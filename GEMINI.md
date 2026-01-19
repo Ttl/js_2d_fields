@@ -1,4 +1,3 @@
-
 # Javascript 2D transmission line field solver
 
 Solves for transmission line electric potential with Laplace solver, then
@@ -22,4 +21,7 @@ Web app is in app.js. Front end is "field_solver.html".
 
 $ node test_microstrip.js
 
+# WASM solver
 
+wasm_solver directory has WASM matrix solver that uses Eigen. Use make to
+compile it. C ++ source is in solver.cpp file.

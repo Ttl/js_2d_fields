@@ -75,46 +75,65 @@ function buildCSR(colLists, valLists, N) {
     return { rowPtr, colIdx, values };
 }
 
+// --- WASM Module Loading ---
+let createWASMModule = null;
+if (typeof require !== 'undefined') {
+    // Node.js environment
+    createWASMModule = require('./wasm_solver/solver.js');
+} else if (typeof Module !== 'undefined') {
+    // Browser environment (Emscripten modularized output)
+    createWASMModule = Module;
+} else {
+    // Fallback or error
+    console.error("Could not find WASM module factory function.");
+}
+
+// Store the initialized WASM module (singleton pattern)
+let WASMModuleInstance = null;
+
 async function solveWithWASM(csr, B, useLU = false) {
-    await Module.ready;
+    if (!WASMModuleInstance) {
+        // Initialize the module if it hasn't been already
+        WASMModuleInstance = await createWASMModule();
+    }
     
     const N = B.length;
     const nnz = csr.values.length;
     
-    console.log(`Solving: N=${N}, nnz=${nnz}, useLU=${useLU}`);
-    
     // Allocate memory
-    const pRow = Module._malloc(4 * (N + 1));
-    const pCol = Module._malloc(4 * nnz);
-    const pVal = Module._malloc(8 * nnz);
-    const pB   = Module._malloc(8 * N);
-    const pX   = Module._malloc(8 * N);
-    
+    const pRow = WASMModuleInstance._malloc(4 * (N + 1));
+    const pCol = WASMModuleInstance._malloc(4 * nnz);
+    const pVal = WASMModuleInstance._malloc(8 * nnz);
+    const pB   = WASMModuleInstance._malloc(8 * N);
+    const pX   = WASMModuleInstance._malloc(8 * N);
+
     try {
+        // Re-acquire HEAP views to ensure they are current in case memory grew
+        const currentHEAP32 = WASMModuleInstance.HEAP32;
+        const currentHEAPF64 = WASMModuleInstance.HEAPF64;
+
         // Copy data - create views AFTER malloc
-        const rowView = new Int32Array(Module.HEAP32.buffer, pRow, N + 1);
-        const colView = new Int32Array(Module.HEAP32.buffer, pCol, nnz);
-        const valView = new Float64Array(Module.HEAPF64.buffer, pVal, nnz);
-        const bView = new Float64Array(Module.HEAPF64.buffer, pB, N);
+        const rowView = new Int32Array(currentHEAP32.buffer, pRow, N + 1);
+        const colView = new Int32Array(currentHEAP32.buffer, pCol, nnz);
+        const valView = new Float64Array(currentHEAPF64.buffer, pVal, nnz);
+        const bView = new Float64Array(currentHEAPF64.buffer, pB, N);
         
         rowView.set(csr.rowPtr);
         colView.set(csr.colIdx);
         valView.set(csr.values);
         bView.set(B);
 
-        if (!Module._solve_sparse) {
+        if (!WASMModuleInstance._solve_sparse) {
             throw new Error("WASM function solve_sparse not found. Module not loaded properly.");
         }
         
         // Call solver
-        const status = Module._solve_sparse(
+        const status = WASMModuleInstance._solve_sparse(
             N, nnz,
             pRow, pCol, pVal,
             pB, pX,
             useLU ? 1 : 0
         );
-        
-        console.log(`Solver status: ${status}`);
         
         if (status !== 0) {
             const errors = {
@@ -128,18 +147,18 @@ async function solveWithWASM(csr, B, useLU = false) {
         }
         
         // Copy result
-        const xView = new Float64Array(Module.HEAPF64.buffer, pX, N);
+        const xView = new Float64Array(WASMModuleInstance.HEAPF64.buffer, pX, N);
         const x = new Float64Array(N);
         x.set(xView);
         
         return x;
     } finally {
         // Always free memory
-        //Module._free(pRow);
-        //Module._free(pCol);
-        //Module._free(pVal);
-        //Module._free(pB);
-        //Module._free(pX);
+        WASMModuleInstance._free(pRow);
+        WASMModuleInstance._free(pCol);
+        WASMModuleInstance._free(pVal);
+        WASMModuleInstance._free(pB);
+        WASMModuleInstance._free(pX);
     }
 }
 
@@ -292,9 +311,10 @@ class FieldSolver2D {
         // --- Convert to CSR ---
         const { rowPtr, colIdx, values } = buildCSR(colLists, valLists, N_unknown);
 
-        //const csr = { rowPtr, colIdx, values };
-        //const x = await solveWithWASM(csr, B, true); // false = Cholesky
+        const csr = { rowPtr, colIdx, values };
+        const x = await solveWithWASM(csr, B, true);
 
+        /*
         // --- Preconditioned CG ---
         const x = new Float64Array(N_unknown);
         const r = new Float64Array(N_unknown);
@@ -370,6 +390,7 @@ class FieldSolver2D {
                 await new Promise(r => setTimeout(r, 0));
             }
         }
+        */
 
         // --- Reconstruct solution ---
         for (let k = 0; k < N_unknown; k++) {

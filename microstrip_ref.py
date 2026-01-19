@@ -660,4 +660,4 @@ def solve_stripline(plots=True):
 
 
 if __name__ == "__main__":
-    solve_microstrip(True)
+    solve_microstrip(False)

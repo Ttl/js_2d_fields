@@ -21,7 +21,6 @@ int solve_sparse(
     try {
         // Build Eigen sparse matrix from CSR format
         SparseMatrix<double> A(N, N);
-        A.reserve(nnz);
         
         std::vector<Triplet<double>> triplets;
         triplets.reserve(nnz);
@@ -40,16 +39,13 @@ int solve_sparse(
         Map<VectorXd> x_vec(x_out, N);
 
         for (int i = 0; i < N; i++) {
-            for (int p = rowPtr[i]; p < rowPtr[i + 1] - 1; p++) {
+            for (int p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
                 if (colIdx[p] >= N || colIdx[p] < 0) {
                     return 10; // Invalid column index
                 }
-                if (colIdx[p] >= colIdx[p + 1]) {
+                if (p > rowPtr[i] && colIdx[p] < colIdx[p-1]) {
                     return 11; // Unsorted columns
                 }
-            }
-            if (rowPtr[i + 1] - 1 >= 0 && colIdx[rowPtr[i + 1] - 1] >= N) {
-                return 10; // Invalid column index
             }
         }
                 
