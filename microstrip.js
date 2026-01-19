@@ -1,23 +1,20 @@
 import { FieldSolver2D, CONSTANTS, diff } from './field_solver.js';
 
 class MicrostripSolver extends FieldSolver2D {
-    constructor(w, h, t, er, tand, sigma, freq, nx, ny) {
+    constructor(w, h, t, er, tan_delta, sigma_cond, freq, nx, ny) { // Renamed params for clarity
         super();
         this.w = w;
         this.h = h;
         this.t = t;
         this.er = er;
-        this.tand = tand;
-        this.sigma = sigma;
+        this.tan_delta = tan_delta; // Set for FieldSolver2D methods
+        this.sigma_cond = sigma_cond; // Set for FieldSolver2D methods
         this.freq = freq;
-        this.omega_freq = 2 * Math.PI * freq;
+        this.omega = 2 * Math.PI * freq; // Renamed to 'omega' for FieldSolver2D methods
         
         // Requirements
         this.nx_req = nx;
         this.ny_req = ny;
-
-        // Physical Constants (assuming global or define here)
-        this.MU0 = 4 * Math.PI * 1e-7; 
 
         // Derived geometry
         this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
@@ -49,7 +46,7 @@ class MicrostripSolver extends FieldSolver2D {
     }
 
     generate_grid() {
-        this.delta_s = Math.sqrt(2 / (this.omega_freq * this.MU0 * this.sigma));
+        this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond)); // Use 'omega' and 'sigma_cond'
 
         // Generate Grids
         this.x = this._grid_x(this.nx_req);
@@ -64,6 +61,7 @@ class MicrostripSolver extends FieldSolver2D {
 
         this.init_matrices();
     }
+
 
     // --- X Grid Generation Port ---
     _grid_x(n) {
@@ -430,83 +428,6 @@ class MicrostripSolver extends FieldSolver2D {
         }
     }
 
-    calculate_losses(Z0) {
-        // Dielectric Loss
-        let Pd = 0.0;
-        const dx = diff(this.x);
-        const dy = diff(this.y);
-
-        for (let i = 0; i < this.y.length - 1; i++) {
-            for (let j = 0; j < this.x.length - 1; j++) {
-                if (this.conductor_mask[i][j]) continue;
-                if (this.epsilon_r[i][j] <= 1.01) continue;
-
-                const E2 = this.Ex[i][j]**2 + this.Ey[i][j]**2;
-                const area = dx[j] * dy[i];
-                Pd += 0.5 * this.omega_freq * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tand * E2 * area;
-            }
-        }
-
-        const P_flow = 1.0 / (2 * Z0);
-        const alpha_diel = 8.686 * (Pd / (2 * P_flow));
-
-        // Conductor loss (Approximation using Perturbation)
-        // Simplified: Alpha_c approx R_s / (Z0 * w) * geometric_factors
-        // For accurate result, we need the surface integral of H-field.
-        // Given JS constraints, using Wheeler's incremental inductance or simple perturbation.
-        // Let's implement the loop integral used in Python script.
-
-        const Rs = Math.sqrt(this.omega_freq * CONSTANTS.MU0 / (2 * this.sigma));
-        const Z0_vac = 376.73;
-        let Pc = 0.0;
-
-        const get_dl = (idx, axis) => axis === 'x' ? 
-            (idx < dx.length ? dx[idx] : dx[dx.length-1]) : 
-            (idx < dy.length ? dy[idx] : dy[dy.length-1]);
-
-        // Iterate interface cells
-        // Simplified loop over signal mask boundaries
-        // ... (Omitting complex path integration for brevity, using high-freq approx) ...
-        // Using approximate formula for demo purposes if integration is too heavy:
-        // alpha_c = 8.686 * Rs / (2 * Z0 * w) (Very rough)
-        // Let's try to do the loop sum on signal trace only
-
-        let sum_H2_dl = 0;
-
-        for (let i=1; i<this.y.length-1; i++) {
-            for (let j=1; j<this.x.length-1; j++) {
-                if (!this.signal_mask[i][j]) continue;
-
-                // Look for dielectric neighbors
-                const neighbors = [
-                    {di: 0, dj: 1, dist: get_dl(i, 'y')},
-                    {di: 0, dj: -1, dist: get_dl(i, 'y')},
-                    {di: 1, dj: 0, dist: get_dl(j, 'x')},
-                    {di: -1, dj: 0, dist: get_dl(j, 'x')}
-                ];
-
-                for (let nb of neighbors) {
-                    const ni = i + nb.di;
-                    const nj = j + nb.dj;
-                    if (!this.signal_mask[ni][nj]) {
-                        // It's an edge
-                        const E_norm = Math.sqrt(this.Ex[ni][nj]**2 + this.Ey[ni][nj]**2);
-                        const er = this.epsilon_r[ni][nj];
-                        // H_tan = E_norm * sqrt(er) / Z0_vac
-                        const H_tan = E_norm * Math.sqrt(er) / Z0_vac;
-                        sum_H2_dl += (H_tan**2) * nb.dist;
-                    }
-                }
-            }
-        }
-
-        // Add ground contribution (approx 50% of trace for microstrip usually, but let's just use trace * factor)
-        // Better: Just use trace integral * 2 for rough estimate
-        const Pc_est = 0.5 * Rs * sum_H2_dl * 2.0;
-        const alpha_cond = 8.686 * Pc_est / (2 * P_flow);
-
-        return { alpha_diel, alpha_cond };
-    }
 }
 
 export { MicrostripSolver };

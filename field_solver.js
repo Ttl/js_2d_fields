@@ -7,7 +7,60 @@ export const CONSTANTS = {
     PI: Math.PI
 };
 
+// --- Complex Number Class ---
+class Complex {
+    constructor(re, im = 0) {
+        this.re = re;
+        this.im = im;
+    }
+
+    add(other) {
+        return new Complex(this.re + other.re, this.im + other.im);
+    }
+
+    sub(other) {
+        return new Complex(this.re - other.re, this.im - other.im);
+    }
+
+    mul(other) {
+        if (typeof other === 'number') {
+            return new Complex(this.re * other, this.im * other);
+        }
+        return new Complex(
+            this.re * other.re - this.im * other.im,
+            this.re * other.im + this.im * other.re
+        );
+    }
+
+    div(other) {
+        if (typeof other === 'number') {
+            return new Complex(this.re / other, this.im / other);
+        }
+        const denominator = other.re * other.re + other.im * other.im;
+        return new Complex(
+            (this.re * other.re + this.im * other.im) / denominator,
+            (this.im * other.re - this.re * other.im) / denominator
+        );
+    }
+
+    sqrt() {
+        const r = Math.sqrt(this.re * this.re + this.im * this.im);
+        const theta = Math.atan2(this.im, this.re);
+        return new Complex(
+            Math.sqrt(r) * Math.cos(theta / 2),
+            Math.sqrt(r) * Math.sin(theta / 2)
+        );
+    }
+
+    toString() {
+        if (this.im === 0) return `${this.re.toFixed(2)}`;
+        if (this.re === 0) return `${this.im.toFixed(2)}j`;
+        return `${this.re.toFixed(2)}${this.im > 0 ? '+' : ''}${this.im.toFixed(2)}j`;
+    }
+}
+
 // --- Math Utils ---
+
 
 function linspace(start, end, n) {
     if (n <= 1) return [start];
@@ -473,5 +526,144 @@ export class FieldSolver2D {
             }
         }
         return Math.abs(Q);
+    }
+
+    calculate_conductor_loss(Ex, Ey, Z0) {
+        if (!this.solution_valid) {
+            throw new Error("Fields (Ex, Ey) are not valid. Run compute_fields() first.");
+        }
+        const ny = this.y.length;
+        const nx = this.x.length;
+        const dx_array = diff(this.x);
+        const dy_array = diff(this.y);
+
+        const Rs = Math.sqrt(this.omega * CONSTANTS.MU0 / (2 * this.sigma_cond));
+        const delta = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
+
+        const get_dx = j => (j >= 0 && j < dx_array.length) ? dx_array[j] : dx_array[dx_array.length - 1];
+        const get_dy = i => (i >= 0 && i < dy_array.length) ? dy_array[i] : dy_array[dy_array.length - 1];
+
+        let Pc = 0.0;
+
+        for (let i = 1; i < ny - 1; i++) {
+            for (let j = 1; j < nx - 1; j++) {
+                if (!(this.signal_mask[i][j] || this.ground_mask[i][j])) {
+                    continue;
+                }
+
+                const neighbors = [
+                    { ni: i, nj: j + 1, direction: 'r', dl_func: get_dy, idx: i },
+                    { ni: i, nj: j - 1, direction: 'l', dl_func: get_dy, idx: i },
+                    { ni: i + 1, nj: j, direction: 'u', dl_func: get_dx, idx: j },
+                    { ni: i - 1, nj: j, direction: 'd', dl_func: get_dx, idx: j },
+                ];
+
+                let cell_K_sq = 0.0;
+                let cell_dl = 0.0;
+
+                for (const { ni, nj, direction, dl_func, idx: dl_idx } of neighbors) {
+                    if (ni < 0 || ni >= ny || nj < 0 || nj >= nx) continue; // Out of bounds
+                    if (this.signal_mask[ni][nj] || this.ground_mask[ni][nj]) {
+                        continue; // Neighbor is also conductor
+                    }
+
+                    const eps_diel = this.epsilon_r[ni][nj];
+                    const Ex_diel = Ex[ni][nj];
+                    const Ey_diel = Ey[ni][nj];
+
+                    let E_norm;
+                    if (direction === 'r') {
+                        E_norm = Ex_diel;
+                    } else if (direction === 'l') {
+                        E_norm = -Ex_diel;
+                    } else if (direction === 'u') {
+                        E_norm = Ey_diel;
+                    } else if (direction === 'd') {
+                        E_norm = -Ey_diel;
+                    } else {
+                        E_norm = 0; // Should not happen
+                    }
+
+                    const Z0_freespace = Math.sqrt(CONSTANTS.MU0 / CONSTANTS.EPS0);
+                    const H_tan = Math.abs(E_norm) * Math.sqrt(eps_diel) / Z0_freespace;
+                    const K = H_tan;
+                    const dl = dl_func(dl_idx);
+
+                    cell_K_sq += K * K * dl;
+                    cell_dl += dl;
+                }
+
+                if (cell_dl > 0) {
+                    const dP = 0.5 * Rs * cell_K_sq;
+                    Pc += dP;
+                }
+            }
+        }
+
+        const Pc_1W = Pc * 2 * Z0; // Normalized to 1W power flow
+        const alpha_db_per_m = 8.686 * Pc_1W / 2.0;
+
+        return alpha_db_per_m;
+    }
+
+    calculate_dielectric_loss(Ex, Ey, Z0) {
+        if (!this.solution_valid) {
+            throw new Error("Fields (Ex, Ey) are not valid. Run compute_fields() first.");
+        }
+        const ny = this.y.length;
+        const nx = this.x.length;
+        const dx_array = diff(this.x);
+        const dy_array = diff(this.y);
+
+        const get_dx = j => (j >= 0 && j < dx_array.length) ? dx_array[j] : dx_array[dx_array.length - 1];
+        const get_dy = i => (i >= 0 && i < dy_array.length) ? dy_array[i] : dy_array[dy_array.length - 1];
+
+        let Pd = 0.0;
+
+        for (let i = 0; i < ny - 1; i++) {
+            for (let j = 0; j < nx - 1; j++) {
+                if (this.conductor_mask[i][j]) continue;
+                if (this.epsilon_r[i][j] <= 1.01) continue; // Air or vacuum, no loss
+
+                const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
+                const dA = get_dx(j) * get_dy(i);
+                
+                // Assuming tan_delta is a property of the class (MicrostripSolver2D or FieldSolver2D)
+                // and omega is also available (2 * pi * freq)
+                if (this.tan_delta && this.omega) {
+                    Pd += 0.5 * this.omega * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tan_delta * E2 * dA;
+                }
+            }
+        }
+
+        const P_flow = 1.0 / (2 * Z0);
+        return 8.686 * (Pd / (2 * P_flow));
+    }
+
+    rlgc(alpha_cond, alpha_diel, C_mode, Z0_mode) {
+        // Convert dB/m to Np/m
+        const alpha_c_np = alpha_cond / 8.686;
+        const alpha_d_np = alpha_diel / 8.686;
+
+        const R = 2 * Z0_mode * alpha_c_np;
+        const G = 2 * alpha_d_np / Z0_mode;
+
+        const L = (Z0_mode * Z0_mode) * C_mode;
+
+        const eps_eff_mode = (L * C_mode) / (CONSTANTS.MU0 * CONSTANTS.EPS0);
+
+        // Complex characteristic impedance Zc = sqrt((R + jwL) / (G + jwC))
+        const num = new Complex(R, this.omega * L);
+        const den = new Complex(G, this.omega * C_mode);
+        const Zc = (num.div(den)).sqrt();
+
+        const rlgc = {
+            R: R,
+            L: L,
+            G: G,
+            C: C_mode
+        };
+
+        return { Zc, rlgc, eps_eff_mode };
     }
 }

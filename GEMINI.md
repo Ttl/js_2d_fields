@@ -21,6 +21,10 @@ Web app is in app.js. Front end is "field_solver.html".
 
 $ node test_microstrip.js
 
+# Run Python reference
+
+$ python microstrip_ref.py 
+
 # WASM solver
 
 wasm_solver directory has WASM matrix solver that uses Eigen. Use make to

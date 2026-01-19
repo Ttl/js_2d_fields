@@ -74,23 +74,35 @@ async function runSimulation() {
 
         // 3. Post Process
         const eps_eff = C / C0;
-        const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
+        const Z0_real = 1 / (CONSTANTS.C * Math.sqrt(C * C0)); // Renamed to avoid conflict with complex Z0
 
         // Restore dielectric fields for loss calc
         solver.V = V_diel;
         solver.Ex = Ex_diel;
         solver.Ey = Ey_diel;
 
-        const losses = solver.calculate_losses(Z0);
+        // Calculate losses using the new FieldSolver2D methods
+        const alpha_cond = solver.calculate_conductor_loss(solver.Ex, solver.Ey, Z0_real);
+        const alpha_diel = solver.calculate_dielectric_loss(solver.Ex, solver.Ey, Z0_real);
+        const alpha_total = alpha_cond + alpha_diel;
+
+        // Calculate RLGC and complex Z0
+        const { Zc, rlgc, eps_eff_mode } = solver.rlgc(alpha_cond, alpha_diel, C, Z0_real);
 
         log(`\nRESULTS:\n` +
                  `----------------------\n` +
                  `Capacitance:   ${(C*1e12).toFixed(2)} pF/m\n` +
-                 `Z0:            ${Z0.toFixed(2)} Ω\n` +
+                 `Z0 (real):     ${Z0_real.toFixed(2)} Ω\n` +
+                 `Z0 (complex):  ${Zc.toString()} Ω\n` +
                  `Eps_eff:       ${eps_eff.toFixed(3)}\n` +
-                 `Dielectric Loss: ${losses.alpha_diel.toFixed(4)} dB/m\n` +
-                 `Conductor Loss:  ${losses.alpha_cond.toFixed(4)} dB/m\n` +
-                 `Total Loss:      ${(losses.alpha_diel + losses.alpha_cond).toFixed(4)} dB/m`);
+                 `Eps_eff (mode):${eps_eff_mode.toFixed(3)}\n` +
+                 `R:             ${rlgc.R.toExponential(3)} Ω/m\n` +
+                 `L:             ${rlgc.L.toExponential(3)} H/m\n` +
+                 `G:             ${rlgc.G.toExponential(3)} S/m\n` +
+                 `C:             ${rlgc.C.toExponential(3)} F/m\n` +
+                 `Dielectric Loss: ${alpha_diel.toFixed(4)} dB/m\n` +
+                 `Conductor Loss:  ${alpha_cond.toFixed(4)} dB/m\n` +
+                 `Total Loss:      ${alpha_total.toFixed(4)} dB/m`);
 
     } catch (e) {
         console.error(e);
