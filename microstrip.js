@@ -33,17 +33,7 @@ class MicrostripSolver extends FieldSolver2D {
         this.generate_grid();
     }
 
-    async calculate_parameters() {
-        await this.solve_laplace_iterative(true);
-        const C0 = this.calculate_capacitance(true);
 
-        await this.solve_laplace_iterative(false);
-        const C = this.calculate_capacitance(false);
-
-        const eps_eff = C / C0;
-        const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
-        return { Z0, eps_eff, C, C0 };
-    }
 
     generate_grid() {
         this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond)); // Use 'omega' and 'sigma_cond'

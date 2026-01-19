@@ -16,28 +16,17 @@ async function solve_microstrip_js_test() {
         50           // skin_cells
     );
 
-    const { Z0, eps_eff, C, C0 } = await solver.calculate_parameters();
-    
-    // Compute fields for loss calculations
-    solver.compute_fields();
+    const results = await solver.perform_analysis();
 
-    // Calculate losses
-    const alpha_cond = solver.calculate_conductor_loss(solver.Ex, solver.Ey, Z0);
-    const alpha_diel = solver.calculate_dielectric_loss(solver.Ex, solver.Ey, Z0);
-    const alpha_total = alpha_cond + alpha_diel;
-
-    // Calculate RLGC and complex Z0
-    const { Zc, rlgc, eps_eff_mode } = solver.rlgc(alpha_cond, alpha_diel, C, Z0);
-
-    console.log(`Z (complex) = ${Zc.toString()} ohm, eps_eff ${eps_eff_mode.toFixed(3)}, RLGC {'R': ${rlgc.R.toExponential(3)}, 'L': ${rlgc.L.toExponential(3)}, 'G': ${rlgc.G.toExponential(3)}, 'C': ${rlgc.C.toExponential(3)}}`);
+    console.log(`Z (complex) = ${results.Zc.toString()} ohm, eps_eff ${results.eps_eff.toFixed(3)}, RLGC {'R': ${results.RLGC.R.toExponential(3)}, 'L': ${results.RLGC.L.toExponential(3)}, 'G': ${results.RLGC.G.toExponential(3)}, 'C': ${results.RLGC.C.toExponential(3)}}`);
 
     console.log(`\n==================================================`);
     console.log(`MICROSTRIP ANALYSIS RESULTS`);
     console.log(`==================================================`);
-    console.log(`Characteristic Impedance Z0:  ${Z0.toFixed(2)} Ω`);
-    console.log(`Effective Permittivity εᵣₑff: ${eps_eff.toFixed(3)}`);
-    console.log(`Losses (dB/m) @ 1GHz:         Diel=${alpha_diel.toFixed(4)}, Cond=${alpha_cond.toPrecision(4)}`);
-    console.log(`Total Attenuation:            ${alpha_total.toFixed(4)} dB/m`);
+    console.log(`Characteristic Impedance Z0:  ${results.Z0.toFixed(2)} Ω`);
+    console.log(`Effective Permittivity εᵣₑff: ${results.eps_eff.toFixed(3)}`);
+    console.log(`Losses (dB/m) @ 1GHz:         Diel=${results.alpha_diel_db_m.toFixed(4)}, Cond=${results.alpha_cond_db_m.toPrecision(4)}`);
+    console.log(`Total Attenuation:            ${results.total_alpha_db_m.toFixed(4)} dB/m`);
     console.log(`==================================================\n`);
 }
 

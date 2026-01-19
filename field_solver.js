@@ -61,6 +61,11 @@ class Complex {
 
 // --- Math Utils ---
 
+export function diff(arr) {
+    const res = new Float64Array(arr.length - 1);
+    for (let i = 0; i < arr.length - 1; i++) res[i] = arr[i+1] - arr[i];
+    return res;
+}
 
 function linspace(start, end, n) {
     if (n <= 1) return [start];
@@ -70,29 +75,63 @@ function linspace(start, end, n) {
     return arr;
 }
 
-export function diff(arr) {
-    const res = new Float64Array(arr.length - 1);
-    for (let i = 0; i < arr.length - 1; i++) res[i] = arr[i+1] - arr[i];
-    return res;
+export function _smooth_transition(x0, x1, n, curve_end, beta=4.0) {
+    if (n === 0) {
+        return new Float64Array(0);
+    }
+    if (n === 1) {
+        return new Float64Array([x0]);
+    }
+    
+    const pts = new Float64Array(n);
+
+    for(let i=0; i<n; i++) {
+        let u = i / (n - 1);
+        let val;
+        
+        if (curve_end === 'start') {
+            val = Math.pow(u, beta);
+        } else if (curve_end === 'end') {
+            val = 1.0 - Math.pow(1.0 - u, beta);
+        } else { // 'both'
+            const u_map = 2 * u - 1;
+            const top = Math.tanh(beta * u_map);
+            const bot = Math.tanh(beta);
+            val = 0.5 * (1 + top / bot);
+        }
+        pts[i] = x0 + (x1 - x0) * val;
+    }
+    return pts;
 }
 
-function smooth_transition(start, end, n_points, curve_end='end', beta=4.0) {
-    if (n_points <= 1) return new Float64Array([start]);
-    if (n_points === 2) return new Float64Array([start, end]);
+export function _enforce_interfaces(arr, interfaces) {
+    const tol = 1e-12;
+    let list = Array.from(arr);
+    let changed = false;
 
-    const xi = linspace(0, 1, n_points);
-    const res = new Float64Array(n_points);
-
-    for(let i=0; i<n_points; i++) {
-        let eta = 0;
-        if (curve_end === 'end') {
-            eta = Math.tanh(beta * xi[i]) / Math.tanh(beta);
-        } else if (curve_end === 'both') {
-            eta = (Math.tanh(beta * (xi[i] - 0.5)) / Math.tanh(beta * 0.5) + 1) / 2;
-        } else {
-            eta = 1 - Math.tanh(beta * (1 - xi[i])) / Math.tanh(beta);
+    for (let val of interfaces) {
+        let min_dist = Number.MAX_VALUE;
+        for(let p of list) min_dist = Math.min(min_dist, Math.abs(p - val));
+        
+        if (min_dist > tol) {
+            list.push(val);
+            changed = true;
         }
-        res[i] = start + eta * (end - start);
+    }
+    if(changed) {
+        return Float64Array.from(new Set(list)).sort();
+    }
+    return arr;
+}
+
+export function _concat_arrays(arrays) {
+    let totalLen = 0;
+    for(let a of arrays) totalLen += a.length;
+    let res = new Float64Array(totalLen);
+    let offset = 0;
+    for(let a of arrays) {
+        res.set(a, offset);
+        offset += a.length;
     }
     return res;
 }
@@ -665,5 +704,56 @@ export class FieldSolver2D {
         };
 
         return { Zc, rlgc, eps_eff_mode };
+    }
+
+    async perform_analysis(onProgress = null) {
+        const totalSteps = 2; // Two main solve_laplace_iterative calls
+        let currentStep = 0;
+
+        const updateProgress = (stepFraction, overallStep) => {
+            if (onProgress) {
+                const totalProgress = ((overallStep - 1) / totalSteps) + (stepFraction / totalSteps);
+                onProgress(totalProgress);
+            }
+        };
+
+        // 1. Calculate C0 (vacuum capacitance)
+        currentStep = 1;
+        await this.solve_laplace_iterative(true, (i, max) => updateProgress(i / max, currentStep));
+        const C0 = this.calculate_capacitance(true);
+
+        // 2. Calculate C (with dielectric capacitance)
+        currentStep = 2;
+        await this.solve_laplace_iterative(false, (i, max) => updateProgress(i / max, currentStep));
+        const C_with_diel = this.calculate_capacitance(false);
+
+        // 3. Calculate Z0 and effective permittivity
+        const eps_eff = C_with_diel / C0;
+        const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C_with_diel * C0));
+
+        // 4. Compute fields Ex, Ey
+        this.compute_fields(); // This will set this.Ex and this.Ey
+
+        // 5. Calculate losses
+        // Conductor loss depends on Ex, Ey, Z0, omega, sigma_cond
+        const alpha_cond_db_m = this.calculate_conductor_loss(this.Ex, this.Ey, Z0);
+
+        // Dielectric loss depends on Ex, Ey, Z0, omega, epsilon_r, tan_delta
+        const alpha_diel_db_m = this.calculate_dielectric_loss(this.Ex, this.Ey, Z0);
+
+        // 6. Calculate RLGC and complex Z0
+        const { Zc, rlgc, eps_eff_mode } = this.rlgc(alpha_cond_db_m, alpha_diel_db_m, C_with_diel, Z0);
+
+        const total_alpha_db_m = alpha_cond_db_m + alpha_diel_db_m;
+
+        return {
+            Z0: Z0, // Characteristic Impedance (real part approximation)
+            Zc: Zc, // Complex Characteristic Impedance
+            eps_eff: eps_eff,
+            RLGC: rlgc,
+            alpha_cond_db_m: alpha_cond_db_m,
+            alpha_diel_db_m: alpha_diel_db_m,
+            total_alpha_db_m: total_alpha_db_m
+        };
     }
 }

@@ -1,67 +1,4 @@
-import { FieldSolver2D, CONSTANTS, diff } from './field_solver.js';
-
-// Helper functions (copied from microstrip.js)
-function _smooth_transition(x0, x1, n, curve_end, beta=4.0) {
-    if (n === 0) {
-        return new Float64Array(0);
-    }
-    if (n === 1) {
-        return new Float64Array([x0]);
-    }
-    
-    const pts = new Float64Array(n);
-
-    for(let i=0; i<n; i++) {
-        let u = i / (n - 1); // This will no longer be 0/0=NaN due to n > 1 check
-        let val;
-        
-        if (curve_end === 'start') {
-            val = Math.pow(u, beta);
-        } else if (curve_end === 'end') {
-            val = 1.0 - Math.pow(1.0 - u, beta);
-        } else { // 'both'
-            const u_map = 2 * u - 1;
-            const top = Math.tanh(beta * u_map);
-            const bot = Math.tanh(beta);
-            val = 0.5 * (1 + top / bot);
-        }
-        pts[i] = x0 + (x1 - x0) * val;
-    }
-    return pts;
-}
-
-function _enforce_interfaces(arr, interfaces) {
-    const tol = 1e-12;
-    let list = Array.from(arr);
-    let changed = false;
-
-    for (let val of interfaces) {
-        let min_dist = Number.MAX_VALUE;
-        for(let p of list) min_dist = Math.min(min_dist, Math.abs(p - val));
-        
-        if (min_dist > tol) {
-            list.push(val);
-            changed = true;
-        }
-    }
-    if(changed) {
-        return Float64Array.from(new Set(list)).sort();
-    }
-    return arr;
-}
-
-function _concat_arrays(arrays) {
-    let totalLen = 0;
-    for(let a of arrays) totalLen += a.length;
-    let res = new Float64Array(totalLen);
-    let offset = 0;
-    for(let a of arrays) {
-        res.set(a, offset);
-        offset += a.length;
-    }
-    return res;
-}
-
+import { FieldSolver2D, CONSTANTS, diff, _smooth_transition, _enforce_interfaces, _concat_arrays } from './field_solver.js';
 
 export class GroundedCPWSolver2D extends FieldSolver2D {
     constructor(
@@ -150,17 +87,7 @@ export class GroundedCPWSolver2D extends FieldSolver2D {
         this.generate_grid();
     }
 
-    async calculate_parameters() {
-        await this.solve_laplace_iterative(true);
-        const C0 = this.calculate_capacitance(true);
 
-        await this.solve_laplace_iterative(false);
-        const C = this.calculate_capacitance(false);
-
-        const eps_eff = C / C0;
-        const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
-        return { Z0, eps_eff, C, C0 };
-    }
 
     generate_grid() {
         this._calculate_geometry_x();
