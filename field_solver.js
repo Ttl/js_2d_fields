@@ -292,10 +292,9 @@ class FieldSolver2D {
         // --- Convert to CSR ---
         const { rowPtr, colIdx, values } = buildCSR(colLists, valLists, N_unknown);
 
-        const csr = { rowPtr, colIdx, values };
-        const x = await solveWithWASM(csr, B, true); // false = Cholesky
+        //const csr = { rowPtr, colIdx, values };
+        //const x = await solveWithWASM(csr, B, true); // false = Cholesky
 
-            /*
         // --- Preconditioned CG ---
         const x = new Float64Array(N_unknown);
         const r = new Float64Array(N_unknown);
@@ -371,7 +370,6 @@ class FieldSolver2D {
                 await new Promise(r => setTimeout(r, 0));
             }
         }
-       */
 
         // --- Reconstruct solution ---
         for (let k = 0; k < N_unknown; k++) {

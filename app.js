@@ -51,7 +51,7 @@ const App = {
         pcont.style.display = 'block';
         this.log("Starting simulation...");
 
-        //try {
+        try {
             // 1. Solve with Dielectric
             this.log("Step 1/2: Solving field with dielectric...");
             await this.solver.solve_laplace_iterative(false, (i, max, diff) => {
@@ -103,13 +103,13 @@ const App = {
                      `Conductor Loss:  ${losses.alpha_cond.toFixed(4)} dB/m\n` +
                      `Total Loss:      ${(losses.alpha_diel + losses.alpha_cond).toFixed(4)} dB/m`);
 
-        //} catch (e) {
-        //    console.error(e);
-        //    this.log("Error: " + e.message);
-        //} finally {
-        //    btn.disabled = false;
-        //    pcont.style.display = 'none';
-        //}
+        } catch (e) {
+            console.error(e);
+            this.log("Error: " + e.message);
+        } finally {
+            btn.disabled = false;
+            pcont.style.display = 'none';
+        }
     },
 
     resizeCanvas() {
