@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>2D Microstrip Field Solver</title>
+    <title>2D Transmission Line Field Solver</title>
     <style>
         :root {
             --bg-color: #f4f4f9;
@@ -128,42 +128,71 @@
             transition: width 0.1s;
         }
     </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
+<script src="plotly-2.27.0.min.js.js"></script>
 </head>
 <body>
 
 <div class="sidebar">
-    <h2>Microstrip Solver</h2>
-
+    <h2>Transmission Line Solver</h2>
+    
     <div class="control-group">
-        <label>Trace Width (mm)</label>
-        <input type="number" id="inp_w" value="3.0" step="0.1">
-    </div>
-    <div class="control-group">
-        <label>Substrate Height (mm)</label>
-        <input type="number" id="inp_h" value="1.6" step="0.1">
-    </div>
-    <div class="control-group">
-        <label>Trace Thickness (μm)</label>
-        <input type="number" id="inp_t" value="35" step="1">
-    </div>
-    <div class="control-group">
-        <label>Relative Permittivity (&epsilon;<sub>r</sub>)</label>
-        <input type="number" id="inp_er" value="4.5" step="0.1">
-    </div>
-    <div class="control-group">
-        <label>Loss Tangent (tan &delta;)</label>
-        <input type="number" id="inp_tand" value="0.02" step="0.001">
-    </div>
-    <div class="control-group">
-        <label>Conductivity (S/m)</label>
-        <input type="number" id="inp_sigma" value="5.8e7" step="1e6">
-    </div>
-    <div class="control-group">
-        <label>Frequency (GHz)</label>
-        <input type="number" id="inp_freq" value="1.0" step="0.1">
+        <label for="tl_type">Transmission Line Type</label>
+        <select id="tl_type">
+            <option value="microstrip">Microstrip</option>
+            <option value="gcpw">GCPW</option>
+        </select>
     </div>
 
+    <div id="microstrip-params">
+        <div class="control-group">
+            <label>Trace Width (mm)</label>
+            <input type="number" id="inp_w" value="3.0" step="0.1">
+        </div>
+        <div class="control-group">
+            <label>Substrate Height (mm)</label>
+            <input type="number" id="inp_h" value="1.6" step="0.1">
+        </div>
+        <div class="control-group">
+            <label>Trace Thickness (μm)</label>
+            <input type="number" id="inp_t" value="35" step="1">
+        </div>
+        <div class="control-group">
+            <label>Relative Permittivity (&epsilon;<sub>r</sub>)</label>
+            <input type="number" id="inp_er" value="4.5" step="0.1">
+        </div>
+        <div class="control-group">
+            <label>Loss Tangent (tan &delta;)</label>
+            <input type="number" id="inp_tand" value="0.02" step="0.001">
+        </div>
+        <div class="control-group">
+            <label>Conductivity (S/m)</label>
+            <input type="number" id="inp_sigma" value="5.8e7" step="1e6">
+        </div>
+        <div class="control-group">
+            <label>Frequency (GHz)</label>
+            <input type="number" id="inp_freq" value="1.0" step="0.1">
+        </div>
+    </div>
+    <div id="gcpw-params" style="display: none;">
+        <h3>GCPW Specific Parameters</h3>
+        <div class="control-group">
+            <label>Gap (mm)</label>
+            <input type="number" id="inp_gap" value="0.1" step="0.01">
+        </div>
+        <div class="control-group">
+            <label>Top Ground Width (mm)</label>
+            <input type="number" id="inp_top_gnd_w" value="0.2" step="0.01">
+        </div>
+        <div class="control-group">
+            <label>Via Gap (mm)</label>
+            <input type="number" id="inp_via_gap" value="0.1" step="0.01">
+        </div>
+        <div class="control-group">
+            <label>Via Diameter (mm)</label>
+            <input type="number" id="inp_via_d" value="0.2" step="0.01">
+        </div>
+    </div>
+    
     <h3>Mesh Settings</h3>
     <div class="control-group">
         <label>Grid Size (Nx / Ny)</label>
@@ -189,6 +218,26 @@
 
     <div class="output-panel" id="console_out">Ready. Click 'Solve Physics' to start simulation.</div>
 </div>
+<script>
+    function toggleParameterVisibility() {
+        const tlType = document.getElementById('tl_type').value;
+        const microstripParams = document.getElementById('microstrip-params');
+        const gcpwParams = document.getElementById('gcpw-params');
+
+        if (tlType === 'microstrip') {
+            microstripParams.style.display = 'block';
+            gcpwParams.style.display = 'none';
+        } else if (tlType === 'gcpw') {
+            microstripParams.style.display = 'block'; // Common params
+            gcpwParams.style.display = 'block';
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('tl_type').addEventListener('change', toggleParameterVisibility);
+        toggleParameterVisibility(); // Set initial visibility
+    });
+</script>
 <script type="module" src="app.js"></script>
 
 </body>

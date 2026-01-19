@@ -1,4 +1,5 @@
 import { MicrostripSolver } from './microstrip.js';
+import { GroundedCPWSolver2D } from './gcpw.js';
 import { CONSTANTS } from './field_solver.js';
 const Plotly = window.Plotly;
 
@@ -12,6 +13,7 @@ function log(msg) {
 
 function getParams() {
     return {
+        tl_type: document.getElementById('tl_type').value,
         w: parseFloat(document.getElementById('inp_w').value) * 1e-3,
         h: parseFloat(document.getElementById('inp_h').value) * 1e-3,
         t: parseFloat(document.getElementById('inp_t').value) * 1e-6,
@@ -21,13 +23,27 @@ function getParams() {
         freq: parseFloat(document.getElementById('inp_freq').value) * 1e9,
         nx: parseInt(document.getElementById('inp_nx').value),
         ny: parseInt(document.getElementById('inp_ny').value),
+        // GCPW specific parameters
+        gap: parseFloat(document.getElementById('inp_gap').value) * 1e-3,
+        top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value) * 1e-3,
+        via_gap: parseFloat(document.getElementById('inp_via_gap').value) * 1e-3,
+        via_d: parseFloat(document.getElementById('inp_via_d').value) * 1e-3,
     };
 }
 
 function updateGeometry() {
     const p = getParams();
-    solver = new MicrostripSolver(p.w, p.h, p.t, p.er, p.tand, p.sigma, p.freq, p.nx, p.ny);
-    log("Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+    if (p.tl_type === 'gcpw') {
+        solver = new GroundedCPWSolver2D(
+            p.h, p.w, p.t, p.gap, p.top_gnd_w, p.via_gap, p.via_d,
+            35e-6, p.er, p.tand, 0.0, p.sigma, 1,
+            null, null, p.freq, p.nx, p.ny
+        );
+        log("GCPW Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+    } else {
+        solver = new MicrostripSolver(p.w, p.h, p.t, p.er, p.tand, p.sigma, p.freq, p.nx, p.ny);
+        log("Microstrip Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+    }
 }
 
 async function runSimulation() {
@@ -333,7 +349,10 @@ function bindEvents() {
         updateGeometry();
         draw();
     };
-    document.getElementById('btn_solve').onclick = () => runSimulation();
+    document.getElementById('btn_solve').onclick = () => {
+        updateGeometry(); // Ensure geometry is updated with latest parameters
+        runSimulation();
+    };
 
     [
       'inp_contours',
