@@ -1,11 +1,9 @@
-
-const { MicrostripSolver } = require('./microstrip.js');
-const TL = { MicrostripSolver };
+import { MicrostripSolver } from './microstrip.js';
 
 async function solve_microstrip_js_test() {
     console.log("Solving Microstrip (JS version) for test...");
 
-    const solver = new TL.MicrostripSolver(
+    const solver = new MicrostripSolver(
         3e-3,        // trace_width
         1.6e-3,      // substrate_height
         35e-6,       // trace_thickness

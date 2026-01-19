@@ -1,21 +1,6 @@
-// Conditional imports for Node.js vs. Browser
-let _FieldSolver2D;
-let _CONSTANTS;
-let _diff;
+import { FieldSolver2D, CONSTANTS, diff } from './field_solver.js';
 
-if (typeof require !== 'undefined') {
-    const fieldSolverModule = require('./field_solver.js');
-    _FieldSolver2D = fieldSolverModule.FieldSolver2D;
-    _CONSTANTS = fieldSolverModule.CONSTANTS;
-    _diff = fieldSolverModule.diff;
-} else {
-    // Assume browser environment where field_solver.js has defined TL globally
-    _FieldSolver2D = window.TL.FieldSolver2D;
-    _CONSTANTS = window.TL.CONSTANTS;
-    _diff = window.TL.diff;
-}
-
-class MicrostripSolver extends _FieldSolver2D {
+class MicrostripSolver extends FieldSolver2D {
     constructor(w, h, t, er, tand, sigma, freq, nx, ny) {
         super();
         this.w = w;
@@ -59,7 +44,7 @@ class MicrostripSolver extends _FieldSolver2D {
         const C = this.calculate_capacitance(false);
 
         const eps_eff = C / C0;
-        const Z0 = 1 / (_CONSTANTS.C * Math.sqrt(C * C0));
+        const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
         return { Z0, eps_eff, C, C0 };
     }
 
@@ -524,16 +509,4 @@ class MicrostripSolver extends _FieldSolver2D {
     }
 }
 
-// Node.js exports
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { MicrostripSolver };
-}
-// Browser global (only if not in Node.js)
-else if (typeof window !== 'undefined') {
-    window.TL = window.TL || {};
-    window.TL.MicrostripSolver = MicrostripSolver;
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { MicrostripSolver };
-}
+export { MicrostripSolver };

@@ -1,4 +1,6 @@
-const CONSTANTS = {
+import createWASMModule from './wasm_solver/solver.js';
+
+export const CONSTANTS = {
     EPS0: 8.854187817e-12,
     MU0: 4 * Math.PI * 1e-7,
     C: 299792458,
@@ -15,7 +17,7 @@ function linspace(start, end, n) {
     return arr;
 }
 
-function diff(arr) {
+export function diff(arr) {
     const res = new Float64Array(arr.length - 1);
     for (let i = 0; i < arr.length - 1; i++) res[i] = arr[i+1] - arr[i];
     return res;
@@ -73,19 +75,6 @@ function buildCSR(colLists, valLists, N) {
     rowPtr[N] = p;
 
     return { rowPtr, colIdx, values };
-}
-
-// --- WASM Module Loading ---
-let createWASMModule = null;
-if (typeof require !== 'undefined') {
-    // Node.js environment
-    createWASMModule = require('./wasm_solver/solver.js');
-} else if (typeof Module !== 'undefined') {
-    // Browser environment (Emscripten modularized output)
-    createWASMModule = Module;
-} else {
-    // Fallback or error
-    console.error("Could not find WASM module factory function.");
 }
 
 // Store the initialized WASM module (singleton pattern)
@@ -164,7 +153,7 @@ async function solveWithWASM(csr, B, useLU = false) {
 
 // --- Solver Class ---
 
-class FieldSolver2D {
+export class FieldSolver2D {
     constructor() {
         this.x = null;
         this.y = null;
@@ -485,16 +474,4 @@ class FieldSolver2D {
         }
         return Math.abs(Q);
     }
-}
-
-// Node.js exports
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { FieldSolver2D, CONSTANTS, diff };
-}
-// Browser global (only if not in Node.js)
-else if (typeof window !== 'undefined') {
-    window.TL = window.TL || {};
-    window.TL.FieldSolver2D = FieldSolver2D;
-    window.TL.CONSTANTS = CONSTANTS;
-    window.TL.diff = diff;
 }
