@@ -466,3 +466,14 @@ class FieldSolver2D {
     }
 }
 
+// Node.js exports
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { FieldSolver2D, CONSTANTS, diff };
+}
+// Browser global (only if not in Node.js)
+else if (typeof window !== 'undefined') {
+    window.TL = window.TL || {};
+    window.TL.FieldSolver2D = FieldSolver2D;
+    window.TL.CONSTANTS = CONSTANTS;
+    window.TL.diff = diff;
+}

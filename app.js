@@ -38,7 +38,7 @@ const App = {
 
     updateGeometry() {
         const p = this.getParams();
-        this.solver = new MicrostripSolver(p.w, p.h, p.t, p.er, p.tand, p.sigma, p.freq, p.nx, p.ny);
+        this.solver = new window.TL.MicrostripSolver(p.w, p.h, p.t, p.er, p.tand, p.sigma, p.freq, p.nx, p.ny);
         this.log("Geometry updated. Grid: " + this.solver.x.length + "x" + this.solver.y.length);
     },
 
@@ -85,7 +85,7 @@ const App = {
 
             // 3. Post Process
             const eps_eff = C / C0;
-            const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
+            const Z0 = 1 / (window.TL.CONSTANTS.C * Math.sqrt(C * C0));
 
             // Restore dielectric fields for loss calc
             this.solver.V = V_diel;

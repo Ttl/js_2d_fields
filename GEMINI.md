@@ -15,3 +15,11 @@ Javascript solver output should match it.
 
 The goal is to make browser based 2D transmission line solver that solves Z0,
 eps_eff, losses and RLGC parameters.
+
+Web app is in app.js. Front end is "field_solver.html".
+
+# Run command line tests
+
+$ node test_microstrip.js
+
+

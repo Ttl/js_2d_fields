@@ -1,4 +1,21 @@
-class MicrostripSolver extends FieldSolver2D {
+// Conditional imports for Node.js vs. Browser
+let _FieldSolver2D;
+let _CONSTANTS;
+let _diff;
+
+if (typeof require !== 'undefined') {
+    const fieldSolverModule = require('./field_solver.js');
+    _FieldSolver2D = fieldSolverModule.FieldSolver2D;
+    _CONSTANTS = fieldSolverModule.CONSTANTS;
+    _diff = fieldSolverModule.diff;
+} else {
+    // Assume browser environment where field_solver.js has defined TL globally
+    _FieldSolver2D = window.TL.FieldSolver2D;
+    _CONSTANTS = window.TL.CONSTANTS;
+    _diff = window.TL.diff;
+}
+
+class MicrostripSolver extends _FieldSolver2D {
     constructor(w, h, t, er, tand, sigma, freq, nx, ny) {
         super();
         this.w = w;
@@ -32,6 +49,18 @@ class MicrostripSolver extends FieldSolver2D {
         this.y_top_end = this.y_top_start + this.top_air;
 
         this.generate_grid();
+    }
+
+    async calculate_parameters() {
+        await this.solve_laplace_iterative(true);
+        const C0 = this.calculate_capacitance(true);
+
+        await this.solve_laplace_iterative(false);
+        const C = this.calculate_capacitance(false);
+
+        const eps_eff = C / C0;
+        const Z0 = 1 / (_CONSTANTS.C * Math.sqrt(C * C0));
+        return { Z0, eps_eff, C, C0 };
     }
 
     generate_grid() {
@@ -493,4 +522,18 @@ class MicrostripSolver extends FieldSolver2D {
 
         return { alpha_diel, alpha_cond };
     }
+}
+
+// Node.js exports
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { MicrostripSolver };
+}
+// Browser global (only if not in Node.js)
+else if (typeof window !== 'undefined') {
+    window.TL = window.TL || {};
+    window.TL.MicrostripSolver = MicrostripSolver;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { MicrostripSolver };
 }
