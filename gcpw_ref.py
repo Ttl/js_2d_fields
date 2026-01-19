@@ -451,4 +451,4 @@ def solve_gcpw(plots=True):
         solver.plot(Ex, Ey)
 
 if __name__ == "__main__":
-    solve_gcpw()
+    solve_gcpw(False)

@@ -86,19 +86,16 @@
             align-items: center;
         }
 
+        #sim_canvas {
+            width: 100%;
+            height: 100%;
+        }
+
         canvas { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
 
-        .overlay-controls {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(255, 255, 255, 0.9);
-            padding: 5px 10px;
-            border-radius: 4px;
-            border: 1px solid var(--border-color);
-            display: flex;
-            gap: 10px;
-            font-size: 0.8em;
+        #sim_canvas {
+            position: relative;
+            z-index: 1;
         }
 
         /* Output Console */
@@ -131,6 +128,7 @@
             transition: width 0.1s;
         }
     </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.0/plotly.min.js"></script>
 </head>
 <body>
 
@@ -186,18 +184,7 @@
 
 <div class="main-content">
     <div class="canvas-container">
-        <div class="overlay-controls">
-            <label><input type="checkbox" id="chk_mesh" checked> Show Mesh</label>
-            <label>
-                View:
-                <select id="sel_view_mode">
-                    <option value="geometry">Geometry</option>
-                    <option value="potential">Potential (V)</option>
-                    <option value="efield">|E| Field</option>
-                </select>
-            </label>
-        </div>
-        <canvas id="sim_canvas"></canvas>
+        <div id="sim_canvas"></div>
     </div>
 
     <div class="output-panel" id="console_out">Ready. Click 'Solve Physics' to start simulation.</div>

@@ -1,9 +1,8 @@
 import { MicrostripSolver } from './microstrip.js';
 import { CONSTANTS } from './field_solver.js';
+const Plotly = window.Plotly;
 
 let solver = null;
-const canvas = document.getElementById('sim_canvas');
-const ctx = document.getElementById('sim_canvas').getContext('2d');
 
 function log(msg) {
     const c = document.getElementById('console_out');
@@ -51,6 +50,7 @@ async function runSimulation() {
 
         // Compute fields for loss calculation and visualization
         solver.compute_fields();
+        currentView = "efield";
         draw(); // Update view with fields
 
         // 2. Solve with Vacuum
@@ -113,115 +113,246 @@ async function runSimulation() {
     }
 }
 
-function resizeCanvas() {
-    const container = canvas.parentElement;
-    canvas.width = container.clientWidth;
-    canvas.height = container.clientHeight;
-    if(solver) draw();
-}
+let contourCount = 20;
+let showMesh = false;
+let currentView = "geometry";
 
 function draw() {
     if (!solver) return;
-    const w = canvas.width;
-    const h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
 
-    const viewMode = document.getElementById('sel_view_mode').value;
-    const showMesh = document.getElementById('chk_mesh').checked;
+    const container = document.getElementById('sim_canvas');
 
-    // Scaling
-    // Find bounding box to fit in canvas with margin
-    const domainW = solver.domain_width;
-    // Limit display Y to relevant area (up to 5x trace height)
-    const maxY = Math.min(solver.y.slice(-1)[0], solver.h + 5 * solver.w);
-    const domainH = maxY;
+    const nx = solver.x.length;
+    const ny = solver.y.length;
 
-    const scaleX = (w - 40) / domainW;
-    const scaleY = (h - 40) / domainH;
-    const scale = Math.min(scaleX, scaleY);
+    // Limit display Y
+    const maxY = Math.min(solver.y[ny - 1], solver.h + 5 * solver.w);
+    const maxYIdx = solver.y.findIndex(y => y > maxY);
+    const nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
 
-    const offsetX = (w - domainW * scale) / 2;
-    const offsetY = h - (h - domainH * scale) / 2; // Bottom origin
+    // Coordinates in mm
+    const xMM = solver.x.map(v => v * 1000);
+    const yMM = solver.y.slice(0, nyDisplay).map(v => v * 1000);
 
-    const toScreenX = (x) => offsetX + x * scale;
-    const toScreenY = (y) => offsetY - y * scale;
+    let zData = [];
+    let title = "";
+    let colorscale = "Viridis";
+    let zTitle = "";
 
-    // Helper to draw Rects
-    const drawCell = (i, j, color) => {
-        const x0 = toScreenX(solver.x[j]);
-        const y0 = toScreenY(solver.y[i]);
-        // dx/dy are widths
-        const x1 = toScreenX(solver.x[j+1]);
-        const y1 = toScreenY(solver.y[i+1]);
+    // --------------------
+    // DATA SELECTION
+    // --------------------
+    if (currentView === "geometry") {
+        title = "Microstrip Geometry";
+        zTitle = "εᵣ / Conductor";
 
-        ctx.fillStyle = color;
-        ctx.fillRect(x0, y1, x1-x0, y0-y1); // Canvas Y inverted
+        colorscale = [
+            [0.0, "#ffffff"],
+            [0.3, "#64c864"],
+            [0.7, "#333333"],
+            [1.0, "#d97706"]
+        ];
+
+        for (let i = 0; i < nyDisplay; i++) {
+            const row = [];
+            for (let j = 0; j < nx; j++) {
+                if (solver.conductor_mask[i][j]) {
+                    row.push(solver.ground_mask[i][j] ? -2 : -1);
+                } else {
+                    row.push(solver.epsilon_r[i][j]);
+                }
+            }
+            zData.push(row);
+        }
+    }
+
+    else if (currentView === "potential" && solver.solution_valid) {
+        title = "Electric Potential (V)";
+        zTitle = "Volts";
+
+        for (let i = 0; i < nyDisplay; i++) {
+            zData.push(solver.V[i].slice(0, nx));
+        }
+    }
+
+    else if (currentView === "efield" && solver.solution_valid) {
+        title = "|E| Field Magnitude (V/m)";
+        zTitle = "V/m";
+
+        for (let i = 0; i < nyDisplay; i++) {
+            const row = [];
+            for (let j = 0; j < nx; j++) {
+                row.push(Math.hypot(solver.Ex[i][j], solver.Ey[i][j]));
+            }
+            zData.push(row);
+        }
+    }
+
+    else {
+        title = "No Data Available";
+        zData = Array(nyDisplay).fill(0).map(() => Array(nx).fill(0));
+    }
+
+    // --------------------
+    // MAIN FIELD TRACE
+    // --------------------
+    const traces = [{
+        type: currentView === "geometry" ? "contour" : "heatmap",
+        x: xMM,
+        y: yMM,
+        z: zData,
+        colorscale: colorscale,
+        contours: {
+            showlines: true,
+            coloring: "heatmap",
+            ncontours: contourCount
+        },
+        colorbar: {
+            title: zTitle,
+            len: 0.8
+        },
+        hovertemplate:
+            "x: %{x:.2f} mm<br>" +
+            "y: %{y:.2f} mm<br>" +
+            "value: %{z:.3e}<extra></extra>"
+    }];
+
+    // --------------------
+    // MESH OVERLAY
+    // --------------------
+    if (showMesh) {
+        const stepX = 1;
+        const stepY = 1;
+
+        for (let j = 0; j < nx; j += stepX) {
+            traces.push({
+                type: "scatter",
+                x: [xMM[j], xMM[j]],
+                y: [yMM[0], yMM[nyDisplay - 1]],
+                mode: "lines",
+                line: { width: 0.2, color: "white" },
+                showlegend: false,
+                hoverinfo: "skip"
+            });
+        }
+
+        for (let i = 0; i < nyDisplay; i += stepY) {
+            traces.push({
+                type: "scatter",
+                x: [xMM[0], xMM[nx - 1]],
+                y: [yMM[i], yMM[i]],
+                mode: "lines",
+                line: { width: 0.2, color: "white" },
+                showlegend: false,
+                hoverinfo: "skip"
+            });
+        }
+    }
+
+    // --------------------
+    // UI MENUS
+    // --------------------
+    const layout = {
+        title: title,
+        xaxis: {
+            title: "Width (mm)",
+            scaleanchor: "y",
+            scaleratio: 1
+        },
+        yaxis: {
+            title: "Height (mm)"
+        },
+        margin: { l: 70, r: 90, t: 50, b: 60 },
+        hovermode: "closest",
+        dragmode: "pan",
+        plot_bgcolor: "#f8f9fa",
+
+        updatemenus: [
+            {
+                x: 0.01,
+                y: 1.15,
+                showactive: true,
+                active: currentView === "geometry" ? 0 : currentView === "potential" ? 1 : 2,
+                buttons: [
+                    {
+                        label: "Geometry",
+                        method: "skip",
+                        args: []
+                    },
+                    {
+                        label: "Potential",
+                        method: "skip",
+                        args: [],
+                        visible: solver.solution_valid
+                    },
+                    {
+                        label: "|E| Field",
+                        method: "skip",
+                        args: [],
+                        visible: solver.solution_valid
+                    }
+                ]
+            }
+        ]
     };
 
-    // Draw Field / Geometry
-    const ny = solver.y.length;
-    const nx = solver.x.length;
-
-    // Determine min/max for colormapping
-    let maxVal = 0;
-    if (viewMode === 'efield' && solver.solution_valid) {
-         for(let i=0; i<ny; i++) 
-            for(let j=0; j<nx; j++) 
-                 maxVal = Math.max(maxVal, Math.sqrt(solver.Ex[i][j]**2 + solver.Ey[i][j]**2));
-    }
-
-    for (let i = 0; i < ny - 1; i++) {
-        if (solver.y[i] > maxY) break;
-
-        for (let j = 0; j < nx - 1; j++) {
-            let color;
-
-            if (viewMode === 'geometry') {
-                if (solver.conductor_mask[i][j]) {
-                    color = solver.ground_mask[i][j] ? '#333' : '#d97706'; // Dark gnd, Orange trace
-                } else {
-                    // Substrate vs Air
-                    const er = solver.epsilon_r[i][j];
-                    color = er > 1.1 ? `rgba(100, 200, 100, ${0.2 + er/10})` : '#fff';
+    const config = {
+        responsive: true,
+        displayModeBar: true,
+        scrollZoom: true,
+        modeBarButtonsToAdd: [
+            {
+                name: "Toggle Mesh",
+                icon: Plotly.Icons.grid,
+                click: () => {
+                    showMesh = !showMesh;
+                    draw();
                 }
-            } else if (viewMode === 'potential' && solver.solution_valid) {
-                if (solver.conductor_mask[i][j]) {
-                     color = solver.ground_mask[i][j] ? '#000' : '#d97706';
-                } else {
-                    const v = solver.V[i][j];
-                    color = viridis(v);
+            },
+            {
+                name: "More Contours",
+                icon: Plotly.Icons.zoomIn,
+                click: () => {
+                    contourCount += 5;
+                    draw();
                 }
-            } else if (viewMode === 'efield' && solver.solution_valid) {
-                const emag = Math.sqrt(solver.Ex[i][j]**2 + solver.Ey[i][j]**2);
-                color = viridis(Math.pow(emag / (maxVal || 1), 0.5)); // Gamma correct
-            } else {
-                color = '#eee';
+            },
+            {
+                name: "Fewer Contours",
+                icon: Plotly.Icons.zoomOut,
+                click: () => {
+                    contourCount = Math.max(5, contourCount - 5);
+                    draw();
+                }
+            },
+            {
+                name: "Auto Z Scale",
+                icon: Plotly.Icons.autoscale,
+                click: () => {
+                    Plotly.relayout(container, { "zaxis.autorange": true });
+                }
             }
+        ]
+    };
 
-            drawCell(i, j, color);
-        }
+    Plotly.react(container, traces, layout, config);
+
+    if (!container._viewListenerBound) {
+        container.on('plotly_buttonclicked', (event) => {
+            if (event.menu.active === 0) currentView = "geometry";
+            else if (event.menu.active === 1) currentView = "potential";
+            else if (event.menu.active === 2) currentView = "efield";
+            draw();
+        });
+        container._viewListenerBound = true;
     }
 
-    // Draw Mesh Lines
-    if (showMesh) {
-        ctx.strokeStyle = 'rgba(0,0,0,0.1)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
+}
 
-        // V lines
-        for(let j=0; j<nx; j++) {
-            const x = toScreenX(solver.x[j]);
-            ctx.moveTo(x, toScreenY(0));
-            ctx.lineTo(x, toScreenY(maxY));
-        }
-        // H lines
-        for(let i=0; i<ny; i++) {
-            if (solver.y[i] > maxY) break;
-            const y = toScreenY(solver.y[i]);
-            ctx.moveTo(toScreenX(0), y);
-            ctx.lineTo(toScreenX(domainW), y);
-        }
-        ctx.stroke();
+function resizeCanvas() {
+    const container = document.getElementById('sim_canvas');
+    if (container) {
+        Plotly.Plots.resize(container);
     }
 }
 
@@ -247,18 +378,27 @@ function bindEvents() {
     };
     document.getElementById('btn_solve').onclick = () => runSimulation();
 
-    ['chk_mesh', 'sel_view_mode'].forEach(id => {
-        document.getElementById(id).onchange = () => draw();
+    [
+      'inp_contours',
+      'inp_vmin',
+      'inp_vmax',
+      'chk_auto_range',
+      'chk_mesh',
+      'sel_view_mode'
+    ].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.onchange = () => draw();
     });
 }
 
 
-// Initial setup and event binding
 function init() {
     bindEvents();
     updateGeometry();
+    draw();
     resizeCanvas();
-    window.addEventListener('resize', () => resizeCanvas());
+    window.addEventListener('resize', resizeCanvas);
 }
 
 // Start when DOM is ready
