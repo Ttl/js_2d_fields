@@ -113,6 +113,145 @@ async function testGCPWCreation() {
     return solver;
 }
 
+// Test Stripline solver creation and analysis
+async function testStriplineCreation() {
+    console.log("Test 5: Stripline solver creation...");
+
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2e-3,
+        trace_width: 0.15e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 16e-6,
+        epsilon_r: 4.1,
+        epsilon_r_top: 4.1,
+        air_top: 0.2e-3,
+        tan_delta: 0.02,
+        sigma_cond: 5.8e7,
+        freq: 1e9,
+        nx: 100,
+        ny: 100,
+        boundaries: ["open", "open", "gnd", "gnd"]
+    });
+
+    console.log(`  Grid: ${solver.x.length}x${solver.y.length}`);
+
+    const results = await solver.perform_analysis();
+    console.log(`  Z0: ${results.Z0.toFixed(2)} Ω, eps_eff: ${results.eps_eff.toFixed(3)}`);
+
+    // Stripline should have eps_eff close to substrate permittivity
+    if (results.eps_eff < 3.5 || results.eps_eff > 4.5) {
+        throw new Error(`Stripline eps_eff out of range: ${results.eps_eff}`);
+    }
+
+    console.log("  PASS: Stripline solver created successfully");
+    return solver;
+}
+
+// Test Microstrip with Solder Mask
+async function testSolderMaskCreation() {
+    console.log("Test 6: Microstrip with Solder Mask...");
+
+    const solver = new MicrostripSolver({
+        substrate_height: 0.1e-3,
+        trace_width: 0.1e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.5,
+        tan_delta: 0.02,
+        sigma_cond: 5.8e7,
+        freq: 1e9,
+        nx: 100,
+        ny: 100,
+        use_sm: true,
+        sm_t_sub: 20e-6,
+        sm_t_trace: 20e-6,
+        sm_t_side: 20e-6,
+        sm_er: 3.5,
+        sm_tand: 0.02,
+        boundaries: ["open", "open", "open", "gnd"]
+    });
+
+    console.log(`  Grid: ${solver.x.length}x${solver.y.length}`);
+
+    const results = await solver.perform_analysis();
+    console.log(`  Z0: ${results.Z0.toFixed(2)} Ω, eps_eff: ${results.eps_eff.toFixed(3)}`);
+
+    if (results.Z0 < 10 || results.Z0 > 200) {
+        throw new Error(`Solder mask Z0 out of range: ${results.Z0}`);
+    }
+
+    console.log("  PASS: Solder Mask microstrip created successfully");
+    return solver;
+}
+
+// Test Embedded Microstrip (Top Dielectric)
+async function testTopDielectricCreation() {
+    console.log("Test 7: Embedded Microstrip (Top Dielectric)...");
+
+    const solver = new MicrostripSolver({
+        substrate_height: 1.6e-3,
+        trace_width: 3e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.5,
+        tan_delta: 0.02,
+        sigma_cond: 5.8e7,
+        freq: 1e9,
+        nx: 100,
+        ny: 100,
+        top_diel_h: 0.2e-3,
+        top_diel_er: 4.5,
+        boundaries: ["open", "open", "open", "gnd"]
+    });
+
+    console.log(`  Grid: ${solver.x.length}x${solver.y.length}`);
+
+    const results = await solver.perform_analysis();
+    console.log(`  Z0: ${results.Z0.toFixed(2)} Ω, eps_eff: ${results.eps_eff.toFixed(3)}`);
+
+    // Embedded microstrip should have higher eps_eff than regular microstrip
+    if (results.eps_eff < 3.0 || results.eps_eff > 5.0) {
+        throw new Error(`Top dielectric eps_eff out of range: ${results.eps_eff}`);
+    }
+
+    console.log("  PASS: Top Dielectric microstrip created successfully");
+    return solver;
+}
+
+// Test Microstrip with Ground Cutout
+async function testGroundCutoutCreation() {
+    console.log("Test 8: Microstrip with Ground Cutout...");
+
+    const solver = new MicrostripSolver({
+        substrate_height: 1.6e-3,
+        trace_width: 3e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.5,
+        tan_delta: 0.02,
+        sigma_cond: 5.8e7,
+        freq: 1e9,
+        nx: 100,
+        ny: 100,
+        gnd_cut_width: 3e-3,
+        gnd_cut_sub_h: 1e-3,
+        boundaries: ["open", "open", "open", "gnd"]
+    });
+
+    console.log(`  Grid: ${solver.x.length}x${solver.y.length}`);
+
+    const results = await solver.perform_analysis();
+    console.log(`  Z0: ${results.Z0.toFixed(2)} Ω, eps_eff: ${results.eps_eff.toFixed(3)}`);
+
+    // Ground cutout should increase Z0 compared to regular microstrip
+    if (results.Z0 < 40 || results.Z0 > 100) {
+        throw new Error(`Ground cutout Z0 out of range: ${results.Z0}`);
+    }
+
+    console.log("  PASS: Ground Cutout microstrip created successfully");
+    return solver;
+}
+
 // Test draw() data access patterns (mirrors app.js draw() exactly)
 function testDrawDataAccess(solver) {
     console.log("Test 4: Draw data access patterns...");
@@ -195,22 +334,27 @@ async function runTests() {
     let passed = 0;
     let failed = 0;
 
-    try {
-        const solver = await testMicrostripCreation();
-        passed++;
+    const tests = [
+        async () => {
+            const solver = await testMicrostripCreation();
+            await testMicrostripAnalysis(solver);
+            testDrawDataAccess(solver);
+            return 3; // 3 tests passed
+        },
+        async () => { await testGCPWCreation(); return 1; },
+        async () => { await testStriplineCreation(); return 1; },
+        async () => { await testSolderMaskCreation(); return 1; },
+        async () => { await testTopDielectricCreation(); return 1; },
+        async () => { await testGroundCutoutCreation(); return 1; },
+    ];
 
-        await testMicrostripAnalysis(solver);
-        passed++;
-
-        testDrawDataAccess(solver);
-        passed++;
-
-        await testGCPWCreation();
-        passed++;
-
-    } catch (e) {
-        console.error(`  FAIL: ${e.message}`);
-        failed++;
+    for (const test of tests) {
+        try {
+            passed += await test();
+        } catch (e) {
+            console.error(`  FAIL: ${e.message}`);
+            failed++;
+        }
     }
 
     console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

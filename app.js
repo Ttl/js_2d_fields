@@ -28,6 +28,25 @@ function getParams() {
         top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value) * 1e-3,
         via_gap: parseFloat(document.getElementById('inp_via_gap').value) * 1e-3,
         via_d: parseFloat(document.getElementById('inp_via_d').value) * 1e-3,
+        // Stripline parameters
+        air_top: parseFloat(document.getElementById('inp_air_top').value) * 1e-3,
+        er_top: parseFloat(document.getElementById('inp_er_top').value),
+        // Solder mask parameters
+        use_sm: document.getElementById('chk_solder_mask').checked,
+        sm_t_sub: parseFloat(document.getElementById('inp_sm_t_sub').value) * 1e-6,
+        sm_t_trace: parseFloat(document.getElementById('inp_sm_t_trace').value) * 1e-6,
+        sm_t_side: parseFloat(document.getElementById('inp_sm_t_side').value) * 1e-6,
+        sm_er: parseFloat(document.getElementById('inp_sm_er').value),
+        sm_tand: parseFloat(document.getElementById('inp_sm_tand').value),
+        // Top dielectric parameters
+        use_top_diel: document.getElementById('chk_top_diel').checked,
+        top_diel_h: parseFloat(document.getElementById('inp_top_diel_h').value) * 1e-3,
+        top_diel_er: parseFloat(document.getElementById('inp_top_diel_er').value),
+        top_diel_tand: parseFloat(document.getElementById('inp_top_diel_tand').value),
+        // Ground cutout parameters
+        use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
+        gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value) * 1e-3,
+        gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value) * 1e-3,
     };
 }
 
@@ -40,8 +59,25 @@ function updateGeometry() {
             null, null, p.freq, p.nx, p.ny
         );
         log("GCPW Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
-    } else {
+    } else if (p.tl_type === 'stripline') {
         solver = new MicrostripSolver({
+            trace_width: p.w,
+            substrate_height: p.h,
+            trace_thickness: p.t,
+            epsilon_r: p.er,
+            epsilon_r_top: p.er_top,
+            air_top: p.air_top,
+            tan_delta: p.tand,
+            sigma_cond: p.sigma,
+            freq: p.freq,
+            nx: p.nx,
+            ny: p.ny,
+            boundaries: ["open", "open", "gnd", "gnd"]
+        });
+        log("Stripline Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+    } else {
+        // Microstrip (with optional solder mask, top dielectric, ground cutout)
+        const options = {
             trace_width: p.w,
             substrate_height: p.h,
             trace_thickness: p.t,
@@ -50,9 +86,39 @@ function updateGeometry() {
             sigma_cond: p.sigma,
             freq: p.freq,
             nx: p.nx,
-            ny: p.ny
-        });
-        log("Microstrip Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+            ny: p.ny,
+            boundaries: ["open", "open", "open", "gnd"]
+        };
+
+        // Solder mask
+        if (p.use_sm) {
+            options.use_sm = true;
+            options.sm_t_sub = p.sm_t_sub;
+            options.sm_t_trace = p.sm_t_trace;
+            options.sm_t_side = p.sm_t_side;
+            options.sm_er = p.sm_er;
+            options.sm_tand = p.sm_tand;
+        }
+
+        // Top dielectric (embedded microstrip)
+        if (p.use_top_diel) {
+            options.top_diel_h = p.top_diel_h;
+            options.top_diel_er = p.top_diel_er;
+            options.top_diel_tand = p.top_diel_tand;
+        }
+
+        // Ground cutout
+        if (p.use_gnd_cut) {
+            options.gnd_cut_width = p.gnd_cut_w;
+            options.gnd_cut_sub_h = p.gnd_cut_h;
+        }
+
+        solver = new MicrostripSolver(options);
+        let typeLabel = "Microstrip";
+        if (p.use_sm) typeLabel += " + Solder Mask";
+        if (p.use_top_diel) typeLabel += " + Top Diel";
+        if (p.use_gnd_cut) typeLabel += " + Gnd Cut";
+        log(typeLabel + " Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
     }
 }
 
