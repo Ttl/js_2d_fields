@@ -63,28 +63,20 @@ class MicrostripSolver extends FieldSolver2D {
         this.dielectrics = dielectrics;
         this.conductors = conductors;
 
-        // Create mesher and generate mesh
-        const mesher = new Mesher(
+        // Create mesher but don't generate mesh yet
+        this.mesher = new Mesher(
             this.domain_width, this.domain_height,
             this.nx, this.ny, this.delta_s,
             this.conductors, this.dielectrics,
             true  // symmetric
         );
 
-        [this.x, this.y] = mesher.generate_mesh();
-
-        this.dx = new Float64Array(this.x.length - 1);
-        for (let i = 0; i < this.x.length - 1; i++) {
-            this.dx[i] = this.x[i + 1] - this.x[i];
-        }
-
-        this.dy = new Float64Array(this.y.length - 1);
-        for (let i = 0; i < this.y.length - 1; i++) {
-            this.dy[i] = this.y[i + 1] - this.y[i];
-        }
-
-        // Setup geometry
-        this._setup_geometry();
+        // Mesh will be generated when needed
+        this.x = null;
+        this.y = null;
+        this.dx = null;
+        this.dy = null;
+        this.mesh_generated = false;
     }
 
     _calculate_coordinates(air_top) {
@@ -279,6 +271,30 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         return [dielectrics, conductors];
+    }
+
+    ensure_mesh() {
+        if (this.mesh_generated) {
+            return;
+        }
+
+        // Generate mesh
+        [this.x, this.y] = this.mesher.generate_mesh();
+
+        // Calculate spacing arrays
+        this.dx = new Float64Array(this.x.length - 1);
+        for (let i = 0; i < this.x.length - 1; i++) {
+            this.dx[i] = this.x[i + 1] - this.x[i];
+        }
+
+        this.dy = new Float64Array(this.y.length - 1);
+        for (let i = 0; i < this.y.length - 1; i++) {
+            this.dy[i] = this.y[i + 1] - this.y[i];
+        }
+
+        // Setup geometry
+        this._setup_geometry();
+        this.mesh_generated = true;
     }
 
     _setup_geometry() {

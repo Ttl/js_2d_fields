@@ -89,7 +89,7 @@ function updateGeometry() {
             sm_er: p.sm_er,
             sm_tand: p.sm_tand
         });
-        log("GCPW Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+        log("GCPW Geometry defined.");
     } else if (p.tl_type === 'stripline') {
         solver = new MicrostripSolver({
             trace_width: p.w,
@@ -105,7 +105,7 @@ function updateGeometry() {
             ny: p.ny,
             boundaries: ["open", "open", "gnd", "gnd"]
         });
-        log("Stripline Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+        log("Stripline Geometry defined.");
     } else {
         // Microstrip (with optional solder mask, top dielectric, ground cutout)
         const options = {
@@ -149,7 +149,7 @@ function updateGeometry() {
         if (p.use_sm) typeLabel += " + Solder Mask";
         if (p.use_top_diel) typeLabel += " + Top Diel";
         if (p.use_gnd_cut) typeLabel += " + Gnd Cut";
-        log(typeLabel + " Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
+        log(typeLabel + " Geometry defined");
     }
 }
 
@@ -168,6 +168,13 @@ async function runSimulation() {
     log("Starting simulation...");
 
     try {
+        // Ensure mesh is generated before solving
+        if (!solver.mesh_generated) {
+            log("Generating mesh...");
+            solver.ensure_mesh();
+            log("Mesh generated: " + solver.x.length + "x" + solver.y.length);
+        }
+
         let results;
 
         log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes, tolerance ${p.tolerance})...`);
@@ -231,52 +238,95 @@ function draw() {
 
     const container = document.getElementById('sim_canvas');
 
-    const nx = solver.x.length;
-    const ny = solver.y.length;
-
-    // Limit display Y - convert Float64Array to regular array for findIndex
-    const yArr = Array.from(solver.y);
-    const maxY = Math.min(yArr[ny - 1], solver.h + 5 * solver.w);
-    const maxYIdx = yArr.findIndex(y => y > maxY);
-    const nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
-
-    // Coordinates in mm - convert Float64Array to regular arrays for Plotly
-    const xMM = Array.from(solver.x, v => v * 1000);
-    const yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
-
     let zData = [];
     let title = "";
     let colorscale = "Viridis";
     let zTitle = "";
+    let shapes = [];
+    let xMM, yMM, nx, ny, nyDisplay;
 
     // --------------------
     // DATA SELECTION
     // --------------------
     if (currentView === "geometry") {
-        title = "Microstrip Geometry";
-        zTitle = "εᵣ / Conductor";
+        title = "Transmission Line Geometry";
 
-        colorscale = [
-            [0.0, "#ffffff"],
-            [0.3, "#64c864"],
-            [0.7, "#333333"],
-            [1.0, "#d97706"]
-        ];
+        // Determine display bounds
+        const maxY = Math.min(solver.h + 5 * solver.w, solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0));
 
-        for (let i = 0; i < nyDisplay; i++) {
-            const row = [];
-            for (let j = 0; j < nx; j++) {
-                if (solver.conductor_mask[i][j]) {
-                    row.push(solver.ground_mask[i][j] ? -2 : -1);
-                } else {
-                    row.push(solver.epsilon_r[i][j]);
-                }
+        // Draw dielectrics as rectangles (color by epsilon_r)
+        for (const diel of solver.dielectrics) {
+            if (diel.y_min > maxY) continue;
+
+            const yMax = Math.min(diel.y_max, maxY);
+            const er = diel.epsilon_r;
+
+            // Color mapping: air (1.0) = white, higher er = green shades
+            let fillcolor;
+            if (er <= 1.01) {
+                fillcolor = 'rgba(255, 255, 255, 0.8)';
+            } else {
+                // Green shades for dielectrics
+                const intensity = Math.min(255, 100 + (er - 1) * 30);
+                fillcolor = `rgba(100, ${intensity}, 100, 0.8)`;
             }
-            zData.push(row);
+
+            shapes.push({
+                type: 'rect',
+                x0: diel.x_min * 1000,
+                y0: diel.y_min * 1000,
+                x1: diel.x_max * 1000,
+                y1: yMax * 1000,
+                fillcolor: fillcolor,
+                line: { color: 'rgba(128, 128, 128, 0.3)', width: 0.5 },
+                layer: 'below'
+            });
         }
+
+        // Draw conductors as rectangles (signal = orange, ground = dark gray)
+        for (const cond of solver.conductors) {
+            if (cond.y_min > maxY) continue;
+
+            const yMax = Math.min(cond.y_max, maxY);
+            const fillcolor = cond.is_signal ?
+                'rgba(217, 119, 6, 1.0)' :  // Orange for signal
+                'rgba(51, 51, 51, 1.0)';     // Dark gray for ground
+
+            shapes.push({
+                type: 'rect',
+                x0: cond.x_min * 1000,
+                y0: cond.y_min * 1000,
+                x1: cond.x_max * 1000,
+                y1: yMax * 1000,
+                fillcolor: fillcolor,
+                line: { color: 'rgba(0, 0, 0, 0.5)', width: 1 },
+                layer: 'above'
+            });
+        }
+
+        // Create empty trace for geometry view (shapes only)
+        xMM = [0, solver.w * 2000]; // Just for axis scaling
+        yMM = [0, maxY * 1000];
     }
 
     else if (currentView === "potential" && solver.solution_valid) {
+        // Ensure mesh exists for field visualization
+        if (!solver.mesh_generated) {
+            solver.ensure_mesh();
+        }
+
+        nx = solver.x.length;
+        ny = solver.y.length;
+
+        // Limit display Y
+        const yArr = Array.from(solver.y);
+        const maxY = Math.min(yArr[ny - 1], solver.h + 5 * solver.w);
+        const maxYIdx = yArr.findIndex(y => y > maxY);
+        nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
+
+        xMM = Array.from(solver.x, v => v * 1000);
+        yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
+
         title = "Electric Potential (V)";
         zTitle = "Volts";
 
@@ -286,6 +336,23 @@ function draw() {
     }
 
     else if (currentView === "efield" && solver.solution_valid) {
+        // Ensure mesh exists for field visualization
+        if (!solver.mesh_generated) {
+            solver.ensure_mesh();
+        }
+
+        nx = solver.x.length;
+        ny = solver.y.length;
+
+        // Limit display Y
+        const yArr = Array.from(solver.y);
+        const maxY = Math.min(yArr[ny - 1], solver.h + 5 * solver.w);
+        const maxYIdx = yArr.findIndex(y => y > maxY);
+        nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
+
+        xMM = Array.from(solver.x, v => v * 1000);
+        yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
+
         title = "|E| Field Magnitude (V/m)";
         zTitle = "V/m";
 
@@ -300,37 +367,50 @@ function draw() {
 
     else {
         title = "No Data Available";
-        zData = Array(nyDisplay).fill(0).map(() => Array(nx).fill(0));
+        // Create minimal dummy data
+        xMM = [0, (solver.w || 1) * 2000];
+        yMM = [0, (solver.h || 1) * 1000];
     }
 
     // --------------------
     // MAIN FIELD TRACE
     // --------------------
-    const traces = [{
-        type: currentView === "geometry" ? "contour" : "heatmap",
-        x: xMM,
-        y: yMM,
-        z: zData,
-        colorscale: colorscale,
-        contours: {
-            showlines: true,
-            coloring: "heatmap",
-            ncontours: contourCount
-        },
-        colorbar: {
-            title: zTitle,
-            len: 0.8
-        },
-        hovertemplate:
-            "x: %{x:.2f} mm<br>" +
-            "y: %{y:.2f} mm<br>" +
-            "value: %{z:.3e}<extra></extra>"
-    }];
+    let traces = [];
+
+    if (currentView === "geometry") {
+        // For geometry, use an invisible scatter trace just for axis scaling
+        traces.push({
+            type: "scatter",
+            x: xMM,
+            y: yMM,
+            mode: "markers",
+            marker: { size: 0, opacity: 0 },
+            showlegend: false,
+            hoverinfo: "skip"
+        });
+    } else if (zData.length > 0) {
+        // For field views, use heatmap
+        traces.push({
+            type: "heatmap",
+            x: xMM,
+            y: yMM,
+            z: zData,
+            colorscale: colorscale,
+            colorbar: {
+                title: zTitle,
+                len: 0.8
+            },
+            hovertemplate:
+                "x: %{x:.2f} mm<br>" +
+                "y: %{y:.2f} mm<br>" +
+                "value: %{z:.3e}<extra></extra>"
+        });
+    }
 
     // --------------------
-    // MESH OVERLAY
+    // MESH OVERLAY (only for field views)
     // --------------------
-    if (showMesh) {
+    if (showMesh && currentView !== "geometry" && nx && ny) {
         const stepX = 1;
         const stepY = 1;
 
@@ -376,6 +456,7 @@ function draw() {
         hovermode: "closest",
         dragmode: "pan",
         plot_bgcolor: "#f8f9fa",
+        shapes: shapes,  // Add vector shapes for geometry
 
         updatemenus: [
             {
@@ -482,10 +563,6 @@ function viridis(t) {
 }
 
 function bindEvents() {
-    document.getElementById('btn_update_geo').onclick = () => {
-        updateGeometry();
-        draw();
-    };
     document.getElementById('btn_solve').onclick = () => {
         updateGeometry(); // Ensure geometry is updated with latest parameters
         runSimulation();
@@ -495,19 +572,42 @@ function bindEvents() {
         log("Stop requested...");
     };
 
-    [
-      'inp_contours',
-      'inp_vmin',
-      'inp_vmax',
-      'chk_auto_range',
-      'chk_mesh',
-      'sel_view_mode'
-    ].forEach(id => {
+    // Real-time geometry updates for all parameter inputs
+    const geometryInputs = [
+        'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma', 'inp_freq',
+        'inp_gap', 'inp_top_gnd_w', 'inp_via_gap',
+        'inp_air_top', 'inp_er_top',
+        'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',
+        'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',
+        'inp_gnd_cut_w', 'inp_gnd_cut_h'
+    ];
+
+    geometryInputs.forEach(id => {
         const el = document.getElementById(id);
-        if (!el) return;
-        el.onchange = () => draw();
+        if (el) {
+            el.addEventListener('input', () => {
+                updateGeometry();
+                draw();
+            });
+        }
     });
 
+    // Real-time updates for checkboxes
+    const geometryCheckboxes = [
+        'chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut'
+    ];
+
+    geometryCheckboxes.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('change', () => {
+                updateGeometry();
+                draw();
+            });
+        }
+    });
+
+    // Transmission line type selector
     document.getElementById('tl_type').addEventListener('change', () => {
         updateGeometry();
         draw();

@@ -247,6 +247,11 @@ export class FieldSolver2D {
     }
 
     async solve_laplace_iterative(vacuum = false, onProgress = null) {
+        // Ensure mesh is generated
+        if (this.ensure_mesh) {
+            this.ensure_mesh();
+        }
+
         const ny = this.y.length, nx = this.x.length;
         const dx = diff(this.x), dy = diff(this.y);
         const N = nx * ny;
@@ -1020,6 +1025,11 @@ export class FieldSolver2D {
         /**
          * Adaptive mesh solve with robust convergence criteria.
          */
+        // Ensure mesh is generated
+        if (this.ensure_mesh) {
+            this.ensure_mesh();
+        }
+
         const {
             max_iters = 10,
             refine_frac = 0.15,
