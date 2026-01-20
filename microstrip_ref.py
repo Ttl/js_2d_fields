@@ -317,6 +317,10 @@ class MicrostripSolver2D(FieldSolver2D):
             self.y_sub_end,
         ]
 
+        # Add ground cut interfaces
+        if self.gnd_cut_width > 0:
+            y_if += [self.y_ext_start, self.y_ext_end]
+
         if self.top_diel_h > 0:
             y_if += [self.y_top_diel_start, self.y_top_diel_end]
 
@@ -353,6 +357,12 @@ class MicrostripSolver2D(FieldSolver2D):
                    y0 >= self.y_gnd_top_start - 1e-15 and
                    y1 <= self.y_gnd_top_end + 1e-15)):
                 weight = 0
+
+            # SUBSTRATE BELOW CUTOUT - field region when ground cut enabled
+            elif (self.gnd_cut_width > 0 and
+                  y0 >= self.y_ext_start - 1e-15 and
+                  y1 <= self.y_ext_end + 1e-15):
+                weight = 0.75
 
             # SUBSTRATE - high field region
             elif (y0 >= self.y_sub_start - 1e-15 and

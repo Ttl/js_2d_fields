@@ -304,6 +304,11 @@ class MicrostripSolver extends FieldSolver2D {
             this.y_sub_end,
         ];
 
+        // Add ground cut interfaces
+        if (this.gnd_cut_width > 0) {
+            y_if.push(this.y_ext_start, this.y_ext_end);
+        }
+
         if (this.top_diel_h > 0) {
             y_if.push(this.y_top_diel_start, this.y_top_diel_end);
         }
@@ -345,6 +350,12 @@ class MicrostripSolver extends FieldSolver2D {
                       y0 >= this.y_gnd_top_start - 1e-15 &&
                       y1 <= this.y_gnd_top_end + 1e-15)) {
                 weight = 0;
+            }
+            // SUBSTRATE BELOW CUTOUT - field region when ground cut enabled
+            else if (this.gnd_cut_width > 0 &&
+                     y0 >= this.y_ext_start - 1e-15 &&
+                     y1 <= this.y_ext_end + 1e-15) {
+                weight = 0.75;
             }
             // SUBSTRATE - high field region
             else if (y0 >= this.y_sub_start - 1e-15 && y1 <= this.y_sub_end + 1e-15) {
