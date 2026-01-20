@@ -166,6 +166,180 @@ class FieldSolver2D:
 
         self.V = solution_full.reshape((self.ny, self.nx))
 
+    def _compute_refine_metrics(self, Ex, Ey):
+        ny, nx = Ex.shape
+        local = []
+        globalc = []
+
+        for i in range(ny):
+            for j in range(nx):
+                # Clamp to valid field nodes
+                ic = min(max(i, 1), ny-2)
+                jc = min(max(j, 1), nx-2)
+
+                dx = self.dx_array[jc]
+                dy = self.dy_array[ic]
+
+                # Skip if completely inside a conductor
+                if (self.conductor_mask[ic, jc] and
+                    self.conductor_mask[ic+1, jc] and self.conductor_mask[ic-1, jc] and
+                    self.conductor_mask[ic, jc+1] and self.conductor_mask[ic, jc-1]):
+                    continue
+
+                dx = self.dx_array[jc]
+                dy = self.dy_array[ic]
+                eps = self.epsilon_r[ic, jc]
+                E2 = Ex[ic, jc]**2 + Ey[ic, jc]**2
+
+                # Global: How much each cell contributes to the total Capacitance.
+                M_energy = 0.5 * eps * E2 * (dx * dy)
+
+                # Local: Field Gradient
+                grad_E = abs(Ex[ic, jc] - Ex[ic, jc-1]) + abs(Ey[ic, jc] - Ey[ic-1, jc])
+
+                # Weight gradient by permittivity so error in substrate is 'heavier'
+                M_local = grad_E * eps
+
+                is_boundary = (not self.conductor_mask[ic, jc] and (
+                    self.conductor_mask[ic+1, jc] or self.conductor_mask[ic-1, jc] or
+                    self.conductor_mask[ic, jc+1] or self.conductor_mask[ic, jc-1]))
+
+                if is_boundary:
+                    M_local *= 2.0
+
+                local.append((M_local, ic, jc))
+                globalc.append((M_energy, ic, jc))
+
+        return local, globalc
+
+    def _select_cells_to_refine(self, local, globalc, frac=0.15):
+        N = int(frac * len(local))
+        Nloc = int(0.2 * N)
+        Nglob = N - Nloc
+
+        local.sort(reverse=True)
+        globalc.sort(reverse=True)
+
+        selected = set()
+
+        for _, i, j in local[:Nloc]:
+            selected.add((i,j))
+
+        for _, i, j in globalc[:Nglob]:
+            selected.add((i,j))
+
+        return selected
+
+    def _refine_selected_cells(self, selected):
+        new_x = set()
+        new_y = set()
+
+        for i, j in selected:
+            ex = abs(self.V[i, j+1] - self.V[i, j])
+            ey = abs(self.V[i+1, j] - self.V[i, j])
+
+            split_x = ex >= ey
+            split_y = ey > ex
+
+            if split_y:
+                new_y.add(0.5 * (self.y[i] + self.y[i+1]))
+                if i > 0:
+                    new_y.add(0.5 * (self.y[i-1] + self.y[i]))
+
+            if split_x:
+                new_x.add(0.5 * (self.x[j] + self.x[j+1]))
+                if j > 0:
+                    new_x.add(0.5 * (self.x[j-1] + self.x[j]))
+
+        self.x = np.array(sorted(set(self.x) | new_x))
+        self.y = np.array(sorted(set(self.y) | new_y))
+
+    def _compute_energy_error(self, Ex, Ey, prev_energy):
+        """
+        Compute relative change in stored electromagnetic energy.
+        Fields must be interpolated to cell centers to match epsilon grid.
+        """
+        energy = 0.0
+        for i in range(self.ny - 1):
+            for j in range(self.nx - 1):
+                if self.conductor_mask[i, j]:
+                    continue
+
+                E2 = Ex[i, j]**2 + Ey[i, j]**2
+                dA = self.dx_array[j] * self.dy_array[i]
+                energy += 0.5 * epsilon_0 * self.epsilon_r[i, j] * E2 * dA
+
+        if prev_energy is None:
+            return energy, 1.0
+
+        rel_error = abs(energy - prev_energy) / max(abs(prev_energy), 1e-12)
+        return energy, rel_error
+
+    def _compute_parameter_error(self, Z0, C, prev_Z0, prev_C):
+        """Track convergence of the quantities you actually care about."""
+        if prev_Z0 is None:
+            return 1.0
+
+        z_err = abs(Z0 - prev_Z0) / max(abs(prev_Z0), 1e-12)
+        c_err = abs(C - prev_C) / max(abs(prev_C), 1e-12)
+        return max(z_err, c_err)
+
+    def solve_adaptive(self,
+                       max_iters=10,
+                       refine_frac=0.15,
+                       energy_tol=0.05,
+                       param_tol=0.1,# Error in Z0/C
+                       max_nodes=50000,
+                       min_converged_passes=2):
+        """
+        Adaptive mesh solve with robust convergence criteria.
+        """
+        prev_energy = None
+        prev_Z0 = None
+        prev_C = None
+        converged_count = 0
+
+        for it in range(max_iters):
+            Z0, eps_eff, C, C0 = self.calculate_parameters()
+            Ex, Ey = self.compute_fields()
+
+            # Energy-based error (primary criterion)
+            energy, energy_err = self._compute_energy_error(Ex, Ey, prev_energy)
+
+            # Parameter-based error (what you actually care about)
+            param_err = self._compute_parameter_error(Z0, C, prev_Z0, prev_C)
+
+            print(f"Pass {it+1}: Energy err={energy_err:.3g}, Param err={param_err:.3g}, "
+                  f"Nodes={self.nx*self.ny}")
+
+            # Check convergence (both criteria must be met)
+            if prev_energy is not None:
+                if energy_err < energy_tol and param_err < param_tol:
+                    converged_count += 1
+                    if converged_count >= min_converged_passes:
+                        print(f"Converged after {it+1} passes")
+                        break
+                else:
+                    converged_count = 0  # Reset if we diverge
+
+            prev_energy = energy
+            prev_Z0 = Z0
+            prev_C = C
+
+            # Node budget check
+            if self.nx * self.ny > max_nodes:
+                print("Node budget reached")
+                break
+
+            # Refine mesh
+            if it != max_iters - 1:
+                local, globalc = self._compute_refine_metrics(Ex, Ey)
+                selected = self._select_cells_to_refine(local, globalc, frac=refine_frac)
+                self._refine_selected_cells(selected)
+                self._setup_geometry()
+
+        return Z0, eps_eff, C, C0, Ex, Ey
+
     def compute_fields(self):
         Ex = np.zeros_like(self.V)
         Ey = np.zeros_like(self.V)
@@ -373,6 +547,24 @@ class FieldSolver2D:
         axs[0].set_ylabel("y (mm)")
         axs[0].set_aspect('equal')
         plt.colorbar(im1, ax=axs[0], label="Log(V/m)")
+
+        mesh_alpha = 0.5
+        mesh_color = "white"
+        mesh_linewidth = 0.2
+        # Plot vertical grid lines
+        scale = 1e3
+        for i in range(0, len(self.x)):
+            axs[0].plot([self.x[i] * scale, self.x[i] * scale],
+                    [self.y[0] * scale, self.y[-1] * scale],
+                    color=mesh_color, alpha=mesh_alpha, linewidth=mesh_linewidth,
+                    zorder=10)
+
+        # Plot horizontal grid lines
+        for j in range(0, len(self.y)):
+            axs[0].plot([self.x[0] * scale, self.x[-1] * scale],
+                    [self.y[j] * scale, self.y[j] * scale],
+                    color=mesh_color, alpha=mesh_alpha, linewidth=mesh_linewidth,
+                    zorder=10)
 
         im2 = axs[1].contourf(self.X * 1e3, self.Y * 1e3, self.V, 10, cmap='viridis')
         mask = self.conductor_mask
