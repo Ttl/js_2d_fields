@@ -34,9 +34,15 @@ def solve_microstrip(plots=True):
     )
 
     # Print X mesh
+    m = solver.x[-1] / 2
+    trace_points = [x for x in solver.x if m - 3e-3/2 < x < m + 3e-3/2]
+    print(f"Trace points (mm from center): {[round(1e3*(x - m), 3) for x in trace_points]}")
+    print(f"Number of trace points: {len(trace_points)}")
     print("X mesh", solver.x)
     print("X mesh diff", np.diff(solver.x))
-    print("X mesh diff forced symmetric", force_symmetric(np.diff(solver.x)))
+    diff = np.diff(solver.x)
+    is_symmetric = np.allclose(diff[:len(diff)//2], diff[len(diff)//2:][::-1])
+    print(f"Mesh is symmetric: {is_symmetric}")
 
     Z0, eps_eff, C, C0 = solver.calculate_parameters()
     Ex, Ey = solver.compute_fields()

@@ -190,6 +190,7 @@ class Mesher:
     def _region_weight_x(self, x0, x1):
         """Calculate mesh density weight for x-region."""
         tol = 1e-15
+        return 1
 
         # Check if region is inside a conductor
         for cond in self.conductors:
@@ -224,6 +225,7 @@ class Mesher:
     def _region_weight_y(self, y0, y1):
         """Calculate mesh density weight for y-region."""
         tol = 1e-15
+        return 1
 
         # Check if region is inside a conductor
         for cond in self.conductors:
@@ -267,8 +269,11 @@ class Mesher:
 
     def _mesh_conductor_region(self, start, end, npts, direction='x'):
         """Create fine mesh for conductor region with corner grading."""
+        center = (start + end) / 2
+
         if npts < 3:
-            return np.linspace(start, end, max(npts, 2))
+            # Always include center for small npts
+            return np.array([start, center, end])
 
         length = end - start
         # Reduce corner meshing - only use 1-2 points per corner for nx=100
@@ -287,13 +292,17 @@ class Mesher:
         else:
             parts.append(np.array([start]))
 
-        # Middle section - use uniform distribution for better coverage
+        # Middle section - always include center point
         mid_start = start + corner
         mid_end = max(end - corner, mid_start)
         if n_mid > 0:
-            parts.append(self._smooth_transition(mid_start, mid_end, n_mid,
-                                                curve_end='end', beta=3.0)[1:])
-
+            # Ensure center point is included
+            mid_points = self._smooth_transition(mid_start, mid_end, n_mid,
+                                                curve_end='end', beta=3.0)[1:]
+            # Check if center is close to any existing point
+            if np.min(np.abs(mid_points - center)) > length / 100:
+                mid_points = np.sort(np.append(mid_points, center))
+            parts.append(mid_points)
 
         # Right/top corner
         if nc > 0 and corner > 1e-15 and mid_end < end - 1e-15:
@@ -302,7 +311,13 @@ class Mesher:
         elif mid_end < end - 1e-15:
             parts.append(np.array([end]))
 
-        return np.concatenate(parts)
+        mesh = np.concatenate(parts)
+
+        # Ensure center is definitely in the mesh
+        if np.min(np.abs(mesh - center)) > length / 100:
+            mesh = np.sort(np.append(mesh, center))
+
+        return mesh
 
     def generate_mesh(self):
         """Generate the x and y mesh arrays."""
@@ -335,7 +350,7 @@ class Mesher:
 
         # Allocate points based on weights
         # First, ensure minimum points in SIGNAL conductors (not ground planes)
-        MIN_CONDUCTOR_POINTS = 5
+        MIN_CONDUCTOR_POINTS = 7
         region_points = []
         reserved_points = 0
         non_conductor_weight = 0
@@ -454,6 +469,70 @@ class Mesher:
             if np.min(np.abs(mesh - interface)) > 1e-12:
                 mesh = np.sort(np.append(mesh, interface))
 
+        # Add center points for all conductors and dielectrics
+        center_points = []
+
+        # Add conductor centers
+        for cond in self.conductors:
+            if axis == 'x':
+                center = (cond.x_min + cond.x_max) / 2
+            else:
+                center = (cond.y_min + cond.y_max) / 2
+
+            # Only add if not at domain boundaries
+            if 0 < center < domain_size:
+                center_points.append(center)
+
+        # Add dielectric centers
+        for diel in self.dielectrics:
+            if axis == 'x':
+                center = (diel.x_min + diel.x_max) / 2
+            else:
+                center = (diel.y_min + diel.y_max) / 2
+
+            # Only add if not at domain boundaries
+            if 0 < center < domain_size:
+                center_points.append(center)
+
+        # Add center points to mesh if they don't already exist
+        for center in center_points:
+            min_dist = np.min(np.abs(mesh - center))
+            # Only add if there's no point very close to it
+            if min_dist > domain_size / 1000:
+                mesh = np.sort(np.append(mesh, center))
+
+        # Add boundary lines adjacent to all conductor edges
+        # This ensures we have a mesh line close to the boundary but not too close
+        boundary_offset = min(self.skin_depth, domain_size / 500)
+        boundary_lines = []
+
+        for cond in self.conductors:
+            if axis == 'x':
+                edges = [cond.x_min, cond.x_max]
+            else:
+                edges = [cond.y_min, cond.y_max]
+
+            for edge in edges:
+                # Skip domain boundaries
+                if abs(edge) < 1e-15 or abs(edge - domain_size) < 1e-15:
+                    continue
+
+                # Add one line just outside the conductor boundary
+                outside_line = edge + boundary_offset if edge < domain_size / 2 else edge - boundary_offset
+                if 0 < outside_line < domain_size:
+                    boundary_lines.append(outside_line)
+
+        # Add boundary lines to mesh if they don't already exist
+        for line in boundary_lines:
+            # Only add if there's no existing point within boundary_offset/2
+            if np.min(np.abs(mesh - line)) > boundary_offset / 2:
+                mesh = np.sort(np.append(mesh, line))
+
+        # Check if geometry is symmetric and enforce symmetry
+        is_symmetric = self._check_symmetry(axis)
+        if is_symmetric:
+            mesh = self._enforce_symmetry(mesh, domain_size)
+
         # Remove duplicate or near-duplicate points
         # This is critical to avoid division by zero in the solver
         mesh_unique = [mesh[0]]
@@ -464,5 +543,88 @@ class Mesher:
                 mesh_unique.append(mesh[i])
 
         return np.array(mesh_unique)
+
+    def _check_symmetry(self, axis):
+        """Check if geometry is symmetric about the center line."""
+        tol = 1e-12
+
+        if axis == 'x':
+            center = self.domain_width / 2
+            # Check if all conductors are symmetric about center
+            for cond in self.conductors:
+                x_min_mirror = center - (cond.x_max - center)
+                x_max_mirror = center - (cond.x_min - center)
+
+                # Check if there's a matching conductor
+                found_match = False
+                for other in self.conductors:
+                    if (abs(other.x_min - x_min_mirror) < tol and
+                        abs(other.x_max - x_max_mirror) < tol and
+                        other.is_signal == cond.is_signal):
+                        found_match = True
+                        break
+
+                # Also check if conductor is centered
+                if abs(cond.x_min + cond.x_max - 2 * center) < tol:
+                    found_match = True
+
+                if not found_match:
+                    return False
+
+            return True
+        else:
+            # Y-axis is generally not symmetric in microstrip
+            return False
+
+    def _enforce_symmetry(self, mesh, domain_size):
+        """Enforce symmetry in mesh by averaging symmetric pairs."""
+        center = domain_size / 2
+        tol = 1e-12
+
+        symmetric_mesh = []
+
+        # Process points from left to right
+        used = np.zeros(len(mesh), dtype=bool)
+
+        for i, point in enumerate(mesh):
+            if used[i]:
+                continue
+
+            # Check if point is at center
+            if abs(point - center) < tol:
+                symmetric_mesh.append(center)
+                used[i] = True
+                continue
+
+            # Find mirror point
+            mirror_pos = 2 * center - point
+            mirror_idx = None
+            min_dist = float('inf')
+
+            for j in range(len(mesh)):
+                if used[j]:
+                    continue
+                dist = abs(mesh[j] - mirror_pos)
+                if dist < min_dist:
+                    min_dist = dist
+                    mirror_idx = j
+
+            if mirror_idx is not None and min_dist < domain_size / 100:
+                # Found mirror - average the positions
+                avg_pos = center + (point - center)  # Keep left point as-is
+                mirror_avg_pos = 2 * center - avg_pos
+
+                symmetric_mesh.append(avg_pos)
+                symmetric_mesh.append(mirror_avg_pos)
+                used[i] = True
+                used[mirror_idx] = True
+            else:
+                # No mirror found - create one
+                symmetric_mesh.append(point)
+                if 0 < mirror_pos < domain_size:
+                    symmetric_mesh.append(mirror_pos)
+                used[i] = True
+
+        return np.sort(np.unique(symmetric_mesh))
 
 
