@@ -83,7 +83,8 @@ class MicrostripSolver2D(FieldSolver2D):
         mesher = Mesher(
             self.domain_width, self.domain_height,
             nx, ny, self.delta_s,
-            self.conductors, self.dielectrics
+            self.conductors, self.dielectrics,
+            symmetric=True
         )
 
         self.x, self.y = mesher.generate_mesh()

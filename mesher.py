@@ -98,7 +98,7 @@ class Mesher:
     """
 
     def __init__(self, domain_width, domain_height, nx, ny, skin_depth,
-                 conductors, dielectrics):
+                 conductors, dielectrics, symmetric=False):
         """
         Parameters:
         -----------
@@ -120,6 +120,7 @@ class Mesher:
         self.skin_depth = skin_depth
         self.conductors = conductors
         self.dielectrics = dielectrics
+        self.symmetric = symmetric
 
         # Calculate corner mesh parameters
         # With 100 mesh lines, we want about 2 extra lines near conductor edges
@@ -502,36 +503,52 @@ class Mesher:
                 mesh = np.sort(np.append(mesh, center))
 
         # Add boundary lines adjacent to all conductor edges
-        # This ensures we have a mesh line close to the boundary but not too close
-        boundary_offset = min(self.skin_depth, domain_size / 500)
+        # Add lines on BOTH sides of each conductor edge (inside and outside)
+        boundary_offset = min(self.skin_depth * 3, domain_size / 200)
         boundary_lines = []
 
         for cond in self.conductors:
             if axis == 'x':
                 edges = [cond.x_min, cond.x_max]
+                cond_min, cond_max = cond.x_min, cond.x_max
             else:
                 edges = [cond.y_min, cond.y_max]
+                cond_min, cond_max = cond.y_min, cond.y_max
 
             for edge in edges:
                 # Skip domain boundaries
                 if abs(edge) < 1e-15 or abs(edge - domain_size) < 1e-15:
                     continue
 
-                # Add one line just outside the conductor boundary
-                outside_line = edge + boundary_offset if edge < domain_size / 2 else edge - boundary_offset
+                # Determine if this is the left/bottom or right/top edge
+                is_left_edge = abs(edge - cond_min) < 1e-15
+
+                if is_left_edge:
+                    # Left/bottom edge: add line outside (to the left) and inside (to the right)
+                    outside_line = edge - boundary_offset
+                    inside_line = edge + boundary_offset
+                else:
+                    # Right/top edge: add line inside (to the left) and outside (to the right)
+                    inside_line = edge - boundary_offset
+                    outside_line = edge + boundary_offset
+
+                # Add lines if they're within the domain and within/adjacent to the conductor
                 if 0 < outside_line < domain_size:
                     boundary_lines.append(outside_line)
+                if cond_min < inside_line < cond_max:
+                    boundary_lines.append(inside_line)
 
         # Add boundary lines to mesh if they don't already exist
         for line in boundary_lines:
-            # Only add if there's no existing point within boundary_offset/2
-            if np.min(np.abs(mesh - line)) > boundary_offset / 2:
+            # Only add if there's no existing point very close to it
+            if np.min(np.abs(mesh - line)) > boundary_offset / 3:
                 mesh = np.sort(np.append(mesh, line))
 
         # Check if geometry is symmetric and enforce symmetry
-        is_symmetric = self._check_symmetry(axis)
-        if is_symmetric:
-            mesh = self._enforce_symmetry(mesh, domain_size)
+        if self.symmetric:
+            is_symmetric = self._check_symmetry(axis)
+            if is_symmetric:
+                mesh = self._enforce_symmetry(mesh, domain_size)
 
         # Remove duplicate or near-duplicate points
         # This is critical to avoid division by zero in the solver
@@ -573,7 +590,6 @@ class Mesher:
 
             return True
         else:
-            # Y-axis is generally not symmetric in microstrip
             return False
 
     def _enforce_symmetry(self, mesh, domain_size):
