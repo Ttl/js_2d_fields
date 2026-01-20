@@ -4,6 +4,11 @@ import { CONSTANTS } from './field_solver.js';
 const Plotly = window.Plotly;
 
 let solver = null;
+let stopRequested = false;
+
+function shouldStop() {
+    return stopRequested;
+}
 
 function log(msg) {
     const c = document.getElementById('console_out');
@@ -47,6 +52,11 @@ function getParams() {
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
         gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value) * 1e-3,
         gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value) * 1e-3,
+        // Adaptive meshing parameters
+        use_adaptive: document.getElementById('chk_adaptive').checked,
+        max_iters: parseInt(document.getElementById('inp_max_iters').value),
+        refine_frac: parseFloat(document.getElementById('inp_refine_frac').value),
+        max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
     };
 }
 
@@ -124,19 +134,51 @@ function updateGeometry() {
 }
 
 async function runSimulation() {
+    const p = getParams();
     const btn = document.getElementById('btn_solve');
+    const btnStop = document.getElementById('btn_stop');
     const pbar = document.getElementById('progress_bar');
     const pcont = document.getElementById('progress_container');
+    const ptext = document.getElementById('progress_text');
 
     btn.disabled = true;
+    btnStop.disabled = false;
+    stopRequested = false;
     pcont.style.display = 'block';
     log("Starting simulation...");
 
     try {
-        log("Running full analysis...");
-        const results = await solver.perform_analysis((progress) => {
-            pbar.style.width = (progress * 100) + "%";
-        });
+        let results;
+
+        if (p.use_adaptive) {
+            log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes)...`);
+            ptext.style.display = 'block';
+
+            results = await solver.solve_adaptive({
+                max_iters: p.max_iters,
+                refine_frac: p.refine_frac,
+                max_nodes: p.max_nodes,
+                onProgress: (info) => {
+                    const progress = info.iteration / info.total_iterations;
+                    pbar.style.width = (progress * 100) + "%";
+                    ptext.textContent = `Pass ${info.iteration}/${info.total_iterations}: ` +
+                                       `Energy err=${info.energy_error.toExponential(2)}, ` +
+                                       `Param err=${info.param_error.toExponential(2)}, ` +
+                                       `Nodes=${info.nodes}`;
+                },
+                shouldStop: shouldStop
+            });
+
+            if (stopRequested) {
+                log("Simulation stopped by user");
+            }
+        } else {
+            log("Running full analysis...");
+            ptext.style.display = 'none';
+            results = await solver.perform_analysis((progress) => {
+                pbar.style.width = (progress * 100) + "%";
+            });
+        }
 
         currentView = "efield";
         draw();
@@ -159,7 +201,10 @@ async function runSimulation() {
         log("Error: " + e.message);
     } finally {
         btn.disabled = false;
+        btnStop.disabled = true;
         pcont.style.display = 'none';
+        ptext.style.display = 'none';
+        stopRequested = false;
     }
 }
 
@@ -430,6 +475,10 @@ function bindEvents() {
     document.getElementById('btn_solve').onclick = () => {
         updateGeometry(); // Ensure geometry is updated with latest parameters
         runSimulation();
+    };
+    document.getElementById('btn_stop').onclick = () => {
+        stopRequested = true;
+        log("Stop requested...");
     };
 
     [

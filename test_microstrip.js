@@ -19,7 +19,7 @@ async function solve_microstrip_js_test() {
         boundaries: ["open", "open", "open", "gnd"]
     });
 
-    const results = await solver.perform_analysis();
+    const results = await solver.solve_adaptive();
 
     console.log(`Z (complex) = ${results.Zc.toString()} ohm, eps_eff ${results.eps_eff.toFixed(3)}, RLGC {'R': ${results.RLGC.R.toExponential(3)}, 'L': ${results.RLGC.L.toExponential(3)}, 'G': ${results.RLGC.G.toExponential(3)}, 'C': ${results.RLGC.C.toExponential(3)}}`);
 
@@ -53,7 +53,7 @@ async function solve_stripline_js_test() {
         boundaries: ["open", "open", "gnd", "gnd"]
     });
 
-    const results = await solver.perform_analysis();
+    const results = await solver.solve_adaptive();
 
     console.log(`Z (complex) = ${results.Zc.toString()} ohm, eps_eff ${results.eps_eff.toFixed(3)}, RLGC {'R': ${results.RLGC.R.toExponential(3)}, 'L': ${results.RLGC.L.toExponential(3)}, 'G': ${results.RLGC.G.toExponential(3)}, 'C': ${results.RLGC.C.toExponential(3)}}`);
 
@@ -88,7 +88,7 @@ async function solve_microstrip_embed_js_test() {
         boundaries: ["open", "open", "open", "gnd"]
     });
 
-    const results = await solver.perform_analysis();
+    const results = await solver.solve_adaptive();
 
     console.log(`Z (complex) = ${results.Zc.toString()} ohm, eps_eff ${results.eps_eff.toFixed(3)}, RLGC {'R': ${results.RLGC.R.toExponential(3)}, 'L': ${results.RLGC.L.toExponential(3)}, 'G': ${results.RLGC.G.toExponential(3)}, 'C': ${results.RLGC.C.toExponential(3)}}`);
 
@@ -123,7 +123,7 @@ async function solve_microstrip_cut_js_test() {
         boundaries: ["open", "open", "open", "gnd"]
     });
 
-    const results = await solver.perform_analysis();
+    const results = await solver.solve_adaptive();
 
     console.log(`Z (complex) = ${results.Zc.toString()} ohm, eps_eff ${results.eps_eff.toFixed(3)}, RLGC {'R': ${results.RLGC.R.toExponential(3)}, 'L': ${results.RLGC.L.toExponential(3)}, 'G': ${results.RLGC.G.toExponential(3)}, 'C': ${results.RLGC.C.toExponential(3)}}`);
 

@@ -759,4 +759,358 @@ export class FieldSolver2D {
             total_alpha_db_m: total_alpha_db_m
         };
     }
+
+    // ============================================================================
+    // ADAPTIVE MESHING METHODS
+    // ============================================================================
+
+    _compute_refine_metrics(Ex, Ey) {
+        /**
+         * For each grid interval, compute a metric indicating how much refinement
+         * would help, based on voltage gradients and field energy in adjacent cells.
+         */
+        const ny = this.V.length;
+        const nx = this.V[0].length;
+
+        // Metric for splitting interval [x[j], x[j+1]]
+        const x_metrics = new Float64Array(this.x.length - 1);
+        // Metric for splitting interval [y[i], y[i+1]]
+        const y_metrics = new Float64Array(this.y.length - 1);
+
+        for (let i = 0; i < ny - 1; i++) {
+            for (let j = 0; j < nx - 1; j++) {
+                // Skip cells fully inside conductors
+                if (this.conductor_mask[i][j] &&
+                    this.conductor_mask[Math.min(i + 1, ny - 1)][j] &&
+                    this.conductor_mask[i][Math.min(j + 1, nx - 1)]) {
+                    continue;
+                }
+
+                const eps = this.epsilon_r[i][j];
+
+                // Voltage differences across this cell
+                const dV_x = j < nx - 1 ? Math.abs(this.V[i][j + 1] - this.V[i][j]) : 0;
+                const dV_y = i < ny - 1 ? Math.abs(this.V[i + 1][j] - this.V[i][j]) : 0;
+
+                // Field magnitude for weighting
+                const E2 = Ex[i][j] ** 2 + Ey[i][j] ** 2;
+                const E_mag = E2 > 0 ? Math.sqrt(E2) : 1e-12;
+
+                // Boundary detection
+                const is_boundary = (!this.conductor_mask[i][j] && (
+                    (i > 0 && this.conductor_mask[i - 1][j]) ||
+                    (i < ny - 1 && this.conductor_mask[i + 1][j]) ||
+                    (j > 0 && this.conductor_mask[i][j - 1]) ||
+                    (j < nx - 1 && this.conductor_mask[i][j + 1])));
+                const boundary_mult = is_boundary ? 2.0 : 1.0;
+
+                // Weight by field strength, permittivity, and boundary importance
+                const weight = E_mag * eps * boundary_mult;
+
+                // Accumulate to the interval metrics
+                if (j < x_metrics.length) {
+                    x_metrics[j] += dV_x * weight;
+                }
+                if (i < y_metrics.length) {
+                    y_metrics[i] += dV_y * weight;
+                }
+            }
+        }
+
+        return { x_metrics, y_metrics };
+    }
+
+    _check_symmetry(coords, center, tol = 1e-10) {
+        /**
+         * Check if coordinate array is symmetric about center.
+         */
+        const n = coords.length;
+        for (let k = 0; k < Math.floor(n / 2); k++) {
+            const left = coords[k];
+            const right = coords[n - 1 - k];
+            if (Math.abs((left - center) + (right - center)) > tol) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    _symmetrize_metrics(metrics) {
+        /**
+         * Average metrics for symmetric pairs.
+         */
+        const n = metrics.length;
+        const result = new Float64Array(n);
+        for (let k = 0; k < n; k++) {
+            result[k] = metrics[k];
+        }
+        for (let k = 0; k < Math.floor(n / 2); k++) {
+            const avg = 0.5 * (metrics[k] + metrics[n - 1 - k]);
+            result[k] = avg;
+            result[n - 1 - k] = avg;
+        }
+        return result;
+    }
+
+    _select_lines_to_refine(x_metrics, y_metrics, frac = 0.15) {
+        /**
+         * Select which grid intervals to split, respecting left-right symmetry.
+         */
+        const x_center = (this.x[0] + this.x[this.x.length - 1]) / 2;
+        const x_symmetric = this._check_symmetry(this.x, x_center);
+
+        let x_metrics_proc = x_metrics;
+        if (x_symmetric) {
+            x_metrics_proc = this._symmetrize_metrics(x_metrics);
+        }
+
+        // Decide how many x vs y lines based on relative total metric
+        let total_x = 0;
+        let total_y = 0;
+        for (let i = 0; i < x_metrics_proc.length; i++) total_x += x_metrics_proc[i];
+        for (let i = 0; i < y_metrics.length; i++) total_y += y_metrics[i];
+        const total = total_x + total_y;
+
+        if (total < 1e-15) {
+            return { selected_x: new Set(), selected_y: new Set() };
+        }
+
+        let n_total = Math.floor(frac * (x_metrics_proc.length + y_metrics.length));
+        n_total = Math.max(1, n_total);
+
+        // Allocate proportionally to where the error is
+        const n_x = Math.floor(n_total * total_x / total);
+        const n_y = n_total - n_x;
+
+        // Select top intervals
+        const x_ranked = Array.from(x_metrics_proc.keys()).sort((a, b) => x_metrics_proc[b] - x_metrics_proc[a]);
+        const y_ranked = Array.from(y_metrics.keys()).sort((a, b) => y_metrics[b] - y_metrics[a]);
+
+        const selected_x = new Set();
+        const selected_y = new Set();
+
+        for (let idx = 0; idx < Math.min(n_x, x_ranked.length); idx++) {
+            const j = x_ranked[idx];
+            if (x_metrics_proc[j] > 0) {
+                selected_x.add(j);
+                if (x_symmetric) {
+                    const partner = x_metrics_proc.length - 1 - j;
+                    if (partner >= 0 && partner < x_metrics_proc.length) {
+                        selected_x.add(partner);
+                    }
+                }
+            }
+        }
+
+        for (let idx = 0; idx < Math.min(n_y, y_ranked.length); idx++) {
+            const i = y_ranked[idx];
+            if (y_metrics[i] > 0) {
+                selected_y.add(i);
+            }
+        }
+
+        return { selected_x, selected_y };
+    }
+
+    _refine_selected_lines(selected_x, selected_y) {
+        /**
+         * Add new grid lines at midpoints of selected intervals.
+         */
+        const x_center = (this.x[0] + this.x[this.x.length - 1]) / 2;
+        const x_symmetric = this._check_symmetry(this.x, x_center);
+
+        const new_x = new Set();
+        const new_y = new Set();
+
+        for (const j of selected_x) {
+            const midpoint = 0.5 * (this.x[j] + this.x[j + 1]);
+            new_x.add(midpoint);
+            if (x_symmetric) {
+                const symmetric_point = 2 * x_center - midpoint;
+                if (symmetric_point > this.x[0] && symmetric_point < this.x[this.x.length - 1]) {
+                    new_x.add(symmetric_point);
+                }
+            }
+        }
+
+        for (const i of selected_y) {
+            const midpoint = 0.5 * (this.y[i] + this.y[i + 1]);
+            new_y.add(midpoint);
+        }
+
+        // Merge and sort
+        const all_x = new Set([...this.x, ...new_x]);
+        const all_y = new Set([...this.y, ...new_y]);
+
+        this.x = Float64Array.from([...all_x].sort((a, b) => a - b));
+        this.y = Float64Array.from([...all_y].sort((a, b) => a - b));
+    }
+
+    refine_mesh(Ex, Ey, frac = 0.15) {
+        /**
+         * Main refinement routine.
+         */
+        const { x_metrics, y_metrics } = this._compute_refine_metrics(Ex, Ey);
+        const { selected_x, selected_y } = this._select_lines_to_refine(x_metrics, y_metrics, frac);
+        this._refine_selected_lines(selected_x, selected_y);
+    }
+
+    _compute_energy_error(Ex, Ey, prev_energy) {
+        /**
+         * Compute relative change in stored electromagnetic energy.
+         * Fields must be interpolated to cell centers to match epsilon grid.
+         */
+        const ny = this.y.length;
+        const nx = this.x.length;
+        const dx_array = diff(this.x);
+        const dy_array = diff(this.y);
+
+        let energy = 0.0;
+        for (let i = 0; i < ny - 1; i++) {
+            for (let j = 0; j < nx - 1; j++) {
+                if (this.conductor_mask[i][j]) {
+                    continue;
+                }
+
+                const E2 = Ex[i][j] ** 2 + Ey[i][j] ** 2;
+                const dA = dx_array[j] * dy_array[i];
+                energy += 0.5 * CONSTANTS.EPS0 * this.epsilon_r[i][j] * E2 * dA;
+            }
+        }
+
+        if (prev_energy === null) {
+            return { energy, rel_error: 1.0 };
+        }
+
+        const rel_error = Math.abs(energy - prev_energy) / Math.max(Math.abs(prev_energy), 1e-12);
+        return { energy, rel_error };
+    }
+
+    _compute_parameter_error(Z0, C, prev_Z0, prev_C) {
+        /**
+         * Track convergence of the quantities you actually care about.
+         */
+        if (prev_Z0 === null) {
+            return 1.0;
+        }
+
+        const z_err = Math.abs(Z0 - prev_Z0) / Math.max(Math.abs(prev_Z0), 1e-12);
+        const c_err = Math.abs(C - prev_C) / Math.max(Math.abs(prev_C), 1e-12);
+        return Math.max(z_err, c_err);
+    }
+
+    _setup_geometry_after_refinement() {
+        /**
+         * Recalculate grid spacings and rebuild geometry.
+         * Child classes should override this if they need custom setup.
+         */
+        // Recalculate dx, dy
+        this.dx_array = diff(this.x);
+        this.dy_array = diff(this.y);
+
+        // Call child-specific setup if it exists
+        if (this._setup_geometry) {
+            this._setup_geometry();
+        } else if (this.init_matrices) {
+            this.init_matrices();
+        }
+    }
+
+    async solve_adaptive(options = {}) {
+        /**
+         * Adaptive mesh solve with robust convergence criteria.
+         */
+        const {
+            max_iters = 10,
+            refine_frac = 0.15,
+            energy_tol = 0.05,
+            param_tol = 0.1,
+            max_nodes = 20000,
+            min_converged_passes = 2,
+            onProgress = null,
+            shouldStop = null
+        } = options;
+
+        let prev_energy = null;
+        let prev_Z0 = null;
+        let prev_C = null;
+        let converged_count = 0;
+
+        let results = null;
+
+        for (let it = 0; it < max_iters; it++) {
+            // Check if stop was requested
+            if (shouldStop && shouldStop()) {
+                console.log("Adaptive solve stopped by user");
+                break;
+            }
+
+            // Calculate parameters
+            results = await this.perform_analysis();
+            const Z0 = results.Z0;
+            const eps_eff = results.eps_eff;
+            const C = results.RLGC.C;
+
+            // Get fields (already computed in perform_analysis)
+            const Ex = this.Ex;
+            const Ey = this.Ey;
+
+            // Energy-based error (primary criterion)
+            const { energy, rel_error: energy_err } = this._compute_energy_error(Ex, Ey, prev_energy);
+
+            // Parameter-based error (what you actually care about)
+            const param_err = this._compute_parameter_error(Z0, C, prev_Z0, prev_C);
+
+            const nodes = this.x.length * this.y.length;
+
+            console.log(`Pass ${it + 1}: Energy err=${energy_err.toExponential(3)}, Param err=${param_err.toExponential(3)}, Nodes=${nodes}`);
+
+            // Call progress callback
+            if (onProgress) {
+                onProgress({
+                    iteration: it + 1,
+                    total_iterations: max_iters,
+                    energy_error: energy_err,
+                    param_error: param_err,
+                    nodes: nodes,
+                    Z0: Z0,
+                    eps_eff: eps_eff
+                });
+            }
+
+            // Yield control periodically
+            await new Promise(r => setTimeout(r, 0));
+
+            // Check convergence (both criteria must be met)
+            if (prev_energy !== null) {
+                if (energy_err < energy_tol && param_err < param_tol) {
+                    converged_count++;
+                    if (converged_count >= min_converged_passes) {
+                        console.log(`Converged after ${it + 1} passes`);
+                        break;
+                    }
+                } else {
+                    converged_count = 0; // Reset if we diverge
+                }
+            }
+
+            prev_energy = energy;
+            prev_Z0 = Z0;
+            prev_C = C;
+
+            // Node budget check
+            if (nodes > max_nodes) {
+                console.log("Node budget reached");
+                break;
+            }
+
+            // Refine mesh (skip on last iteration)
+            if (it !== max_iters - 1) {
+                this.refine_mesh(Ex, Ey, refine_frac);
+                this._setup_geometry_after_refinement();
+            }
+        }
+
+        return results;
+    }
 }

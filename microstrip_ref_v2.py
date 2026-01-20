@@ -337,9 +337,9 @@ def solve_microstrip(plots=True):
         boundaries=["open", "open", "open", "gnd"]
     )
 
-    Z0, eps_eff, C, C0 = solver.calculate_parameters()
-    Ex, Ey = solver.compute_fields()
-    #Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001)
+    #Z0, eps_eff, C, C0 = solver.calculate_parameters()
+    #Ex, Ey = solver.compute_fields()
+    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001)
 
     alpha_cond, J = solver.calculate_conductor_loss(Ex, Ey, Z0)
     alpha_diel = solver.calculate_dielectric_loss(Ex, Ey, Z0)
