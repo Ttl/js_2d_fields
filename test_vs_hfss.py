@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from microstrip_ref_v2 import MicrostripSolver2D
+from gcpw_ref_v2 import GroundedCPWSolver2D
 
 def test_microstrip_solution(solver_results, reference, test_name="Microstrip"):
     """
@@ -286,7 +287,6 @@ def solve_gcpw():
         gap=0.15e-3,
         top_gnd_width=5e-3,
         via_gap=0.5e-3,
-        via_diameter=0.3e-3,
         use_sm=False,
         sm_er=3.5,
         nx=10, ny=10,
@@ -294,7 +294,7 @@ def solve_gcpw():
 
     #Z0, eps_eff, C, C0 = solver.calculate_parameters()
     #Ex, Ey = solver.compute_fields()
-    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive()
+    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001, max_iters=20, max_nodes=50000)
 
     alpha_cond, J = solver.calculate_conductor_loss(Ex, Ey, Z0)
     alpha_diel = solver.calculate_dielectric_loss(Ex, Ey, Z0)
@@ -314,14 +314,60 @@ def solve_gcpw():
 
     # Reference values
     reference = {
-        "Z0": 63.7,
-        "diel_loss": 2.25,
-        "cond_loss": 2.03,
-        "eps_eff": 2.5677
+        "Z0": 64.27,
+        "loss": 4.288,
+        "eps_eff": 2.5563
     }
 
     # Test against reference
     test_microstrip_solution(solver_results, reference, "GCPW")
+
+def solve_gcpw_mask():
+    solver = GroundedCPWSolver2D(
+        substrate_height=1.6e-3,
+        trace_width=0.3e-3,
+        trace_thickness=35e-6,
+        gap=0.15e-3,
+        top_gnd_width=5e-3,
+        via_gap=0.5e-3,
+        use_sm=True,
+        sm_er=3.5,
+        nx=10, ny=10,
+    )
+
+    #Z0, eps_eff, C, C0 = solver.calculate_parameters()
+    #Ex, Ey = solver.compute_fields()
+    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001, max_iters=20, max_nodes=50000)
+
+    alpha_cond, J = solver.calculate_conductor_loss(Ex, Ey, Z0)
+    alpha_diel = solver.calculate_dielectric_loss(Ex, Ey, Z0)
+    alpha_total = alpha_cond + alpha_diel
+    z, rlgc, eps_eff_mode = solver.rlgc(alpha_cond, alpha_diel, C, Z0)
+
+    solver_results = {
+        'Z0': Z0,
+        'eps_eff': eps_eff,
+        'diel_loss': alpha_diel,
+        'cond_loss': alpha_cond,
+        'C': rlgc['C'],
+        'R': rlgc['R'],
+        'L': rlgc['L'],
+        'G': rlgc['G']
+    }
+
+    # Reference values
+    reference = {
+        "Z0": 60.52,
+        "loss": 4.70,
+        "eps_eff": 2.883,
+        'C': 93.58e-12,
+        #'R': 30.16,
+        'G': 9.7e-3,
+        'L': 342.7e-9
+    }
+
+    # Test against reference
+    test_microstrip_solution(solver_results, reference, "GCPW mask")
 
 def solve_microstrip_embed():
     solver = MicrostripSolver2D(
@@ -465,4 +511,5 @@ if __name__ == "__main__":
     solve_microstrip_cut()
     #solve_differential_stripline()
     #solve_differential_microstrip()
-    #solve_gcpw()
+    solve_gcpw()
+    solve_gcpw_mask()

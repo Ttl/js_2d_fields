@@ -2,6 +2,7 @@
 import sys
 import numpy as np
 from microstrip_ref_v2 import MicrostripSolver2D
+from gcpw_ref_v2 import GroundedCPWSolver2D
 
 def force_symmetric(arr):
     a = np.asarray(arr, dtype=float).copy()
@@ -18,25 +19,43 @@ def force_symmetric(arr):
     return a
 
 def solve_microstrip(plots=True):
-    print("Solving Microstrip (v2 with Mesher)...")
-    solver = MicrostripSolver2D(
-        substrate_height=1.6e-3,
-        trace_width=3e-3,
-        trace_thickness=35e-6,
-        gnd_thickness=35e-6,
-        epsilon_r=4.5,
-        tan_delta=0.02,
-        sigma_cond=5.8e7,
-        freq=1e9,
-        nx=2, ny=2,
-        gnd_cut_width=3e-3,
-        gnd_cut_sub_h=1e-3,
-        use_sm=False,
-        boundaries=["open", "open", "open", "gnd"]
-    )
+    if 0:
+        solver = MicrostripSolver2D(
+            substrate_height=1.6e-3,
+            trace_width=3e-3,
+            trace_thickness=35e-6,
+            gnd_thickness=35e-6,
+            epsilon_r=4.5,
+            tan_delta=0.02,
+            sigma_cond=5.8e7,
+            freq=1e9,
+            nx=2, ny=2,
+            gnd_cut_width=3e-3,
+            gnd_cut_sub_h=1e-3,
+            use_sm=False,
+            boundaries=["open", "open", "open", "gnd"]
+        )
+    else:
+        solver = GroundedCPWSolver2D(
+            substrate_height=1.6e-3,
+            trace_width=0.3e-3,
+            trace_thickness=35e-6,
+            gap=0.15e-3,
+            top_gnd_width=5e-3,
+            via_gap=0.5e-3,
+            gnd_thickness=35e-6,
+            epsilon_r=4.5,
+            tan_delta=0.02,
+            sigma_cond=5.8e7,
+            freq=1e9,
+            nx=2, ny=2,
+            use_sm=False,
+            boundaries=["open", "open", "open", "gnd"]
+        )
+
 
     # Print X mesh
-    if 0:
+    if 1:
         m = float(solver.x[-1] / 2)
         trace_points = [float(x) for x in solver.x if m - 3e-3/2 < x < m + 3e-3/2]
         print(f"Trace points (mm from center): {[round(1e3*(x - m), 3) for x in trace_points]}")

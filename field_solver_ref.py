@@ -371,7 +371,7 @@ class FieldSolver2D:
             param_err = self._compute_parameter_error(Z0, C, prev_Z0, prev_C)
 
             print(f"Pass {it+1}: Energy err={energy_err:.3g}, Param err={param_err:.3g}, "
-                  f"Nodes={self.nx*self.ny}")
+                  f"Nodes={self.nx}x{self.ny}")
 
             # Check convergence (both criteria must be met)
             if prev_energy is not None:

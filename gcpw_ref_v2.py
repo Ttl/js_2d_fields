@@ -5,46 +5,39 @@ from field_solver_ref import FieldSolver2D, epsilon_0, mu_0, pi
 from mesher import Dielectric, Conductor, Mesher
 
 # ============================================================================
-# MICROSTRIP SOLVER V2
+# GROUNDED COPLANAR WAVEGUIDE SOLVER V2
 # ============================================================================
 
-class MicrostripSolver2D(FieldSolver2D):
+class GroundedCPWSolver2D(FieldSolver2D):
     """
-    Microstrip transmission line solver using the new Mesher class.
+    Grounded Coplanar Waveguide (GCPW) transmission line solver using the new Mesher class.
 
     This version uses lists of dielectrics and conductors for more flexible
     geometry specification.
     """
 
     def __init__(self, substrate_height, trace_width, trace_thickness,
+                 gap, top_gnd_width, via_gap,
                  gnd_thickness=35e-6, epsilon_r=4.5, tan_delta=0.02,
                  sigma_diel=0.0, sigma_cond=5.8e7, epsilon_r_top=1,
                  air_top=None, air_side=None, freq=1e9,
                  nx=300, ny=300, boundaries=None,
                  use_sm=False, sm_t_sub=20e-6, sm_t_trace=20e-6,
-                 sm_t_side=20e-6, sm_er=3.5, sm_tand=0.02,
-                 gnd_cut_width=0.0,
-                 gnd_cut_sub_h=0.0,
-                 top_diel_h=0.0,
-                 top_diel_er=1.0,
-                 top_diel_tand=0.0):
+                 sm_t_side=20e-6, sm_er=3.5, sm_tand=0.02):
 
         # Store parameters
         self.h = substrate_height
         self.w = trace_width
         self.t = trace_thickness
+        self.gap = gap  # Gap to top ground
+        self.top_gnd_w = top_gnd_width
+        self.via_gap = via_gap  # Edge-to-edge distance: signal edge to via edge
         self.t_gnd = gnd_thickness
         self.er = epsilon_r
         self.er_top = epsilon_r_top
         self.tan_delta = tan_delta
         self.sigma_diel = sigma_diel
         self.sigma_cond = sigma_cond
-
-        self.gnd_cut_width = gnd_cut_width
-        self.gnd_cut_sub_h = gnd_cut_sub_h
-        self.top_diel_h = top_diel_h
-        self.top_diel_er = top_diel_er
-        self.top_diel_tand = top_diel_tand
 
         # Solder Mask Parameters
         self.use_sm = use_sm
@@ -63,10 +56,12 @@ class MicrostripSolver2D(FieldSolver2D):
         self.air_side = air_side
 
         # Domain sizing
+        self.active_width = self.w + 2 * max(self.gap + self.top_gnd_w, self.via_gap + self.gap)
+
         if air_side is None:
-            self.domain_width = 2 * max(self.w * 8, self.h * 15)
+            self.domain_width = self.active_width * 2
         else:
-            self.domain_width = self.w + 2 * air_side
+            self.domain_width = self.active_width + 2 * air_side
 
         self.boundaries = boundaries if boundaries else ["open", "open", "open", "gnd"]
 
@@ -96,38 +91,23 @@ class MicrostripSolver2D(FieldSolver2D):
 
     def _calculate_coordinates(self):
         """Calculate all physical y-coordinates for geometry layers."""
-        # Bottom extension for cut ground
-        self.y_ext_start = self.t_gnd
-        self.y_ext_end = self.t_gnd + self.gnd_cut_sub_h
-
-        # New bottom ground plane location
-        self.y_gnd_bot_start = self.y_ext_end
-        self.y_gnd_bot_end = self.y_gnd_bot_start + self.t_gnd
-        if self.gnd_cut_width == 0:
-            self.y_gnd_bot_end = self.y_gnd_bot_start
-
+        # Y-coordinates
+        self.y_gnd_bot_start = 0.0
+        self.y_gnd_bot_end = self.t_gnd
         self.y_sub_start = self.y_gnd_bot_end
         self.y_sub_end = self.y_sub_start + self.h
-
-        # Top dielectric
-        self.y_top_diel_start = self.y_sub_end
-        self.y_top_diel_end = self.y_top_diel_start + self.top_diel_h
-
-        # Trace is embedded in top dielectric
-        self.y_trace_start = self.y_top_diel_start
+        self.y_trace_start = self.y_sub_end
         self.y_trace_end = self.y_trace_start + self.t
 
         # Solder mask extents
-        self.y_sm_sub_end = self.y_top_diel_end + self.sm_t_sub
+        self.y_sm_sub_end = self.y_sub_end + self.sm_t_sub
         self.y_sm_trace_end = self.y_trace_end + self.sm_t_trace
 
-        self.y_top_start = self.y_top_diel_end
-        if self.use_sm:
-            self.y_top_start = max(self.y_sm_sub_end, self.y_sm_trace_end)
+        self.y_top_start = self.y_trace_end if not self.use_sm else max(self.y_sm_sub_end, self.y_sm_trace_end)
 
         # Top air/dielectric region
         if self.air_top is None:
-            self.top_dielectric_h = self.h * 15
+            self.top_dielectric_h = self.h * 10
             self.has_top_gnd = False
         else:
             self.top_dielectric_h = self.air_top + self.t
@@ -143,37 +123,32 @@ class MicrostripSolver2D(FieldSolver2D):
             self.y_gnd_top_start = self.y_gnd_top_end = None
             self.domain_height = self.y_top_end
 
+        # X-coordinates
+        cx = self.domain_width / 2
+        self.x_tr_l = cx - self.w / 2
+        self.x_tr_r = cx + self.w / 2
+
+        # Top Grounds
+        self.x_gap_l = self.x_tr_l - self.gap
+        self.x_gap_r = self.x_tr_r + self.gap
+
+        # Vias (Single via on each side)
+        self.via_x_left_inner = self.x_tr_l - self.gap - self.via_gap
+        self.via_x_right_inner = self.x_tr_r + self.gap + self.via_gap
+
     def _build_geometry_lists(self):
-        """Build lists of dielectrics and conductors from legacy parameters."""
+        """Build lists of dielectrics and conductors from parameters."""
         dielectrics = []
         conductors = []
 
-        cx = self.domain_width / 2
-        xl, xr = cx - self.w / 2, cx + self.w / 2
+        # --- DIELECTRICS ---
 
-        # Substrate (covers both cutout extension and main substrate)
-        if self.gnd_cut_sub_h > 0:
-            # Substrate covers from extension start to substrate end
-            dielectrics.append(Dielectric(
-                0, self.y_ext_start,
-                self.domain_width, self.y_trace_start,
-                self.er, self.tan_delta
-            ))
-        else:
-            # No cutout, just main substrate
-            dielectrics.append(Dielectric(
-                0, self.y_sub_start,
-                self.domain_width, self.h,
-                self.er, self.tan_delta
-            ))
-
-        # Top dielectric (if present)
-        if self.top_diel_h > 0:
-            dielectrics.append(Dielectric(
-                0, self.y_top_diel_start,
-                self.domain_width, self.top_diel_h,
-                self.top_diel_er, self.top_diel_tand
-            ))
+        # Substrate (full width)
+        dielectrics.append(Dielectric(
+            0, self.y_sub_start,
+            self.domain_width, self.h,
+            self.er, self.tan_delta
+        ))
 
         # Top air/dielectric region
         dielectrics.append(Dielectric(
@@ -182,43 +157,86 @@ class MicrostripSolver2D(FieldSolver2D):
             self.er_top, 0.0
         ))
 
-        # Solder mask regions (overwrites previous)
+        # Solder mask regions (if enabled)
         if self.use_sm:
-            # Solder mask on substrate (full width, but will be overwritten by trace)
-            dielectrics.append(Dielectric(
-                0, self.y_top_diel_end,
-                self.domain_width, self.sm_t_sub,
-                self.sm_er, self.sm_tand
-            ))
-
-            # Solder mask on left side of trace
-            xsl = xl - self.sm_t_side
-            if xsl >= 0:
+            # Solder mask over substrate in gaps (Zone A)
+            # Left gap
+            if self.x_gap_l > 0:
+                gap_width_left = self.x_tr_l - self.x_gap_l
                 dielectrics.append(Dielectric(
-                    xsl, self.y_trace_start,
-                    self.sm_t_side, self.t + self.sm_t_trace,
+                    self.x_gap_l, self.y_sub_end,
+                    gap_width_left, self.sm_t_sub,
                     self.sm_er, self.sm_tand
                 ))
 
-            # Solder mask on right side of trace
-            xsr = xr + self.sm_t_side
-            if xsr <= self.domain_width:
+            # Right gap
+            if self.x_gap_r < self.domain_width:
+                gap_width_right = self.x_gap_r - self.x_tr_r
                 dielectrics.append(Dielectric(
-                    xr, self.y_trace_start,
-                    self.sm_t_side, self.t + self.sm_t_trace,
+                    self.x_tr_r, self.y_sub_end,
+                    gap_width_right, self.sm_t_sub,
                     self.sm_er, self.sm_tand
                 ))
 
-            # Solder mask on top of trace
+            # Solder mask on top of signal trace (Zone B)
             dielectrics.append(Dielectric(
-                xl, self.y_trace_end,
+                self.x_tr_l, self.y_trace_end,
                 self.w, self.sm_t_trace,
                 self.sm_er, self.sm_tand
             ))
 
+            # Solder mask on top of left ground
+            if self.x_gap_l > 0:
+                dielectrics.append(Dielectric(
+                    0, self.y_trace_end,
+                    self.x_gap_l, self.sm_t_trace,
+                    self.sm_er, self.sm_tand
+                ))
+
+            # Solder mask on top of right ground
+            if self.x_gap_r < self.domain_width:
+                dielectrics.append(Dielectric(
+                    self.x_gap_r, self.y_trace_end,
+                    self.domain_width - self.x_gap_r, self.sm_t_trace,
+                    self.sm_er, self.sm_tand
+                ))
+
+            # Solder mask on sidewalls (Zone C)
+            # Left edge of signal trace
+            if self.x_tr_l - self.sm_t_side >= 0:
+                dielectrics.append(Dielectric(
+                    self.x_tr_l - self.sm_t_side, self.y_sub_end,
+                    self.sm_t_side, self.t + self.sm_t_trace,
+                    self.sm_er, self.sm_tand
+                ))
+
+            # Right edge of signal trace
+            if self.x_tr_r + self.sm_t_side <= self.domain_width:
+                dielectrics.append(Dielectric(
+                    self.x_tr_r, self.y_sub_end,
+                    self.sm_t_side, self.t + self.sm_t_trace,
+                    self.sm_er, self.sm_tand
+                ))
+
+            # Right edge of left ground (inner edge)
+            if self.x_gap_l + self.sm_t_side <= self.x_tr_l:
+                dielectrics.append(Dielectric(
+                    self.x_gap_l, self.y_sub_end,
+                    self.sm_t_side, self.t + self.sm_t_trace,
+                    self.sm_er, self.sm_tand
+                ))
+
+            # Left edge of right ground (inner edge)
+            if self.x_gap_r - self.sm_t_side >= self.x_tr_r:
+                dielectrics.append(Dielectric(
+                    self.x_gap_r - self.sm_t_side, self.y_sub_end,
+                    self.sm_t_side, self.t + self.sm_t_trace,
+                    self.sm_er, self.sm_tand
+                ))
+
         # --- CONDUCTORS ---
 
-        # Bottom ground (beneath everything)
+        # Bottom ground plane (full width)
         if self.t_gnd > 0:
             conductors.append(Conductor(
                 0, 0,
@@ -226,39 +244,43 @@ class MicrostripSolver2D(FieldSolver2D):
                 is_signal=False
             ))
 
-        # Bottom ground plane (above cutout extension)
-        if self.gnd_cut_width == 0:
-            # No cutout - full ground plane
-            if self.y_gnd_bot_end > self.y_gnd_bot_start:
-                conductors.append(Conductor(
-                    0, self.y_gnd_bot_start,
-                    self.domain_width, self.t_gnd,
-                    is_signal=False
-                ))
-        else:
-            # With cutout - ground on sides only
-            cut_l = cx - self.gnd_cut_width / 2
-            cut_r = cx + self.gnd_cut_width / 2
+        # Vias (connect bottom ground to top grounds)
+        # Left via
+        if self.via_x_left_inner > 0:
+            conductors.append(Conductor(
+                0, self.y_sub_start,
+                self.via_x_left_inner, self.h,
+                is_signal=False
+            ))
 
-            # Left ground
-            if cut_l > 0:
-                conductors.append(Conductor(
-                    0, self.y_gnd_bot_start,
-                    cut_l, self.t_gnd,
-                    is_signal=False
-                ))
+        # Right via
+        if self.via_x_right_inner < self.domain_width:
+            conductors.append(Conductor(
+                self.via_x_right_inner, self.y_sub_start,
+                self.domain_width - self.via_x_right_inner, self.h,
+                is_signal=False
+            ))
 
-            # Right ground
-            if cut_r < self.domain_width:
-                conductors.append(Conductor(
-                    cut_r, self.y_gnd_bot_start,
-                    self.domain_width - cut_r, self.t_gnd,
-                    is_signal=False
-                ))
+        # Top ground planes (on sides)
+        # Left ground
+        if self.x_gap_l > 0:
+            conductors.append(Conductor(
+                0, self.y_trace_start,
+                self.x_gap_l, self.t,
+                is_signal=False
+            ))
+
+        # Right ground
+        if self.x_gap_r < self.domain_width:
+            conductors.append(Conductor(
+                self.x_gap_r, self.y_trace_start,
+                self.domain_width - self.x_gap_r, self.t,
+                is_signal=False
+            ))
 
         # Signal trace
         conductors.append(Conductor(
-            xl, self.y_trace_start,
+            self.x_tr_l, self.y_trace_start,
             self.w, self.t,
             is_signal=True
         ))
@@ -273,7 +295,7 @@ class MicrostripSolver2D(FieldSolver2D):
 
         return dielectrics, conductors
 
-    def _setup_geometry(self ):
+    def _setup_geometry(self):
         """Setup geometry from dielectric and conductor lists."""
         tol = 1e-11
 
@@ -319,12 +341,15 @@ class MicrostripSolver2D(FieldSolver2D):
 # TEST FUNCTION
 # ============================================================================
 
-def solve_microstrip(plots=True):
-    print("Solving Microstrip (v2 with Mesher)...")
-    solver = MicrostripSolver2D(
+def solve_gcpw(plots=True):
+    print("Solving GCPW (v2 with Mesher)...")
+    solver = GroundedCPWSolver2D(
         substrate_height=1.6e-3,
-        trace_width=3e-3,
+        trace_width=0.3e-3,
         trace_thickness=35e-6,
+        gap=0.15e-3,
+        top_gnd_width=5e-3,
+        via_gap=0.5e-3,
         gnd_thickness=35e-6,
         epsilon_r=4.5,
         tan_delta=0.02,
@@ -337,7 +362,7 @@ def solve_microstrip(plots=True):
 
     #Z0, eps_eff, C, C0 = solver.calculate_parameters()
     #Ex, Ey = solver.compute_fields()
-    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001)
+    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001, max_iters=20, max_nodes=100000)
 
     alpha_cond, J = solver.calculate_conductor_loss(Ex, Ey, Z0)
     alpha_diel = solver.calculate_dielectric_loss(Ex, Ey, Z0)
@@ -347,7 +372,7 @@ def solve_microstrip(plots=True):
     print(f"Z (complex) = {z:.2f} ohm, eps_eff {eps_eff_mode:.3f}, RLGC {rlgc}")
 
     print(f"\n{'='*50}")
-    print(f"MICROSTRIP ANALYSIS RESULTS")
+    print(f"GCPW ANALYSIS RESULTS")
     print(f"{'='*50}")
     print(f"Characteristic Impedance Z0:  {Z0:.2f} Ω")
     print(f"Effective Permittivity εᵣₑff: {eps_eff:.3f}")
@@ -365,4 +390,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         if "plot" in sys.argv[1]:
             plots = True
-    solve_microstrip(plots)
+    solve_gcpw(plots)

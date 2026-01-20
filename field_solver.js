@@ -1063,7 +1063,7 @@ export class FieldSolver2D {
 
             const nodes = this.x.length * this.y.length;
 
-            console.log(`Pass ${it + 1}: Energy err=${energy_err.toExponential(3)}, Param err=${param_err.toExponential(3)}, Nodes=${nodes}`);
+            console.log(`Pass ${it + 1}: Energy err=${energy_err.toExponential(3)}, Param err=${param_err.toExponential(3)}, Grid=${this.x.length}x${this.y.length}`);
 
             // Call progress callback
             if (onProgress) {
@@ -1072,7 +1072,8 @@ export class FieldSolver2D {
                     total_iterations: max_iters,
                     energy_error: energy_err,
                     param_error: param_err,
-                    nodes: nodes,
+                    nodes_x: this.x.length,
+                    nodes_y: this.y.length,
                     Z0: Z0,
                     eps_eff: eps_eff
                 });

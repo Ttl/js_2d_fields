@@ -83,11 +83,6 @@ class GroundedCPWSolver2D(FieldSolver2D):
         # --- Grid and Arrays ---
         self.x, self.dx_array = self._grid_x(nx)
         self.y, self.dy_array = self._grid_y(ny)
-        self.X, self.Y = np.meshgrid(self.x, self.y)
-        self.V = np.zeros(self.X.shape)
-        self.epsilon_r = np.ones(self.X.shape)
-        self.signal_mask = np.zeros(self.X.shape, dtype=bool)
-        self.ground_mask = np.zeros(self.X.shape, dtype=bool)
 
         self._setup_geometry()
 
@@ -181,7 +176,6 @@ class GroundedCPWSolver2D(FieldSolver2D):
                 if is_sm_sidewall:
                     density *= 1.5
             
-            print(x0, x1, density)
             region_densities.append(density)
         
         # Calculate total "weighted width" and allocate points
@@ -323,6 +317,12 @@ class GroundedCPWSolver2D(FieldSolver2D):
     def _setup_geometry(self):
         cx = self.domain_width / 2
 
+        self.X, self.Y = np.meshgrid(self.x, self.y)
+        self.V = np.zeros(self.X.shape)
+        self.epsilon_r = np.ones(self.X.shape)
+        self.signal_mask = np.zeros(self.X.shape, dtype=bool)
+        self.ground_mask = np.zeros(self.X.shape, dtype=bool)
+
         for i, yc in enumerate(self.y):
             for j, xc in enumerate(self.x):
                 # --- 1. Permittivity (Dielectrics) ---
@@ -424,11 +424,12 @@ def solve_gcpw(plots=True):
         via_gap=0.5e-3,
         use_sm=False,
         sm_er=3.5,
-        nx=200, ny=200,
+        nx=50, ny=50,
     )
 
-    Z0, eps_eff, C, C0 = solver.calculate_parameters()
-    Ex, Ey = solver.compute_fields()
+    #Z0, eps_eff, C, C0 = solver.calculate_parameters()
+    #Ex, Ey = solver.compute_fields()
+    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001)
 
     alpha_cond, J = solver.calculate_conductor_loss(Ex, Ey, Z0)
     alpha_diel = solver.calculate_dielectric_loss(Ex, Ey, Z0)

@@ -26,13 +26,12 @@ function getParams() {
         tand: parseFloat(document.getElementById('inp_tand').value),
         sigma: parseFloat(document.getElementById('inp_sigma').value),
         freq: parseFloat(document.getElementById('inp_freq').value) * 1e9,
-        nx: parseInt(document.getElementById('inp_nx').value),
-        ny: parseInt(document.getElementById('inp_ny').value),
+        nx: 30,  // Fixed initial grid size
+        ny: 30,  // Fixed initial grid size
         // GCPW specific parameters
         gap: parseFloat(document.getElementById('inp_gap').value) * 1e-3,
         top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value) * 1e-3,
         via_gap: parseFloat(document.getElementById('inp_via_gap').value) * 1e-3,
-        via_d: parseFloat(document.getElementById('inp_via_d').value) * 1e-3,
         // Stripline parameters
         air_top: parseFloat(document.getElementById('inp_air_top').value) * 1e-3,
         er_top: parseFloat(document.getElementById('inp_er_top').value),
@@ -52,10 +51,10 @@ function getParams() {
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
         gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value) * 1e-3,
         gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value) * 1e-3,
-        // Adaptive meshing parameters
-        use_adaptive: document.getElementById('chk_adaptive').checked,
+        // Adaptive meshing parameters - always enabled
+        use_adaptive: true,
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
-        refine_frac: parseFloat(document.getElementById('inp_refine_frac').value),
+        tolerance: parseFloat(document.getElementById('inp_tolerance').value),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
     };
 }
@@ -64,11 +63,32 @@ function updateGeometry() {
     const p = getParams();
     currentView = "geometry";
     if (p.tl_type === 'gcpw') {
-        solver = new GroundedCPWSolver2D(
-            p.h, p.w, p.t, p.gap, p.top_gnd_w, p.via_gap, p.via_d,
-            35e-6, p.er, p.tand, 0.0, p.sigma, 1,
-            null, null, p.freq, p.nx, p.ny
-        );
+        solver = new GroundedCPWSolver2D({
+            substrate_height: p.h,
+            trace_width: p.w,
+            trace_thickness: p.t,
+            gap: p.gap,
+            top_gnd_width: p.top_gnd_w,
+            via_gap: p.via_gap,
+            gnd_thickness: 35e-6,
+            epsilon_r: p.er,
+            tan_delta: p.tand,
+            sigma_diel: 0.0,
+            sigma_cond: p.sigma,
+            epsilon_r_top: 1,
+            air_top: null,
+            air_side: null,
+            freq: p.freq,
+            nx: p.nx,
+            ny: p.ny,
+            boundaries: null,
+            use_sm: p.use_sm,
+            sm_t_sub: p.sm_t_sub,
+            sm_t_trace: p.sm_t_trace,
+            sm_t_side: p.sm_t_side,
+            sm_er: p.sm_er,
+            sm_tand: p.sm_tand
+        });
         log("GCPW Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
     } else if (p.tl_type === 'stripline') {
         solver = new MicrostripSolver({
@@ -150,34 +170,28 @@ async function runSimulation() {
     try {
         let results;
 
-        if (p.use_adaptive) {
-            log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes)...`);
-            ptext.style.display = 'block';
+        log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes, tolerance ${p.tolerance})...`);
+        ptext.style.display = 'block';
 
-            results = await solver.solve_adaptive({
-                max_iters: p.max_iters,
-                refine_frac: p.refine_frac,
-                max_nodes: p.max_nodes,
-                onProgress: (info) => {
-                    const progress = info.iteration / info.total_iterations;
-                    pbar.style.width = (progress * 100) + "%";
-                    ptext.textContent = `Pass ${info.iteration}/${info.total_iterations}: ` +
-                                       `Energy err=${info.energy_error.toExponential(2)}, ` +
-                                       `Param err=${info.param_error.toExponential(2)}, ` +
-                                       `Nodes=${info.nodes}`;
-                },
-                shouldStop: shouldStop
-            });
-
-            if (stopRequested) {
-                log("Simulation stopped by user");
-            }
-        } else {
-            log("Running full analysis...");
-            ptext.style.display = 'none';
-            results = await solver.perform_analysis((progress) => {
+        results = await solver.solve_adaptive({
+            max_iters: p.max_iters,
+            tolerance: p.tolerance,
+            param_tol: 0.001,  // Fixed parameter tolerance
+            max_nodes: p.max_nodes,
+            onProgress: (info) => {
+                const progress = info.iteration / p.max_iters;
                 pbar.style.width = (progress * 100) + "%";
-            });
+                ptext.textContent = `Pass ${info.iteration}/${p.max_iters}: ` +
+                                   `Energy err=${info.energy_error.toExponential(2)}, ` +
+                                   `Param err=${info.param_error.toExponential(2)}, ` +
+                                   `Grid=${info.nodes_x}x${info.nodes_y}`;
+                log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, Grid=${info.nodes_x}x${info.nodes_y}`);
+            },
+            shouldStop: shouldStop
+        });
+
+        if (stopRequested) {
+            log("Simulation stopped by user");
         }
 
         currentView = "efield";

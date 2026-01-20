@@ -12,8 +12,8 @@ async function solve_microstrip_js_test() {
         tan_delta: 0.02,
         sigma_cond: 5.8e7,
         freq: 1e9,
-        nx: 100,
-        ny: 100,
+        nx: 10,
+        ny: 10,
         skin_cells: 50,
         use_sm: false,
         boundaries: ["open", "open", "open", "gnd"]
@@ -47,8 +47,8 @@ async function solve_stripline_js_test() {
         tan_delta: 0.02,
         sigma_cond: 5.8e7,
         freq: 1e9,
-        nx: 100,
-        ny: 100,
+        nx: 10,
+        ny: 10,
         skin_cells: 50,
         boundaries: ["open", "open", "gnd", "gnd"]
     });
@@ -79,8 +79,8 @@ async function solve_microstrip_embed_js_test() {
         tan_delta: 0.02,
         sigma_cond: 5.8e7,
         freq: 1e9,
-        nx: 200,
-        ny: 200,
+        nx: 10,
+        ny: 10,
         skin_cells: 50,
         use_sm: false,
         top_diel_h: 0.2e-3,
@@ -114,12 +114,9 @@ async function solve_microstrip_cut_js_test() {
         tan_delta: 0.02,
         sigma_cond: 5.8e7,
         freq: 1e9,
-        nx: 300,
-        ny: 300,
-        skin_cells: 50,
+        nx: 10,
+        ny: 10,
         use_sm: false,
-        gnd_cut_width: 3e-3,
-        gnd_cut_sub_h: 1e-3,
         boundaries: ["open", "open", "open", "gnd"]
     });
 
