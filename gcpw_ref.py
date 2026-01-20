@@ -1,9 +1,10 @@
 #!/usr/bin/env python
+import sys
 from field_solver_ref import *
 
 class GroundedCPWSolver2D(FieldSolver2D):
     def __init__(self, substrate_height, trace_width, trace_thickness,
-                 gap, top_gnd_width, via_gap, via_diameter,
+                 gap, top_gnd_width, via_gap,
                  gnd_thickness=35e-6, epsilon_r=4.5, tan_delta=0.02,
                  sigma_diel=0.0, sigma_cond=5.8e7, epsilon_r_top=1,
                  air_top=None, air_side=None, freq=1e9,
@@ -11,13 +12,17 @@ class GroundedCPWSolver2D(FieldSolver2D):
                  use_sm=False, sm_t_sub=20e-6, sm_t_trace=20e-6,
                  sm_t_side=20e-6, sm_er=3.5, sm_tand=0.02):
 
+        # Geometry
+        # domain edge (via inside) - via edge - top gnd edge - gap - signal
+        # Top gnd is from domain edge to gap
+        # Via is under the top gnd from domain edge to via edge
+        # via_gap is distance from top gnd gap to via edge
         self.h = substrate_height
         self.w = trace_width
         self.t = trace_thickness
         self.gap = gap # Gap to top ground
         self.top_gnd_w = top_gnd_width
         self.via_gap = via_gap # Edge-to-edge distance: signal edge to via edge
-        self.via_d = via_diameter
         self.t_gnd = gnd_thickness
         self.er = epsilon_r
         self.er_top = epsilon_r_top
@@ -39,7 +44,7 @@ class GroundedCPWSolver2D(FieldSolver2D):
         self.skin_cells = skin_cells
 
         # Total width: focus on the active area, but we will extend grounds to edges
-        self.active_width = self.w + 2 * max(self.gap + self.top_gnd_w, self.via_gap + self.via_d)
+        self.active_width = self.w + 2 * max(self.gap + self.top_gnd_w, self.via_gap + self.gap)
 
         if air_side is None:
             self.domain_width = self.active_width * 1.5
@@ -98,184 +103,180 @@ class GroundedCPWSolver2D(FieldSolver2D):
 
         # Vias (Single via on each side)
         # Inner edge of via is (trace_edge - via_gap)
-        self.via_x_left_inner = self.x_tr_l - self.via_gap
-        self.via_x_left_center = self.via_x_left_inner - (self.via_d / 2)
+        self.via_x_left_inner = self.x_tr_l - self.gap - self.via_gap
 
-        self.via_x_right_inner = self.x_tr_r + self.via_gap
-        self.via_x_right_center = self.via_x_right_inner + (self.via_d / 2)
+        self.via_x_right_inner = self.x_tr_r + self.gap + self.via_gap
 
     def _grid_x(self, n):
+        """Generate x-grid with adaptive grading focused on field-critical regions."""
         cx = self.domain_width / 2
-
-        xl_trace, xr_trace = self.x_tr_l, self.x_tr_r
-        xl_gap, xr_gap = self.x_gap_l, self.x_gap_r
-
+        
+        # Define all critical x-interfaces
+        x_if = [
+            0,                          # Left domain edge
+            self.via_x_left_inner,      # Left via inner edge
+            self.x_gap_l,               # Left ground inner edge
+            self.x_tr_l,                # Left trace edge
+            self.x_tr_r,                # Right trace edge
+            self.x_gap_r,               # Right ground inner edge
+            self.via_x_right_inner,     # Right via inner edge
+            self.domain_width           # Right domain edge
+        ]
+        
+        # Add solder mask interfaces if enabled
+        if self.use_sm:
+            sm = self.sm_t_side
+            x_if += [
+                self.x_gap_l + sm,      # Left gap SM (ground side)
+                self.x_tr_l - sm,       # Left gap SM (trace side)
+                self.x_tr_r + sm,       # Right gap SM (trace side)
+                self.x_gap_r - sm       # Right gap SM (ground side)
+            ]
+        
+        x_if = np.array(sorted(set(x_if)))
+        n_regions = len(x_if) - 1
+        
+        # Adaptive point allocation based on field importance
+        # Use density per unit width rather than total weight
+        region_densities = []
+        
+        for k in range(n_regions):
+            x0, x1 = x_if[k], x_if[k + 1]
+            width = x1 - x0
+            
+            # Assign density (points per unit width) based on field importance
+            
+            # Highest field: trace region
+            if x0 >= self.x_tr_l - 1e-15 and x1 <= self.x_tr_r + 1e-15:
+                density = 6.0  # Trace itself - many points
+            
+            # High field: gaps between trace and ground
+            elif ((self.x_gap_l - 1e-15 <= x0 and x1 <= self.x_tr_l + 1e-15) or
+                  (self.x_tr_r - 1e-15 <= x0 and x1 <= self.x_gap_r + 1e-15)):
+                density = 6.0  # Gap regions - high field gradients
+            
+            # Medium field: ground plane regions (between via and gap)
+            elif ((self.via_x_left_inner - 1e-15 <= x0 and x1 <= self.x_gap_l + 1e-15) or
+                  (self.x_gap_r - 1e-15 <= x0 and x1 <= self.via_x_right_inner + 1e-15)):
+                density = 2.0  # Top ground regions
+            
+            # Lower field: domain edge to via (low field, uniform)
+            else:
+                density = 0.5  # Outer regions - minimal points needed
+            
+            # Extra density for solder mask sidewall regions (field discontinuities)
+            if self.use_sm:
+                sm = self.sm_t_side
+                # Check if this region is a SM sidewall
+                is_sm_sidewall = (
+                    abs(x0 - (self.x_gap_l)) < 1e-15 or
+                    abs(x1 - (self.x_gap_l + sm)) < 1e-15 or
+                    abs(x1 - (self.x_tr_l - sm)) < 1e-15 or
+                    abs(x0 - (self.x_tr_l)) < 1e-15 or
+                    abs(x0 - (self.x_tr_r)) < 1e-15 or
+                    abs(x1 - (self.x_tr_r + sm)) < 1e-15 or
+                    abs(x1 - (self.x_gap_r - sm)) < 1e-15 or
+                    abs(x0 - (self.x_gap_r)) < 1e-15
+                )
+                if is_sm_sidewall:
+                    density *= 1.5
+            
+            print(x0, x1, density)
+            region_densities.append(density)
+        
+        # Calculate total "weighted width" and allocate points
+        region_widths = [x_if[k+1] - x_if[k] for k in range(n_regions)]
+        weighted_widths = [region_densities[k] * region_widths[k] for k in range(n_regions)]
+        total_weighted = sum(weighted_widths)
+        
+        region_points = []
+        allocated = 0
+        
+        for k in range(n_regions):
+            if k == n_regions - 1:
+                pts = n - allocated
+            else:
+                pts = max(3, int(n * weighted_widths[k] / total_weighted))
+            region_points.append(pts)
+            allocated += pts
+        
+        # Generate grid segments
+        x_parts = []
         ds = self.delta_s
-        corner_w = min(3 * ds, self.w / 4)
+        corner_trace = min(3 * ds, self.w / 4)
         corner_gap = min(3 * ds, self.gap / 4)
-
-        sm = self.sm_t_side if self.use_sm else 0.0
-
-        n_corner = max(5, n // 40)
-        n_outer_gnd = max(int(n * 0.12), 8)
-        n_gap_bulk = max(int(n * 0.14), 10)
-        n_trace_center = max(int(n * 0.15), 8)
-
-        # Solder mask sidewall resolution
-        n_sm = max(5, n // 40) if self.use_sm else 0
-
-        # --- LEFT SIDE ---
-
-        # 1. Left outer ground
-        a = self._smooth_transition(
-            0, xl_gap - corner_gap,
-            n_outer_gnd, curve_end="end"
-        )
-
-        # 2. Left ground corner
-        a_corner = self._smooth_transition(
-            xl_gap - corner_gap, xl_gap,
-            n_corner, curve_end="end"
-        )
-
-        # 2.5 Left gap SM sidewall (ground edge)
-        if self.use_sm and sm > 0:
-            b_sm1 = self._smooth_transition(
-                xl_gap, xl_gap + sm,
-                n_sm, curve_end="both", beta=4.0
-            )
-            gap_start = xl_gap + sm
-        else:
-            b_sm1 = None
-            gap_start = xl_gap
-
-        # 3. Left gap bulk
-        b = self._smooth_transition(
-            gap_start, xl_trace - sm,
-            n_gap_bulk, curve_end="both", beta=6.0
-        )
-
-        # 3.5 Left gap SM sidewall (trace edge)
-        if self.use_sm and sm > 0:
-            b_sm2 = self._smooth_transition(
-                xl_trace - sm, xl_trace,
-                n_sm, curve_end="both", beta=4.0
-            )
-        else:
-            b_sm2 = None
-
-        # 4. Trace left corner
-        c_cl = self._smooth_transition(
-            xl_trace, xl_trace + corner_w,
-            n_corner, curve_end="start"
-        )
-
-        # 5. Trace center
-        c = self._smooth_transition(
-            xl_trace + corner_w,
-            xr_trace - corner_w,
-            n_trace_center,
-            curve_end="both"
-        )
-
-        # 6. Trace right corner
-        c_cr = self._smooth_transition(
-            xr_trace - corner_w, xr_trace,
-            n_corner, curve_end="end"
-        )
-
-        # --- RIGHT SIDE ---
-
-        # 7. Right gap SM sidewall (trace edge)
-        if self.use_sm and sm > 0:
-            d_sm1 = self._smooth_transition(
-                xr_trace, xr_trace + sm,
-                n_sm, curve_end="both", beta=4.0
-            )
-            gap_r_start = xr_trace + sm
-        else:
-            d_sm1 = None
-            gap_r_start = xr_trace
-
-        # 8. Right gap bulk
-        d = self._smooth_transition(
-            gap_r_start, xr_gap - sm,
-            n_gap_bulk, curve_end="both", beta=6.0
-        )
-
-        # 8.5 Right gap SM sidewall (ground edge)
-        if self.use_sm and sm > 0:
-            d_sm2 = self._smooth_transition(
-                xr_gap - sm, xr_gap,
-                n_sm, curve_end="both", beta=4.0
-            )
-        else:
-            d_sm2 = None
-
-        # 9. Right ground corner
-        e_corner = self._smooth_transition(
-            xr_gap, xr_gap + corner_gap,
-            n_corner, curve_end="start"
-        )
-
-        # Remaining outer ground
-        used = (
-            len(a) +
-            len(a_corner[1:]) +
-            (len(b_sm1[1:]) if b_sm1 is not None else 0) +
-            len(b[1:]) +
-            (len(b_sm2[1:]) if b_sm2 is not None else 0) +
-            len(c_cl[1:]) +
-            len(c[1:]) +
-            len(c_cr[1:]) +
-            (len(d_sm1[1:]) if d_sm1 is not None else 0) +
-            len(d[1:]) +
-            (len(d_sm2[1:]) if d_sm2 is not None else 0) +
-            len(e_corner[1:])
-        )
-
-        remaining_n = max(n - used, 6)
-
-        e = self._smooth_transition(
-            xr_gap + corner_gap,
-            self.domain_width,
-            remaining_n + 1,
-            curve_end="start"
-        )
-
-        # --- Combine all segments ---
-        parts = [
-            a,
-            a_corner[1:]
-        ]
-
-        if b_sm1 is not None:
-            parts.append(b_sm1[1:])
-        parts.append(b[1:])
-        if b_sm2 is not None:
-            parts.append(b_sm2[1:])
-
-        parts += [
-            c_cl[1:],
-            c[1:],
-            c_cr[1:]
-        ]
-
-        if d_sm1 is not None:
-            parts.append(d_sm1[1:])
-        parts.append(d[1:])
-        if d_sm2 is not None:
-            parts.append(d_sm2[1:])
-
-        parts += [
-            e_corner[1:],
-            e[1:]
-        ]
-
-        x = np.concatenate(parts)
-
+        ncorner = max(3, self.skin_cells // 4)
+        
+        for k in range(n_regions):
+            x0, x1 = x_if[k], x_if[k + 1]
+            npts = region_points[k]
+            
+            # Determine grading strategy based on region type
+            
+            # TRACE REGION - fine mesh with corner grading
+            if x0 >= self.x_tr_l - 1e-15 and x1 <= self.x_tr_r + 1e-15:
+                nc = min(ncorner, npts // 3)
+                n_mid = max(3, npts - 2 * nc)
+                
+                corner_left = min(corner_trace, (x1 - x0) / 3)
+                corner_right = min(corner_trace, (x1 - x0) / 3)
+                
+                if nc > 0 and corner_left > 1e-15:
+                    cl = self._smooth_transition(x0, x0 + corner_left, nc,
+                                                curve_end="start", beta=4.0)
+                else:
+                    cl = np.array([x0])
+                
+                mid0 = x0 + corner_left
+                mid1 = max(x1 - corner_right, mid0)
+                mid = self._smooth_transition(mid0, mid1, n_mid,
+                                             curve_end="both", beta=4.0)
+                
+                if nc > 0 and corner_right > 1e-15:
+                    cr = self._smooth_transition(mid1, x1, nc,
+                                                curve_end="end", beta=4.0)
+                else:
+                    cr = np.array([x1])
+                
+                seg = np.concatenate([cl, mid[1:], cr[1:]])
+            
+            # GAP REGIONS - grade toward both interfaces
+            elif ((self.x_gap_l <= x0 and x1 <= self.x_tr_l + 1e-15) or
+                  (self.x_tr_r - 1e-15 <= x0 and x1 <= self.x_gap_r)):
+                seg = self._smooth_transition(x0, x1, npts,
+                                             curve_end="both", beta=4.0)
+            
+            # GROUND REGIONS - grade toward gap (inner edge)
+            elif ((self.via_x_left_inner < x0 and x1 <= self.x_gap_l + 1e-15) or
+                  (self.x_gap_r - 1e-15 <= x0 and x1 < self.via_x_right_inner)):
+                # Grade toward trace (inner edge has higher field)
+                if x1 <= self.x_gap_l + 1e-15:
+                    # Left ground: dense at right (toward trace)
+                    seg = self._smooth_transition(x0, x1, npts,
+                                                 curve_end="end", beta=3.0)
+                else:
+                    # Right ground: dense at left (toward trace)
+                    seg = self._smooth_transition(x0, x1, npts,
+                                                 curve_end="start", beta=3.0)
+            
+            # OUTER REGIONS (domain edge to via) - uniform, no grading (low field)
+            else:
+                end = "end" if x0 < self.x_tr_l else "start"
+                seg = self._smooth_transition(x0, x1, npts,
+                                             curve_end=end, beta=1.5)
+            
+            if k > 0:
+                seg = seg[1:]
+            x_parts.append(seg)
+        
+        x = np.concatenate(x_parts)
+        
+        # Enforce exact interface locations
+        for xi in x_if:
+            if np.min(np.abs(x - xi)) > 1e-12:
+                x = np.sort(np.append(x, xi))
+        
         return x, np.diff(x)
-
     def _grid_y(self, n):
         # Same as microstrip - reuse the vertical grid logic
         n_gnd = max(3, int(n * 0.05))
@@ -421,7 +422,6 @@ def solve_gcpw(plots=True):
         gap=0.15e-3,
         top_gnd_width=5e-3,
         via_gap=0.5e-3,
-        via_diameter=0.3e-3,
         use_sm=False,
         sm_er=3.5,
         nx=200, ny=200,
@@ -451,4 +451,8 @@ def solve_gcpw(plots=True):
         solver.plot(Ex, Ey)
 
 if __name__ == "__main__":
-    solve_gcpw(False)
+    plots = False
+    if len(sys.argv) > 1:
+        if "plot" in sys.argv[1]:
+            plots = True
+    solve_gcpw(plots)

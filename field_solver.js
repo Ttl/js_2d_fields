@@ -76,52 +76,38 @@ function linspace(start, end, n) {
 }
 
 export function _smooth_transition(x0, x1, n, curve_end, beta=4.0) {
-    if (n === 0) {
-        return new Float64Array(0);
-    }
-    if (n === 1) {
-        return new Float64Array([x0]);
+    if (n <= 1) {
+        if (n === 0) return new Float64Array(0); // If 0 points, return empty array
+        return new Float64Array([x0, x1]); // Python returns [start, end] for n_points <= 1
     }
     
     const pts = new Float64Array(n);
+    const xi = linspace(0, 1, n);
 
     for(let i=0; i<n; i++) {
-        let u = i / (n - 1);
-        let val;
-        
-        if (curve_end === 'start') {
-            val = Math.pow(u, beta);
-        } else if (curve_end === 'end') {
-            val = 1.0 - Math.pow(1.0 - u, beta);
-        } else { // 'both'
-            const u_map = 2 * u - 1;
-            const top = Math.tanh(beta * u_map);
-            const bot = Math.tanh(beta);
-            val = 0.5 * (1 + top / bot);
+        let eta;
+        if (curve_end === 'end') {
+            eta = Math.tanh(beta * xi[i]) / Math.tanh(beta);
+        } else if (curve_end === 'both') {
+            eta = (Math.tanh(beta * (xi[i] - 0.5)) / Math.tanh(beta * 0.5) + 1) / 2;
+        } else { // 'start'
+            eta = 1 - Math.tanh(beta * (1 - xi[i])) / Math.tanh(beta);
         }
-        pts[i] = x0 + (x1 - x0) * val;
+        pts[i] = x0 + eta * (x1 - x0);
     }
     return pts;
 }
 
 export function _enforce_interfaces(arr, interfaces) {
-    const tol = 1e-12;
     let list = Array.from(arr);
-    let changed = false;
 
+    // Always add all interface values, then use Set to handle uniqueness and sort.
+    // This directly mirrors the Python np.append and np.sort behavior (with unique implied).
     for (let val of interfaces) {
-        let min_dist = Number.MAX_VALUE;
-        for(let p of list) min_dist = Math.min(min_dist, Math.abs(p - val));
-        
-        if (min_dist > tol) {
-            list.push(val);
-            changed = true;
-        }
+        list.push(val);
     }
-    if(changed) {
-        return Float64Array.from(new Set(list)).sort();
-    }
-    return arr;
+    
+    return Float64Array.from(new Set(list)).sort((a, b) => a - b);
 }
 
 export function _concat_arrays(arrays) {
@@ -533,7 +519,8 @@ export class FieldSolver2D {
 
                 // Check 4 neighbors
                 const check_neighbor = (ni, nj, is_vertical_flux) => {
-                    if (this.signal_mask[ni][nj]) return; // Internal to conductor
+                    // Only add flux if the neighbor is NOT part of the signal conductor
+                    if (this.signal_mask[ni][nj]) return;
 
                     // E-field Normal
                     let En;
@@ -558,10 +545,26 @@ export class FieldSolver2D {
                     Q += CONSTANTS.EPS0 * er * En * area;
                 };
 
-                check_neighbor(i, j+1, false); // Right
-                check_neighbor(i, j-1, false); // Left
-                check_neighbor(i+1, j, true);  // Top
-                check_neighbor(i-1, j, true);  // Bottom
+                // Changed these to use the bounds checking from the python side
+                // No need to check for signal_mask[i,j+1] etc. here, as check_neighbor does it.
+                // The python code calculates the flux across faces *between* a signal and a dielectric region.
+
+                // Right neighbor
+                if (!this.signal_mask[i][j + 1]) {
+                    check_neighbor(i, j + 1, false);
+                }
+                // Left neighbor
+                if (!this.signal_mask[i][j - 1]) {
+                    check_neighbor(i, j - 1, false);
+                }
+                // Top neighbor
+                if (!this.signal_mask[i + 1][j]) {
+                    check_neighbor(i + 1, j, true);
+                }
+                // Bottom neighbor
+                if (!this.signal_mask[i - 1][j]) {
+                    check_neighbor(i - 1, j, true);
+                }
             }
         }
         return Math.abs(Q);

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import sys
 from field_solver_ref import *
 
 class MicrostripSolver2D(FieldSolver2D):
@@ -660,4 +661,8 @@ def solve_stripline(plots=True):
 
 
 if __name__ == "__main__":
-    solve_microstrip(False)
+    plots = False
+    if len(sys.argv) > 1:
+        if "plot" in sys.argv[1]:
+            plots = True
+    solve_microstrip(plots)

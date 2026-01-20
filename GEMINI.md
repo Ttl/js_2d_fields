@@ -25,6 +25,7 @@ $ node test_microstrip.js
 
 $ python microstrip_ref.py 
 $ python gcpw_ref.py 
+$ python microstrip_ref_mask.py
 
 # WASM solver
 
