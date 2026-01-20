@@ -160,9 +160,9 @@ export class GroundedCPWSolver2D extends FieldSolver2D {
         this.x_gap_l = this.x_tr_l - this.gap;
         this.x_gap_r = this.x_tr_r + this.gap;
 
-        // Via positions
-        this.via_x_left_inner = this.x_tr_l - this.via_gap;
-        this.via_x_right_inner = this.x_tr_r + this.via_gap;
+        // Via positions (via_gap is distance from ground edge to via edge)
+        this.via_x_left_inner = this.x_gap_l - this.via_gap;
+        this.via_x_right_inner = this.x_gap_r + this.via_gap;
     }
 
     _build_geometry_lists() {
@@ -193,22 +193,38 @@ export class GroundedCPWSolver2D extends FieldSolver2D {
 
         // Solder mask regions (overwrites previous)
         if (this.use_sm) {
-            // Solder mask on substrate in gaps (between grounds and signal)
-            // Left gap
-            dielectrics.push(new Dielectric(
-                xl_gap, this.y_sub_end,
-                xl - xl_gap, this.sm_t_sub,
-                this.sm_er, this.sm_tand
-            ));
-            // Right gap
-            dielectrics.push(new Dielectric(
-                xr, this.y_sub_end,
-                xr_gap - xr, this.sm_t_sub,
-                this.sm_er, this.sm_tand
-            ));
+            // Trace side positions
+            const xsl = xl - this.sm_t_side;  // Left side of trace
+            const xsr = xr + this.sm_t_side;  // Right side of trace
 
-            // Solder mask on left side of trace
-            const xsl = xl - this.sm_t_side;
+            // Ground side mask positions (needed for avoiding overlap)
+            const xl_gnd_side_end = Math.min(xl_gap + this.sm_t_side, xl);
+            const xr_gnd_side_start = Math.max(xr_gap - this.sm_t_side, xr);
+
+            // Solder mask on substrate in gaps (between grounds and signal)
+            // Avoid overlap with trace side masks AND ground side masks
+            // Left gap - start after ground side mask ends
+            const xl_sub_start = xl_gnd_side_end;
+            const xl_sub_end = Math.min(xl, Math.max(xl_sub_start, xsl));
+            if (xl_sub_end > xl_sub_start) {
+                dielectrics.push(new Dielectric(
+                    xl_sub_start, this.y_sub_end,
+                    xl_sub_end - xl_sub_start, this.sm_t_sub,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+            // Right gap - end before ground side mask starts
+            const xr_sub_end = xr_gnd_side_start;
+            const xr_sub_start = Math.max(xr, Math.min(xr_sub_end, xsr));
+            if (xr_sub_end > xr_sub_start) {
+                dielectrics.push(new Dielectric(
+                    xr_sub_start, this.y_sub_end,
+                    xr_sub_end - xr_sub_start, this.sm_t_sub,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on left side of trace (signal-facing)
             if (xsl >= 0) {
                 dielectrics.push(new Dielectric(
                     xsl, this.y_trace_start,
@@ -217,12 +233,29 @@ export class GroundedCPWSolver2D extends FieldSolver2D {
                 ));
             }
 
-            // Solder mask on right side of trace
-            const xsr = xr;
-            if (xsr + this.sm_t_side <= this.domain_width) {
+            // Solder mask on right side of trace (signal-facing)
+            if (xsr <= this.domain_width) {
                 dielectrics.push(new Dielectric(
-                    xsr, this.y_trace_start,
+                    xr, this.y_trace_start,
                     this.sm_t_side, this.t + this.sm_t_trace,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on ground side of left gap (extends from ground edge into gap)
+            if (xl_gnd_side_end > xl_gap) {
+                dielectrics.push(new Dielectric(
+                    xl_gap, this.y_trace_start,
+                    xl_gnd_side_end - xl_gap, this.t + this.sm_t_trace,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on ground side of right gap (extends from ground edge into gap)
+            if (xr_gap > xr_gnd_side_start) {
+                dielectrics.push(new Dielectric(
+                    xr_gnd_side_start, this.y_trace_start,
+                    xr_gap - xr_gnd_side_start, this.t + this.sm_t_trace,
                     this.sm_er, this.sm_tand
                 ));
             }

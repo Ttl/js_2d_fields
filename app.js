@@ -89,7 +89,6 @@ function updateGeometry() {
             sm_er: p.sm_er,
             sm_tand: p.sm_tand
         });
-        log("GCPW Geometry defined.");
     } else if (p.tl_type === 'stripline') {
         solver = new MicrostripSolver({
             trace_width: p.w,
@@ -105,7 +104,6 @@ function updateGeometry() {
             ny: p.ny,
             boundaries: ["open", "open", "gnd", "gnd"]
         });
-        log("Stripline Geometry defined.");
     } else {
         // Microstrip (with optional solder mask, top dielectric, ground cutout)
         const options = {
@@ -145,11 +143,6 @@ function updateGeometry() {
         }
 
         solver = new MicrostripSolver(options);
-        let typeLabel = "Microstrip";
-        if (p.use_sm) typeLabel += " + Solder Mask";
-        if (p.use_top_diel) typeLabel += " + Top Diel";
-        if (p.use_gnd_cut) typeLabel += " + Gnd Cut";
-        log(typeLabel + " Geometry defined");
     }
 }
 
@@ -201,7 +194,7 @@ async function runSimulation() {
             log("Simulation stopped by user");
         }
 
-        currentView = "efield";
+        // Redraw to show E-field overlay on geometry
         draw();
 
         log(`\nRESULTS:\n` +
@@ -233,10 +226,18 @@ let contourCount = 20;
 let showMesh = false;
 let currentView = "geometry";
 
-function draw() {
+function draw(resetZoom = false) {
     if (!solver) return;
 
     const container = document.getElementById('sim_canvas');
+
+    // Preserve current view state if plot exists (unless resetZoom is requested)
+    let currentXRange = null;
+    let currentYRange = null;
+    if (!resetZoom && container && container.layout && container.layout.xaxis) {
+        currentXRange = container.layout.xaxis.range;
+        currentYRange = container.layout.yaxis.range;
+    }
 
     let zData = [];
     let title = "";
@@ -304,9 +305,34 @@ function draw() {
             });
         }
 
-        // Create empty trace for geometry view (shapes only)
-        xMM = [0, solver.w * 2000]; // Just for axis scaling
-        yMM = [0, maxY * 1000];
+        // If solution available, overlay E-field contours
+        if (solver.solution_valid && solver.mesh_generated) {
+            nx = solver.x.length;
+            ny = solver.y.length;
+
+            // Limit display Y
+            const yArr = Array.from(solver.y);
+            const maxYIdx = yArr.findIndex(y => y > maxY);
+            nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
+
+            xMM = Array.from(solver.x, v => v * 1000);
+            yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
+
+            // Compute E-field magnitude
+            for (let i = 0; i < nyDisplay; i++) {
+                const row = [];
+                for (let j = 0; j < nx; j++) {
+                    row.push(Math.hypot(solver.Ex[i][j], solver.Ey[i][j]));
+                }
+                zData.push(row);
+            }
+
+            title = "Transmission Line Geometry with E-field";
+        } else {
+            // No solution - just axis scaling
+            xMM = [0, solver.w * 2000];
+            yMM = [0, maxY * 1000];
+        }
     }
 
     else if (currentView === "potential" && solver.solution_valid) {
@@ -377,8 +403,31 @@ function draw() {
     // --------------------
     let traces = [];
 
-    if (currentView === "geometry") {
-        // For geometry, use an invisible scatter trace just for axis scaling
+    if (currentView === "geometry" && zData.length > 0) {
+        // Geometry with E-field overlay: use contour plot with semi-transparent coloring
+        traces.push({
+            type: "contour",
+            x: xMM,
+            y: yMM,
+            z: zData,
+            colorscale: "Hot",
+            opacity: 0.6,
+            contours: {
+                showlines: true,
+                coloring: "heatmap",
+                ncontours: 15
+            },
+            colorbar: {
+                title: "|E| (V/m)",
+                len: 0.6
+            },
+            hovertemplate:
+                "x: %{x:.2f} mm<br>" +
+                "y: %{y:.2f} mm<br>" +
+                "|E|: %{z:.3e} V/m<extra></extra>"
+        });
+    } else if (currentView === "geometry") {
+        // Geometry only - invisible scatter for axis scaling
         traces.push({
             type: "scatter",
             x: xMM,
@@ -389,7 +438,7 @@ function draw() {
             hoverinfo: "skip"
         });
     } else if (zData.length > 0) {
-        // For field views, use heatmap
+        // Field views only - use heatmap
         traces.push({
             type: "heatmap",
             x: xMM,
@@ -407,10 +456,8 @@ function draw() {
         });
     }
 
-    // --------------------
-    // MESH OVERLAY (only for field views)
-    // --------------------
-    if (showMesh && currentView !== "geometry" && nx && ny) {
+    // MESH OVERLAY
+    if (showMesh && solver.solution_valid) {
         const stepX = 1;
         const stepY = 1;
 
@@ -447,10 +494,12 @@ function draw() {
         xaxis: {
             title: "Width (mm)",
             scaleanchor: "y",
-            scaleratio: 1
+            scaleratio: 1,
+            range: currentXRange  // Preserve zoom/pan
         },
         yaxis: {
-            title: "Height (mm)"
+            title: "Height (mm)",
+            range: currentYRange  // Preserve zoom/pan
         },
         margin: { l: 70, r: 90, t: 50, b: 60 },
         hovermode: "closest",
@@ -607,10 +656,10 @@ function bindEvents() {
         }
     });
 
-    // Transmission line type selector
+    // Transmission line type selector - reset zoom when type changes
     document.getElementById('tl_type').addEventListener('change', () => {
         updateGeometry();
-        draw();
+        draw(true);  // Reset zoom/pan for new geometry
     });
 }
 

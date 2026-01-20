@@ -302,6 +302,12 @@
         const gcpwParams = document.getElementById('gcpw-params');
         const striplineParams = document.getElementById('stripline-params');
         const advancedParams = document.getElementById('advanced-params');
+        const solderMaskGroup = advancedParams.querySelector('.control-group:has(#chk_solder_mask)');
+        const solderMaskParams = document.getElementById('solder-mask-params');
+        const topDielGroup = advancedParams.querySelector('.control-group:has(#chk_top_diel)');
+        const topDielParams = document.getElementById('top-diel-params');
+        const gndCutGroup = advancedParams.querySelector('.control-group:has(#chk_gnd_cut)');
+        const gndCutParams = document.getElementById('gnd-cut-params');
 
         // Hide all type-specific params first
         gcpwParams.style.display = 'none';
@@ -312,12 +318,22 @@
 
         if (tlType === 'microstrip') {
             advancedParams.style.display = 'block';
+            // Show all options for microstrip
+            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
+            if (topDielGroup) topDielGroup.style.display = 'block';
+            if (gndCutGroup) gndCutGroup.style.display = 'block';
         } else if (tlType === 'stripline') {
             striplineParams.style.display = 'block';
             advancedParams.style.display = 'none';
         } else if (tlType === 'gcpw') {
             gcpwParams.style.display = 'block';
-            advancedParams.style.display = 'none'; // GCPW doesn't use these advanced options
+            advancedParams.style.display = 'block';
+            // Only show solder mask for GCPW, hide others
+            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
+            if (topDielGroup) topDielGroup.style.display = 'none';
+            if (topDielParams) topDielParams.style.display = 'none';
+            if (gndCutGroup) gndCutGroup.style.display = 'none';
+            if (gndCutParams) gndCutParams.style.display = 'none';
         }
     }
 
@@ -341,6 +357,11 @@
         document.getElementById('chk_gnd_cut').addEventListener('change', () => {
             toggleCheckboxSection('chk_gnd_cut', 'gnd-cut-params');
         });
+
+        // Initialize checkbox sections based on restored state (for browser auto-restore)
+        toggleCheckboxSection('chk_solder_mask', 'solder-mask-params');
+        toggleCheckboxSection('chk_top_diel', 'top-diel-params');
+        toggleCheckboxSection('chk_gnd_cut', 'gnd-cut-params');
     });
 </script>
 <script type="module" src="app.js"></script>
