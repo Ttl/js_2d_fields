@@ -167,104 +167,153 @@ class FieldSolver2D:
         self.V = solution_full.reshape((self.ny, self.nx))
 
     def _compute_refine_metrics(self, Ex, Ey):
-        ny, nx = Ex.shape
-        local = []
-        globalc = []
+        """
+        For each grid interval, compute a metric indicating how much refinement
+        would help, based on voltage gradients and field energy in adjacent cells.
+        """
+        ny, nx = self.V.shape
 
-        for i in range(ny):
-            for j in range(nx):
-                # Clamp to valid field nodes
-                ic = min(max(i, 1), ny-2)
-                jc = min(max(j, 1), nx-2)
+        # Metric for splitting interval [x[j], x[j+1]]
+        x_metrics = np.zeros(len(self.x) - 1)
+        # Metric for splitting interval [y[i], y[i+1]]
+        y_metrics = np.zeros(len(self.y) - 1)
 
-                dx = self.dx_array[jc]
-                dy = self.dy_array[ic]
-
-                # Skip if completely inside a conductor
-                if (self.conductor_mask[ic, jc] and
-                    self.conductor_mask[ic+1, jc] and self.conductor_mask[ic-1, jc] and
-                    self.conductor_mask[ic, jc+1] and self.conductor_mask[ic, jc-1]):
+        for i in range(ny - 1):
+            for j in range(nx - 1):
+                # Skip cells fully inside conductors
+                if (self.conductor_mask[i, j] and
+                    self.conductor_mask[min(i+1, ny-1), j] and
+                    self.conductor_mask[i, min(j+1, nx-1)]):
                     continue
 
-                dx = self.dx_array[jc]
-                dy = self.dy_array[ic]
-                eps = self.epsilon_r[ic, jc]
-                E2 = Ex[ic, jc]**2 + Ey[ic, jc]**2
+                eps = self.epsilon_r[i, j]
 
-                # Global: How much each cell contributes to the total Capacitance.
-                M_energy = 0.5 * eps * E2 * (dx * dy)
+                # Voltage differences across this cell
+                dV_x = abs(self.V[i, j+1] - self.V[i, j]) if j < nx - 1 else 0
+                dV_y = abs(self.V[i+1, j] - self.V[i, j]) if i < ny - 1 else 0
 
-                # Local: Field Gradient
-                grad_E = abs(Ex[ic, jc] - Ex[ic, jc-1]) + abs(Ey[ic, jc] - Ey[ic-1, jc])
+                # Field magnitude for weighting
+                E2 = Ex[i, j]**2 + Ey[i, j]**2
+                E_mag = np.sqrt(E2) if E2 > 0 else 1e-12
 
-                # Weight gradient by permittivity so error in substrate is 'heavier'
-                M_local = grad_E * eps
+                # Boundary detection
+                is_boundary = (not self.conductor_mask[i, j] and (
+                    (i > 0 and self.conductor_mask[i-1, j]) or
+                    (i < ny-1 and self.conductor_mask[i+1, j]) or
+                    (j > 0 and self.conductor_mask[i, j-1]) or
+                    (j < nx-1 and self.conductor_mask[i, j+1])))
+                boundary_mult = 2.0 if is_boundary else 1.0
 
-                is_boundary = (not self.conductor_mask[ic, jc] and (
-                    self.conductor_mask[ic+1, jc] or self.conductor_mask[ic-1, jc] or
-                    self.conductor_mask[ic, jc+1] or self.conductor_mask[ic, jc-1]))
+                # Weight by field strength, permittivity, and boundary importance
+                weight = E_mag * eps * boundary_mult
 
-                if is_boundary:
-                    M_local *= 2.0
+                # Accumulate to the interval metrics
+                if j < len(x_metrics):
+                    x_metrics[j] += dV_x * weight
+                if i < len(y_metrics):
+                    y_metrics[i] += dV_y * weight
 
-                local.append((M_local, ic, jc))
-                globalc.append((M_energy, ic, jc))
+        return x_metrics, y_metrics
 
-        return local, globalc
 
-    def _select_cells_to_refine(self, local, globalc, frac=0.15):
-        N = int(frac * len(local))
-        Nloc = int(0.4 * N)
-        Nglob = N - Nloc
+    def _select_lines_to_refine(self, x_metrics, y_metrics, frac=0.15):
+        """
+        Select which grid intervals to split, respecting left-right symmetry.
+        """
+        x_center = (self.x[0] + self.x[-1]) / 2
+        x_symmetric = self._check_symmetry(self.x, x_center)
 
-        local.sort(reverse=True)
-        globalc.sort(reverse=True)
+        if x_symmetric:
+            x_metrics = self._symmetrize_metrics(x_metrics)
 
-        selected = set()
+        # Decide how many x vs y lines based on relative total metric
+        total_x = np.sum(x_metrics)
+        total_y = np.sum(y_metrics)
+        total = total_x + total_y
 
-        for _, i, j in local[:Nloc]:
-            selected.add((i,j))
+        if total < 1e-15:
+            return set(), set()
 
-        for _, i, j in globalc[:Nglob]:
-            selected.add((i,j))
+        n_total = int(frac * (len(x_metrics) + len(y_metrics)))
+        n_total = max(1, n_total)
 
-        return selected
+        # Allocate proportionally to where the error is
+        n_x = int(n_total * total_x / total)
+        n_y = n_total - n_x
 
-    def _refine_selected_cells(self, selected):
+        # Select top intervals
+        x_ranked = np.argsort(x_metrics)[::-1]
+        y_ranked = np.argsort(y_metrics)[::-1]
+
+        selected_x = set()
+        selected_y = set()
+
+        for j in x_ranked[:n_x]:
+            if x_metrics[j] > 0:
+                selected_x.add(j)
+                if x_symmetric:
+                    partner = len(x_metrics) - 1 - j
+                    if 0 <= partner < len(x_metrics):
+                        selected_x.add(partner)
+
+        for i in y_ranked[:n_y]:
+            if y_metrics[i] > 0:
+                selected_y.add(i)
+
+        return selected_x, selected_y
+
+
+    def _check_symmetry(self, coords, center, tol=1e-10):
+        """Check if coordinate array is symmetric about center."""
+        n = len(coords)
+        for k in range(n // 2):
+            left = coords[k]
+            right = coords[n - 1 - k]
+            if abs((left - center) + (right - center)) > tol:
+                return False
+        return True
+
+
+    def _symmetrize_metrics(self, metrics):
+        """Average metrics for symmetric pairs."""
+        n = len(metrics)
+        result = metrics.copy()
+        for k in range(n // 2):
+            avg = 0.5 * (metrics[k] + metrics[n - 1 - k])
+            result[k] = avg
+            result[n - 1 - k] = avg
+        return result
+
+
+    def _refine_selected_lines(self, selected_x, selected_y):
+        """Add new grid lines at midpoints of selected intervals."""
+        x_center = (self.x[0] + self.x[-1]) / 2
+        x_symmetric = self._check_symmetry(self.x, x_center)
+
         new_x = set()
         new_y = set()
 
-        for i, j in selected:
-            ex = abs(self.V[i, j+1] - self.V[i, j])
-            ey = abs(self.V[i+1, j] - self.V[i, j])
+        for j in selected_x:
+            midpoint = 0.5 * (self.x[j] + self.x[j + 1])
+            new_x.add(midpoint)
+            if x_symmetric:
+                symmetric_point = 2 * x_center - midpoint
+                if self.x[0] < symmetric_point < self.x[-1]:
+                    new_x.add(symmetric_point)
 
-            # Detect which face touches a conductor
-            split_down = i > 0 and self.conductor_mask[i-1, j]
-            split_up   = i < self.ny-1 and self.conductor_mask[i+1, j]
-            split_left = j > 0 and self.conductor_mask[i, j-1]
-            split_right= j < self.nx-1 and self.conductor_mask[i, j+1]
-
-            # Default behavior (gradient-based)
-            do_x = ex >= ey
-            do_y = ey > ex
-
-            # Override near conductors: refine toward the wall
-            if split_down:
-                new_y.add(0.5 * (self.y[i-1] + self.y[i]))
-            elif split_up:
-                new_y.add(0.5 * (self.y[i] + self.y[i+1]))
-            elif do_y:
-                new_y.add(0.5 * (self.y[i] + self.y[i+1]))
-
-            if split_left:
-                new_x.add(0.5 * (self.x[j-1] + self.x[j]))
-            elif split_right:
-                new_x.add(0.5 * (self.x[j] + self.x[j+1]))
-            elif do_x:
-                new_x.add(0.5 * (self.x[j] + self.x[j+1]))
+        for i in selected_y:
+            midpoint = 0.5 * (self.y[i] + self.y[i + 1])
+            new_y.add(midpoint)
 
         self.x = np.array(sorted(set(self.x) | new_x))
         self.y = np.array(sorted(set(self.y) | new_y))
+
+
+    def refine_mesh(self, Ex, Ey, frac=0.15):
+        """Main refinement routine."""
+        x_metrics, y_metrics = self._compute_refine_metrics(Ex, Ey)
+        selected_x, selected_y = self._select_lines_to_refine(x_metrics, y_metrics, frac)
+        self._refine_selected_lines(selected_x, selected_y)
 
     def _compute_energy_error(self, Ex, Ey, prev_energy):
         """
@@ -345,9 +394,7 @@ class FieldSolver2D:
 
             # Refine mesh
             if it != max_iters - 1:
-                local, globalc = self._compute_refine_metrics(Ex, Ey)
-                selected = self._select_cells_to_refine(local, globalc, frac=refine_frac)
-                self._refine_selected_cells(selected)
+                self.refine_mesh(Ex, Ey, frac=refine_frac)
                 self._setup_geometry()
 
         return Z0, eps_eff, C, C0, Ex, Ey
