@@ -149,13 +149,13 @@ function updateGeometry() {
 async function runSimulation() {
     const p = getParams();
     const btn = document.getElementById('btn_solve');
-    const btnStop = document.getElementById('btn_stop');
     const pbar = document.getElementById('progress_bar');
     const pcont = document.getElementById('progress_container');
     const ptext = document.getElementById('progress_text');
 
-    btn.disabled = true;
-    btnStop.disabled = false;
+    // Change button to "Stop" mode
+    btn.textContent = 'Stop';
+    btn.classList.add('stop-mode');
     stopRequested = false;
     pcont.style.display = 'block';
     log("Starting simulation...");
@@ -201,7 +201,7 @@ async function runSimulation() {
                  `----------------------\n` +
                  `Characteristic Impedance Z0:  ${results.Z0.toFixed(2)} Ω\n` +
                  `Z0 (complex):  ${results.Zc.toString()} Ω\n` +
-                 `Effective Permittivity εᵣₑff: ${results.eps_eff.toFixed(3)}\n` +
+                 `Effective Permittivity: ${results.eps_eff.toFixed(3)}\n` +
                  `R:             ${results.RLGC.R.toExponential(3)} Ω/m\n` +
                  `L:             ${results.RLGC.L.toExponential(3)} H/m\n` +
                  `G:             ${results.RLGC.G.toExponential(3)} S/m\n` +
@@ -214,8 +214,9 @@ async function runSimulation() {
         console.error(e);
         log("Error: " + e.message);
     } finally {
-        btn.disabled = false;
-        btnStop.disabled = true;
+        // Restore button to "Solve Physics" mode
+        btn.textContent = 'Solve Physics';
+        btn.classList.remove('stop-mode');
         pcont.style.display = 'none';
         ptext.style.display = 'none';
         stopRequested = false;
@@ -613,12 +614,16 @@ function viridis(t) {
 
 function bindEvents() {
     document.getElementById('btn_solve').onclick = () => {
-        updateGeometry(); // Ensure geometry is updated with latest parameters
-        runSimulation();
-    };
-    document.getElementById('btn_stop').onclick = () => {
-        stopRequested = true;
-        log("Stop requested...");
+        const btn = document.getElementById('btn_solve');
+        if (btn.textContent === 'Stop') {
+            // Stop the simulation
+            stopRequested = true;
+            log("Stop requested...");
+        } else {
+            // Start the simulation
+            updateGeometry(); // Ensure geometry is updated with latest parameters
+            runSimulation();
+        }
     };
 
     // Real-time geometry updates for all parameter inputs

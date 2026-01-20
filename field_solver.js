@@ -958,6 +958,11 @@ export class FieldSolver2D {
         const { x_metrics, y_metrics } = this._compute_refine_metrics(Ex, Ey);
         const { selected_x, selected_y } = this._select_lines_to_refine(x_metrics, y_metrics, frac);
         this._refine_selected_lines(selected_x, selected_y);
+
+        // Invalidate solution since mesh has changed
+        this.solution_valid = false;
+        this.Ex = null;
+        this.Ey = null;
     }
 
     _compute_energy_error(Ex, Ey, prev_energy) {
@@ -1049,12 +1054,6 @@ export class FieldSolver2D {
         let results = null;
 
         for (let it = 0; it < max_iters; it++) {
-            // Check if stop was requested
-            if (shouldStop && shouldStop()) {
-                console.log("Adaptive solve stopped by user");
-                break;
-            }
-
             // Calculate parameters
             results = await this.perform_analysis();
             const Z0 = results.Z0;
@@ -1112,6 +1111,12 @@ export class FieldSolver2D {
             // Node budget check
             if (nodes > max_nodes) {
                 console.log("Node budget reached");
+                break;
+            }
+
+            // Check if stop was requested
+            if (shouldStop && shouldStop()) {
+                console.log("Adaptive solve stopped by user");
                 break;
             }
 

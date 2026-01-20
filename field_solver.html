@@ -72,6 +72,12 @@
         }
         button:hover { background-color: #1d4ed8; }
         button:disabled { background-color: #93c5fd; cursor: wait; }
+        button.stop-mode {
+            background-color: #dc2626;
+        }
+        button.stop-mode:hover {
+            background-color: #b91c1c;
+        }
 
         /* Visualization Area */
         .canvas-container {
@@ -279,8 +285,6 @@
     </div>
 
     <button id="btn_solve">Solve Physics</button>
-    <div style="height: 10px;"></div>
-    <button id="btn_stop" disabled style="background-color: #dc2626;">Stop</button>
 
     <div class="progress-container" id="progress_container">
         <div class="progress-bar" id="progress_bar"></div>
