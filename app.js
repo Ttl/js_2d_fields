@@ -52,6 +52,7 @@ function getParams() {
 
 function updateGeometry() {
     const p = getParams();
+    currentView = "geometry";
     if (p.tl_type === 'gcpw') {
         solver = new GroundedCPWSolver2D(
             p.h, p.w, p.t, p.gap, p.top_gnd_w, p.via_gap, p.via_d,
@@ -442,6 +443,11 @@ function bindEvents() {
         const el = document.getElementById(id);
         if (!el) return;
         el.onchange = () => draw();
+    });
+
+    document.getElementById('tl_type').addEventListener('change', () => {
+        updateGeometry();
+        draw();
     });
 }
 

@@ -198,11 +198,11 @@
         <h3>Stripline Parameters</h3>
         <div class="control-group">
             <label>Top Dielectric Height (mm)</label>
-            <input type="number" id="inp_air_top" value="0.2" step="0.01">
+            <input type="number" id="inp_air_top" value="1.6" step="0.01">
         </div>
         <div class="control-group">
             <label>Top Permittivity (&epsilon;<sub>r,top</sub>)</label>
-            <input type="number" id="inp_er_top" value="4.1" step="0.1">
+            <input type="number" id="inp_er_top" value="4.5" step="0.1">
         </div>
     </div>
 
@@ -312,7 +312,7 @@
             advancedParams.style.display = 'block';
         } else if (tlType === 'stripline') {
             striplineParams.style.display = 'block';
-            advancedParams.style.display = 'block';
+            advancedParams.style.display = 'none';
         } else if (tlType === 'gcpw') {
             gcpwParams.style.display = 'block';
             advancedParams.style.display = 'none'; // GCPW doesn't use these advanced options
