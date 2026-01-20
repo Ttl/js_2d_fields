@@ -28,21 +28,29 @@ def solve_microstrip(plots=True):
         tan_delta=0.02,
         sigma_cond=5.8e7,
         freq=1e9,
-        nx=20, ny=20,
+        nx=2, ny=2,
+        gnd_cut_width=3e-3,
+        gnd_cut_sub_h=1e-3,
         use_sm=False,
         boundaries=["open", "open", "open", "gnd"]
     )
 
     # Print X mesh
-    m = solver.x[-1] / 2
-    trace_points = [x for x in solver.x if m - 3e-3/2 < x < m + 3e-3/2]
-    print(f"Trace points (mm from center): {[round(1e3*(x - m), 3) for x in trace_points]}")
-    print(f"Number of trace points: {len(trace_points)}")
-    print("X mesh", solver.x)
-    print("X mesh diff", np.diff(solver.x))
-    diff = np.diff(solver.x)
-    is_symmetric = np.allclose(diff[:len(diff)//2], diff[len(diff)//2:][::-1])
-    print(f"Mesh is symmetric: {is_symmetric}")
+    if 0:
+        m = float(solver.x[-1] / 2)
+        trace_points = [float(x) for x in solver.x if m - 3e-3/2 < x < m + 3e-3/2]
+        print(f"Trace points (mm from center): {[round(1e3*(x - m), 3) for x in trace_points]}")
+        left_points = [float(x) for x in solver.x if x < m - 3e-3/2]
+        print(f"Trace points left of trace (mm from center): {[round(1e3*(x - m), 3) for x in left_points]}")
+        print(f"Number of trace points: {len(trace_points)}")
+        print("X mesh", solver.x)
+
+    # Trace center
+    t = solver.t
+    m = solver.y_trace_start + solver.t/2
+
+    trace_y_points = [float(y) for y in solver.y if m - t/2 < y < m + t/2]
+    print(f"Trace y-points (mm from center): {[round(1e3*(y - m), 3) for y in trace_y_points]}")
 
     Z0, eps_eff, C, C0 = solver.calculate_parameters()
     Ex, Ey = solver.compute_fields()

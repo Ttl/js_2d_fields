@@ -191,7 +191,6 @@ class Mesher:
     def _region_weight_x(self, x0, x1):
         """Calculate mesh density weight for x-region."""
         tol = 1e-15
-        return 1
 
         # Check if region is inside a conductor
         for cond in self.conductors:
@@ -226,7 +225,6 @@ class Mesher:
     def _region_weight_y(self, y0, y1):
         """Calculate mesh density weight for y-region."""
         tol = 1e-15
-        return 1
 
         # Check if region is inside a conductor
         for cond in self.conductors:
@@ -269,56 +267,52 @@ class Mesher:
             return 0.15  # Far field - minimize mesh density
 
     def _mesh_conductor_region(self, start, end, npts, direction='x'):
-        """Create fine mesh for conductor region with corner grading."""
+        """Create fine mesh for conductor region with symmetric distribution about center."""
         center = (start + end) / 2
+        length = end - start
 
         if npts < 3:
             # Always include center for small npts
             return np.array([start, center, end])
 
-        length = end - start
-        # Reduce corner meshing - only use 1-2 points per corner for nx=100
-        nc = max(1, min(max(1, self.ncorner // 2), npts // 4))
-        n_mid = max(npts - 2 * nc, npts // 2)
+        # Generate symmetric mesh by creating left half and mirroring
+        # Always include boundaries and center
+        mesh_points = [start, end, center]
 
-        corner = min(self.corner_size, length / 4)
+        # Calculate how many additional points we need (excluding start, end, center)
+        n_additional = max(0, npts - 3)
 
-        # Generate segments
-        parts = []
+        if n_additional > 0:
+            # Divide additional points between left and right halves
+            n_half = n_additional // 2
 
-        # Left/bottom corner
-        if nc > 0 and corner > 1e-15:
-            parts.append(self._smooth_transition(start, start + corner, nc,
-                                                curve_end='start', beta=3.0))
-        else:
-            parts.append(np.array([start]))
+            if n_half > 0:
+                # Generate points in left half using smooth transition
+                # Points go from start to center (excluding both endpoints)
+                left_half_length = length / 2
 
-        # Middle section - always include center point
-        mid_start = start + corner
-        mid_end = max(end - corner, mid_start)
-        if n_mid > 0:
-            # Ensure center point is included
-            mid_points = self._smooth_transition(mid_start, mid_end, n_mid,
-                                                curve_end='end', beta=3.0)[1:]
-            # Check if center is close to any existing point
-            if np.min(np.abs(mid_points - center)) > length / 100:
-                mid_points = np.sort(np.append(mid_points, center))
-            parts.append(mid_points)
+                # Create graded distribution in left half
+                xi = np.linspace(0, 1, n_half + 2)[1:-1]  # Exclude 0 and 1
+                # Use tanh grading for finer mesh near edges
+                beta = 2.0
+                eta = np.tanh(beta * (xi - 0.5)) / np.tanh(beta * 0.5) / 2 + 0.5
 
-        # Right/top corner
-        if nc > 0 and corner > 1e-15 and mid_end < end - 1e-15:
-            parts.append(self._smooth_transition(mid_end, end, nc,
-                                                curve_end='end', beta=3.0)[1:])
-        elif mid_end < end - 1e-15:
-            parts.append(np.array([end]))
+                # Map to actual coordinates in left half
+                left_points = start + eta * left_half_length
+                mesh_points.extend(left_points)
 
-        mesh = np.concatenate(parts)
+                # Mirror to right half
+                right_points = 2 * center - left_points
+                mesh_points.extend(right_points)
 
-        # Ensure center is definitely in the mesh
-        if np.min(np.abs(mesh - center)) > length / 100:
-            mesh = np.sort(np.append(mesh, center))
+            # If we have an odd number of additional points, add one more near center
+            if n_additional % 2 == 1:
+                # Add a point slightly to the left of center
+                offset = length / (4 * npts)
+                mesh_points.append(center - offset)
+                mesh_points.append(center + offset)
 
-        return mesh
+        return np.sort(np.array(mesh_points))
 
     def generate_mesh(self):
         """Generate the x and y mesh arrays."""
@@ -351,7 +345,7 @@ class Mesher:
 
         # Allocate points based on weights
         # First, ensure minimum points in SIGNAL conductors (not ground planes)
-        MIN_CONDUCTOR_POINTS = 7
+        MIN_CONDUCTOR_POINTS = 5
         region_points = []
         reserved_points = 0
         non_conductor_weight = 0
@@ -443,17 +437,17 @@ class Mesher:
                     if axis == 'x':
                         if abs(i1 - cond.x_min) < 1e-12:
                             end_curve = 'end'  # Dense toward conductor
-                            beta_val = 1.0
+                            beta_val = 2.0
                         elif abs(i0 - cond.x_max) < 1e-12:
                             end_curve = 'start'  # Dense toward conductor
-                            beta_val = 1.0
+                            beta_val = 2.0
                     else:
                         if abs(i1 - cond.y_min) < 1e-12:
                             end_curve = 'end'  # Dense toward conductor
-                            beta_val = 1.0
+                            beta_val = 2.0
                         elif abs(i0 - cond.y_max) < 1e-12:
                             end_curve = 'start'  # Dense toward conductor
-                            beta_val = 1.0
+                            beta_val = 2.0
 
                 seg = self._smooth_transition(i0, i1, npts,
                                             curve_end=end_curve, beta=beta_val)

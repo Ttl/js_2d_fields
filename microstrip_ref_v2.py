@@ -156,7 +156,7 @@ class MicrostripSolver2D(FieldSolver2D):
             # Substrate covers from extension start to substrate end
             dielectrics.append(Dielectric(
                 0, self.y_ext_start,
-                self.domain_width, self.gnd_cut_sub_h + self.h,
+                self.domain_width, self.y_trace_start,
                 self.er, self.tan_delta
             ))
         else:
@@ -196,7 +196,7 @@ class MicrostripSolver2D(FieldSolver2D):
             if xsl >= 0:
                 dielectrics.append(Dielectric(
                     xsl, self.y_trace_start,
-                    self.sm_t_side, self.sm_t_trace,
+                    self.sm_t_side, self.t + self.sm_t_trace,
                     self.sm_er, self.sm_tand
                 ))
 
@@ -205,7 +205,7 @@ class MicrostripSolver2D(FieldSolver2D):
             if xsr <= self.domain_width:
                 dielectrics.append(Dielectric(
                     xr, self.y_trace_start,
-                    self.sm_t_side, self.sm_t_trace,
+                    self.sm_t_side, self.t + self.sm_t_trace,
                     self.sm_er, self.sm_tand
                 ))
 
@@ -330,14 +330,16 @@ def solve_microstrip(plots=True):
         tan_delta=0.02,
         sigma_cond=5.8e7,
         freq=1e9,
-        nx=1, ny=1,
-        use_sm=False,
+        nx=50, ny=50,
+        gnd_cut_width=3e-3,
+        gnd_cut_sub_h=1e-3,
+        use_sm=True,
         boundaries=["open", "open", "open", "gnd"]
     )
 
-    #Z0, eps_eff, C, C0 = solver.calculate_parameters()
-    #Ex, Ey = solver.compute_fields()
-    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001)
+    Z0, eps_eff, C, C0 = solver.calculate_parameters()
+    Ex, Ey = solver.compute_fields()
+    #Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001)
 
     alpha_cond, J = solver.calculate_conductor_loss(Ex, Ey, Z0)
     alpha_diel = solver.calculate_dielectric_loss(Ex, Ey, Z0)

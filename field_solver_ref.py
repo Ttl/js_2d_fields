@@ -214,7 +214,7 @@ class FieldSolver2D:
 
     def _select_cells_to_refine(self, local, globalc, frac=0.15):
         N = int(frac * len(local))
-        Nloc = int(0.2 * N)
+        Nloc = int(0.4 * N)
         Nglob = N - Nloc
 
         local.sort(reverse=True)
@@ -238,18 +238,30 @@ class FieldSolver2D:
             ex = abs(self.V[i, j+1] - self.V[i, j])
             ey = abs(self.V[i+1, j] - self.V[i, j])
 
-            split_x = ex >= ey
-            split_y = ey > ex
+            # Detect which face touches a conductor
+            split_down = i > 0 and self.conductor_mask[i-1, j]
+            split_up   = i < self.ny-1 and self.conductor_mask[i+1, j]
+            split_left = j > 0 and self.conductor_mask[i, j-1]
+            split_right= j < self.nx-1 and self.conductor_mask[i, j+1]
 
-            if split_y:
+            # Default behavior (gradient-based)
+            do_x = ex >= ey
+            do_y = ey > ex
+
+            # Override near conductors: refine toward the wall
+            if split_down:
+                new_y.add(0.5 * (self.y[i-1] + self.y[i]))
+            elif split_up:
                 new_y.add(0.5 * (self.y[i] + self.y[i+1]))
-                if i > 0:
-                    new_y.add(0.5 * (self.y[i-1] + self.y[i]))
+            elif do_y:
+                new_y.add(0.5 * (self.y[i] + self.y[i+1]))
 
-            if split_x:
+            if split_left:
+                new_x.add(0.5 * (self.x[j-1] + self.x[j]))
+            elif split_right:
                 new_x.add(0.5 * (self.x[j] + self.x[j+1]))
-                if j > 0:
-                    new_x.add(0.5 * (self.x[j-1] + self.x[j]))
+            elif do_x:
+                new_x.add(0.5 * (self.x[j] + self.x[j+1]))
 
         self.x = np.array(sorted(set(self.x) | new_x))
         self.y = np.array(sorted(set(self.y) | new_y))
@@ -289,7 +301,7 @@ class FieldSolver2D:
                        refine_frac=0.15,
                        energy_tol=0.05,
                        param_tol=0.1,# Error in Z0/C
-                       max_nodes=50000,
+                       max_nodes=20000,
                        min_converged_passes=2):
         """
         Adaptive mesh solve with robust convergence criteria.
