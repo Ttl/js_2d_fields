@@ -41,7 +41,17 @@ function updateGeometry() {
         );
         log("GCPW Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
     } else {
-        solver = new MicrostripSolver(p.w, p.h, p.t, p.er, p.tand, p.sigma, p.freq, p.nx, p.ny);
+        solver = new MicrostripSolver({
+            trace_width: p.w,
+            substrate_height: p.h,
+            trace_thickness: p.t,
+            epsilon_r: p.er,
+            tan_delta: p.tand,
+            sigma_cond: p.sigma,
+            freq: p.freq,
+            nx: p.nx,
+            ny: p.ny
+        });
         log("Microstrip Geometry updated. Grid: " + solver.x.length + "x" + solver.y.length);
     }
 }
@@ -98,14 +108,15 @@ function draw() {
     const nx = solver.x.length;
     const ny = solver.y.length;
 
-    // Limit display Y
-    const maxY = Math.min(solver.y[ny - 1], solver.h + 5 * solver.w);
-    const maxYIdx = solver.y.findIndex(y => y > maxY);
+    // Limit display Y - convert Float64Array to regular array for findIndex
+    const yArr = Array.from(solver.y);
+    const maxY = Math.min(yArr[ny - 1], solver.h + 5 * solver.w);
+    const maxYIdx = yArr.findIndex(y => y > maxY);
     const nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
 
-    // Coordinates in mm
-    const xMM = solver.x.map(v => v * 1000);
-    const yMM = solver.y.slice(0, nyDisplay).map(v => v * 1000);
+    // Coordinates in mm - convert Float64Array to regular arrays for Plotly
+    const xMM = Array.from(solver.x, v => v * 1000);
+    const yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
 
     let zData = [];
     let title = "";
