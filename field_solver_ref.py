@@ -295,11 +295,16 @@ class FieldSolver2D:
 
         for j in selected_x:
             midpoint = 0.5 * (self.x[j] + self.x[j + 1])
-            new_x.add(midpoint)
+
             if x_symmetric:
-                symmetric_point = 2 * x_center - midpoint
-                if self.x[0] < symmetric_point < self.x[-1]:
-                    new_x.add(symmetric_point)
+                # Only generate midpoints on one side of center
+                if midpoint <= x_center:
+                    new_x.add(midpoint)
+                    symmetric_point = 2 * x_center - midpoint
+                    if self.x[0] < symmetric_point < self.x[-1]:
+                        new_x.add(symmetric_point)
+            else:
+                new_x.add(midpoint)
 
         for i in selected_y:
             midpoint = 0.5 * (self.y[i] + self.y[i + 1])

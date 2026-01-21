@@ -303,7 +303,6 @@ export class FieldSolver2D {
             if (r === c) diag[r] += v;
         };
 
-        // --- Matrix assembly (Python parity) ---
         for (let i = 0; i < ny; i++) {
             for (let j = 0; j < nx; j++) {
                 if (is_cond(i, j)) continue;
@@ -382,87 +381,8 @@ export class FieldSolver2D {
 
         // --- Convert to CSR ---
         const { rowPtr, colIdx, values } = buildCSR(colLists, valLists, N_unknown);
-
         const csr = { rowPtr, colIdx, values };
         const x = await solveWithWASM(csr, B, true);
-
-        /*
-        // --- Preconditioned CG ---
-        const x = new Float64Array(N_unknown);
-        const r = new Float64Array(N_unknown);
-        const z = new Float64Array(N_unknown);
-        const p = new Float64Array(N_unknown);
-        const Ap = new Float64Array(N_unknown);
-        const invDiag = new Float64Array(N_unknown);
-
-        for (let i = 0; i < N_unknown; i++) invDiag[i] = 1.0 / diag[i];
-
-        let bnorm = 0;
-        for (let i = 0; i < N_unknown; i++) {
-            r[i] = B[i];
-            bnorm += B[i] * B[i];
-        }
-        bnorm = Math.sqrt(bnorm);
-
-        const rtol = 1e-7;
-        const atol = 1e-12;
-        const maxIter = 10000;
-
-        for (let i = 0; i < N_unknown; i++) {
-            z[i] = r[i] * invDiag[i];
-            p[i] = z[i];
-        }
-
-        let rz_old = 0;
-        for (let i = 0; i < N_unknown; i++) rz_old += r[i] * z[i];
-
-        for (let iter = 0; iter < maxIter; iter++) {
-            // Ap = A * p
-            for (let i = 0; i < N_unknown; i++) {
-                let sum = 0;
-                for (let k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
-                    sum += values[k] * p[colIdx[k]];
-                }
-                Ap[i] = sum;
-            }
-
-            let alpha_den = 0;
-            for (let i = 0; i < N_unknown; i++) {
-                alpha_den += p[i] * Ap[i];
-            }
-
-            const alpha = rz_old / alpha_den;
-
-            let err = 0;
-            for (let i = 0; i < N_unknown; i++) {
-                x[i] += alpha * p[i];
-                r[i] -= alpha * Ap[i];
-                err += r[i] * r[i];
-            }
-
-            const rnorm = Math.sqrt(err);
-            if (rnorm <= rtol * bnorm + atol) break;
-
-            for (let i = 0; i < N_unknown; i++) {
-                z[i] = r[i] * invDiag[i];
-            }
-
-            let rz_new = 0;
-            for (let i = 0; i < N_unknown; i++) rz_new += r[i] * z[i];
-
-            const beta = rz_new / rz_old;
-            rz_old = rz_new;
-
-            for (let i = 0; i < N_unknown; i++) {
-                p[i] = z[i] + beta * p[i];
-            }
-
-            if (iter % 100 === 0 && onProgress) {
-                onProgress(iter, maxIter, rnorm / bnorm);
-                await new Promise(r => setTimeout(r, 0));
-            }
-        }
-        */
 
         // --- Reconstruct solution ---
         for (let k = 0; k < N_unknown; k++) {
@@ -923,12 +843,17 @@ export class FieldSolver2D {
 
         for (const j of selected_x) {
             const midpoint = 0.5 * (this.x[j] + this.x[j + 1]);
-            new_x.add(midpoint);
+
             if (x_symmetric) {
-                const symmetric_point = 2 * x_center - midpoint;
-                if (symmetric_point > this.x[0] && symmetric_point < this.x[this.x.length - 1]) {
-                    new_x.add(symmetric_point);
+                if (midpoint <= x_center) {
+                    new_x.add(midpoint);
+                    const symmetric_point = 2 * x_center - midpoint;
+                    if (symmetric_point > this.x[0] && symmetric_point < this.x[this.x.length - 1]) {
+                        new_x.add(symmetric_point);
+                    }
                 }
+            } else {
+                new_x.add(midpoint);
             }
         }
 
@@ -1001,23 +926,6 @@ export class FieldSolver2D {
         const z_err = Math.abs(Z0 - prev_Z0) / Math.max(Math.abs(prev_Z0), 1e-12);
         const c_err = Math.abs(C - prev_C) / Math.max(Math.abs(prev_C), 1e-12);
         return Math.max(z_err, c_err);
-    }
-
-    _setup_geometry_after_refinement() {
-        /**
-         * Recalculate grid spacings and rebuild geometry.
-         * Child classes should override this if they need custom setup.
-         */
-        // Recalculate dx, dy
-        this.dx_array = diff(this.x);
-        this.dy_array = diff(this.y);
-
-        // Call child-specific setup if it exists
-        if (this._setup_geometry) {
-            this._setup_geometry();
-        } else if (this.init_matrices) {
-            this.init_matrices();
-        }
     }
 
     async _solve_single_mode(mode, vacuum_first = true) {
@@ -1335,7 +1243,7 @@ export class FieldSolver2D {
                 // Refine mesh (use odd mode fields for refinement)
                 if (it !== max_iters - 1) {
                     this.refine_mesh(Ex_odd, Ey_odd, refineFrac);
-                    this._setup_geometry_after_refinement();
+                    this._setup_geometry();
                 }
             }
 
@@ -1449,7 +1357,7 @@ export class FieldSolver2D {
                 // Refine mesh (skip on last iteration)
                 if (it !== max_iters - 1) {
                     this.refine_mesh(Ex, Ey, refineFrac);
-                    this._setup_geometry_after_refinement();
+                    this._setup_geometry();
                 }
             }
 
