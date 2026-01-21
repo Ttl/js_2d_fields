@@ -105,6 +105,102 @@ function test_microstrip_solution(solver_results, reference, test_name = "Micros
     return test_results;
 }
 
+function test_differential_solution(solver_results, reference, test_name = "Differential Microstrip") {
+    // Global error thresholds (relative error in %)
+    const MAX_Z_DIFF_ERROR = 6.0;
+    const MAX_Z_COMMON_ERROR = 6.0;
+    const MAX_Z_ODD_ERROR = 6.0;
+    const MAX_Z_EVEN_ERROR = 6.0;
+    const MAX_EPS_EFF_ERROR = 5.0;
+    const MAX_LOSS_ERROR = 50.0;
+    const MAX_C_ERROR = 10.0;
+
+    // Error thresholds mapping
+    const error_thresholds = {
+        'Z_diff': MAX_Z_DIFF_ERROR,
+        'Z_common': MAX_Z_COMMON_ERROR,
+        'Z_odd': MAX_Z_ODD_ERROR,
+        'Z_even': MAX_Z_EVEN_ERROR,
+        'eps_eff_odd': MAX_EPS_EFF_ERROR,
+        'eps_eff_even': MAX_EPS_EFF_ERROR,
+        'C_odd': MAX_C_ERROR,
+        'C_even': MAX_C_ERROR,
+        'alpha_c_odd': MAX_LOSS_ERROR,
+        'alpha_c_even': MAX_LOSS_ERROR,
+        'alpha_d_odd': MAX_LOSS_ERROR,
+        'alpha_d_even': MAX_LOSS_ERROR,
+        'alpha_total_odd': MAX_LOSS_ERROR,
+        'alpha_total_even': MAX_LOSS_ERROR,
+    };
+
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`${test_name.toUpperCase()} VALIDATION TEST`);
+    console.log(`${'='.repeat(80)}`);
+    console.log(`${'Parameter'.padEnd(20)} ${'Solved'.padEnd(15)} ${'Reference'.padEnd(15)} ${'Error (%)'.padEnd(12)} ${'Status'.padEnd(10)}`);
+    console.log(`${'-'.repeat(80)}`);
+
+    let all_passed = true;
+    const test_results = {};
+
+    for (const [param, ref_value] of Object.entries(reference)) {
+        if (!(param in solver_results)) {
+            continue;
+        }
+
+        const solved_value = solver_results[param];
+
+        // Calculate relative error
+        let rel_error;
+        if (ref_value !== 0) {
+            rel_error = Math.abs((solved_value - ref_value) / ref_value) * 100;
+        } else {
+            rel_error = Math.abs(solved_value) * 100;
+        }
+
+        // Check against threshold
+        const threshold = error_thresholds[param] || 10.0;
+        const passed = rel_error <= threshold;
+        all_passed = all_passed && passed;
+
+        const status = passed ? "✓ PASS" : "✗ FAIL";
+
+        // Format values based on parameter type
+        let solved_str, ref_str;
+        if (param.startsWith('C_')) {
+            solved_str = `${(solved_value * 1e12).toFixed(2)} pF`;
+            ref_str = `${(ref_value * 1e12).toFixed(2)} pF`;
+        } else if (param.startsWith('alpha_')) {
+            solved_str = `${solved_value.toFixed(4)} dB/m`;
+            ref_str = `${ref_value.toFixed(4)} dB/m`;
+        } else if (param.startsWith('Z_')) {
+            solved_str = `${solved_value.toFixed(2)} Ω`;
+            ref_str = `${ref_value.toFixed(2)} Ω`;
+        } else {
+            solved_str = `${solved_value.toFixed(3)}`;
+            ref_str = `${ref_value.toFixed(3)}`;
+        }
+
+        console.log(`${param.padEnd(20)} ${solved_str.padEnd(15)} ${ref_str.padEnd(15)} ${rel_error.toFixed(2).padEnd(12)} ${status.padEnd(10)}`);
+
+        test_results[param] = {
+            'solved': solved_value,
+            'reference': ref_value,
+            'error': rel_error,
+            'passed': passed
+        };
+    }
+
+    console.log(`${'-'.repeat(80)}`);
+    console.log(`Overall Result: ${all_passed ? '✓ ALL TESTS PASSED' : '✗ SOME TESTS FAILED'}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (!all_passed) {
+        throw new Error(`${test_name} validation failed - see errors above`);
+    }
+
+    return test_results;
+}
+
 async function solve_microstrip() {
     const solver = new MicrostripSolver({
         substrate_height: 1.6e-3,
@@ -117,7 +213,6 @@ async function solve_microstrip() {
         freq: 1e9,
         nx: 10,
         ny: 10,
-        skin_cells: 50,
         use_sm: false,
         boundaries: ["open", "open", "open", "gnd"]
     });
@@ -165,7 +260,6 @@ async function solve_microstrip_embed() {
         freq: 1e9,
         nx: 10,
         ny: 10,
-        skin_cells: 50,
         use_sm: false,
         top_diel_h: 0.2e-3,
         top_diel_er: 4.5,
@@ -212,7 +306,6 @@ async function solve_microstrip_cut() {
         freq: 1e9,
         nx: 10,
         ny: 10,
-        skin_cells: 50,
         use_sm: false,
         gnd_cut_width: 3e-3,
         gnd_cut_sub_h: 1e-3,
@@ -247,11 +340,78 @@ async function solve_microstrip_cut() {
     return solver_results;
 }
 
+async function solve_differential_microstrip() {
+    const solver = new MicrostripSolver({
+        substrate_height: 1.6e-3,
+        trace_width: 3e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 16e-6,
+        epsilon_r: 4.5,
+        freq: 1e9,
+        nx: 10,
+        ny: 10,
+        trace_spacing: 1e-3  // This enables differential mode
+    });
+
+    const results = await solver.solve_adaptive({energy_tol: 0.01});
+
+    const reference = {
+        'Z_odd': 40.23,
+        'Z_even': 57.65,
+        'eps_eff_even': 3.65,
+        'eps_eff_odd': 2.98,
+        'alpha_c_odd': 0.363,
+        'alpha_c_even': 0.269,
+        'alpha_d_odd': 2.67,
+        'alpha_d_even': 3.21
+    };
+
+    // Test against reference
+    test_differential_solution(results, reference, "Differential Microstrip");
+
+    return results;
+}
+
+async function solve_differential_stripline() {
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2e-3,
+        trace_width: 0.15e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 16e-6,
+        epsilon_r: 4.1,
+        epsilon_r_top: 4.1,
+        air_top: 0.2e-3,
+        freq: 1e9,
+        nx: 10,
+        ny: 10,
+        trace_spacing: 0.1e-3,  // This enables differential mode
+        boundaries: ["open", "open", "gnd", "gnd"]
+    });
+
+    const results = await solver.solve_adaptive();
+
+    const reference = {
+        'Z_odd': 37.6,
+        'Z_even': 61.36,
+        'eps_eff_even': 4.162,
+        'eps_eff_odd': 4.195,
+        'alpha_total_odd': 7.93,
+        'alpha_total_even': 6.47,
+    };
+
+    // Test against reference
+    test_differential_solution(results, reference, "Differential Stripline");
+
+    return results;
+}
+
 // Run tests
 async function runTests() {
     await solve_microstrip();
     await solve_microstrip_embed();
     await solve_microstrip_cut();
+    await solve_differential_stripline();
+    await solve_differential_microstrip();
 }
 
 runTests();

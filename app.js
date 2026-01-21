@@ -28,6 +28,8 @@ function getParams() {
         freq: parseFloat(document.getElementById('inp_freq').value) * 1e9,
         nx: 30,  // Fixed initial grid size
         ny: 30,  // Fixed initial grid size
+        // Differential parameters
+        trace_spacing: parseFloat(document.getElementById('inp_trace_spacing').value) * 1e-3,
         // GCPW specific parameters
         gap: parseFloat(document.getElementById('inp_gap').value) * 1e-3,
         top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value) * 1e-3,
@@ -88,6 +90,21 @@ function updateGeometry() {
             sm_t_side: p.sm_t_side,
             sm_er: p.sm_er,
             sm_tand: p.sm_tand
+        });
+    } else if (p.tl_type === 'diff_microstrip') {
+        // Differential Microstrip
+        solver = new MicrostripSolver({
+            trace_width: p.w,
+            substrate_height: p.h,
+            trace_thickness: p.t,
+            trace_spacing: p.trace_spacing,  // Enable differential mode
+            epsilon_r: p.er,
+            tan_delta: p.tand,
+            sigma_cond: p.sigma,
+            freq: p.freq,
+            nx: p.nx,
+            ny: p.ny,
+            boundaries: ["open", "open", "open", "gnd"]
         });
     } else if (p.tl_type === 'stripline') {
         solver = new MicrostripSolver({
@@ -197,18 +214,34 @@ async function runSimulation() {
         // Redraw to show E-field overlay on geometry
         draw();
 
-        log(`\nRESULTS:\n` +
-                 `----------------------\n` +
-                 `Characteristic Impedance Z0:  ${results.Z0.toFixed(2)} Ω\n` +
-                 `Z0 (complex):  ${results.Zc.toString()} Ω\n` +
-                 `Effective Permittivity: ${results.eps_eff.toFixed(3)}\n` +
-                 `R:             ${results.RLGC.R.toExponential(3)} Ω/m\n` +
-                 `L:             ${results.RLGC.L.toExponential(3)} H/m\n` +
-                 `G:             ${results.RLGC.G.toExponential(3)} S/m\n` +
-                 `C:             ${results.RLGC.C.toExponential(3)} F/m\n` +
-                 `Dielectric Loss: ${results.alpha_diel_db_m.toFixed(4)} dB/m\n` +
-                 `Conductor Loss:  ${results.alpha_cond_db_m.toFixed(4)} dB/m\n` +
-                 `Total Loss:      ${results.total_alpha_db_m.toFixed(4)} dB/m`);
+        // Check if differential results
+        if (results.Z_odd !== undefined) {
+            // Differential microstrip results
+            log(`\nDIFFERENTIAL RESULTS:\n` +
+                     `======================\n` +
+                     `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ω  (2 × Z_odd)\n` +
+                     `Common-Mode Impedance Z_common: ${results.Z_common.toFixed(2)} Ω  (Z_even / 2)\n` +
+                     `\nModal Impedances:\n` +
+                     `  Odd-Mode  Z_odd:  ${results.Z_odd.toFixed(2)} Ω  (εᵣₑff = ${results.eps_eff_odd.toFixed(3)})\n` +
+                     `  Even-Mode Z_even: ${results.Z_even.toFixed(2)} Ω  (εᵣₑff = ${results.eps_eff_even.toFixed(3)})\n` +
+                     `\nLosses @ ${(p.freq / 1e9).toFixed(2)} GHz:\n` +
+                     `  Odd-Mode:  Diel=${results.alpha_d_odd.toFixed(4)} dB/m, Cond=${results.alpha_c_odd.toFixed(4)} dB/m, Total=${results.alpha_total_odd.toFixed(4)} dB/m\n` +
+                     `  Even-Mode: Diel=${results.alpha_d_even.toFixed(4)} dB/m, Cond=${results.alpha_c_even.toFixed(4)} dB/m, Total=${results.alpha_total_even.toFixed(4)} dB/m`);
+        } else {
+            // Single-ended results
+            log(`\nRESULTS:\n` +
+                     `----------------------\n` +
+                     `Characteristic Impedance Z0:  ${results.Z0.toFixed(2)} Ω\n` +
+                     `Z0 (complex):  ${results.Zc.toString()} Ω\n` +
+                     `Effective Permittivity: ${results.eps_eff.toFixed(3)}\n` +
+                     `R:             ${results.RLGC.R.toExponential(3)} Ω/m\n` +
+                     `L:             ${results.RLGC.L.toExponential(3)} H/m\n` +
+                     `G:             ${results.RLGC.G.toExponential(3)} S/m\n` +
+                     `C:             ${results.RLGC.C.toExponential(3)} F/m\n` +
+                     `Dielectric Loss: ${results.alpha_diel_db_m.toFixed(4)} dB/m\n` +
+                     `Conductor Loss:  ${results.alpha_cond_db_m.toFixed(4)} dB/m\n` +
+                     `Total Loss:      ${results.total_alpha_db_m.toFixed(4)} dB/m`);
+        }
 
     } catch (e) {
         console.error(e);
@@ -226,6 +259,28 @@ async function runSimulation() {
 let contourCount = 20;
 let showMesh = false;
 let currentView = "geometry";
+
+// Helper function to get Ex/Ey fields (handles differential mode)
+function getFields() {
+    if (!solver || !solver.Ex || !solver.Ey) {
+        return { Ex: null, Ey: null };
+    }
+
+    // Check if differential mode: solver.Ex is [Ex_odd, Ex_even]
+    // In differential: solver.Ex.length === 2 and each element is a 2D array
+    // In single-ended: solver.Ex is directly a 2D array
+    // Detect by checking if solver.Ex[0] has a numeric length property and solver.Ex[1] exists
+    const isDifferential = solver.Ex.length === 2 && solver.Ex[1] !== undefined &&
+                           typeof solver.Ex[0].length === 'number' && solver.Ex[0].length > 0;
+
+    if (isDifferential) {
+        // Differential mode: use odd mode (index 0) by default
+        return { Ex: solver.Ex[0], Ey: solver.Ey[0] };
+    } else {
+        // Single-ended mode
+        return { Ex: solver.Ex, Ey: solver.Ey };
+    }
+}
 
 function draw(resetZoom = false) {
     if (!solver) return;
@@ -320,12 +375,17 @@ function draw(resetZoom = false) {
             yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
 
             // Compute E-field magnitude
-            for (let i = 0; i < nyDisplay; i++) {
-                const row = [];
-                for (let j = 0; j < nx; j++) {
-                    row.push(Math.hypot(solver.Ex[i][j], solver.Ey[i][j]));
+            const { Ex, Ey } = getFields();
+            if (Ex && Ey && Ex.length >= nyDisplay) {
+                for (let i = 0; i < nyDisplay; i++) {
+                    const row = [];
+                    if (Ex[i] && Ey[i]) {
+                        for (let j = 0; j < nx; j++) {
+                            row.push(Math.hypot(Ex[i][j], Ey[i][j]));
+                        }
+                    }
+                    zData.push(row);
                 }
-                zData.push(row);
             }
 
             title = "Transmission Line Geometry with E-field";
@@ -383,12 +443,17 @@ function draw(resetZoom = false) {
         title = "|E| Field Magnitude (V/m)";
         zTitle = "V/m";
 
-        for (let i = 0; i < nyDisplay; i++) {
-            const row = [];
-            for (let j = 0; j < nx; j++) {
-                row.push(Math.hypot(solver.Ex[i][j], solver.Ey[i][j]));
+        const { Ex, Ey } = getFields();
+        if (Ex && Ey && Ex.length >= nyDisplay) {
+            for (let i = 0; i < nyDisplay; i++) {
+                const row = [];
+                if (Ex[i] && Ey[i]) {
+                    for (let j = 0; j < nx; j++) {
+                        row.push(Math.hypot(Ex[i][j], Ey[i][j]));
+                    }
+                }
+                zData.push(row);
             }
-            zData.push(row);
         }
     }
 

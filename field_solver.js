@@ -80,7 +80,7 @@ export function _smooth_transition(x0, x1, n, curve_end, beta=4.0) {
         if (n === 0) return new Float64Array(0); // If 0 points, return empty array
         return new Float64Array([x0, x1]); // Python returns [start, end] for n_points <= 1
     }
-    
+
     const pts = new Float64Array(n);
     const xi = linspace(0, 1, n);
 
@@ -106,7 +106,7 @@ export function _enforce_interfaces(arr, interfaces) {
     for (let val of interfaces) {
         list.push(val);
     }
-    
+
     return Float64Array.from(new Set(list)).sort((a, b) => a - b);
 }
 
@@ -135,14 +135,14 @@ function buildCSR(colLists, valLists, N) {
         rowPtr[i] = p;
         const cols = colLists[i];
         const vals = valLists[i];
-        
+
         // Create array of (col, val) pairs and sort by column index
         const pairs = [];
         for (let k = 0; k < cols.length; k++) {
             pairs.push({ col: cols[k], val: vals[k] });
         }
         pairs.sort((a, b) => a.col - b.col);
-        
+
         // Write sorted data
         for (let k = 0; k < pairs.length; k++) {
             colIdx[p] = pairs[k].col;
@@ -163,10 +163,10 @@ async function solveWithWASM(csr, B, useLU = false) {
         // Initialize the module if it hasn't been already
         WASMModuleInstance = await createWASMModule();
     }
-    
+
     const N = B.length;
     const nnz = csr.values.length;
-    
+
     // Allocate memory
     const pRow = WASMModuleInstance._malloc(4 * (N + 1));
     const pCol = WASMModuleInstance._malloc(4 * nnz);
@@ -184,7 +184,7 @@ async function solveWithWASM(csr, B, useLU = false) {
         const colView = new Int32Array(currentHEAP32.buffer, pCol, nnz);
         const valView = new Float64Array(currentHEAPF64.buffer, pVal, nnz);
         const bView = new Float64Array(currentHEAPF64.buffer, pB, N);
-        
+
         rowView.set(csr.rowPtr);
         colView.set(csr.colIdx);
         valView.set(csr.values);
@@ -193,7 +193,7 @@ async function solveWithWASM(csr, B, useLU = false) {
         if (!WASMModuleInstance._solve_sparse) {
             throw new Error("WASM function solve_sparse not found. Module not loaded properly.");
         }
-        
+
         // Call solver
         const status = WASMModuleInstance._solve_sparse(
             N, nnz,
@@ -201,23 +201,23 @@ async function solveWithWASM(csr, B, useLU = false) {
             pB, pX,
             useLU ? 1 : 0
         );
-        
+
         if (status !== 0) {
             const errors = {
                 1: "LU decomposition failed",
-                2: "LU solving failed", 
+                2: "LU solving failed",
                 3: "Cholesky decomposition failed (matrix may not be positive definite)",
                 4: "Cholesky solving failed",
                 99: "Unknown C++ exception"
             };
             throw new Error(errors[status] || `WASM solver failed with code: ${status}`);
         }
-        
+
         // Copy result
         const xView = new Float64Array(WASMModuleInstance.HEAPF64.buffer, pX, N);
         const x = new Float64Array(N);
         x.set(xView);
-        
+
         return x;
     } finally {
         // Always free memory
@@ -550,10 +550,6 @@ export class FieldSolver2D {
                     Q += CONSTANTS.EPS0 * er * En * area;
                 };
 
-                // Changed these to use the bounds checking from the python side
-                // No need to check for signal_mask[i,j+1] etc. here, as check_neighbor does it.
-                // The python code calculates the flux across faces *between* a signal and a dielectric region.
-
                 // Right neighbor
                 if (!this.signal_mask[i][j + 1]) {
                     check_neighbor(i, j + 1, false);
@@ -674,9 +670,7 @@ export class FieldSolver2D {
 
                 const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
                 const dA = get_dx(j) * get_dy(i);
-                
-                // Assuming tan_delta is a property of the class (MicrostripSolver2D or FieldSolver2D)
-                // and omega is also available (2 * pi * freq)
+
                 if (this.tan_delta && this.omega) {
                     Pd += 0.5 * this.omega * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tan_delta * E2 * dA;
                 }
@@ -1037,7 +1031,7 @@ export class FieldSolver2D {
 
         const {
             max_iters = 10,
-            refine_frac = 0.15,
+            refine_frac = 0.2,
             energy_tol = 0.05,
             param_tol = 0.1,
             max_nodes = 20000,

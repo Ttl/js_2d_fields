@@ -145,9 +145,18 @@
         <label for="tl_type">Transmission Line Type</label>
         <select id="tl_type">
             <option value="microstrip">Microstrip</option>
+            <option value="diff_microstrip">Differential Microstrip</option>
             <option value="stripline">Stripline</option>
             <option value="gcpw">GCPW</option>
         </select>
+    </div>
+
+    <div id="diff-params" style="display: none;">
+        <h3>Differential Pair Parameters</h3>
+        <div class="control-group">
+            <label>Trace Spacing (mm)</label>
+            <input type="number" id="inp_trace_spacing" value="1.0" step="0.1">
+        </div>
     </div>
 
     <div id="microstrip-params">
@@ -303,6 +312,7 @@
     function toggleParameterVisibility() {
         const tlType = document.getElementById('tl_type').value;
         const microstripParams = document.getElementById('microstrip-params');
+        const diffParams = document.getElementById('diff-params');
         const gcpwParams = document.getElementById('gcpw-params');
         const striplineParams = document.getElementById('stripline-params');
         const advancedParams = document.getElementById('advanced-params');
@@ -314,6 +324,7 @@
         const gndCutParams = document.getElementById('gnd-cut-params');
 
         // Hide all type-specific params first
+        diffParams.style.display = 'none';
         gcpwParams.style.display = 'none';
         striplineParams.style.display = 'none';
 
@@ -326,6 +337,9 @@
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
+        } else if (tlType === 'diff_microstrip') {
+            diffParams.style.display = 'block';
+            advancedParams.style.display = 'none';
         } else if (tlType === 'stripline') {
             striplineParams.style.display = 'block';
             advancedParams.style.display = 'none';
