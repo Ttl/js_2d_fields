@@ -1,6 +1,7 @@
 import { MicrostripSolver } from './microstrip.js';
 import { GroundedCPWSolver2D } from './gcpw.js';
 import { CONSTANTS } from './field_solver.js';
+import { makeStreamlineTraceFromConductors } from './streamlines.js';
 const Plotly = window.Plotly;
 
 let solver = null;
@@ -286,6 +287,7 @@ function getFields() {
     }
 }
 
+
 function draw(resetZoom = false) {
     if (!solver) return;
 
@@ -482,28 +484,88 @@ function draw(resetZoom = false) {
     let traces = [];
 
     if (currentView === "geometry" && zData.length > 0) {
-        // Geometry with E-field overlay: use contour plot with semi-transparent coloring
-        traces.push({
-            type: "contour",
-            x: xMM,
-            y: yMM,
-            z: zData,
-            colorscale: "Hot",
-            opacity: 0.6,
-            contours: {
-                showlines: true,
-                coloring: "heatmap",
-                ncontours: 15
-            },
-            colorbar: {
-                title: "|E| (V/m)",
-                len: 0.6
-            },
-            hovertemplate:
-                "x: %{x:.2f} mm<br>" +
-                "y: %{y:.2f} mm<br>" +
-                "|E|: %{z:.3e} V/m<extra></extra>"
-        });
+        const { Ex, Ey } = getFields();
+
+        //const fieldTraces = [];
+
+        //const stepX = Math.max(1, Math.floor(nx / 30));        // density control
+        //const stepY = Math.max(1, Math.floor(nyDisplay / 30));
+        //const scale = 0.8; // arrow length in mm
+
+
+        //if (Ex && Ey && Ex.length >= nyDisplay) {
+        //    const xLines = [];
+        //    const yLines = [];
+
+        //    for (let i = 0; i < nyDisplay; i += stepY) {
+        //        for (let j = 0; j < nx; j += stepX) {
+        //            const ex = Ex[i]?.[j];
+        //            const ey = Ey[i]?.[j];
+        //            if (!ex || !ey) continue;
+
+        //            const mag = Math.hypot(ex, ey);
+        //            if (mag === 0) continue;
+
+        //            // Base point (mm)
+        //            const x0 = xMM[j];
+        //            const y0 = yMM[i];
+
+        //            // Direction (normalized)
+        //            const dx = (ex / mag) * scale;
+        //            const dy = (ey / mag) * scale;
+
+        //            // Line segment
+        //            xLines.push(x0, x0 + dx, null);
+        //            yLines.push(y0, y0 + dy, null);
+        //        }
+        //    }
+
+        //    traces.push({
+        //        type: "scatter",
+        //        mode: "lines",
+        //        x: xLines,
+        //        y: yLines,
+        //        line: {
+        //            width: 1.2,
+        //            color: "black"
+        //        },
+        //        hoverinfo: "skip",
+        //        name: "E-field lines"
+        //    });
+        //}
+        //
+        //traces.push({
+        //    type: "contour",
+        //    x: xMM,
+        //    y: yMM,
+        //    z: zData,
+        //    colorscale: "Hot",
+        //    opacity: 0.6,
+        //    contours: {
+        //        showlines: true,
+        //        coloring: "heatmap",
+        //        ncontours: 15
+        //    },
+        //    colorbar: {
+        //        title: "|E| (V/m)",
+        //        len: 0.6
+        //    },
+        //    hovertemplate:
+        //        "x: %{x:.2f} mm<br>" +
+        //        "y: %{y:.2f} mm<br>" +
+        //        "|E|: %{z:.3e} V/m<extra></extra>"
+        //});
+
+        traces.push(
+            makeStreamlineTraceFromConductors(
+                Ex,
+                Ey,
+                solver.x,
+                solver.y,
+                solver.conductors
+            )
+        );
+
     } else if (currentView === "geometry") {
         // Geometry only - invisible scatter for axis scaling
         traces.push({
