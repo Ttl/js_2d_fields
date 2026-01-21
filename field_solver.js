@@ -235,18 +235,55 @@ export class FieldSolver2D {
     constructor() {
         this.x = null;
         this.y = null;
-        this.V = null;
+        this.V = null;  // Stored as array: [V] for single-ended, [V_odd, V_even] for differential
         this.epsilon_r = null;
         this.conductor_mask = null; // 1 if conductor, 0 if dielectric
         this.bc_mask = null; // Boundary conditions
         this.solution_valid = false;
 
-        // Computed fields
+        // Computed fields - stored as array: [fields] for single-ended, [odd, even] for differential
         this.Ex = null;
         this.Ey = null;
     }
 
-    async solve_laplace_iterative(vacuum = false, onProgress = null) {
+    /**
+     * Create a voltage array based on conductor masks and solve mode.
+     * @param {string} mode - 'single', 'odd', or 'even'
+     * @returns {Array<Float64Array>} - 2D voltage array
+     */
+    _create_voltage_array(mode = 'single') {
+        const ny = this.y.length;
+        const nx = this.x.length;
+        const V = Array(ny).fill().map(() => new Float64Array(nx));
+
+        for (let i = 0; i < ny; i++) {
+            for (let j = 0; j < nx; j++) {
+                if (this.ground_mask[i][j]) {
+                    V[i][j] = 0.0;
+                } else if (mode === 'odd' && this.is_differential) {
+                    // Odd mode: positive trace = +1V, negative trace = -1V
+                    if (this.signal_p_mask[i][j]) V[i][j] = 1.0;
+                    else if (this.signal_n_mask[i][j]) V[i][j] = -1.0;
+                } else if (mode === 'even' && this.is_differential) {
+                    // Even mode: both traces = +1V
+                    if (this.signal_mask[i][j]) V[i][j] = 1.0;
+                } else {
+                    // Single-ended: signal = +1V
+                    if (this.signal_mask[i][j]) V[i][j] = 1.0;
+                }
+            }
+        }
+        return V;
+    }
+
+    /**
+     * Solve Laplace equation for the given voltage array.
+     * @param {Array<Float64Array>} V - 2D voltage array with conductor boundary conditions set
+     * @param {boolean} vacuum - If true, solve with vacuum permittivity
+     * @param {function} onProgress - Optional progress callback
+     * @returns {Array<Float64Array>} - The solved voltage array (same reference as input)
+     */
+    async solve_laplace_iterative(V, vacuum = false, onProgress = null) {
         // Ensure mesh is generated
         if (this.ensure_mesh) {
             this.ensure_mesh();
@@ -368,7 +405,7 @@ export class FieldSolver2D {
                     if (!is_cond(ii, jj)) {
                         addA(n, full_to_red[fn2], c);
                     } else {
-                        B[n] -= c * this.V[ii][jj];
+                        B[n] -= c * V[ii][jj];
                     }
                 };
 
@@ -389,18 +426,25 @@ export class FieldSolver2D {
             const n = red_to_full[k];
             const i = (n / nx) | 0;
             const j = n % nx;
-            this.V[i][j] = x[k];
+            V[i][j] = x[k];
         }
+
+        return V;
     }
 
-    compute_fields() {
+    /**
+     * Compute E-field from voltage distribution.
+     * @param {Array<Float64Array>} V - 2D voltage array
+     * @returns {{Ex: Array<Float64Array>, Ey: Array<Float64Array>}} - E-field components
+     */
+    compute_fields(V) {
         const ny = this.y.length;
         const nx = this.x.length;
         const dx = diff(this.x);
         const dy = diff(this.y);
 
-        this.Ex = Array(ny).fill().map(() => new Float64Array(nx));
-        this.Ey = Array(ny).fill().map(() => new Float64Array(nx));
+        const Ex = Array(ny).fill().map(() => new Float64Array(nx));
+        const Ey = Array(ny).fill().map(() => new Float64Array(nx));
 
         for(let i=1; i<ny-1; i++) {
             for(let j=1; j<nx-1; j++) {
@@ -411,23 +455,30 @@ export class FieldSolver2D {
                 const dyd = dy[i-1];
                 const dyu = dy[i];
 
-                this.Ex[i][j] = -(
-                    (dxl / (dxr * (dxl + dxr))) * this.V[i][j+1] +
-                    ((dxr - dxl) / (dxl * dxr)) * this.V[i][j] -
-                    (dxr / (dxl * (dxl + dxr))) * this.V[i][j-1]
+                Ex[i][j] = -(
+                    (dxl / (dxr * (dxl + dxr))) * V[i][j+1] +
+                    ((dxr - dxl) / (dxl * dxr)) * V[i][j] -
+                    (dxr / (dxl * (dxl + dxr))) * V[i][j-1]
                 );
 
-                this.Ey[i][j] = -(
-                    (dyd / (dyu * (dyd + dyu))) * this.V[i+1][j] +
-                    ((dyu - dyd) / (dyd * dyu)) * this.V[i][j] -
-                    (dyu / (dyd * (dyd + dyu))) * this.V[i-1][j]
+                Ey[i][j] = -(
+                    (dyd / (dyu * (dyd + dyu))) * V[i+1][j] +
+                    ((dyu - dyd) / (dyd * dyu)) * V[i][j] -
+                    (dyu / (dyd * (dyd + dyu))) * V[i-1][j]
                 );
             }
         }
         this.solution_valid = true;
+        return { Ex, Ey };
     }
 
-    calculate_capacitance(vacuum=false) {
+    /**
+     * Calculate capacitance from voltage distribution.
+     * @param {Array<Float64Array>} V - 2D voltage array
+     * @param {boolean} vacuum - If true, use vacuum permittivity
+     * @returns {number} - Capacitance in F/m
+     */
+    calculate_capacitance(V, vacuum=false) {
         let Q = 0.0;
         const ny = this.y.length;
         const nx = this.x.length;
@@ -455,13 +506,13 @@ export class FieldSolver2D {
                     if (is_vertical_flux) {
                          // Neighbor is Top/Bottom
                          dist = Math.abs(this.y[i] - this.y[ni]);
-                         En = (this.V[i][j] - this.V[ni][nj]) / dist;
+                         En = (V[i][j] - V[ni][nj]) / dist;
                          // Average dx for area
                          area = (get_dx(j-1) + get_dx(j)) / 2;
                     } else {
                         // Neighbor is Left/Right
                         dist = Math.abs(this.x[j] - this.x[nj]);
-                        En = (this.V[i][j] - this.V[ni][nj]) / dist;
+                        En = (V[i][j] - V[ni][nj]) / dist;
                         // Average dy for area
                         area = (get_dy(i-1) + get_dy(i)) / 2;
                     }
@@ -641,27 +692,29 @@ export class FieldSolver2D {
 
         // 1. Calculate C0 (vacuum capacitance)
         currentStep = 1;
-        await this.solve_laplace_iterative(true, (i, max) => updateProgress(i / max, currentStep));
-        const C0 = this.calculate_capacitance(true);
+        let V = this._create_voltage_array('single');
+        V = await this.solve_laplace_iterative(V, true, (i, max) => updateProgress(i / max, currentStep));
+        const C0 = this.calculate_capacitance(V, true);
 
         // 2. Calculate C (with dielectric capacitance)
         currentStep = 2;
-        await this.solve_laplace_iterative(false, (i, max) => updateProgress(i / max, currentStep));
-        const C_with_diel = this.calculate_capacitance(false);
+        V = this._create_voltage_array('single');
+        V = await this.solve_laplace_iterative(V, false, (i, max) => updateProgress(i / max, currentStep));
+        const C_with_diel = this.calculate_capacitance(V, false);
 
         // 3. Calculate Z0 and effective permittivity
         const eps_eff = C_with_diel / C0;
         const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C_with_diel * C0));
 
         // 4. Compute fields Ex, Ey
-        this.compute_fields(); // This will set this.Ex and this.Ey
+        const { Ex, Ey } = this.compute_fields(V);
 
         // 5. Calculate losses
         // Conductor loss depends on Ex, Ey, Z0, omega, sigma_cond
-        const alpha_cond_db_m = this.calculate_conductor_loss(this.Ex, this.Ey, Z0);
+        const alpha_cond_db_m = this.calculate_conductor_loss(Ex, Ey, Z0);
 
         // Dielectric loss depends on Ex, Ey, Z0, omega, epsilon_r, tan_delta
-        const alpha_diel_db_m = this.calculate_dielectric_loss(this.Ex, this.Ey, Z0);
+        const alpha_diel_db_m = this.calculate_dielectric_loss(Ex, Ey, Z0);
 
         // 6. Calculate RLGC and complex Z0
         const { Zc, rlgc, eps_eff_mode } = this.rlgc(alpha_cond_db_m, alpha_diel_db_m, C_with_diel, Z0);
@@ -675,7 +728,10 @@ export class FieldSolver2D {
             RLGC: rlgc,
             alpha_cond_db_m: alpha_cond_db_m,
             alpha_diel_db_m: alpha_diel_db_m,
-            total_alpha_db_m: total_alpha_db_m
+            total_alpha_db_m: total_alpha_db_m,
+            V: V,  // Return V for storage
+            Ex: Ex,
+            Ey: Ey
         };
     }
 
@@ -683,13 +739,13 @@ export class FieldSolver2D {
     // ADAPTIVE MESHING METHODS
     // ============================================================================
 
-    _compute_refine_metrics(Ex, Ey) {
+    _compute_refine_metrics(V, Ex, Ey) {
         /**
          * For each grid interval, compute a metric indicating how much refinement
          * would help, based on voltage gradients and field energy in adjacent cells.
          */
-        const ny = this.V.length;
-        const nx = this.V[0].length;
+        const ny = V.length;
+        const nx = V[0].length;
 
         // Metric for splitting interval [x[j], x[j+1]]
         const x_metrics = new Float64Array(this.x.length - 1);
@@ -708,8 +764,8 @@ export class FieldSolver2D {
                 const eps = this.epsilon_r[i][j];
 
                 // Voltage differences across this cell
-                const dV_x = j < nx - 1 ? Math.abs(this.V[i][j + 1] - this.V[i][j]) : 0;
-                const dV_y = i < ny - 1 ? Math.abs(this.V[i + 1][j] - this.V[i][j]) : 0;
+                const dV_x = j < nx - 1 ? Math.abs(V[i][j + 1] - V[i][j]) : 0;
+                const dV_y = i < ny - 1 ? Math.abs(V[i + 1][j] - V[i][j]) : 0;
 
                 // Field magnitude for weighting
                 const E2 = Ex[i][j] ** 2 + Ey[i][j] ** 2;
@@ -870,11 +926,11 @@ export class FieldSolver2D {
         this.y = Float64Array.from([...all_y].sort((a, b) => a - b));
     }
 
-    refine_mesh(Ex, Ey, frac = 0.15) {
+    refine_mesh(V, Ex, Ey, frac = 0.15) {
         /**
          * Main refinement routine.
          */
-        const { x_metrics, y_metrics } = this._compute_refine_metrics(Ex, Ey);
+        const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey);
         const { selected_x, selected_y } = this._select_lines_to_refine(x_metrics, y_metrics, frac);
         this._refine_selected_lines(selected_x, selected_y);
 
@@ -939,65 +995,35 @@ export class FieldSolver2D {
          *
          * Returns:
          * --------
-         * {Z0, eps_eff, C, C0, Ex, Ey}
+         * {Z0, eps_eff, C, C0, Ex, Ey, V}
          */
-        const nx = this.x.length;
-        const ny = this.y.length;
-
-        // Set voltages based on mode
-        this.V = Array(ny).fill().map(() => new Float64Array(nx));
-
-        if (mode === 'odd') {
-            // Odd mode: left=-1V, right=+1V
-            for (let i = 0; i < ny; i++) {
-                for (let j = 0; j < nx; j++) {
-                    if (this.signal_n_mask[i][j]) {
-                        this.V[i][j] = -1.0;
-                    } else if (this.signal_p_mask[i][j]) {
-                        this.V[i][j] = 1.0;
-                    } else if (this.ground_mask[i][j]) {
-                        this.V[i][j] = 0.0;
-                    }
-                }
-            }
-        } else {
-            // Even mode: both=+1V
-            for (let i = 0; i < ny; i++) {
-                for (let j = 0; j < nx; j++) {
-                    if (this.signal_n_mask[i][j] || this.signal_p_mask[i][j]) {
-                        this.V[i][j] = 1.0;
-                    } else if (this.ground_mask[i][j]) {
-                        this.V[i][j] = 0.0;
-                    }
-                }
-            }
-        }
-
         let C0;
+        let V;
+
         if (vacuum_first) {
             // Calculate C0 (vacuum capacitance)
-            await this.solve_laplace_iterative(true);
+            V = this._create_voltage_array(mode);
+            V = await this.solve_laplace_iterative(V, true);
 
             // Use only positive trace for charge calculation
             const orig_signal_mask = this.signal_mask.map(row => row.slice());
             this.signal_mask = this.signal_p_mask.map(row => row.slice());
-            C0 = this.calculate_capacitance(true);
+            C0 = this.calculate_capacitance(V, true);
             this.signal_mask = orig_signal_mask;
         }
 
         // Solve with dielectric
-        await this.solve_laplace_iterative(false);
+        V = this._create_voltage_array(mode);
+        V = await this.solve_laplace_iterative(V, false);
 
         // Use only positive trace for charge calculation
         const orig_signal_mask = this.signal_mask.map(row => row.slice());
         this.signal_mask = this.signal_p_mask.map(row => row.slice());
-        const C = this.calculate_capacitance(false);
+        const C = this.calculate_capacitance(V, false);
         this.signal_mask = orig_signal_mask;
 
         // Calculate fields
-        this.compute_fields();
-        const Ex = this.Ex.map(row => row.slice());
-        const Ey = this.Ey.map(row => row.slice());
+        const { Ex, Ey } = this.compute_fields(V);
 
         // Calculate impedance
         let eps_eff, Z0;
@@ -1006,7 +1032,7 @@ export class FieldSolver2D {
             Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
         }
 
-        return { Z0, eps_eff, C, C0, Ex, Ey };
+        return { Z0, eps_eff, C, C0, Ex, Ey, V };
     }
 
     _calculate_differential_conductor_loss(Ex, Ey, Z0, mode) {
@@ -1154,8 +1180,8 @@ export class FieldSolver2D {
             let prev_Z_odd = null;
             let prev_Z_even = null;
 
-            let Z_odd, eps_eff_odd, C_odd, C0_odd, Ex_odd, Ey_odd;
-            let Z_even, eps_eff_even, C_even, C0_even, Ex_even, Ey_even;
+            let Z_odd, eps_eff_odd, C_odd, C0_odd, Ex_odd, Ey_odd, V_odd;
+            let Z_even, eps_eff_even, C_even, C0_even, Ex_even, Ey_even, V_even;
 
             for (let it = 0; it < max_iters; it++) {
                 // Solve even mode (+1V and +1V)
@@ -1166,6 +1192,7 @@ export class FieldSolver2D {
                 C0_even = even_results.C0;
                 Ex_even = even_results.Ex;
                 Ey_even = even_results.Ey;
+                V_even = even_results.V;
 
                 // Solve odd mode (+1V and -1V)
                 const odd_results = await this._solve_single_mode('odd', true);
@@ -1175,6 +1202,7 @@ export class FieldSolver2D {
                 C0_odd = odd_results.C0;
                 Ex_odd = odd_results.Ex;
                 Ey_odd = odd_results.Ey;
+                V_odd = odd_results.V;
 
                 // Energy-based error
                 const { energy: energy_odd, rel_error: energy_err_odd } =
@@ -1242,7 +1270,7 @@ export class FieldSolver2D {
 
                 // Refine mesh (use odd mode fields for refinement)
                 if (it !== max_iters - 1) {
-                    this.refine_mesh(Ex_odd, Ey_odd, refineFrac);
+                    this.refine_mesh(V_odd, Ex_odd, Ey_odd, refineFrac);
                     this._setup_geometry();
                 }
             }
@@ -1254,7 +1282,8 @@ export class FieldSolver2D {
             const alpha_c_even = this._calculate_differential_conductor_loss(Ex_even, Ey_even, Z_even, 'even');
             const alpha_d_even = this._calculate_differential_dielectric_loss(Ex_even, Ey_even, Z_even);
 
-            // Store fields as arrays for differential mode
+            // Store fields and potentials as arrays for differential mode
+            this.V = [V_odd, V_even];
             this.Ex = [Ex_odd, Ex_even];
             this.Ey = [Ey_odd, Ey_even];
 
@@ -1286,6 +1315,7 @@ export class FieldSolver2D {
             let prev_energy = null;
             let prev_Z0 = null;
             let prev_C = null;
+            let V, Ex, Ey;
 
             for (let it = 0; it < max_iters; it++) {
                 // Calculate parameters
@@ -1294,9 +1324,10 @@ export class FieldSolver2D {
                 const eps_eff = results.eps_eff;
                 const C = results.RLGC.C;
 
-                // Get fields (already computed in perform_analysis)
-                const Ex = this.Ex;
-                const Ey = this.Ey;
+                // Get fields and potential from perform_analysis
+                V = results.V;
+                Ex = results.Ex;
+                Ey = results.Ey;
 
                 // Energy-based error (primary criterion)
                 const { energy, rel_error: energy_err } = this._compute_energy_error(Ex, Ey, prev_energy);
@@ -1356,14 +1387,15 @@ export class FieldSolver2D {
 
                 // Refine mesh (skip on last iteration)
                 if (it !== max_iters - 1) {
-                    this.refine_mesh(Ex, Ey, refineFrac);
+                    this.refine_mesh(V, Ex, Ey, refineFrac);
                     this._setup_geometry();
                 }
             }
 
-            // Wrap fields in array for consistency with differential mode
-            this.Ex = [this.Ex];
-            this.Ey = [this.Ey];
+            // Wrap fields and potential in array for consistency with differential mode
+            this.V = [V];
+            this.Ex = [Ex];
+            this.Ey = [Ey];
         }
 
         return results;

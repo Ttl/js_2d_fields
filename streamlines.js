@@ -85,10 +85,7 @@ function generateConductorSeedsWeighted(
 
     for (const c of conductors) {
         if (!c.is_signal) continue;
-
-        //const v = sampleV(c.x_min, c.y_min, xArr, yArr, V);
-        //if (V < 0.1) break; // Gnd or negative diff pair
-
+        if (c.polarity < 0) continue;
         const width = c.x_max - c.x_min;
         const nSamples = Math.max(50, Math.floor(width / spacing) * 4);
 

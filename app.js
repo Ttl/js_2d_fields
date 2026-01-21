@@ -287,6 +287,22 @@ function getFields() {
     }
 }
 
+// Helper function to get voltage potential (handles differential mode)
+function getPotential() {
+    if (!solver || !solver.V) {
+        return null;
+    }
+
+    if (isDifferentialMode()) {
+        // Differential mode: determine which mode based on currentView
+        const modeIndex = currentView === "potential_even" ? 1 : 0;  // Default to odd (0)
+        return solver.V[modeIndex];
+    } else {
+        // Single-ended mode
+        return solver.V[0];
+    }
+}
+
 
 function draw(resetZoom = false) {
     if (!solver) return;
@@ -404,7 +420,7 @@ function draw(resetZoom = false) {
         }
     }
 
-    else if (currentView === "potential" && solver.solution_valid) {
+    else if ((currentView === "potential" || currentView === "potential_odd" || currentView === "potential_even") && solver.solution_valid) {
         // Ensure mesh exists for field visualization
         if (!solver.mesh_generated) {
             solver.ensure_mesh();
@@ -422,11 +438,20 @@ function draw(resetZoom = false) {
         xMM = Array.from(solver.x, v => v * 1000);
         yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
 
-        title = "Electric Potential (V)";
+        let modeLabel = "";
+        if (currentView === "potential_odd") {
+            modeLabel = " (Odd Mode)";
+        } else if (currentView === "potential_even") {
+            modeLabel = " (Even Mode)";
+        }
+        title = `Electric Potential${modeLabel} (V)`;
         zTitle = "Volts";
 
-        for (let i = 0; i < nyDisplay; i++) {
-            zData.push(solver.V[i].slice(0, nx));
+        const V = getPotential();
+        if (V && V.length >= nyDisplay) {
+            for (let i = 0; i < nyDisplay; i++) {
+                zData.push(V[i].slice(0, nx));
+            }
         }
     }
 
@@ -654,11 +679,15 @@ function draw(resetZoom = false) {
                 showactive: true,
                 active: (() => {
                     if (currentView === "geometry") return 0;
-                    if (currentView === "potential") return 1;
                     if (isDifferentialMode()) {
-                        if (currentView === "efield_odd") return 2;
-                        if (currentView === "efield_even") return 3;
+                        // Differential: Geometry, Potential(odd), Potential(even), E-field(odd), E-field(even)
+                        if (currentView === "potential_odd" || currentView === "potential") return 1;
+                        if (currentView === "potential_even") return 2;
+                        if (currentView === "efield_odd" || currentView === "efield") return 3;
+                        if (currentView === "efield_even") return 4;
                     } else {
+                        // Single-ended: Geometry, Potential, E-field
+                        if (currentView === "potential") return 1;
                         if (currentView === "efield") return 2;
                     }
                     return 0;
@@ -669,18 +698,22 @@ function draw(resetZoom = false) {
                             label: "Geometry",
                             method: "skip",
                             args: []
-                        },
-                        {
-                            label: "Potential",
-                            method: "skip",
-                            args: [],
-                            visible: solver.solution_valid
                         }
                     ];
 
                     if (solver.solution_valid) {
                         if (isDifferentialMode()) {
                             // Add separate buttons for odd and even modes
+                            buttons.push({
+                                label: "Potential (odd)",
+                                method: "skip",
+                                args: []
+                            });
+                            buttons.push({
+                                label: "Potential (even)",
+                                method: "skip",
+                                args: []
+                            });
                             buttons.push({
                                 label: "E-field (odd)",
                                 method: "skip",
@@ -692,7 +725,12 @@ function draw(resetZoom = false) {
                                 args: []
                             });
                         } else {
-                            // Single-ended: just one E-field button
+                            // Single-ended: just one Potential and one E-field button
+                            buttons.push({
+                                label: "Potential",
+                                method: "skip",
+                                args: []
+                            });
                             buttons.push({
                                 label: "|E| Field",
                                 method: "skip",
@@ -736,14 +774,24 @@ function draw(resetZoom = false) {
         container.on('plotly_buttonclicked', (event) => {
             if (event.menu.active === 0) {
                 currentView = "geometry";
-            } else if (event.menu.active === 1) {
-                currentView = "potential";
-            } else if (event.menu.active === 2) {
-                // Button 2: either "efield" for single-ended or "efield_odd" for differential
-                currentView = isDifferentialMode() ? "efield_odd" : "efield";
-            } else if (event.menu.active === 3) {
-                // Button 3: "efield_even" for differential (only exists in differential mode)
-                currentView = "efield_even";
+            } else if (isDifferentialMode()) {
+                // Differential mode: Geometry(0), Potential(odd)(1), Potential(even)(2), E-field(odd)(3), E-field(even)(4)
+                if (event.menu.active === 1) {
+                    currentView = "potential_odd";
+                } else if (event.menu.active === 2) {
+                    currentView = "potential_even";
+                } else if (event.menu.active === 3) {
+                    currentView = "efield_odd";
+                } else if (event.menu.active === 4) {
+                    currentView = "efield_even";
+                }
+            } else {
+                // Single-ended mode: Geometry(0), Potential(1), E-field(2)
+                if (event.menu.active === 1) {
+                    currentView = "potential";
+                } else if (event.menu.active === 2) {
+                    currentView = "efield";
+                }
             }
             draw();
         });

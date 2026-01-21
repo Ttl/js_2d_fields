@@ -271,26 +271,26 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Signal trace(s)
         if (this.is_differential) {
-            // Left trace (negative in odd mode)
+            // Left trace (negative in odd mode, polarity = -1)
             const xl_left = cx - this.w - this.trace_spacing / 2;
             conductors.push(new Conductor(
                 xl_left, this.y_trace_start,
                 this.w, this.t,
-                true
+                true, -1
             ));
-            // Right trace (positive in odd mode)
+            // Right trace (positive in odd mode, polarity = +1)
             const xl_right = cx + this.trace_spacing / 2;
             conductors.push(new Conductor(
                 xl_right, this.y_trace_start,
                 this.w, this.t,
-                true
+                true, 1
             ));
         } else {
-            // Single trace
+            // Single trace (polarity = +1)
             conductors.push(new Conductor(
                 xl, this.y_trace_start,
                 this.w, this.t,
-                true
+                true, 1
             ));
         }
 
@@ -335,8 +335,7 @@ class MicrostripSolver extends FieldSolver2D {
         const nx = this.x.length;
         const ny = this.y.length;
 
-        // Initialize field arrays
-        this.V = Array(ny).fill().map(() => new Float64Array(nx));
+        // Initialize mask and material arrays (V is created by solver based on mode)
         this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
         this.signal_mask = Array(ny).fill().map(() => new Uint8Array(nx));
         this.ground_mask = Array(ny).fill().map(() => new Uint8Array(nx));
@@ -362,8 +361,7 @@ class MicrostripSolver extends FieldSolver2D {
             }
         }
 
-        // Apply conductors
-        let signal_cond_idx = 0;
+        // Apply conductors - use polarity to determine signal_p vs signal_n
         for (const cond of this.conductors) {
             for (let i = 0; i < ny; i++) {
                 const yc = this.y[i];
@@ -373,24 +371,20 @@ class MicrostripSolver extends FieldSolver2D {
                         if (xc >= cond.x_min - tol && xc <= cond.x_max + tol) {
                             if (cond.is_signal) {
                                 this.signal_mask[i][j] = 1;
-                                // For differential: first signal is negative, second is positive
+                                // Use polarity to determine positive/negative trace
                                 if (this.is_differential) {
-                                    if (signal_cond_idx === 0) {
-                                        this.signal_n_mask[i][j] = 1;
-                                    } else {
+                                    if (cond.polarity > 0) {
                                         this.signal_p_mask[i][j] = 1;
+                                    } else {
+                                        this.signal_n_mask[i][j] = 1;
                                     }
                                 }
                             } else {
                                 this.ground_mask[i][j] = 1;
                             }
-                            this.V[i][j] = cond.voltage;
                         }
                     }
                 }
-            }
-            if (cond.is_signal) {
-                signal_cond_idx++;
             }
         }
 

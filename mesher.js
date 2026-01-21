@@ -35,15 +35,15 @@ class Conductor {
      * @param {number} width - Width of the rectangle
      * @param {number} height - Height of the rectangle
      * @param {boolean} is_signal - True for signal conductor, False for ground
-     * @param {number} voltage - Voltage value (default: 1.0 for signal, 0.0 for ground)
+     * @param {number} polarity - Signal polarity: +1 (positive), -1 (negative), 0 (ground)
      */
-    constructor(x, y, width, height, is_signal = false, voltage = 0.0) {
+    constructor(x, y, width, height, is_signal = false, polarity = 0) {
         this.x = x;
         this.y = y;
         this.width = width;
         this.height = height;
         this.is_signal = is_signal;
-        this.voltage = voltage !== 0.0 ? voltage : (is_signal ? 1.0 : 0.0);
+        this.polarity = is_signal ? (polarity || 1) : 0;
     }
 
     get x_min() { return this.x; }

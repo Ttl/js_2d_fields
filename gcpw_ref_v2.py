@@ -343,26 +343,43 @@ class GroundedCPWSolver2D(FieldSolver2D):
 
 def solve_gcpw(plots=True):
     print("Solving GCPW (v2 with Mesher)...")
+    #solver = GroundedCPWSolver2D(
+    #    substrate_height=1.6e-3,
+    #    trace_width=0.3e-3,
+    #    trace_thickness=35e-6,
+    #    gap=0.15e-3,
+    #    top_gnd_width=5e-3,
+    #    via_gap=0.5e-3,
+    #    gnd_thickness=35e-6,
+    #    epsilon_r=4.5,
+    #    tan_delta=0.02,
+    #    sigma_cond=5.8e7,
+    #    freq=1e9,
+    #    nx=10, ny=10,
+    #    use_sm=False,
+    #    boundaries=["open", "open", "open", "gnd"]
+    #)
     solver = GroundedCPWSolver2D(
         substrate_height=1.6e-3,
-        trace_width=0.3e-3,
+        trace_width=1.6e-3,
         trace_thickness=35e-6,
-        gap=0.15e-3,
-        top_gnd_width=5e-3,
-        via_gap=0.5e-3,
+        gap=1e-3,
+        top_gnd_width=0.5e-3,
+        via_gap=1.6e-3,
         gnd_thickness=35e-6,
         epsilon_r=4.5,
         tan_delta=0.02,
         sigma_cond=5.8e7,
         freq=1e9,
-        nx=10, ny=10,
+        nx=30, ny=30,
         use_sm=False,
         boundaries=["open", "open", "open", "gnd"]
     )
 
     #Z0, eps_eff, C, C0 = solver.calculate_parameters()
     #Ex, Ey = solver.compute_fields()
-    Z0, eps_eff, C, C0, Ex, Ey = solver.solve_adaptive(param_tol=0.001, max_iters=20, max_nodes=100000)
+    Z0, eps_eff, C, C0 = solver.solve_adaptive()
+    Ex, Ey = solver.Ex, solver.Ey
 
     alpha_cond, J = solver.calculate_conductor_loss(Ex, Ey, Z0)
     alpha_diel = solver.calculate_dielectric_loss(Ex, Ey, Z0)

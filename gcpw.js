@@ -376,8 +376,7 @@ export class GroundedCPWSolver2D extends FieldSolver2D {
         const dielectrics = this.dielectrics;
         const conductors = this.conductors;
 
-        // Initialize field arrays
-        this.V = Array(ny).fill().map(() => new Float64Array(nx).fill(0.0));
+        // Initialize mask and material arrays (V is created by solver based on mode)
         this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
         this.signal_mask = Array(ny).fill().map(() => new Uint8Array(nx).fill(0));
         this.ground_mask = Array(ny).fill().map(() => new Uint8Array(nx).fill(0));
@@ -410,7 +409,6 @@ export class GroundedCPWSolver2D extends FieldSolver2D {
                             } else {
                                 this.ground_mask[i][j] = 1;
                             }
-                            this.V[i][j] = cond.voltage;
                         }
                     }
                 }
