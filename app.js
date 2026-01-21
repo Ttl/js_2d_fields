@@ -256,9 +256,19 @@ async function runSimulation() {
     }
 }
 
-let contourCount = 20;
 let showMesh = false;
 let currentView = "geometry";
+
+// Helper function to check if solver is in differential mode
+function isDifferentialMode() {
+    if (!solver || !solver.Ex || !solver.Ey) return false;
+    // In differential mode, Ex and Ey are arrays of 2 arrays (odd and even modes)
+    // Check if Ex[0] and Ex[1] are both arrays
+    return Array.isArray(solver.Ex) &&
+           solver.Ex.length === 2 &&
+           Array.isArray(solver.Ex[0]) &&
+           Array.isArray(solver.Ex[1]);
+}
 
 // Helper function to get Ex/Ey fields (handles differential mode)
 function getFields() {
@@ -266,19 +276,13 @@ function getFields() {
         return { Ex: null, Ey: null };
     }
 
-    // Check if differential mode: solver.Ex is [Ex_odd, Ex_even]
-    // In differential: solver.Ex.length === 2 and each element is a 2D array
-    // In single-ended: solver.Ex is directly a 2D array
-    // Detect by checking if solver.Ex[0] has a numeric length property and solver.Ex[1] exists
-    const isDifferential = solver.Ex.length === 2 && solver.Ex[1] !== undefined &&
-                           typeof solver.Ex[0].length === 'number' && solver.Ex[0].length > 0;
-
-    if (isDifferential) {
-        // Differential mode: use odd mode (index 0) by default
-        return { Ex: solver.Ex[0], Ey: solver.Ey[0] };
+    if (isDifferentialMode()) {
+        // Differential mode: determine which mode based on currentView
+        const modeIndex = currentView === "efield_even" ? 1 : 0;  // Default to odd (0)
+        return { Ex: solver.Ex[modeIndex], Ey: solver.Ey[modeIndex] };
     } else {
         // Single-ended mode
-        return { Ex: solver.Ex, Ey: solver.Ey };
+        return { Ex: solver.Ex[0], Ey: solver.Ey[0] };
     }
 }
 
@@ -388,7 +392,9 @@ function draw(resetZoom = false) {
                 }
             }
 
-            title = "Transmission Line Geometry with E-field";
+            // In geometry view with differential solver, always show odd mode
+            const modeLabel = isDifferentialMode() ? " (Odd Mode)" : "";
+            title = `Transmission Line Geometry with E-field${modeLabel}`;
         } else {
             // No solution - just axis scaling
             xMM = [0, solver.w * 2000];
@@ -422,7 +428,7 @@ function draw(resetZoom = false) {
         }
     }
 
-    else if (currentView === "efield" && solver.solution_valid) {
+    else if ((currentView === "efield" || currentView === "efield_odd" || currentView === "efield_even") && solver.solution_valid) {
         // Ensure mesh exists for field visualization
         if (!solver.mesh_generated) {
             solver.ensure_mesh();
@@ -440,7 +446,13 @@ function draw(resetZoom = false) {
         xMM = Array.from(solver.x, v => v * 1000);
         yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
 
-        title = "|E| Field Magnitude (V/m)";
+        let modeLabel = "";
+        if (currentView === "efield_odd") {
+            modeLabel = " (Odd Mode)";
+        } else if (currentView === "efield_even") {
+            modeLabel = " (Even Mode)";
+        }
+        title = `|E| Field Magnitude${modeLabel} (V/m)`;
         zTitle = "V/m";
 
         const { Ex, Ey } = getFields();
@@ -578,26 +590,57 @@ function draw(resetZoom = false) {
                 x: 0.01,
                 y: 1.15,
                 showactive: true,
-                active: currentView === "geometry" ? 0 : currentView === "potential" ? 1 : 2,
-                buttons: [
-                    {
-                        label: "Geometry",
-                        method: "skip",
-                        args: []
-                    },
-                    {
-                        label: "Potential",
-                        method: "skip",
-                        args: [],
-                        visible: solver.solution_valid
-                    },
-                    {
-                        label: "|E| Field",
-                        method: "skip",
-                        args: [],
-                        visible: solver.solution_valid
+                active: (() => {
+                    if (currentView === "geometry") return 0;
+                    if (currentView === "potential") return 1;
+                    if (isDifferentialMode()) {
+                        if (currentView === "efield_odd") return 2;
+                        if (currentView === "efield_even") return 3;
+                    } else {
+                        if (currentView === "efield") return 2;
                     }
-                ]
+                    return 0;
+                })(),
+                buttons: (() => {
+                    const buttons = [
+                        {
+                            label: "Geometry",
+                            method: "skip",
+                            args: []
+                        },
+                        {
+                            label: "Potential",
+                            method: "skip",
+                            args: [],
+                            visible: solver.solution_valid
+                        }
+                    ];
+
+                    if (solver.solution_valid) {
+                        if (isDifferentialMode()) {
+                            // Add separate buttons for odd and even modes
+                            buttons.push({
+                                label: "E-field (odd)",
+                                method: "skip",
+                                args: []
+                            });
+                            buttons.push({
+                                label: "E-field (even)",
+                                method: "skip",
+                                args: []
+                            });
+                        } else {
+                            // Single-ended: just one E-field button
+                            buttons.push({
+                                label: "|E| Field",
+                                method: "skip",
+                                args: []
+                            });
+                        }
+                    }
+
+                    return buttons;
+                })()
             }
         ]
     };
@@ -616,22 +659,6 @@ function draw(resetZoom = false) {
                 }
             },
             {
-                name: "More Contours",
-                icon: Plotly.Icons.zoomIn,
-                click: () => {
-                    contourCount += 5;
-                    draw();
-                }
-            },
-            {
-                name: "Fewer Contours",
-                icon: Plotly.Icons.zoomOut,
-                click: () => {
-                    contourCount = Math.max(5, contourCount - 5);
-                    draw();
-                }
-            },
-            {
                 name: "Auto Z Scale",
                 icon: Plotly.Icons.autoscale,
                 click: () => {
@@ -645,9 +672,17 @@ function draw(resetZoom = false) {
 
     if (!container._viewListenerBound) {
         container.on('plotly_buttonclicked', (event) => {
-            if (event.menu.active === 0) currentView = "geometry";
-            else if (event.menu.active === 1) currentView = "potential";
-            else if (event.menu.active === 2) currentView = "efield";
+            if (event.menu.active === 0) {
+                currentView = "geometry";
+            } else if (event.menu.active === 1) {
+                currentView = "potential";
+            } else if (event.menu.active === 2) {
+                // Button 2: either "efield" for single-ended or "efield_odd" for differential
+                currentView = isDifferentialMode() ? "efield_odd" : "efield";
+            } else if (event.menu.active === 3) {
+                // Button 3: "efield_even" for differential (only exists in differential mode)
+                currentView = "efield_even";
+            }
             draw();
         });
         container._viewListenerBound = true;

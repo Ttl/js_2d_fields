@@ -1250,15 +1250,6 @@ export class FieldSolver2D {
             let Z_even, eps_eff_even, C_even, C0_even, Ex_even, Ey_even;
 
             for (let it = 0; it < max_iters; it++) {
-                // Solve odd mode (+1V and -1V)
-                const odd_results = await this._solve_single_mode('odd', true);
-                Z_odd = odd_results.Z0;
-                eps_eff_odd = odd_results.eps_eff;
-                C_odd = odd_results.C;
-                C0_odd = odd_results.C0;
-                Ex_odd = odd_results.Ex;
-                Ey_odd = odd_results.Ey;
-
                 // Solve even mode (+1V and +1V)
                 const even_results = await this._solve_single_mode('even', true);
                 Z_even = even_results.Z0;
@@ -1267,6 +1258,15 @@ export class FieldSolver2D {
                 C0_even = even_results.C0;
                 Ex_even = even_results.Ex;
                 Ey_even = even_results.Ey;
+
+                // Solve odd mode (+1V and -1V)
+                const odd_results = await this._solve_single_mode('odd', true);
+                Z_odd = odd_results.Z0;
+                eps_eff_odd = odd_results.eps_eff;
+                C_odd = odd_results.C;
+                C0_odd = odd_results.C0;
+                Ex_odd = odd_results.Ex;
+                Ey_odd = odd_results.Ey;
 
                 // Energy-based error
                 const { energy: energy_odd, rel_error: energy_err_odd } =
