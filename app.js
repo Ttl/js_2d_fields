@@ -304,6 +304,70 @@ function getPotential() {
 }
 
 
+// --- Interpolation functions for higher-resolution plots ---
+
+// Find the index i such that arr[i] <= val < arr[i+1]
+function find_idx(arr, val) {
+    // A linear scan is used here. For very large grids, binary search could be an optimization.
+    for (let i = 0; i < arr.length - 1; i++) {
+        if (arr[i] <= val && val < arr[i + 1]) {
+            return i;
+        }
+    }
+    // Handle the edge case where val is exactly the last element
+    if (val === arr[arr.length - 1]) {
+        return arr.length - 2;
+    }
+    return -1;
+}
+
+// Bilinear interpolation for a point (x, y) within a grid cell
+function bilinearInterpolate(x, y, x1, y1, x2, y2, q11, q12, q21, q22) {
+    const denom = (x2 - x1) * (y2 - y1);
+    if (denom === 0) {
+        // Avoid division by zero if the grid cell has no area
+        return q11;
+    }
+    const w11 = (x2 - x) * (y2 - y);
+    const w12 = (x2 - x) * (y - y1);
+    const w21 = (x - x1) * (y2 - y);
+    const w22 = (x - x1) * (y - y1);
+    return (w11 * q11 + w12 * q12 + w21 * q21 + w22 * q22) / denom;
+}
+
+// Interpolates data from an old grid (z_old) to a new, finer grid (x_new, y_new)
+function interpolateGrid(x_old, y_old, z_old, x_new, y_new) {
+    const z_new = Array(y_new.length).fill(0).map(() => Array(x_new.length).fill(0));
+
+    for (let j = 0; j < y_new.length; j++) {
+        const y_val = y_new[j];
+        const y_idx1 = find_idx(y_old, y_val);
+        if (y_idx1 === -1) continue;
+        const y_idx2 = y_idx1 + 1;
+
+        for (let i = 0; i < x_new.length; i++) {
+            const x_val = x_new[i];
+            const x_idx1 = find_idx(x_old, x_val);
+            if (x_idx1 === -1) continue;
+            const x_idx2 = x_idx1 + 1;
+
+            // Values at the four corners of the cell in the old grid
+            const q11 = z_old[y_idx1][x_idx1];
+            const q12 = z_old[y_idx2][x_idx1];
+            const q21 = z_old[y_idx1][x_idx2];
+            const q22 = z_old[y_idx2][x_idx2];
+
+            z_new[j][i] = bilinearInterpolate(
+                x_val, y_val,
+                x_old[x_idx1], y_old[y_idx1], x_old[x_idx2], y_old[y_idx2],
+                q11, q12, q21, q22
+            );
+        }
+    }
+    return z_new;
+}
+
+
 function draw(resetZoom = false) {
     if (!solver) return;
 
@@ -504,6 +568,48 @@ function draw(resetZoom = false) {
     }
 
     // --------------------
+    // INTERPOLATION FOR SMOOTHER PLOTS
+    // --------------------
+    const INTERP_ENABLED = true; // Control flag for interpolation
+    const INTERP_FACTOR = 5;     // Interpolation multiplier (e.g., 5x resolution)
+
+    if (INTERP_ENABLED && zData.length > 0 && (currentView.includes("potential") || currentView.includes("efield"))) {
+        
+        const x_old = Array.from(solver.x); // Original grid X (meters)
+        const y_old = Array.from(solver.y).slice(0, nyDisplay); // Original grid Y (meters)
+
+        if (x_old.length > 1 && y_old.length > 1 && zData.length > 1 && zData[0].length > 1) {
+            const nx_interp = (nx - 1) * INTERP_FACTOR + 1;
+            const ny_interp = (nyDisplay - 1) * INTERP_FACTOR + 1;
+
+            // Create a new, uniformly spaced, finer grid for interpolation
+            const x_new = new Float64Array(nx_interp);
+            const y_new = new Float64Array(ny_interp);
+
+            const x_min = x_old[0];
+            const x_max = x_old[x_old.length - 1];
+            const y_min = y_old[0];
+            const y_max = y_old[y_old.length - 1];
+
+            for (let i = 0; i < nx_interp; i++) {
+                x_new[i] = x_min + (x_max - x_min) * i / (nx_interp - 1);
+            }
+            for (let j = 0; j < ny_interp; j++) {
+                y_new[j] = y_min + (y_max - y_min) * j / (ny_interp - 1);
+            }
+
+            // Perform interpolation from the original zData to the new grid
+            const z_interp = interpolateGrid(x_old, y_old, zData, x_new, y_new);
+
+            // Update plot variables with the new, higher-resolution data
+            xMM = Array.from(x_new, v => v * 1000);
+            yMM = Array.from(y_new, v => v * 1000);
+            zData = z_interp;
+        }
+    }
+
+
+    // --------------------
     // MAIN FIELD TRACE
     // --------------------
     let traces = [];
@@ -605,11 +711,19 @@ function draw(resetZoom = false) {
     } else if (zData.length > 0) {
         // Field views only - use heatmap
         traces.push({
-            type: "heatmap",
+            type: "contour",
             x: xMM,
             y: yMM,
             z: zData,
             colorscale: colorscale,
+            contours: {
+                coloring: 'heatmap',
+                showlines: true,
+            },
+            line: {
+              smoothing: 1.3,
+              width: 0.5
+            },
             colorbar: {
                 title: zTitle,
                 len: 0.8
