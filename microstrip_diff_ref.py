@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import sys
 from field_solver_ref import *
 
 class DifferentialMicrostripSolver2D(FieldSolver2D):
@@ -458,7 +459,7 @@ class DifferentialMicrostripSolver2D(FieldSolver2D):
         return 8.686 * (0.5 * Pd / (2 * P_flow))
 
 
-def solve_differential_microstrip(plots=True):
+def solve_differential_microstrip(plots=False):
     solver = DifferentialMicrostripSolver2D(
             substrate_height=1.6e-3,
             trace_width=3e-3,
@@ -482,7 +483,7 @@ def solve_differential_microstrip(plots=True):
         solver.plot(Ex_odd, Ey_odd)
         solver.plot(Ex_even, Ey_even)
 
-def solve_differential_stripline(plots=True):
+def solve_differential_stripline(plots=False):
     solver = DifferentialMicrostripSolver2D(
             substrate_height=0.2e-3,
             trace_width=0.15e-3,
@@ -510,4 +511,8 @@ def solve_differential_stripline(plots=True):
         solver.plot(Ex_even, Ey_even)
 
 if __name__ == "__main__":
-    solve_differential_microstrip()
+    plots = False
+    if len(sys.argv) > 1:
+        if "plot" in sys.argv[1]:
+            plots = True
+    solve_differential_microstrip(plots)

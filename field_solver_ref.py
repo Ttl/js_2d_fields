@@ -354,6 +354,9 @@ class FieldSolver2D:
                        min_converged_passes=2):
         """
         Adaptive mesh solve with robust convergence criteria.
+
+        Stores computed fields in self.Ex and self.Ey.
+        Returns: Z0, eps_eff, C, C0
         """
         prev_energy = None
         prev_Z0 = None
@@ -397,7 +400,11 @@ class FieldSolver2D:
                 self.refine_mesh(Ex, Ey, frac=refine_frac)
                 self._setup_geometry()
 
-        return Z0, eps_eff, C, C0, Ex, Ey
+        # Store fields as class members
+        self.Ex = Ex
+        self.Ey = Ey
+
+        return Z0, eps_eff, C, C0
 
     def compute_fields(self):
         Ex = np.zeros_like(self.V)
