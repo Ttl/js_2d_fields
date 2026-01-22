@@ -694,7 +694,8 @@ function draw(resetZoom = false) {
                 Ey,
                 solver.x,
                 solver.y,
-                solver.conductors
+                solver.conductors,
+                50
             )
         );
 

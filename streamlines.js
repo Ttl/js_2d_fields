@@ -78,37 +78,97 @@ function distToConductor(x, y, conductors) {
 function generateConductorSeedsWeighted(
     conductors, spacing,
     xArr, yArr, Ex, Ey,
-    yOffset = 1e-7
+    numStreamlines = null,
+    edgeOffset = 1e-7
 ) {
     const seeds = [];
     const eps = 1e-12;
 
+    // Calculate total perimeter of all signal conductors for proportional distribution
+    let totalPerimeter = 0;
+    const signalConductors = conductors.filter(c => c.is_signal);
+    for (const c of signalConductors) {
+        const width = c.x_max - c.x_min;
+        const height = c.y_max - c.y_min;
+        totalPerimeter += 2 * (width + height);
+    }
+
     for (const c of conductors) {
         if (!c.is_signal) continue;
-        if (c.polarity < 0) continue;
-        const width = c.x_max - c.x_min;
-        const nSamples = Math.max(50, Math.floor(width / spacing) * 4);
 
-        // Process both top and bottom edges
+        const width = c.x_max - c.x_min;
+        const height = c.y_max - c.y_min;
+        const polarity = c.polarity;
+        const perimeter = 2 * (width + height);
+
+        // Calculate sample counts based on dimensions
+        const nSamplesH = Math.max(50, Math.floor(width / spacing) * 4);
+        const nSamplesV = Math.max(50, Math.floor(height / spacing) * 4);
+
+        // Seed counts: use configurable total or fall back to spacing-based
+        let nSeedsH, nSeedsV;
+        if (numStreamlines !== null) {
+            // Distribute streamlines proportionally to this conductor's perimeter
+            const conductorShare = Math.round(numStreamlines * (perimeter / totalPerimeter));
+            // Split between horizontal and vertical edges by their length ratio
+            const hShare = width / (width + height);
+            nSeedsH = Math.max(1, Math.round(conductorShare * hShare / 2));
+            nSeedsV = Math.max(1, Math.round(conductorShare * (1 - hShare) / 2));
+        } else {
+            nSeedsH = Math.max(10, Math.floor(width / spacing));
+            nSeedsV = Math.max(3, Math.floor(height / spacing));
+        }
+
+        // Define all four edges
         const edges = [
-            { y: c.y_max + yOffset, normalSign: 1 },   // Top edge: +y normal
-            { y: c.y_min - yOffset, normalSign: -1 }   // Bottom edge: -y normal
+            // Horizontal edges (top and bottom)
+            {
+                length: width,
+                sample: (t) => ({ x: c.x_min + t * width, y: c.y_max + edgeOffset }),
+                nSamples: nSamplesH,
+                nSeeds: nSeedsH,
+                getField: (f) => Math.abs(f.ey)
+            },
+            {
+                length: width,
+                sample: (t) => ({ x: c.x_min + t * width, y: c.y_min - edgeOffset }),
+                nSamples: nSamplesH,
+                nSeeds: nSeedsH,
+                getField: (f) => Math.abs(f.ey)
+            },
+            // Vertical edges (left and right)
+            {
+                length: height,
+                sample: (t) => ({ x: c.x_min - edgeOffset, y: c.y_min + t * height }),
+                nSamples: nSamplesV,
+                nSeeds: nSeedsV,
+                getField: (f) => Math.abs(f.ex)
+            },
+            {
+                length: height,
+                sample: (t) => ({ x: c.x_max + edgeOffset, y: c.y_min + t * height }),
+                nSamples: nSamplesV,
+                nSeeds: nSeedsV,
+                getField: (f) => Math.abs(f.ex)
+            }
         ];
 
         for (const edge of edges) {
             // Sample points along edge
-            const xs = [];
+            const positions = [];
             const w = [];
 
-            for (let i = 0; i < nSamples; i++) {
-                const x = c.x_min + (i / (nSamples - 1)) * width;
-                xs.push(x);
-                const f = sampleField(x, edge.y, xArr, yArr, Ex, Ey, conductors);
+            for (let i = 0; i < edge.nSamples; i++) {
+                const t = i / (edge.nSamples - 1);
+                const pos = edge.sample(t);
+                positions.push(pos);
+
+                const f = sampleField(pos.x, pos.y, xArr, yArr, Ex, Ey, conductors);
                 if (!f) {
                     w.push(eps);
                 } else {
-                    // Normal field component (use abs of Ey for weighting)
-                    w.push(Math.abs(f.ey) + eps);
+                    // Normal field component
+                    w.push(edge.getField(f) + eps);
                 }
             }
 
@@ -120,15 +180,21 @@ function generateConductorSeedsWeighted(
                 C.push(sum);
             }
 
-            // Number of streamlines to launch (similar to non-weighted version)
-            const nSeeds = Math.max(10, Math.floor(width / spacing));
+            // Skip edge if no field flux
+            if (sum < eps * edge.nSamples * 2) continue;
 
             // Uniform sampling in CDF space
-            for (let k = 0; k <= nSeeds; k++) {
-                const target = (k / nSeeds) * sum;
+            for (let k = 0; k <= edge.nSeeds; k++) {
+                const target = (k / edge.nSeeds) * sum;
                 let i = C.findIndex(v => v >= target);
                 if (i < 0) i = C.length - 1;
-                seeds.push([xs[i], edge.y]);
+
+                // Store seed with polarity info for direction control
+                seeds.push({
+                    x: positions[i].x,
+                    y: positions[i].y,
+                    polarity: polarity
+                });
             }
         }
     }
@@ -139,28 +205,31 @@ function generateConductorSeedsWeighted(
 function makeStreamlineTraceFromConductors(
     Ex, Ey,
     xSolver, ySolver,
-    conductors
+    conductors,
+    numStreamlines = null
 ) {
     const xLines = [];
     const yLines = [];
 
     const spacing = 0.5 * (xSolver[xSolver.length - 1] - xSolver[0]) / xSolver.length;
-    const ds = spacing / 4;
+    const ds = spacing / 2;
     const maxSteps = 800;
 
     const seeds = generateConductorSeedsWeighted(
         conductors, spacing,
         xSolver, ySolver,
         Ex, Ey,
+        numStreamlines
     );
 
-    for (const [x0, y0] of seeds) {
+    for (const seed of seeds) {
         const line = traceStreamline(
-            x0, y0,
+            seed.x, seed.y,
             xSolver, ySolver,
             Ex, Ey,
             ds, maxSteps,
-            conductors
+            conductors,
+            seed.polarity
         );
 
         if (line.length < 2) continue;
@@ -255,64 +324,88 @@ function sampleField(x, y, xArr, yArr, Ex, Ey, conductors) {
 }
 
 function snapToNormal(x, y, conductors, f) {
-    for (const c of conductors) {
-        const tol = 1e-9;
+    if (!f) return null;
 
-        if (Math.abs(y - c.y_max) < tol &&
-            x >= c.x_min && x <= c.x_max) {
-            return { ex: 0, ey: Math.sign(f.ey) };
+    for (const c of conductors) {
+        const tol = 1e-7;
+
+        // Top edge
+        if (Math.abs(y - c.y_max) < tol && x >= c.x_min && x <= c.x_max) {
+            return { ex: 0, ey: Math.abs(f.ey) > 1e-12 ? Math.sign(f.ey) : 1 };
+        }
+        // Bottom edge
+        if (Math.abs(y - c.y_min) < tol && x >= c.x_min && x <= c.x_max) {
+            return { ex: 0, ey: Math.abs(f.ey) > 1e-12 ? Math.sign(f.ey) : -1 };
+        }
+        // Right edge
+        if (Math.abs(x - c.x_max) < tol && y >= c.y_min && y <= c.y_max) {
+            return { ex: Math.abs(f.ex) > 1e-12 ? Math.sign(f.ex) : 1, ey: 0 };
+        }
+        // Left edge
+        if (Math.abs(x - c.x_min) < tol && y >= c.y_min && y <= c.y_max) {
+            return { ex: Math.abs(f.ex) > 1e-12 ? Math.sign(f.ex) : -1, ey: 0 };
         }
     }
     return f;
 }
 
-function backtrackToConductor(x0, y0, xArr, yArr, Ex, Ey, ds, conductors) {
-    // Trace backwards (against field direction) to find conductor surface
+function backtrackToConductor(x0, y0, xArr, yArr, Ex, Ey, ds, conductors, direction = -1) {
+    // Trace to find conductor surface
+    // direction = -1: backwards (against E-field) for positive polarity
+    // direction = +1: forwards (with E-field) for negative polarity
     const maxSteps = 100;
     const points = [[x0, y0]];
     let x = x0;
     let y = y0;
-    
+
     for (let n = 0; n < maxSteps; n++) {
         const f = sampleField(x, y, xArr, yArr, Ex, Ey, conductors);
         if (!f) break;
-        
+
         const m = Math.hypot(f.ex, f.ey);
         if (m === 0) break;
 
         const dist = distToConductor(x, y, conductors);
         const dsLocal = Math.min(ds, dist / 2); // Smaller steps near conductors
-        
-        // Step BACKWARDS (negative direction)
-        const xNew = x - dsLocal * f.ex / m;
-        const yNew = y - dsLocal * f.ey / m;
-        
+
+        // Step in specified direction
+        const xNew = x + direction * dsLocal * f.ex / m;
+        const yNew = y + direction * dsLocal * f.ey / m;
+
         // Check if we hit a conductor
         const hit = findConductorIntersection(x, y, xNew, yNew, conductors);
         if (hit) {
             points.unshift([hit.x, hit.y]);
             return points;
         }
-        
+
         // Check if inside conductor (fallback)
         if (isInsideConductor(xNew, yNew, conductors)) {
             // Use current point as best approximation
             return points;
         }
-        
+
         points.unshift([xNew, yNew]);
         x = xNew;
         y = yNew;
     }
-    
+
     return points;
 }
 
-function traceStreamline(x0, y0, xArr, yArr, Ex, Ey, ds, maxSteps, conductors) {
+function traceStreamline(x0, y0, xArr, yArr, Ex, Ey, ds, maxSteps, conductors, polarity = 1) {
+    // polarity > 0: trace with E-field (from + to -)
+    // polarity < 0: trace against E-field (from - to +), then reverse for display
+
+    // Direction multiplier: positive polarity traces forward, negative traces backward
+    const dir = polarity >= 0 ? 1 : -1;
+
+    // Backtrack direction is opposite of trace direction
+    const backtrackDir = -dir;
+
     // First, backtrack to conductor surface
-    const backtrack = backtrackToConductor(x0, y0, xArr, yArr, Ex, Ey, ds / 2, conductors);
-    console.log(backtrack.length);
-    
+    const backtrack = backtrackToConductor(x0, y0, xArr, yArr, Ex, Ey, ds / 2, conductors, backtrackDir);
+
     // Start with backtracked points
     const line = backtrack;
 
@@ -329,36 +422,37 @@ function traceStreamline(x0, y0, xArr, yArr, Ex, Ey, ds, maxSteps, conductors) {
         const m1 = Math.hypot(f1.ex, f1.ey);
         if (m1 === 0) break;
 
-        const k1x = f1.ex / m1;
-        const k1y = f1.ey / m1;
+        // Apply direction multiplier
+        const k1x = dir * f1.ex / m1;
+        const k1y = dir * f1.ey / m1;
 
         const dist = distToConductor(x, y, conductors);
         const dsLocal = Math.min(ds, Math.max(dist / 2, ds / 10)); // Smaller steps near conductors
 
-        const f2 = sampleField(x + 0.5 * ds * k1x, y + 0.5 * dsLocal * k1y, xArr, yArr, Ex, Ey, conductors);
+        const f2 = sampleField(x + 0.5 * dsLocal * k1x, y + 0.5 * dsLocal * k1y, xArr, yArr, Ex, Ey, conductors);
         if (!f2) break;
         const m2 = Math.hypot(f2.ex, f2.ey);
         if (m2 === 0) break;
 
-        const k2x = f2.ex / m2;
-        const k2y = f2.ey / m2;
+        const k2x = dir * f2.ex / m2;
+        const k2y = dir * f2.ey / m2;
 
-        const f3 = sampleField(x + 0.5 * ds * k2x, y + 0.5 * dsLocal * k2y, xArr, yArr, Ex, Ey, conductors);
+        const f3 = sampleField(x + 0.5 * dsLocal * k2x, y + 0.5 * dsLocal * k2y, xArr, yArr, Ex, Ey, conductors);
         if (!f3) break;
         const m3 = Math.hypot(f3.ex, f3.ey);
         if (m3 === 0) break;
-        const k3x = f3.ex / m3;
-        const k3y = f3.ey / m3;
+        const k3x = dir * f3.ex / m3;
+        const k3y = dir * f3.ey / m3;
 
-        const f4 = sampleField(x + ds * k3x, y + dsLocal * k3y, xArr, yArr, Ex, Ey, conductors);
+        const f4 = sampleField(x + dsLocal * k3x, y + dsLocal * k3y, xArr, yArr, Ex, Ey, conductors);
         if (!f4) break;
         const m4 = Math.hypot(f4.ex, f4.ey);
         if (m4 === 0) break;
-        const k4x = f4.ex / m4;
-        const k4y = f4.ey / m4;
+        const k4x = dir * f4.ex / m4;
+        const k4y = dir * f4.ey / m4;
 
-        const xNew = x + ds * (k1x + 2*k2x + 2*k3x + k4x) / 6;
-        const yNew = y + ds * (k1y + 2*k2y + 2*k3y + k4y) / 6;
+        const xNew = x + dsLocal * (k1x + 2*k2x + 2*k3x + k4x) / 6;
+        const yNew = y + dsLocal * (k1y + 2*k2y + 2*k3y + k4y) / 6;
 
         // Check if we crossed into a conductor
         const hit = findConductorIntersection(x, y, xNew, yNew, conductors);
