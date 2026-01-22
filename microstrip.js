@@ -268,7 +268,7 @@ class MicrostripSolver extends FieldSolver2D {
                 // Standard microstrip solder mask
                 // Solder mask on substrate (full width)
                 dielectrics.push(new Dielectric(
-                    0, this.y_top_diel_end,
+                    0, this.y_sub_end,
                     this.domain_width, this.sm_t_sub,
                     this.sm_er, this.sm_tand
                 ));
