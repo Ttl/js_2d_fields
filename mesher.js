@@ -295,6 +295,12 @@ class Mesher {
     generate_mesh() {
         const x = this._generate_axis_mesh('x');
         const y = this._generate_axis_mesh('y');
+
+        // Validate symmetry if requested
+        if (this.symmetric) {
+            this._validate_mesh_symmetry(x);
+        }
+
         return [x, y];
     }
 
@@ -449,12 +455,14 @@ class Mesher {
 
         // Add center points for all conductors and dielectrics
         const center_points = [];
+        const axis_min_for_centers = axis === 'x' ? this.x_min : 0;
+        const axis_max_for_centers = axis === 'x' ? this.x_max : this.domain_height;
 
         for (const cond of this.conductors) {
             const center = axis === 'x' ?
                 (cond.x_min + cond.x_max) / 2 :
                 (cond.y_min + cond.y_max) / 2;
-            if (0 < center && center < domain_size) {
+            if (axis_min_for_centers < center && center < axis_max_for_centers) {
                 center_points.push(center);
             }
         }
@@ -463,7 +471,7 @@ class Mesher {
             const center = axis === 'x' ?
                 (diel.x_min + diel.x_max) / 2 :
                 (diel.y_min + diel.y_max) / 2;
-            if (0 < center && center < domain_size) {
+            if (axis_min_for_centers < center && center < axis_max_for_centers) {
                 center_points.push(center);
             }
         }
@@ -483,6 +491,8 @@ class Mesher {
         // Add boundary lines adjacent to conductor edges
         const boundary_offset = Math.min(this.skin_depth * 3, domain_size / 200);
         const boundary_lines = [];
+        const axis_min = axis === 'x' ? this.x_min : 0;
+        const axis_max = axis === 'x' ? this.x_max : this.domain_height;
 
         for (const cond of this.conductors) {
             const cond_min = axis === 'x' ? cond.x_min : cond.y_min;
@@ -490,7 +500,7 @@ class Mesher {
             const edges = [cond_min, cond_max];
 
             for (const edge of edges) {
-                if (Math.abs(edge) < 1e-15 || Math.abs(edge - domain_size) < 1e-15) {
+                if (Math.abs(edge - axis_min) < 1e-15 || Math.abs(edge - axis_max) < 1e-15) {
                     continue;
                 }
 
@@ -505,7 +515,7 @@ class Mesher {
                     outside_line = edge + boundary_offset;
                 }
 
-                if (0 < outside_line && outside_line < domain_size) {
+                if (axis_min < outside_line && outside_line < axis_max) {
                     boundary_lines.push(outside_line);
                 }
                 if (cond_min < inside_line && inside_line < cond_max) {
@@ -526,15 +536,7 @@ class Mesher {
             }
         }
 
-        // Check symmetry and enforce if needed
-        if (this.symmetric) {
-            const is_symmetric = this._check_symmetry(axis);
-            if (is_symmetric) {
-                mesh = this._enforce_symmetry(mesh, domain_size);
-            }
-        }
-
-        // Remove duplicate or near-duplicate points
+        // Remove duplicate or near-duplicate points first
         const mesh_unique = [mesh[0]];
         const min_spacing = domain_size * 1e-10;
 
@@ -544,7 +546,21 @@ class Mesher {
             }
         }
 
-        return Float64Array.from(mesh_unique);
+        mesh = Float64Array.from(mesh_unique);
+
+        // Check symmetry and enforce if needed (do this AFTER all additions)
+        if (this.symmetric && axis === 'x') {
+            const is_symmetric = this._check_symmetry(axis);
+            if (is_symmetric) {
+                const axis_min = axis === 'x' ? this.x_min : 0;
+                const axis_max = axis === 'x' ? this.x_max : this.domain_height;
+                mesh = this._enforce_symmetry(mesh, axis_min, axis_max);
+            } else {
+                console.warn('Geometry is not symmetric, but symmetric meshing was requested');
+            }
+        }
+
+        return mesh;
     }
 
     _check_symmetry(axis) {
@@ -579,8 +595,9 @@ class Mesher {
         return true;
     }
 
-    _enforce_symmetry(mesh, domain_size) {
-        const center = domain_size / 2;
+    _enforce_symmetry(mesh, axis_min, axis_max) {
+        const center = (axis_min + axis_max) / 2;
+        const domain_size = axis_max - axis_min;
         const tol = 1e-12;
         const symmetric_mesh = [];
         const used = new Array(mesh.length).fill(false);
@@ -618,7 +635,7 @@ class Mesher {
                 used[mirror_idx] = true;
             } else {
                 symmetric_mesh.push(point);
-                if (0 < mirror_pos && mirror_pos < domain_size) {
+                if (axis_min < mirror_pos && mirror_pos < axis_max) {
                     symmetric_mesh.push(mirror_pos);
                 }
                 used[i] = true;
@@ -626,6 +643,47 @@ class Mesher {
         }
 
         return Float64Array.from(Array.from(new Set(symmetric_mesh)).sort((a, b) => a - b));
+    }
+
+    _validate_mesh_symmetry(mesh) {
+        const center = (this.x_min + this.x_max) / 2;
+        const tol = 1e-10;
+        const errors = [];
+
+        // Build a set of mesh points for fast lookup
+        const mesh_set = new Set(Array.from(mesh).map(x => x.toFixed(15)));
+
+        for (const point of mesh) {
+            const mirror_pos = 2 * center - point;
+            const mirror_key = mirror_pos.toFixed(15);
+
+            // Skip the center point itself
+            if (Math.abs(point - center) < tol) {
+                continue;
+            }
+
+            // Check if mirror point exists
+            if (!mesh_set.has(mirror_key)) {
+                // Check for near matches
+                let found_near = false;
+                for (const other of mesh) {
+                    if (Math.abs(other - mirror_pos) < tol) {
+                        found_near = true;
+                        break;
+                    }
+                }
+
+                if (!found_near) {
+                    errors.push(`Point ${point} has no symmetric counterpart (expected ${mirror_pos})`);
+                }
+            }
+        }
+
+        if (errors.length > 0) {
+            console.error('Mesh symmetry validation failed:');
+            errors.forEach(err => console.error('  ' + err));
+            throw new Error(`Mesh is not symmetric: ${errors.length} symmetry violations detected`);
+        }
     }
 
     _concat_arrays(arrays) {

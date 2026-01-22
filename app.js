@@ -116,11 +116,14 @@ function updateGeometry() {
             }
             // Add enclosure options
             if (p.use_enclosure) {
-                options.use_side_gnd = p.use_side_gnd;
                 options.enclosure_width = p.enclosure_width;
                 options.enclosure_height = p.enclosure_height;
+                // Set boundaries based on side and top ground options
+                const left_bc = p.use_side_gnd ? "gnd" : "open";
+                const right_bc = p.use_side_gnd ? "gnd" : "open";
+                const top_bc = p.use_top_gnd ? "gnd" : "open";
+                options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
                 if (p.use_top_gnd) {
-                    options.boundaries = ["open", "open", "gnd", "gnd"];
                     options.air_top = p.enclosure_height;
                 }
             }
@@ -168,11 +171,14 @@ function updateGeometry() {
             }
             // Add enclosure options
             if (p.use_enclosure) {
-                options.use_side_gnd = p.use_side_gnd;
                 options.enclosure_width = p.enclosure_width;
                 options.enclosure_height = p.enclosure_height;
+                // Set boundaries based on side and top ground options
+                const left_bc = p.use_side_gnd ? "gnd" : "open";
+                const right_bc = p.use_side_gnd ? "gnd" : "open";
+                const top_bc = p.use_top_gnd ? "gnd" : "open";
+                options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
                 if (p.use_top_gnd) {
-                    options.boundaries = ["open", "open", "gnd", "gnd"];
                     options.air_top = p.enclosure_height;
                 }
             }
@@ -214,11 +220,14 @@ function updateGeometry() {
             }
             // Add enclosure options
             if (p.use_enclosure) {
-                options.use_side_gnd = p.use_side_gnd;
                 options.enclosure_width = p.enclosure_width;
                 options.enclosure_height = p.enclosure_height;
+                // Set boundaries based on side and top ground options
+                const left_bc = p.use_side_gnd ? "gnd" : "open";
+                const right_bc = p.use_side_gnd ? "gnd" : "open";
+                const top_bc = p.use_top_gnd ? "gnd" : "open";
+                options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
                 if (p.use_top_gnd) {
-                    options.boundaries = ["open", "open", "gnd", "gnd"];
                     options.air_top = p.enclosure_height;
                 }
             }
@@ -260,8 +269,11 @@ function updateGeometry() {
             }
             // Add enclosure options (stripline already has top ground)
             if (p.use_enclosure) {
-                options.use_side_gnd = p.use_side_gnd;
                 options.enclosure_width = p.enclosure_width;
+                // Set side boundaries based on side ground option
+                const left_bc = p.use_side_gnd ? "gnd" : "open";
+                const right_bc = p.use_side_gnd ? "gnd" : "open";
+                options.boundaries = [left_bc, right_bc, "gnd", "gnd"];
             }
             solver = new MicrostripSolver(options);
         } else if (p.tl_type === 'diff_stripline') {
@@ -282,8 +294,11 @@ function updateGeometry() {
             };
             // Enclosure options (stripline already has top ground)
             if (p.use_enclosure) {
-                options.use_side_gnd = p.use_side_gnd;
                 options.enclosure_width = p.enclosure_width;
+                // Set side boundaries based on side ground option
+                const left_bc = p.use_side_gnd ? "gnd" : "open";
+                const right_bc = p.use_side_gnd ? "gnd" : "open";
+                options.boundaries = [left_bc, right_bc, "gnd", "gnd"];
             }
             solver = new MicrostripSolver(options);
         } else {
@@ -326,11 +341,14 @@ function updateGeometry() {
 
             // Enclosure options
             if (p.use_enclosure) {
-                options.use_side_gnd = p.use_side_gnd;
                 options.enclosure_width = p.enclosure_width;
                 options.enclosure_height = p.enclosure_height;
+                // Set boundaries based on side and top ground options
+                const left_bc = p.use_side_gnd ? "gnd" : "open";
+                const right_bc = p.use_side_gnd ? "gnd" : "open";
+                const top_bc = p.use_top_gnd ? "gnd" : "open";
+                options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
                 if (p.use_top_gnd) {
-                    options.boundaries = ["open", "open", "gnd", "gnd"];
                     options.air_top = p.enclosure_height;
                 }
             }

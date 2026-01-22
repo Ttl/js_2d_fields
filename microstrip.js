@@ -41,7 +41,6 @@ class MicrostripSolver extends FieldSolver2D {
         this.use_vias = options.use_vias ?? false;      // Enable via generation
 
         // Enclosure options
-        this.use_side_gnd = options.use_side_gnd ?? false;
         this.enclosure_width = options.enclosure_width ?? null;
         this.enclosure_height = options.enclosure_height ?? null;
 
@@ -67,7 +66,7 @@ class MicrostripSolver extends FieldSolver2D {
             // Use explicit enclosure width
             // If side ground is enabled, this is the distance between inner walls
             // Otherwise, it's the total domain width
-            if (this.use_side_gnd) {
+            if (this.has_side_gnd) {
                 // enclosure_width is the air box size (inner wall to inner wall)
                 // Add ground thickness on both sides
                 this.domain_width = this.enclosure_width + 2 * this.t_gnd;
@@ -112,6 +111,9 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         this.boundaries = options.boundaries ?? ["open", "open", "open", "gnd"];
+
+        // Determine if side grounds are present based on boundaries
+        this.has_side_gnd = (this.boundaries[0] === "gnd" || this.boundaries[1] === "gnd");
 
         // Calculate physical coordinates
         this._calculate_coordinates(air_top);
@@ -240,7 +242,8 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         // Check that active area fits in enclosure if enclosure is enabled
-        if (options.use_side_gnd && options.enclosure_width !== undefined && options.enclosure_width !== null) {
+        const has_side_gnd_temp = (options.boundaries && (options.boundaries[0] === "gnd" || options.boundaries[1] === "gnd"));
+        if (has_side_gnd_temp && options.enclosure_width !== undefined && options.enclosure_width !== null) {
             // Calculate active area width based on configuration
             let active_width = 0;
             const w = options.trace_width || 0;
@@ -648,21 +651,23 @@ class MicrostripSolver extends FieldSolver2D {
             ));
         }
 
-        // Side ground planes (if enclosure is enabled)
-        if (this.use_side_gnd) {
-            const side_gnd_thickness = this.t_gnd;
-            const side_gnd_height = this.has_top_gnd ?
-                (this.y_gnd_top_start + this.t_gnd) :
-                (this.y_top_start + this.top_dielectric_h);
+        // Side ground planes (based on boundaries array)
+        const side_gnd_thickness = this.t_gnd;
+        const side_gnd_height = this.has_top_gnd ?
+            (this.y_gnd_top_start + this.t_gnd) :
+            (this.y_top_start + this.top_dielectric_h);
 
-            // Left side ground (from x_min to x_min + thickness)
+        // Left side ground (if boundaries[0] === "gnd")
+        if (this.boundaries[0] === "gnd") {
             conductors.push(new Conductor(
                 x_min, 0,
                 side_gnd_thickness, side_gnd_height,
                 false
             ));
+        }
 
-            // Right side ground (from x_max - thickness to x_max)
+        // Right side ground (if boundaries[1] === "gnd")
+        if (this.boundaries[1] === "gnd") {
             conductors.push(new Conductor(
                 x_max - side_gnd_thickness, 0,
                 side_gnd_thickness, side_gnd_height,

@@ -272,8 +272,8 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
         if (Number.isNaN(min)) {
             errors.push(`NaN in ${name})`);
         }
-        if (!(min > 1e-12)) {
-            errors.push(`${name}: min spacing <= 1e-12 (min=${min})`);
+        if (!(min > 1e-15)) {
+            errors.push(`${name}: min spacing <= 1e-15 (min=${min})`);
         }
         if (!(max / min < 1e12)) {
             errors.push(`${name}: spacing ratio too large (max/min = ${max / min})`);
