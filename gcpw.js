@@ -39,8 +39,5 @@ export class GroundedCPWSolver2D extends MicrostripSolver {
             sm_er: options.sm_er ?? 3.5,
             sm_tand: options.sm_tand ?? 0.02,
         });
-
-        // Store original GCPW-specific properties for compatibility
-        this.top_gnd_w = options.top_gnd_width;
     }
 }

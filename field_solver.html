@@ -278,6 +278,26 @@
                 <input type="number" id="inp_gnd_cut_h" value="1.0" step="0.1">
             </div>
         </div>
+
+        <div class="control-group">
+            <label><input type="checkbox" id="chk_enclosure"> Enable Enclosure</label>
+        </div>
+        <div id="enclosure-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
+            <div class="control-group">
+                <label><input type="checkbox" id="chk_side_gnd"> Side Ground</label>
+            </div>
+            <div class="control-group" id="top-gnd-group">
+                <label><input type="checkbox" id="chk_top_gnd"> Top Ground</label>
+            </div>
+            <div class="control-group">
+                <label>Width (mm)</label>
+                <input type="number" id="inp_enclosure_width" value="10.0" step="0.1">
+            </div>
+            <div class="control-group" id="enclosure-height-group">
+                <label>Height (mm)</label>
+                <input type="number" id="inp_enclosure_height" value="5.0" step="0.1">
+            </div>
+        </div>
     </div>
 
     <h3>Solver Settings</h3>
@@ -323,6 +343,10 @@
         const topDielParams = document.getElementById('top-diel-params');
         const gndCutGroup = advancedParams.querySelector('.control-group:has(#chk_gnd_cut)');
         const gndCutParams = document.getElementById('gnd-cut-params');
+        const enclosureGroup = advancedParams.querySelector('.control-group:has(#chk_enclosure)');
+        const enclosureParams = document.getElementById('enclosure-params');
+        const topGndGroup = document.getElementById('top-gnd-group');
+        const enclosureHeightGroup = document.getElementById('enclosure-height-group');
 
         // Hide all type-specific params first
         diffParams.style.display = 'none';
@@ -339,30 +363,43 @@
         const chkSolderMask = document.getElementById('chk_solder_mask');
         const chkTopDiel = document.getElementById('chk_top_diel');
         const chkGndCut = document.getElementById('chk_gnd_cut');
+        const chkEnclosure = document.getElementById('chk_enclosure');
 
         if (tlType === 'microstrip') {
             // Enable all advanced options for microstrip
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (enclosureGroup) enclosureGroup.style.display = 'block';
+            if (topGndGroup) topGndGroup.style.display = 'block';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
             if (chkSolderMask) chkSolderMask.disabled = false;
             if (chkTopDiel) chkTopDiel.disabled = false;
             if (chkGndCut) chkGndCut.disabled = false;
+            if (chkEnclosure) chkEnclosure.disabled = false;
         } else if (tlType === 'diff_microstrip') {
             diffParams.style.display = 'block';
             // Enable all advanced options for diff microstrip
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (enclosureGroup) enclosureGroup.style.display = 'block';
+            if (topGndGroup) topGndGroup.style.display = 'block';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
             if (chkSolderMask) chkSolderMask.disabled = false;
             if (chkTopDiel) chkTopDiel.disabled = false;
             if (chkGndCut) chkGndCut.disabled = false;
+            if (chkEnclosure) chkEnclosure.disabled = false;
         } else if (tlType === 'stripline') {
             striplineParams.style.display = 'block';
             // Show but disable all advanced options for stripline
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (enclosureGroup) enclosureGroup.style.display = 'block';
+            // Hide top ground checkbox and height for stripline (already has top ground)
+            if (topGndGroup) topGndGroup.style.display = 'none';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
             if (chkSolderMask) {
                 chkSolderMask.disabled = true;
                 chkSolderMask.checked = false;
@@ -378,15 +415,22 @@
                 chkGndCut.checked = false;
                 gndCutParams.style.display = 'none';
             }
+            if (chkEnclosure) {
+                chkEnclosure.disabled = false;
+            }
         } else if (tlType === 'gcpw') {
             gcpwParams.style.display = 'block';
             // Enable all advanced options for GCPW
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (enclosureGroup) enclosureGroup.style.display = 'block';
+            if (topGndGroup) topGndGroup.style.display = 'block';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
             if (chkSolderMask) chkSolderMask.disabled = false;
             if (chkTopDiel) chkTopDiel.disabled = false;
             if (chkGndCut) chkGndCut.disabled = false;
+            if (chkEnclosure) chkEnclosure.disabled = false;
         } else if (tlType === 'diff_gcpw') {
             diffParams.style.display = 'block';
             gcpwParams.style.display = 'block';
@@ -394,9 +438,13 @@
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (enclosureGroup) enclosureGroup.style.display = 'block';
+            if (topGndGroup) topGndGroup.style.display = 'block';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
             if (chkSolderMask) chkSolderMask.disabled = false;
             if (chkTopDiel) chkTopDiel.disabled = false;
             if (chkGndCut) chkGndCut.disabled = false;
+            if (chkEnclosure) chkEnclosure.disabled = false;
         }
     }
 
@@ -420,11 +468,15 @@
         document.getElementById('chk_gnd_cut').addEventListener('change', () => {
             toggleCheckboxSection('chk_gnd_cut', 'gnd-cut-params');
         });
+        document.getElementById('chk_enclosure').addEventListener('change', () => {
+            toggleCheckboxSection('chk_enclosure', 'enclosure-params');
+        });
 
         // Initialize checkbox sections based on restored state (for browser auto-restore)
         toggleCheckboxSection('chk_solder_mask', 'solder-mask-params');
         toggleCheckboxSection('chk_top_diel', 'top-diel-params');
         toggleCheckboxSection('chk_gnd_cut', 'gnd-cut-params');
+        toggleCheckboxSection('chk_enclosure', 'enclosure-params');
     });
 </script>
 <script type="module" src="app.js"></script>

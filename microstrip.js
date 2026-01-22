@@ -37,6 +37,11 @@ class MicrostripSolver extends FieldSolver2D {
         this.via_gap = options.via_gap ?? 0;            // Gap from ground edge to via
         this.use_vias = options.use_vias ?? false;      // Enable via generation
 
+        // Enclosure options
+        this.use_side_gnd = options.use_side_gnd ?? false;
+        this.enclosure_width = options.enclosure_width ?? null;
+        this.enclosure_height = options.enclosure_height ?? null;
+
         // Solder Mask Parameters
         this.use_sm = options.use_sm ?? false;
         this.sm_t_sub = options.sm_t_sub ?? 20e-6;
@@ -55,7 +60,18 @@ class MicrostripSolver extends FieldSolver2D {
         const air_top = options.air_top ?? null;
 
         // Domain sizing
-        if (this.is_differential) {
+        if (this.enclosure_width !== null) {
+            // Use explicit enclosure width
+            // If side ground is enabled, this is the distance between inner walls
+            // Otherwise, it's the total domain width
+            if (this.use_side_gnd) {
+                // enclosure_width is the air box size (inner wall to inner wall)
+                // We'll add ground thickness later
+                this.domain_width = this.enclosure_width;
+            } else {
+                this.domain_width = this.enclosure_width;
+            }
+        } else if (this.is_differential) {
             // For differential, span includes both traces and spacing
             const trace_span = 2 * this.w + this.trace_spacing;
             if (this.use_coplanar_gnd) {
@@ -159,7 +175,12 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         // Top air/dielectric region
-        if (air_top === null) {
+        if (this.enclosure_height !== null) {
+            // Use enclosure height (distance from highest dielectric to top of domain)
+            // Highest dielectric is y_top_start
+            this.top_dielectric_h = this.enclosure_height;
+            this.has_top_gnd = (this.boundaries[2] === "gnd");
+        } else if (air_top === null) {
             this.top_dielectric_h = this.h * 15;
             this.has_top_gnd = false;
         } else {
@@ -483,6 +504,28 @@ class MicrostripSolver extends FieldSolver2D {
             conductors.push(new Conductor(
                 0, this.y_gnd_top_start,
                 this.domain_width, this.t_gnd,
+                false
+            ));
+        }
+
+        // Side ground planes (if enclosure is enabled)
+        if (this.use_side_gnd) {
+            const side_gnd_thickness = this.t_gnd;
+            const side_gnd_height = this.has_top_gnd ?
+                (this.y_gnd_top_start + this.t_gnd) :
+                (this.y_top_start + this.top_dielectric_h);
+
+            // Left side ground (from 0 to thickness)
+            conductors.push(new Conductor(
+                0, 0,
+                side_gnd_thickness, side_gnd_height,
+                false
+            ));
+
+            // Right side ground (from domain_width - thickness to domain_width)
+            conductors.push(new Conductor(
+                this.domain_width - side_gnd_thickness, 0,
+                side_gnd_thickness, side_gnd_height,
                 false
             ));
         }

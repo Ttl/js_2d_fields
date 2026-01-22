@@ -53,6 +53,12 @@ function getParams() {
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
         gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value) * 1e-3,
         gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value) * 1e-3,
+        // Enclosure parameters
+        use_enclosure: document.getElementById('chk_enclosure').checked,
+        use_side_gnd: document.getElementById('chk_side_gnd').checked,
+        use_top_gnd: document.getElementById('chk_top_gnd').checked,
+        enclosure_width: parseFloat(document.getElementById('inp_enclosure_width').value) * 1e-3,
+        enclosure_height: parseFloat(document.getElementById('inp_enclosure_height').value) * 1e-3,
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
         tolerance: parseFloat(document.getElementById('inp_tolerance').value),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
@@ -102,6 +108,16 @@ function updateGeometry() {
             options.gnd_cut_width = p.gnd_cut_w;
             options.gnd_cut_sub_h = p.gnd_cut_h;
         }
+        // Add enclosure options
+        if (p.use_enclosure) {
+            options.use_side_gnd = p.use_side_gnd;
+            options.enclosure_width = p.enclosure_width;
+            options.enclosure_height = p.enclosure_height;
+            if (p.use_top_gnd) {
+                options.boundaries = ["open", "open", "gnd", "gnd"];
+                options.air_top = p.enclosure_height;
+            }
+        }
         solver = new MicrostripSolver(options);
     } else if (p.tl_type === 'diff_gcpw') {
         const options = {
@@ -144,6 +160,16 @@ function updateGeometry() {
             options.gnd_cut_width = p.gnd_cut_w;
             options.gnd_cut_sub_h = p.gnd_cut_h;
         }
+        // Add enclosure options
+        if (p.use_enclosure) {
+            options.use_side_gnd = p.use_side_gnd;
+            options.enclosure_width = p.enclosure_width;
+            options.enclosure_height = p.enclosure_height;
+            if (p.use_top_gnd) {
+                options.boundaries = ["open", "open", "gnd", "gnd"];
+                options.air_top = p.enclosure_height;
+            }
+        }
         solver = new MicrostripSolver(options);
     } else if (p.tl_type === 'diff_microstrip') {
         // Differential Microstrip
@@ -180,6 +206,16 @@ function updateGeometry() {
             options.gnd_cut_width = p.gnd_cut_w;
             options.gnd_cut_sub_h = p.gnd_cut_h;
         }
+        // Add enclosure options
+        if (p.use_enclosure) {
+            options.use_side_gnd = p.use_side_gnd;
+            options.enclosure_width = p.enclosure_width;
+            options.enclosure_height = p.enclosure_height;
+            if (p.use_top_gnd) {
+                options.boundaries = ["open", "open", "gnd", "gnd"];
+                options.air_top = p.enclosure_height;
+            }
+        }
         solver = new MicrostripSolver(options);
     } else if (p.tl_type === 'stripline') {
         const options = {
@@ -215,6 +251,11 @@ function updateGeometry() {
         if (p.use_gnd_cut) {
             options.gnd_cut_width = p.gnd_cut_w;
             options.gnd_cut_sub_h = p.gnd_cut_h;
+        }
+        // Add enclosure options (stripline already has top ground)
+        if (p.use_enclosure) {
+            options.use_side_gnd = p.use_side_gnd;
+            options.enclosure_width = p.enclosure_width;
         }
         solver = new MicrostripSolver(options);
     } else {
@@ -253,6 +294,17 @@ function updateGeometry() {
         if (p.use_gnd_cut) {
             options.gnd_cut_width = p.gnd_cut_w;
             options.gnd_cut_sub_h = p.gnd_cut_h;
+        }
+
+        // Enclosure options
+        if (p.use_enclosure) {
+            options.use_side_gnd = p.use_side_gnd;
+            options.enclosure_width = p.enclosure_width;
+            options.enclosure_height = p.enclosure_height;
+            if (p.use_top_gnd) {
+                options.boundaries = ["open", "open", "gnd", "gnd"];
+                options.air_top = p.enclosure_height;
+            }
         }
 
         solver = new MicrostripSolver(options);
@@ -1057,7 +1109,8 @@ function bindEvents() {
         'inp_air_top', 'inp_er_top',
         'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',
         'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',
-        'inp_gnd_cut_w', 'inp_gnd_cut_h'
+        'inp_gnd_cut_w', 'inp_gnd_cut_h',
+        'inp_enclosure_width', 'inp_enclosure_height'
     ];
 
     geometryInputs.forEach(id => {
@@ -1072,7 +1125,7 @@ function bindEvents() {
 
     // Real-time updates for checkboxes
     const geometryCheckboxes = [
-        'chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut'
+        'chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_side_gnd', 'chk_top_gnd'
     ];
 
     geometryCheckboxes.forEach(id => {
