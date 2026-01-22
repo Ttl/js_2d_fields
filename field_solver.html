@@ -148,6 +148,7 @@
             <option value="diff_microstrip">Differential Microstrip</option>
             <option value="stripline">Stripline</option>
             <option value="gcpw">GCPW</option>
+            <option value="diff_gcpw">Differential GCPW</option>
         </select>
     </div>
 
@@ -331,27 +332,71 @@
         // Common params always visible
         microstripParams.style.display = 'block';
 
+        // Always show advanced params
+        advancedParams.style.display = 'block';
+
+        // Get the checkboxes
+        const chkSolderMask = document.getElementById('chk_solder_mask');
+        const chkTopDiel = document.getElementById('chk_top_diel');
+        const chkGndCut = document.getElementById('chk_gnd_cut');
+
         if (tlType === 'microstrip') {
-            advancedParams.style.display = 'block';
-            // Show all options for microstrip
+            // Enable all advanced options for microstrip
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (chkSolderMask) chkSolderMask.disabled = false;
+            if (chkTopDiel) chkTopDiel.disabled = false;
+            if (chkGndCut) chkGndCut.disabled = false;
         } else if (tlType === 'diff_microstrip') {
             diffParams.style.display = 'block';
-            advancedParams.style.display = 'none';
+            // Enable all advanced options for diff microstrip
+            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
+            if (topDielGroup) topDielGroup.style.display = 'block';
+            if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (chkSolderMask) chkSolderMask.disabled = false;
+            if (chkTopDiel) chkTopDiel.disabled = false;
+            if (chkGndCut) chkGndCut.disabled = false;
         } else if (tlType === 'stripline') {
             striplineParams.style.display = 'block';
-            advancedParams.style.display = 'none';
+            // Show but disable all advanced options for stripline
+            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
+            if (topDielGroup) topDielGroup.style.display = 'block';
+            if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (chkSolderMask) {
+                chkSolderMask.disabled = true;
+                chkSolderMask.checked = false;
+                solderMaskParams.style.display = 'none';
+            }
+            if (chkTopDiel) {
+                chkTopDiel.disabled = true;
+                chkTopDiel.checked = false;
+                topDielParams.style.display = 'none';
+            }
+            if (chkGndCut) {
+                chkGndCut.disabled = true;
+                chkGndCut.checked = false;
+                gndCutParams.style.display = 'none';
+            }
         } else if (tlType === 'gcpw') {
             gcpwParams.style.display = 'block';
-            advancedParams.style.display = 'block';
-            // Only show solder mask for GCPW, hide others
+            // Enable all advanced options for GCPW
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
-            if (topDielGroup) topDielGroup.style.display = 'none';
-            if (topDielParams) topDielParams.style.display = 'none';
-            if (gndCutGroup) gndCutGroup.style.display = 'none';
-            if (gndCutParams) gndCutParams.style.display = 'none';
+            if (topDielGroup) topDielGroup.style.display = 'block';
+            if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (chkSolderMask) chkSolderMask.disabled = false;
+            if (chkTopDiel) chkTopDiel.disabled = false;
+            if (chkGndCut) chkGndCut.disabled = false;
+        } else if (tlType === 'diff_gcpw') {
+            diffParams.style.display = 'block';
+            gcpwParams.style.display = 'block';
+            // Enable all advanced options for diff GCPW
+            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
+            if (topDielGroup) topDielGroup.style.display = 'block';
+            if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (chkSolderMask) chkSolderMask.disabled = false;
+            if (chkTopDiel) chkTopDiel.disabled = false;
+            if (chkGndCut) chkGndCut.disabled = false;
         }
     }
 

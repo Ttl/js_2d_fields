@@ -1,5 +1,4 @@
 import { MicrostripSolver } from './microstrip.js';
-import { GroundedCPWSolver2D } from './gcpw.js';
 import { CONSTANTS } from './field_solver.js';
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 const Plotly = window.Plotly;
@@ -64,35 +63,91 @@ function updateGeometry() {
     const p = getParams();
     currentView = "geometry";
     if (p.tl_type === 'gcpw') {
-        solver = new GroundedCPWSolver2D({
+        const options = {
             substrate_height: p.h,
             trace_width: p.w,
             trace_thickness: p.t,
-            gap: p.gap,
-            top_gnd_width: p.top_gnd_w,
-            via_gap: p.via_gap,
             gnd_thickness: 35e-6,
             epsilon_r: p.er,
             tan_delta: p.tand,
-            sigma_diel: 0.0,
             sigma_cond: p.sigma,
-            epsilon_r_top: 1,
-            air_top: null,
-            air_side: null,
             freq: p.freq,
             nx: p.nx,
             ny: p.ny,
-            boundaries: null,
-            use_sm: p.use_sm,
-            sm_t_sub: p.sm_t_sub,
-            sm_t_trace: p.sm_t_trace,
-            sm_t_side: p.sm_t_side,
-            sm_er: p.sm_er,
-            sm_tand: p.sm_tand
-        });
+            boundaries: ["open", "open", "open", "gnd"],
+            // Coplanar-specific
+            use_coplanar_gnd: true,
+            gap: p.gap,
+            top_gnd_width: p.top_gnd_w,
+            via_gap: p.via_gap,
+            use_vias: true,
+        };
+        // Add solder mask options
+        if (p.use_sm) {
+            options.use_sm = true;
+            options.sm_t_sub = p.sm_t_sub;
+            options.sm_t_trace = p.sm_t_trace;
+            options.sm_t_side = p.sm_t_side;
+            options.sm_er = p.sm_er;
+            options.sm_tand = p.sm_tand;
+        }
+        // Add top dielectric options
+        if (p.use_top_diel) {
+            options.top_diel_h = p.top_diel_h;
+            options.top_diel_er = p.top_diel_er;
+            options.top_diel_tand = p.top_diel_tand;
+        }
+        // Add ground cutout options
+        if (p.use_gnd_cut) {
+            options.gnd_cut_width = p.gnd_cut_w;
+            options.gnd_cut_sub_h = p.gnd_cut_h;
+        }
+        solver = new MicrostripSolver(options);
+    } else if (p.tl_type === 'diff_gcpw') {
+        const options = {
+            substrate_height: p.h,
+            trace_width: p.w,
+            trace_thickness: p.t,
+            trace_spacing: p.trace_spacing,  // Enables differential mode
+            gnd_thickness: 35e-6,
+            epsilon_r: p.er,
+            tan_delta: p.tand,
+            sigma_cond: p.sigma,
+            freq: p.freq,
+            nx: p.nx,
+            ny: p.ny,
+            boundaries: ["open", "open", "open", "gnd"],
+            // Coplanar-specific
+            use_coplanar_gnd: true,
+            gap: p.gap,
+            top_gnd_width: p.top_gnd_w,
+            via_gap: p.via_gap,
+            use_vias: true,
+        };
+        // Add solder mask options
+        if (p.use_sm) {
+            options.use_sm = true;
+            options.sm_t_sub = p.sm_t_sub;
+            options.sm_t_trace = p.sm_t_trace;
+            options.sm_t_side = p.sm_t_side;
+            options.sm_er = p.sm_er;
+            options.sm_tand = p.sm_tand;
+        }
+        // Add top dielectric options
+        if (p.use_top_diel) {
+            options.top_diel_h = p.top_diel_h;
+            options.top_diel_er = p.top_diel_er;
+            options.top_diel_tand = p.top_diel_tand;
+        }
+        // Add ground cutout options
+        if (p.use_gnd_cut) {
+            options.gnd_cut_width = p.gnd_cut_w;
+            options.gnd_cut_sub_h = p.gnd_cut_h;
+        }
+        solver = new MicrostripSolver(options);
     } else if (p.tl_type === 'diff_microstrip') {
         // Differential Microstrip
-        solver = new MicrostripSolver({
+        const options = {
             trace_width: p.w,
             substrate_height: p.h,
             trace_thickness: p.t,
@@ -104,9 +159,30 @@ function updateGeometry() {
             nx: p.nx,
             ny: p.ny,
             boundaries: ["open", "open", "open", "gnd"]
-        });
+        };
+        // Add solder mask options
+        if (p.use_sm) {
+            options.use_sm = true;
+            options.sm_t_sub = p.sm_t_sub;
+            options.sm_t_trace = p.sm_t_trace;
+            options.sm_t_side = p.sm_t_side;
+            options.sm_er = p.sm_er;
+            options.sm_tand = p.sm_tand;
+        }
+        // Add top dielectric options
+        if (p.use_top_diel) {
+            options.top_diel_h = p.top_diel_h;
+            options.top_diel_er = p.top_diel_er;
+            options.top_diel_tand = p.top_diel_tand;
+        }
+        // Add ground cutout options
+        if (p.use_gnd_cut) {
+            options.gnd_cut_width = p.gnd_cut_w;
+            options.gnd_cut_sub_h = p.gnd_cut_h;
+        }
+        solver = new MicrostripSolver(options);
     } else if (p.tl_type === 'stripline') {
-        solver = new MicrostripSolver({
+        const options = {
             trace_width: p.w,
             substrate_height: p.h,
             trace_thickness: p.t,
@@ -119,7 +195,28 @@ function updateGeometry() {
             nx: p.nx,
             ny: p.ny,
             boundaries: ["open", "open", "gnd", "gnd"]
-        });
+        };
+        // Add solder mask options
+        if (p.use_sm) {
+            options.use_sm = true;
+            options.sm_t_sub = p.sm_t_sub;
+            options.sm_t_trace = p.sm_t_trace;
+            options.sm_t_side = p.sm_t_side;
+            options.sm_er = p.sm_er;
+            options.sm_tand = p.sm_tand;
+        }
+        // Add top dielectric options
+        if (p.use_top_diel) {
+            options.top_diel_h = p.top_diel_h;
+            options.top_diel_er = p.top_diel_er;
+            options.top_diel_tand = p.top_diel_tand;
+        }
+        // Add ground cutout options
+        if (p.use_gnd_cut) {
+            options.gnd_cut_width = p.gnd_cut_w;
+            options.gnd_cut_sub_h = p.gnd_cut_h;
+        }
+        solver = new MicrostripSolver(options);
     } else {
         // Microstrip (with optional solder mask, top dielectric, ground cutout)
         const options = {
@@ -955,6 +1052,7 @@ function bindEvents() {
     // Real-time geometry updates for all parameter inputs
     const geometryInputs = [
         'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma', 'inp_freq',
+        'inp_trace_spacing',
         'inp_gap', 'inp_top_gnd_w', 'inp_via_gap',
         'inp_air_top', 'inp_er_top',
         'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',

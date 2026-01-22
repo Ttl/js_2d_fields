@@ -30,6 +30,13 @@ class MicrostripSolver extends FieldSolver2D {
         this.top_diel_er = options.top_diel_er ?? 1.0;
         this.top_diel_tand = options.top_diel_tand ?? 0.0;
 
+        // Coplanar ground options (from GCPW)
+        this.use_coplanar_gnd = options.use_coplanar_gnd ?? false;
+        this.gap = options.gap ?? 0;                    // Gap from signal to top ground
+        this.top_gnd_width = options.top_gnd_width ?? 0; // Width of top ground planes
+        this.via_gap = options.via_gap ?? 0;            // Gap from ground edge to via
+        this.use_vias = options.use_vias ?? false;      // Enable via generation
+
         // Solder Mask Parameters
         this.use_sm = options.use_sm ?? false;
         this.sm_t_sub = options.sm_t_sub ?? 20e-6;
@@ -51,17 +58,37 @@ class MicrostripSolver extends FieldSolver2D {
         if (this.is_differential) {
             // For differential, span includes both traces and spacing
             const trace_span = 2 * this.w + this.trace_spacing;
-            if (air_side === null) {
-                this.domain_width = 2 * Math.max(trace_span * 4, this.h * 15);
+            if (this.use_coplanar_gnd) {
+                // Coplanar: active width includes gaps, top grounds, vias
+                const active_width = trace_span + 2 * (this.gap + Math.max(this.top_gnd_width, this.via_gap));
+                if (air_side === null) {
+                    this.domain_width = Math.max(active_width * 1.5, this.h * 10);
+                } else {
+                    this.domain_width = active_width + 2 * air_side;
+                }
             } else {
-                this.domain_width = trace_span + 2 * air_side;
+                if (air_side === null) {
+                    this.domain_width = 2 * Math.max(trace_span * 4, this.h * 15);
+                } else {
+                    this.domain_width = trace_span + 2 * air_side;
+                }
             }
         } else {
             // Single-ended
-            if (air_side === null) {
-                this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
+            if (this.use_coplanar_gnd) {
+                // Coplanar: active width includes gaps, top grounds, vias
+                const active_width = this.w + 2 * (this.gap + Math.max(this.top_gnd_width, this.via_gap));
+                if (air_side === null) {
+                    this.domain_width = Math.max(active_width * 1.5, this.h * 10);
+                } else {
+                    this.domain_width = active_width + 2 * air_side;
+                }
             } else {
-                this.domain_width = this.w + 2 * air_side;
+                if (air_side === null) {
+                    this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
+                } else {
+                    this.domain_width = this.w + 2 * air_side;
+                }
             }
         }
 
@@ -69,6 +96,11 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Calculate physical coordinates
         this._calculate_coordinates(air_top);
+
+        // Calculate coplanar geometry if enabled
+        if (this.use_coplanar_gnd) {
+            this._calculate_coplanar_geometry_x();
+        }
 
         // Skin depth
         this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
@@ -148,6 +180,46 @@ class MicrostripSolver extends FieldSolver2D {
         }
     }
 
+    _calculate_coplanar_geometry_x() {
+        // Calculate x-coordinates for gaps, top grounds, vias
+        // Handle both single-ended and differential layouts
+        const cx = this.domain_width / 2;
+
+        if (this.is_differential) {
+            // Differential: two traces with spacing between
+            // Layout: Via|TopGnd|Gap|Sig(-)|Space|Sig(+)|Gap|TopGnd|Via
+            const half_spacing = this.trace_spacing / 2;
+
+            // Left trace (negative polarity)
+            this.x_tr_left_l = cx - this.w - half_spacing;
+            this.x_tr_left_r = cx - half_spacing;
+
+            // Right trace (positive polarity)
+            this.x_tr_right_l = cx + half_spacing;
+            this.x_tr_right_r = cx + this.w + half_spacing;
+
+            // Outer gaps (from outer edges of traces)
+            this.x_gap_outer_l = this.x_tr_left_l - this.gap;
+            this.x_gap_outer_r = this.x_tr_right_r + this.gap;
+
+            // Via positions (via_gap is distance from ground edge to via edge)
+            this.via_x_left_inner = this.x_gap_outer_l - this.via_gap;
+            this.via_x_right_inner = this.x_gap_outer_r + this.via_gap;
+        } else {
+            // Single-ended: one trace centered
+            this.x_tr_l = cx - this.w / 2;
+            this.x_tr_r = cx + this.w / 2;
+
+            // Gaps from signal to top ground
+            this.x_gap_l = this.x_tr_l - this.gap;
+            this.x_gap_r = this.x_tr_r + this.gap;
+
+            // Via positions (via_gap is distance from ground edge to via edge)
+            this.via_x_left_inner = this.x_gap_l - this.via_gap;
+            this.via_x_right_inner = this.x_gap_r + this.via_gap;
+        }
+    }
+
     _build_geometry_lists() {
         const dielectrics = [];
         const conductors = [];
@@ -189,39 +261,89 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Solder mask regions (overwrites previous)
         if (this.use_sm) {
-            // Solder mask on substrate (full width)
-            dielectrics.push(new Dielectric(
-                0, this.y_top_diel_end,
-                this.domain_width, this.sm_t_sub,
-                this.sm_er, this.sm_tand
-            ));
-
-            // Solder mask on left side of trace
-            const xsl = xl - this.sm_t_side;
-            if (xsl >= 0) {
+            if (this.use_coplanar_gnd) {
+                // Coplanar solder mask: in gaps between signals and grounds
+                this._add_coplanar_solder_mask(dielectrics);
+            } else {
+                // Standard microstrip solder mask
+                // Solder mask on substrate (full width)
                 dielectrics.push(new Dielectric(
-                    xsl, this.y_trace_start,
-                    this.sm_t_side, this.t + this.sm_t_trace,
+                    0, this.y_top_diel_end,
+                    this.domain_width, this.sm_t_sub,
                     this.sm_er, this.sm_tand
                 ));
-            }
 
-            // Solder mask on right side of trace
-            const xsr = xr + this.sm_t_side;
-            if (xsr <= this.domain_width) {
-                dielectrics.push(new Dielectric(
-                    xr, this.y_trace_start,
-                    this.sm_t_side, this.t + this.sm_t_trace,
-                    this.sm_er, this.sm_tand
-                ));
-            }
+                if (this.is_differential) {
+                    // Differential: solder mask for both traces
+                    const half_spacing = this.trace_spacing / 2;
+                    const xl_left = cx - this.w - half_spacing;
+                    const xr_left = cx - half_spacing;
+                    const xl_right = cx + half_spacing;
+                    const xr_right = cx + this.w + half_spacing;
 
-            // Solder mask on top of trace
-            dielectrics.push(new Dielectric(
-                xl, this.y_trace_end,
-                this.w, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
+                    // Left trace solder mask
+                    dielectrics.push(new Dielectric(
+                        xl_left - this.sm_t_side, this.y_trace_start,
+                        this.sm_t_side, this.t + this.sm_t_trace,
+                        this.sm_er, this.sm_tand
+                    ));
+                    dielectrics.push(new Dielectric(
+                        xr_left, this.y_trace_start,
+                        this.sm_t_side, this.t + this.sm_t_trace,
+                        this.sm_er, this.sm_tand
+                    ));
+                    dielectrics.push(new Dielectric(
+                        xl_left, this.y_trace_end,
+                        this.w, this.sm_t_trace,
+                        this.sm_er, this.sm_tand
+                    ));
+
+                    // Right trace solder mask
+                    dielectrics.push(new Dielectric(
+                        xl_right - this.sm_t_side, this.y_trace_start,
+                        this.sm_t_side, this.t + this.sm_t_trace,
+                        this.sm_er, this.sm_tand
+                    ));
+                    dielectrics.push(new Dielectric(
+                        xr_right, this.y_trace_start,
+                        this.sm_t_side, this.t + this.sm_t_trace,
+                        this.sm_er, this.sm_tand
+                    ));
+                    dielectrics.push(new Dielectric(
+                        xl_right, this.y_trace_end,
+                        this.w, this.sm_t_trace,
+                        this.sm_er, this.sm_tand
+                    ));
+                } else {
+                    // Single-ended: solder mask for one trace
+                    // Solder mask on left side of trace
+                    const xsl = xl - this.sm_t_side;
+                    if (xsl >= 0) {
+                        dielectrics.push(new Dielectric(
+                            xsl, this.y_trace_start,
+                            this.sm_t_side, this.t + this.sm_t_trace,
+                            this.sm_er, this.sm_tand
+                        ));
+                    }
+
+                    // Solder mask on right side of trace
+                    const xsr = xr + this.sm_t_side;
+                    if (xsr <= this.domain_width) {
+                        dielectrics.push(new Dielectric(
+                            xr, this.y_trace_start,
+                            this.sm_t_side, this.t + this.sm_t_trace,
+                            this.sm_er, this.sm_tand
+                        ));
+                    }
+
+                    // Solder mask on top of trace
+                    dielectrics.push(new Dielectric(
+                        xl, this.y_trace_end,
+                        this.w, this.sm_t_trace,
+                        this.sm_er, this.sm_tand
+                    ));
+                }
+            }
         }
 
         // --- CONDUCTORS ---
@@ -269,6 +391,33 @@ class MicrostripSolver extends FieldSolver2D {
             }
         }
 
+        // Coplanar vias through substrate (if enabled)
+        if (this.use_coplanar_gnd && this.use_vias) {
+            // Vias should extend from bottom ground to top coplanar grounds
+            // Start from top of bottom ground (y_ext_start = t_gnd)
+            // End at top of coplanar grounds (y_trace_end)
+            const via_y_start = this.y_ext_start;
+            const via_height = this.y_trace_end - this.y_ext_start;
+
+            // Left via (from inner edge to left boundary)
+            if (this.via_x_left_inner > 0) {
+                conductors.push(new Conductor(
+                    0, via_y_start,
+                    this.via_x_left_inner, via_height,
+                    false
+                ));
+            }
+
+            // Right via (from inner edge to right boundary)
+            if (this.via_x_right_inner < this.domain_width) {
+                conductors.push(new Conductor(
+                    this.via_x_right_inner, via_y_start,
+                    this.domain_width - this.via_x_right_inner, via_height,
+                    false
+                ));
+            }
+        }
+
         // Signal trace(s)
         if (this.is_differential) {
             // Left trace (negative in odd mode, polarity = -1)
@@ -294,7 +443,42 @@ class MicrostripSolver extends FieldSolver2D {
             ));
         }
 
-        // Top ground plane (if present)
+        // Coplanar top grounds (on same layer as signal traces)
+        if (this.use_coplanar_gnd) {
+            if (this.is_differential) {
+                // Differential: grounds on outer edges only
+                // Left top ground (from left edge to outer gap edge)
+                conductors.push(new Conductor(
+                    0, this.y_trace_start,
+                    this.x_gap_outer_l, this.t,
+                    false
+                ));
+
+                // Right top ground (from outer gap edge to right edge)
+                conductors.push(new Conductor(
+                    this.x_gap_outer_r, this.y_trace_start,
+                    this.domain_width - this.x_gap_outer_r, this.t,
+                    false
+                ));
+            } else {
+                // Single-ended: grounds on both sides of the trace
+                // Left top ground (from left edge to gap edge)
+                conductors.push(new Conductor(
+                    0, this.y_trace_start,
+                    this.x_gap_l, this.t,
+                    false
+                ));
+
+                // Right top ground (from gap edge to right edge)
+                conductors.push(new Conductor(
+                    this.x_gap_r, this.y_trace_start,
+                    this.domain_width - this.x_gap_r, this.t,
+                    false
+                ));
+            }
+        }
+
+        // Top ground plane (if present - for stripline)
         if (this.has_top_gnd) {
             conductors.push(new Conductor(
                 0, this.y_gnd_top_start,
@@ -304,6 +488,207 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         return [dielectrics, conductors];
+    }
+
+    _add_coplanar_solder_mask(dielectrics) {
+        // Coplanar solder mask: covers gaps and tops of conductors
+        // Adapted from gcpw.js lines 194-283
+
+        if (this.is_differential) {
+            // Differential coplanar solder mask
+            const xl = this.x_tr_left_l;
+            const xr_left = this.x_tr_left_r;
+            const xl_right = this.x_tr_right_l;
+            const xr = this.x_tr_right_r;
+            const xl_gap = this.x_gap_outer_l;
+            const xr_gap = this.x_gap_outer_r;
+
+            // Solder mask on substrate in outer gaps
+            const xl_sub_start = xl_gap + this.sm_t_side;
+            const xl_sub_end = xl - this.sm_t_side;
+            if (xl_sub_end > xl_sub_start) {
+                dielectrics.push(new Dielectric(
+                    xl_sub_start, this.y_sub_end,
+                    xl_sub_end - xl_sub_start, this.sm_t_sub,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            const xr_sub_start = xr + this.sm_t_side;
+            const xr_sub_end = xr_gap - this.sm_t_side;
+            if (xr_sub_end > xr_sub_start) {
+                dielectrics.push(new Dielectric(
+                    xr_sub_start, this.y_sub_end,
+                    xr_sub_end - xr_sub_start, this.sm_t_sub,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask in center gap (between traces)
+            const center_start = xr_left + this.sm_t_side;
+            const center_end = xl_right - this.sm_t_side;
+            if (center_end > center_start) {
+                dielectrics.push(new Dielectric(
+                    center_start, this.y_sub_end,
+                    center_end - center_start, this.sm_t_sub,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on sides of left trace
+            dielectrics.push(new Dielectric(
+                xl - this.sm_t_side, this.y_trace_start,
+                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+            dielectrics.push(new Dielectric(
+                xr_left, this.y_trace_start,
+                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+
+            // Solder mask on sides of right trace
+            dielectrics.push(new Dielectric(
+                xl_right - this.sm_t_side, this.y_trace_start,
+                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+            dielectrics.push(new Dielectric(
+                xr, this.y_trace_start,
+                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+
+            // Solder mask on outer gap sides (ground side)
+            dielectrics.push(new Dielectric(
+                xl_gap, this.y_trace_start,
+                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+            dielectrics.push(new Dielectric(
+                xr_gap - this.sm_t_side, this.y_trace_start,
+                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+
+            // Solder mask on top of traces
+            dielectrics.push(new Dielectric(
+                xl, this.y_trace_end,
+                this.w, this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+            dielectrics.push(new Dielectric(
+                xl_right, this.y_trace_end,
+                this.w, this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+
+            // Solder mask on top of grounds
+            dielectrics.push(new Dielectric(
+                0, this.y_trace_end,
+                xl_gap, this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+            dielectrics.push(new Dielectric(
+                xr_gap, this.y_trace_end,
+                this.domain_width - xr_gap, this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+        } else {
+            // Single-ended coplanar solder mask (from original gcpw.js)
+            const xl = this.x_tr_l;
+            const xr = this.x_tr_r;
+            const xl_gap = this.x_gap_l;
+            const xr_gap = this.x_gap_r;
+
+            // Trace side positions
+            const xsl = xl - this.sm_t_side;
+            const xsr = xr + this.sm_t_side;
+
+            // Ground side mask positions
+            const xl_gnd_side_end = Math.min(xl_gap + this.sm_t_side, xl);
+            const xr_gnd_side_start = Math.max(xr_gap - this.sm_t_side, xr);
+
+            // Solder mask on substrate in gaps (between grounds and signal)
+            // Left gap
+            const xl_sub_start = xl_gnd_side_end;
+            const xl_sub_end = Math.min(xl, Math.max(xl_sub_start, xsl));
+            if (xl_sub_end > xl_sub_start) {
+                dielectrics.push(new Dielectric(
+                    xl_sub_start, this.y_sub_end,
+                    xl_sub_end - xl_sub_start, this.sm_t_sub,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Right gap
+            const xr_sub_end = xr_gnd_side_start;
+            const xr_sub_start_calc = Math.max(xr, Math.min(xr_sub_end, xsr));
+            if (xr_sub_end > xr_sub_start_calc) {
+                dielectrics.push(new Dielectric(
+                    xr_sub_start_calc, this.y_sub_end,
+                    xr_sub_end - xr_sub_start_calc, this.sm_t_sub,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on left side of trace
+            if (xsl >= 0) {
+                dielectrics.push(new Dielectric(
+                    xsl, this.y_trace_start,
+                    this.sm_t_side, this.t + this.sm_t_trace,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on right side of trace
+            if (xsr <= this.domain_width) {
+                dielectrics.push(new Dielectric(
+                    xr, this.y_trace_start,
+                    this.sm_t_side, this.t + this.sm_t_trace,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on ground side of left gap
+            if (xl_gnd_side_end > xl_gap) {
+                dielectrics.push(new Dielectric(
+                    xl_gap, this.y_trace_start,
+                    xl_gnd_side_end - xl_gap, this.t + this.sm_t_trace,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on ground side of right gap
+            if (xr_gap > xr_gnd_side_start) {
+                dielectrics.push(new Dielectric(
+                    xr_gnd_side_start, this.y_trace_start,
+                    xr_gap - xr_gnd_side_start, this.t + this.sm_t_trace,
+                    this.sm_er, this.sm_tand
+                ));
+            }
+
+            // Solder mask on top of signal trace
+            dielectrics.push(new Dielectric(
+                xl, this.y_trace_end,
+                this.w, this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+
+            // Solder mask on top of left ground
+            dielectrics.push(new Dielectric(
+                0, this.y_trace_end,
+                xl_gap, this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+
+            // Solder mask on top of right ground
+            dielectrics.push(new Dielectric(
+                xr_gap, this.y_trace_end,
+                this.domain_width - xr_gap, this.sm_t_trace,
+                this.sm_er, this.sm_tand
+            ));
+        }
     }
 
     ensure_mesh() {
