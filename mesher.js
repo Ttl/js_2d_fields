@@ -67,8 +67,10 @@ class Mesher {
      * @param {Array<Conductor>} conductors - List of conductor objects
      * @param {Array<Dielectric>} dielectrics - List of dielectric objects
      * @param {boolean} symmetric - Whether to enforce symmetry (default: false)
+     * @param {number} x_min - Minimum x-coordinate (default: 0)
+     * @param {number} x_max - Maximum x-coordinate (default: domain_width)
      */
-    constructor(domain_width, domain_height, nx, ny, skin_depth, conductors, dielectrics, symmetric = false) {
+    constructor(domain_width, domain_height, nx, ny, skin_depth, conductors, dielectrics, symmetric = false, x_min = 0, x_max = null) {
         this.domain_width = domain_width;
         this.domain_height = domain_height;
         this.nx = nx;
@@ -77,6 +79,8 @@ class Mesher {
         this.conductors = conductors;
         this.dielectrics = dielectrics;
         this.symmetric = symmetric;
+        this.x_min = x_min;
+        this.x_max = x_max !== null ? x_max : domain_width;
 
         // Calculate corner mesh parameters
         this.ncorner = Math.max(2, Math.floor(nx / 40));  // About 2-3 lines for nx=100
@@ -118,7 +122,7 @@ class Mesher {
     }
 
     _collect_interfaces_x() {
-        const x_if = new Set([0.0, this.domain_width]);
+        const x_if = new Set([this.x_min, this.x_max]);
 
         for (const cond of this.conductors) {
             x_if.add(cond.x_min);
@@ -126,10 +130,10 @@ class Mesher {
         }
 
         for (const diel of this.dielectrics) {
-            if (diel.x_min > 0) {
+            if (diel.x_min > this.x_min) {
                 x_if.add(diel.x_min);
             }
-            if (diel.x_max < this.domain_width) {
+            if (diel.x_max < this.x_max) {
                 x_if.add(diel.x_max);
             }
         }
@@ -546,7 +550,7 @@ class Mesher {
     _check_symmetry(axis) {
         if (axis !== 'x') return false;
 
-        const center = this.domain_width / 2;
+        const center = (this.x_min + this.x_max) / 2;
         const tol = 1e-12;
 
         for (const cond of this.conductors) {

@@ -69,8 +69,8 @@ class MicrostripSolver extends FieldSolver2D {
             // Otherwise, it's the total domain width
             if (this.use_side_gnd) {
                 // enclosure_width is the air box size (inner wall to inner wall)
-                // We'll add ground thickness later
-                this.domain_width = this.enclosure_width;
+                // Add ground thickness on both sides
+                this.domain_width = this.enclosure_width + 2 * this.t_gnd;
             } else {
                 this.domain_width = this.enclosure_width;
             }
@@ -130,11 +130,14 @@ class MicrostripSolver extends FieldSolver2D {
         this.conductors = conductors;
 
         // Create mesher but don't generate mesh yet
+        // Geometry is centered at x=0, so domain spans from -domain_width/2 to +domain_width/2
         this.mesher = new Mesher(
             this.domain_width, this.domain_height,
             this.nx, this.ny, this.delta_s,
             this.conductors, this.dielectrics,
-            true  // symmetric
+            true,  // symmetric
+            -this.domain_width / 2,  // x_min
+            this.domain_width / 2    // x_max
         );
 
         // Mesh will be generated when needed
@@ -265,12 +268,9 @@ class MicrostripSolver extends FieldSolver2D {
                 }
             }
 
-            // Add some margin for the side grounds themselves
-            const t_gnd = options.gnd_thickness || 35e-6;
-            const required_width = active_width + 2 * t_gnd;
-
-            if (required_width > options.enclosure_width) {
-                errors.push(`Active area width (${(active_width * 1000).toFixed(3)} mm) with side grounds (${(required_width * 1000).toFixed(3)} mm total) exceeds enclosure width (${(options.enclosure_width * 1000).toFixed(3)} mm)`);
+            // enclosure_width is the inner width (between ground walls), so just check active area
+            if (active_width > options.enclosure_width) {
+                errors.push(`Active area width (${(active_width * 1000).toFixed(3)} mm) exceeds enclosure inner width (${(options.enclosure_width * 1000).toFixed(3)} mm)`);
             }
         }
 
@@ -342,7 +342,7 @@ class MicrostripSolver extends FieldSolver2D {
     _calculate_coplanar_geometry_x() {
         // Calculate x-coordinates for gaps, top grounds, vias
         // Handle both single-ended and differential layouts
-        const cx = this.domain_width / 2;
+        // Geometry is centered at x=0
 
         if (this.is_differential) {
             // Differential: two traces with spacing between
@@ -350,12 +350,12 @@ class MicrostripSolver extends FieldSolver2D {
             const half_spacing = this.trace_spacing / 2;
 
             // Left trace (negative polarity)
-            this.x_tr_left_l = cx - this.w - half_spacing;
-            this.x_tr_left_r = cx - half_spacing;
+            this.x_tr_left_l = -this.w - half_spacing;
+            this.x_tr_left_r = -half_spacing;
 
             // Right trace (positive polarity)
-            this.x_tr_right_l = cx + half_spacing;
-            this.x_tr_right_r = cx + this.w + half_spacing;
+            this.x_tr_right_l = half_spacing;
+            this.x_tr_right_r = this.w + half_spacing;
 
             // Outer gaps (from outer edges of traces)
             this.x_gap_outer_l = this.x_tr_left_l - this.gap;
@@ -365,9 +365,9 @@ class MicrostripSolver extends FieldSolver2D {
             this.via_x_left_inner = this.x_gap_outer_l - this.via_gap;
             this.via_x_right_inner = this.x_gap_outer_r + this.via_gap;
         } else {
-            // Single-ended: one trace centered
-            this.x_tr_l = cx - this.w / 2;
-            this.x_tr_r = cx + this.w / 2;
+            // Single-ended: one trace centered at x=0
+            this.x_tr_l = -this.w / 2;
+            this.x_tr_r = this.w / 2;
 
             // Gaps from signal to top ground
             this.x_gap_l = this.x_tr_l - this.gap;
@@ -383,20 +383,22 @@ class MicrostripSolver extends FieldSolver2D {
         const dielectrics = [];
         const conductors = [];
 
-        const cx = this.domain_width / 2;
-        const xl = cx - this.w / 2;
-        const xr = cx + this.w / 2;
+        // Geometry is centered at x=0
+        const xl = -this.w / 2;
+        const xr = this.w / 2;
+        const x_min = -this.domain_width / 2;
+        const x_max = this.domain_width / 2;
 
         // Substrate (covers both cutout extension and main substrate)
         if (this.gnd_cut_sub_h > 0) {
             dielectrics.push(new Dielectric(
-                0, this.y_ext_start,
+                x_min, this.y_ext_start,
                 this.domain_width, this.y_trace_start - this.y_ext_start,
                 this.er, this.tan_delta
             ));
         } else {
             dielectrics.push(new Dielectric(
-                0, this.y_sub_start,
+                x_min, this.y_sub_start,
                 this.domain_width, this.h,
                 this.er, this.tan_delta
             ));
@@ -405,7 +407,7 @@ class MicrostripSolver extends FieldSolver2D {
         // Top dielectric (if present)
         if (this.top_diel_h > 0) {
             dielectrics.push(new Dielectric(
-                0, this.y_top_diel_start,
+                x_min, this.y_top_diel_start,
                 this.domain_width, this.top_diel_h,
                 this.top_diel_er, this.top_diel_tand
             ));
@@ -413,7 +415,7 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Top air/dielectric region
         dielectrics.push(new Dielectric(
-            0, this.y_top_start,
+            x_min, this.y_top_start,
             this.domain_width, this.top_dielectric_h,
             this.er_top, 0.0
         ));
@@ -427,7 +429,7 @@ class MicrostripSolver extends FieldSolver2D {
                 // Standard microstrip solder mask
                 // Solder mask on substrate (full width)
                 dielectrics.push(new Dielectric(
-                    0, this.y_sub_end,
+                    x_min, this.y_sub_end,
                     this.domain_width, this.sm_t_sub,
                     this.sm_er, this.sm_tand
                 ));
@@ -435,10 +437,10 @@ class MicrostripSolver extends FieldSolver2D {
                 if (this.is_differential) {
                     // Differential: solder mask for both traces
                     const half_spacing = this.trace_spacing / 2;
-                    const xl_left = cx - this.w - half_spacing;
-                    const xr_left = cx - half_spacing;
-                    const xl_right = cx + half_spacing;
-                    const xr_right = cx + this.w + half_spacing;
+                    const xl_left = -this.w - half_spacing;
+                    const xr_left = -half_spacing;
+                    const xl_right = half_spacing;
+                    const xr_right = this.w + half_spacing;
 
                     // Left trace solder mask
                     dielectrics.push(new Dielectric(
@@ -477,7 +479,7 @@ class MicrostripSolver extends FieldSolver2D {
                     // Single-ended: solder mask for one trace
                     // Solder mask on left side of trace
                     const xsl = xl - this.sm_t_side;
-                    if (xsl >= 0) {
+                    if (xsl >= x_min) {
                         dielectrics.push(new Dielectric(
                             xsl, this.y_trace_start,
                             this.sm_t_side, this.t + this.sm_t_trace,
@@ -487,7 +489,7 @@ class MicrostripSolver extends FieldSolver2D {
 
                     // Solder mask on right side of trace
                     const xsr = xr + this.sm_t_side;
-                    if (xsr <= this.domain_width) {
+                    if (xsr <= x_max) {
                         dielectrics.push(new Dielectric(
                             xr, this.y_trace_start,
                             this.sm_t_side, this.t + this.sm_t_trace,
@@ -510,7 +512,7 @@ class MicrostripSolver extends FieldSolver2D {
         // Bottom ground (beneath everything)
         if (this.t_gnd > 0) {
             conductors.push(new Conductor(
-                0, 0,
+                x_min, 0,
                 this.domain_width, this.t_gnd,
                 false
             ));
@@ -521,30 +523,30 @@ class MicrostripSolver extends FieldSolver2D {
             // No cutout - full ground plane
             if (this.y_gnd_bot_end > this.y_gnd_bot_start) {
                 conductors.push(new Conductor(
-                    0, this.y_gnd_bot_start,
+                    x_min, this.y_gnd_bot_start,
                     this.domain_width, this.t_gnd,
                     false
                 ));
             }
         } else {
             // With cutout - ground on sides only
-            const cut_l = cx - this.gnd_cut_width / 2;
-            const cut_r = cx + this.gnd_cut_width / 2;
+            const cut_l = -this.gnd_cut_width / 2;
+            const cut_r = this.gnd_cut_width / 2;
 
             // Left ground
-            if (cut_l > 0) {
+            if (cut_l > x_min) {
                 conductors.push(new Conductor(
-                    0, this.y_gnd_bot_start,
-                    cut_l, this.t_gnd,
+                    x_min, this.y_gnd_bot_start,
+                    cut_l - x_min, this.t_gnd,
                     false
                 ));
             }
 
             // Right ground
-            if (cut_r < this.domain_width) {
+            if (cut_r < x_max) {
                 conductors.push(new Conductor(
                     cut_r, this.y_gnd_bot_start,
-                    this.domain_width - cut_r, this.t_gnd,
+                    x_max - cut_r, this.t_gnd,
                     false
                 ));
             }
@@ -559,19 +561,19 @@ class MicrostripSolver extends FieldSolver2D {
             const via_height = this.y_trace_end - this.y_ext_start;
 
             // Left via (from inner edge to left boundary)
-            if (this.via_x_left_inner > 0) {
+            if (this.via_x_left_inner > x_min) {
                 conductors.push(new Conductor(
-                    0, via_y_start,
-                    this.via_x_left_inner, via_height,
+                    x_min, via_y_start,
+                    this.via_x_left_inner - x_min, via_height,
                     false
                 ));
             }
 
             // Right via (from inner edge to right boundary)
-            if (this.via_x_right_inner < this.domain_width) {
+            if (this.via_x_right_inner < x_max) {
                 conductors.push(new Conductor(
                     this.via_x_right_inner, via_y_start,
-                    this.domain_width - this.via_x_right_inner, via_height,
+                    x_max - this.via_x_right_inner, via_height,
                     false
                 ));
             }
@@ -580,14 +582,14 @@ class MicrostripSolver extends FieldSolver2D {
         // Signal trace(s)
         if (this.is_differential) {
             // Left trace (negative in odd mode, polarity = -1)
-            const xl_left = cx - this.w - this.trace_spacing / 2;
+            const xl_left = -this.w - this.trace_spacing / 2;
             conductors.push(new Conductor(
                 xl_left, this.y_trace_start,
                 this.w, this.t,
                 true, -1
             ));
             // Right trace (positive in odd mode, polarity = +1)
-            const xl_right = cx + this.trace_spacing / 2;
+            const xl_right = this.trace_spacing / 2;
             conductors.push(new Conductor(
                 xl_right, this.y_trace_start,
                 this.w, this.t,
@@ -608,30 +610,30 @@ class MicrostripSolver extends FieldSolver2D {
                 // Differential: grounds on outer edges only
                 // Left top ground (from left edge to outer gap edge)
                 conductors.push(new Conductor(
-                    0, this.y_trace_start,
-                    this.x_gap_outer_l, this.t,
+                    x_min, this.y_trace_start,
+                    this.x_gap_outer_l - x_min, this.t,
                     false
                 ));
 
                 // Right top ground (from outer gap edge to right edge)
                 conductors.push(new Conductor(
                     this.x_gap_outer_r, this.y_trace_start,
-                    this.domain_width - this.x_gap_outer_r, this.t,
+                    x_max - this.x_gap_outer_r, this.t,
                     false
                 ));
             } else {
                 // Single-ended: grounds on both sides of the trace
                 // Left top ground (from left edge to gap edge)
                 conductors.push(new Conductor(
-                    0, this.y_trace_start,
-                    this.x_gap_l, this.t,
+                    x_min, this.y_trace_start,
+                    this.x_gap_l - x_min, this.t,
                     false
                 ));
 
                 // Right top ground (from gap edge to right edge)
                 conductors.push(new Conductor(
                     this.x_gap_r, this.y_trace_start,
-                    this.domain_width - this.x_gap_r, this.t,
+                    x_max - this.x_gap_r, this.t,
                     false
                 ));
             }
@@ -640,7 +642,7 @@ class MicrostripSolver extends FieldSolver2D {
         // Top ground plane (if present - for stripline)
         if (this.has_top_gnd) {
             conductors.push(new Conductor(
-                0, this.y_gnd_top_start,
+                x_min, this.y_gnd_top_start,
                 this.domain_width, this.t_gnd,
                 false
             ));
@@ -653,16 +655,16 @@ class MicrostripSolver extends FieldSolver2D {
                 (this.y_gnd_top_start + this.t_gnd) :
                 (this.y_top_start + this.top_dielectric_h);
 
-            // Left side ground (from 0 to thickness)
+            // Left side ground (from x_min to x_min + thickness)
             conductors.push(new Conductor(
-                0, 0,
+                x_min, 0,
                 side_gnd_thickness, side_gnd_height,
                 false
             ));
 
-            // Right side ground (from domain_width - thickness to domain_width)
+            // Right side ground (from x_max - thickness to x_max)
             conductors.push(new Conductor(
-                this.domain_width - side_gnd_thickness, 0,
+                x_max - side_gnd_thickness, 0,
                 side_gnd_thickness, side_gnd_height,
                 false
             ));
@@ -765,14 +767,16 @@ class MicrostripSolver extends FieldSolver2D {
             ));
 
             // Solder mask on top of grounds
+            const x_min = -this.domain_width / 2;
+            const x_max = this.domain_width / 2;
             dielectrics.push(new Dielectric(
-                0, this.y_trace_end,
-                xl_gap, this.sm_t_trace,
+                x_min, this.y_trace_end,
+                xl_gap - x_min, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr_gap, this.y_trace_end,
-                this.domain_width - xr_gap, this.sm_t_trace,
+                x_max - xr_gap, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
         } else {
@@ -857,16 +861,18 @@ class MicrostripSolver extends FieldSolver2D {
             ));
 
             // Solder mask on top of left ground
+            const x_min = -this.domain_width / 2;
+            const x_max = this.domain_width / 2;
             dielectrics.push(new Dielectric(
-                0, this.y_trace_end,
-                xl_gap, this.sm_t_trace,
+                x_min, this.y_trace_end,
+                xl_gap - x_min, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
 
             // Solder mask on top of right ground
             dielectrics.push(new Dielectric(
                 xr_gap, this.y_trace_end,
-                this.domain_width - xr_gap, this.sm_t_trace,
+                x_max - xr_gap, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
         }

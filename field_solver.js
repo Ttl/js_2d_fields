@@ -1092,7 +1092,7 @@ export class FieldSolver2D {
         const {
             max_iters = 10,
             refine_frac,
-            energy_tol = 0.05,
+            energy_tol = 0.02,
             param_tol = 0.1,
             max_nodes = 20000,
             min_converged_passes = 2,
