@@ -16,6 +16,10 @@ function log(msg) {
     c.scrollTop = c.scrollHeight;
 }
 
+function nanToNull(input) {
+    return Number.isNaN(input) ? null : input;
+}
+
 function getParams() {
     return {
         tl_type: document.getElementById('tl_type').value,
@@ -57,8 +61,8 @@ function getParams() {
         use_enclosure: document.getElementById('chk_enclosure').checked,
         use_side_gnd: document.getElementById('chk_side_gnd').checked,
         use_top_gnd: document.getElementById('chk_top_gnd').checked,
-        enclosure_width: parseFloat(document.getElementById('inp_enclosure_width').value) * 1e-3,
-        enclosure_height: parseFloat(document.getElementById('inp_enclosure_height').value) * 1e-3,
+        enclosure_width: nanToNull(parseFloat(document.getElementById('inp_enclosure_width').value) * 1e-3),
+        enclosure_height: nanToNull(parseFloat(document.getElementById('inp_enclosure_height').value) * 1e-3),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
         tolerance: parseFloat(document.getElementById('inp_tolerance').value),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
