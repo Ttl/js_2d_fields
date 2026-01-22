@@ -937,7 +937,7 @@ function draw(resetZoom = false) {
                 x: [xMM[j], xMM[j]],
                 y: [yMM[0], yMM[nyDisplay - 1]],
                 mode: "lines",
-                line: { width: 0.2, color: "white" },
+                line: { width: 0.2, color: "black" },
                 showlegend: false,
                 hoverinfo: "skip"
             });
@@ -949,7 +949,7 @@ function draw(resetZoom = false) {
                 x: [xMM[0], xMM[nx - 1]],
                 y: [yMM[i], yMM[i]],
                 mode: "lines",
-                line: { width: 0.2, color: "white" },
+                line: { width: 0.2, color: "black" },
                 showlegend: false,
                 hoverinfo: "skip"
             });

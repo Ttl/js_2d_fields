@@ -229,6 +229,105 @@ async function solveWithWASM(csr, B, useLU = false) {
     }
 }
 
+function isArrayLike2D(arr, ny, nx) {
+    if (!arr || typeof arr !== "object") return false;
+    if (arr.length !== ny) return false;
+
+    for (let i = 0; i < ny; i++) {
+        const row = arr[i];
+        if (!row || typeof row !== "object") return false;
+        if (typeof row.length !== "number") return false;
+        if (row.length !== nx) return false;
+    }
+    return true;
+}
+
+function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = false) {
+    const errors = [];
+
+    const ny = y.length;
+    const nx = x.length;
+
+    // --- Shape checks ---
+    if (!isArrayLike2D(V, ny, nx)) {
+        errors.push("V must be a (ny, nx) 2D array matching mesh dimensions")
+    }
+
+    if (!isArrayLike2D(conductor_mask, ny, nx)) {
+        errors.push("conductor_mask must be a (ny, nx) 2D array matching mesh dimensions")
+    }
+
+    if (!vacuum && !isArrayLike2D(epsilon_r, ny, nx)) {
+        errors.push("epsilon_r must be a (ny, nx) 2D array matching mesh dimensions when vacuum=false")
+    }
+
+    // --- dx/dy checks ---
+    const dx = diff(x);
+    const dy = diff(y);
+
+    const check_spacing = (d, name) => {
+        const min = Math.min(...d);
+        const max = Math.max(...d);
+
+        if (Number.isNaN(min)) {
+            errors.push(`NaN in ${name})`);
+        }
+        if (!(min > 1e-12)) {
+            errors.push(`${name}: min spacing <= 1e-12 (min=${min})`);
+        }
+        if (!(max / min < 1e12)) {
+            errors.push(`${name}: spacing ratio too large (max/min = ${max / min})`);
+        }
+    };
+
+    if (dx.length > 0) check_spacing(dx, "dx");
+    if (dy.length > 0) check_spacing(dy, "dy");
+
+    // --- conductor presence ---
+    let has_conductor = false;
+    for (let i = 0; i < ny && !has_conductor; i++) {
+        for (let j = 0; j < nx; j++) {
+            if (conductor_mask[i][j]) {
+                has_conductor = true;
+                break;
+            }
+        }
+    }
+    if (!has_conductor) {
+        errors.push("No conductor cells found in conductor_mask");
+    }
+
+    // --- V validity ---
+    for (let i = 0; i < ny; i++) {
+        for (let j = 0; j < nx; j++) {
+            const v = V[i][j];
+            if (!Number.isFinite(v)) {
+                errors.push(`V contains non-finite value at (${i}, ${j}): ${v}`);
+                break;
+            }
+        }
+    }
+
+    // --- epsilon_r validity ---
+    if (!vacuum) {
+        for (let i = 0; i < ny; i++) {
+            for (let j = 0; j < nx; j++) {
+                const er = epsilon_r[i][j];
+                if (!Number.isFinite(er)) {
+                    errors.push(`epsilon_r contains non-finite value at (${i}, ${j}): ${er}`);
+                    return errors;
+                }
+                if (!(er > 0)) {
+                    errors.push(`epsilon_r must be > 0 at (${i}, ${j}), got ${er}`);
+                    return errors;
+                }
+            }
+        }
+    }
+
+    return errors;
+}
+
 // --- Solver Class ---
 
 export class FieldSolver2D {
@@ -288,6 +387,22 @@ export class FieldSolver2D {
         if (this.ensure_mesh) {
             this.ensure_mesh();
         }
+
+        const errors = validate_laplace_inputs(
+                V,
+                this.x,
+                this.y,
+                this.epsilon_r,
+                this.conductor_mask,
+                vacuum
+            );
+
+        if (errors.length > 0) {
+                throw new Error(
+                    "Laplace solver input validation failed:\n" +
+                    errors.map(e => " - " + e).join("\n")
+                );
+            }
 
         const ny = this.y.length, nx = this.x.length;
         const dx = diff(this.x), dy = diff(this.y);
