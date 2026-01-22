@@ -218,17 +218,18 @@ async function solve_microstrip() {
     });
 
     const results = await solver.solve_adaptive();
+    const mode = results.modes[0];
 
     // Prepare results dictionary matching Python format
     const solver_results = {
-        'Z0': results.Z0,
-        'eps_eff': results.eps_eff,
-        'diel_loss': results.alpha_diel_db_m,
-        'cond_loss': results.alpha_cond_db_m,
-        'C': results.RLGC.C,
-        'R': results.RLGC.R,
-        'L': results.RLGC.L,
-        'G': results.RLGC.G
+        'Z0': mode.Z0,
+        'eps_eff': mode.eps_eff,
+        'diel_loss': mode.alpha_d,
+        'cond_loss': mode.alpha_c,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
     };
 
     // Reference values from HFSS
@@ -267,17 +268,18 @@ async function solve_microstrip_embed() {
     });
 
     const results = await solver.solve_adaptive();
+    const mode = results.modes[0];
 
     const solver_results = {
-        'Z0': results.Z0,
-        'eps_eff': results.eps_eff,
-        'diel_loss': results.alpha_diel_db_m,
-        'cond_loss': results.alpha_cond_db_m,
-        'loss': results.total_alpha_db_m,
-        'C': results.RLGC.C,
-        'R': results.RLGC.R,
-        'L': results.RLGC.L,
-        'G': results.RLGC.G
+        'Z0': mode.Z0,
+        'eps_eff': mode.eps_eff,
+        'diel_loss': mode.alpha_d,
+        'cond_loss': mode.alpha_c,
+        'loss': mode.alpha_total,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
     };
 
     // Reference values from HFSS
@@ -313,17 +315,18 @@ async function solve_microstrip_cut() {
     });
 
     const results = await solver.solve_adaptive();
+    const mode = results.modes[0];
 
     const solver_results = {
-        'Z0': results.Z0,
-        'eps_eff': results.eps_eff,
-        'diel_loss': results.alpha_diel_db_m,
-        'cond_loss': results.alpha_cond_db_m,
-        'loss': results.total_alpha_db_m,
-        'C': results.RLGC.C,
-        'R': results.RLGC.R,
-        'L': results.RLGC.L,
-        'G': results.RLGC.G
+        'Z0': mode.Z0,
+        'eps_eff': mode.eps_eff,
+        'diel_loss': mode.alpha_d,
+        'cond_loss': mode.alpha_c,
+        'loss': mode.alpha_total,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
     };
 
     // Reference values from HFSS
@@ -354,6 +357,24 @@ async function solve_differential_microstrip() {
     });
 
     const results = await solver.solve_adaptive({energy_tol: 0.01});
+    const odd = results.modes.find(m => m.mode === 'odd');
+    const even = results.modes.find(m => m.mode === 'even');
+
+    // Map to flat structure for test function
+    const solver_results = {
+        'Z_odd': odd.Z0,
+        'Z_even': even.Z0,
+        'Z_diff': results.Z_diff,
+        'Z_common': results.Z_common,
+        'eps_eff_odd': odd.eps_eff,
+        'eps_eff_even': even.eps_eff,
+        'alpha_c_odd': odd.alpha_c,
+        'alpha_c_even': even.alpha_c,
+        'alpha_d_odd': odd.alpha_d,
+        'alpha_d_even': even.alpha_d,
+        'alpha_total_odd': odd.alpha_total,
+        'alpha_total_even': even.alpha_total
+    };
 
     const reference = {
         'Z_odd': 40.23,
@@ -367,7 +388,7 @@ async function solve_differential_microstrip() {
     };
 
     // Test against reference
-    test_differential_solution(results, reference, "Differential Microstrip");
+    test_differential_solution(solver_results, reference, "Differential Microstrip");
 
     return results;
 }
@@ -389,6 +410,24 @@ async function solve_differential_stripline() {
     });
 
     const results = await solver.solve_adaptive();
+    const odd = results.modes.find(m => m.mode === 'odd');
+    const even = results.modes.find(m => m.mode === 'even');
+
+    // Map to flat structure for test function
+    const solver_results = {
+        'Z_odd': odd.Z0,
+        'Z_even': even.Z0,
+        'Z_diff': results.Z_diff,
+        'Z_common': results.Z_common,
+        'eps_eff_odd': odd.eps_eff,
+        'eps_eff_even': even.eps_eff,
+        'alpha_c_odd': odd.alpha_c,
+        'alpha_c_even': even.alpha_c,
+        'alpha_d_odd': odd.alpha_d,
+        'alpha_d_even': even.alpha_d,
+        'alpha_total_odd': odd.alpha_total,
+        'alpha_total_even': even.alpha_total
+    };
 
     const reference = {
         'Z_odd': 37.6,
@@ -400,7 +439,7 @@ async function solve_differential_stripline() {
     };
 
     // Test against reference
-    test_differential_solution(results, reference, "Differential Stripline");
+    test_differential_solution(solver_results, reference, "Differential Stripline");
 
     return results;
 }

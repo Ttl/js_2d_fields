@@ -552,16 +552,20 @@ export class FieldSolver2D {
         const dy_array = diff(this.y);
 
         const Rs = Math.sqrt(this.omega * CONSTANTS.MU0 / (2 * this.sigma_cond));
-        const delta = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
 
         const get_dx = j => (j >= 0 && j < dx_array.length) ? dx_array[j] : dx_array[dx_array.length - 1];
         const get_dy = i => (i >= 0 && i < dy_array.length) ? dy_array[i] : dy_array[dy_array.length - 1];
+
+        // Helper functions for conductor detection based on mode
+        const isConductor = this.is_differential
+            ? (i, j) => this.signal_p_mask[i][j] || this.signal_n_mask[i][j] || this.ground_mask[i][j]
+            : (i, j) => this.signal_mask[i][j] || this.ground_mask[i][j];
 
         let Pc = 0.0;
 
         for (let i = 1; i < ny - 1; i++) {
             for (let j = 1; j < nx - 1; j++) {
-                if (!(this.signal_mask[i][j] || this.ground_mask[i][j])) {
+                if (!isConductor(i, j)) {
                     continue;
                 }
 
@@ -576,9 +580,9 @@ export class FieldSolver2D {
                 let cell_dl = 0.0;
 
                 for (const { ni, nj, direction, dl_func, idx: dl_idx } of neighbors) {
-                    if (ni < 0 || ni >= ny || nj < 0 || nj >= nx) continue; // Out of bounds
-                    if (this.signal_mask[ni][nj] || this.ground_mask[ni][nj]) {
-                        continue; // Neighbor is also conductor
+                    if (ni < 0 || ni >= ny || nj < 0 || nj >= nx) continue;
+                    if (isConductor(ni, nj)) {
+                        continue;
                     }
 
                     const eps_diel = this.epsilon_r[ni][nj];
@@ -595,7 +599,7 @@ export class FieldSolver2D {
                     } else if (direction === 'd') {
                         E_norm = -Ey_diel;
                     } else {
-                        E_norm = 0; // Should not happen
+                        E_norm = 0;
                     }
 
                     const Z0_freespace = Math.sqrt(CONSTANTS.MU0 / CONSTANTS.EPS0);
@@ -614,7 +618,9 @@ export class FieldSolver2D {
             }
         }
 
-        const Pc_1W = Pc * 2 * Z0; // Normalized to 1W power flow
+        // Power normalization: differential has 0.5 factor
+        const power_factor = this.is_differential ? 0.5 : 1.0;
+        const Pc_1W = power_factor * Pc * 2 * Z0;
         const alpha_db_per_m = 8.686 * Pc_1W / 2.0;
 
         return alpha_db_per_m;
@@ -632,12 +638,17 @@ export class FieldSolver2D {
         const get_dx = j => (j >= 0 && j < dx_array.length) ? dx_array[j] : dx_array[dx_array.length - 1];
         const get_dy = i => (i >= 0 && i < dy_array.length) ? dy_array[i] : dy_array[dy_array.length - 1];
 
+        // Helper function for conductor detection based on mode
+        const isConductor = this.is_differential
+            ? (i, j) => this.signal_p_mask[i][j] || this.signal_n_mask[i][j] || this.ground_mask[i][j]
+            : (i, j) => this.conductor_mask[i][j];
+
         let Pd = 0.0;
 
         for (let i = 0; i < ny - 1; i++) {
             for (let j = 0; j < nx - 1; j++) {
-                if (this.conductor_mask[i][j]) continue;
-                if (this.epsilon_r[i][j] <= 1.01) continue; // Air or vacuum, no loss
+                if (isConductor(i, j)) continue;
+                if (this.epsilon_r[i][j] <= 1.01) continue;
 
                 const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
                 const dA = get_dx(j) * get_dy(i);
@@ -648,8 +659,10 @@ export class FieldSolver2D {
             }
         }
 
+        // Power normalization: differential has 0.5 factor
+        const power_factor = this.is_differential ? 0.5 : 1.0;
         const P_flow = 1.0 / (2 * Z0);
-        return 8.686 * (Pd / (2 * P_flow));
+        return 8.686 * (power_factor * Pd / (2 * P_flow));
     }
 
     rlgc(alpha_cond, alpha_diel, C_mode, Z0_mode) {
@@ -963,7 +976,7 @@ export class FieldSolver2D {
             }
         }
 
-        if (prev_energy === null) {
+        if (prev_energy === null || prev_energy === undefined) {
             return { energy, rel_error: 1.0 };
         }
 
@@ -986,16 +999,16 @@ export class FieldSolver2D {
 
     async _solve_single_mode(mode, vacuum_first = true) {
         /**
-         * Solve a single mode (odd or even) for differential pair.
+         * Solve a single mode and return full results.
          *
          * Parameters:
          * -----------
-         * mode : string - 'odd' or 'even'
+         * mode : string - 'single', 'odd', or 'even'
          * vacuum_first : boolean - Whether to solve vacuum case first for C0 calculation
          *
          * Returns:
          * --------
-         * {Z0, eps_eff, C, C0, Ex, Ey, V}
+         * {mode, Z0, eps_eff, C, C0, RLGC, Zc, alpha_c, alpha_d, alpha_total, V, Ex, Ey}
          */
         let C0;
         let V;
@@ -1005,22 +1018,31 @@ export class FieldSolver2D {
             V = this._create_voltage_array(mode);
             V = await this.solve_laplace_iterative(V, true);
 
-            // Use only positive trace for charge calculation
-            const orig_signal_mask = this.signal_mask.map(row => row.slice());
-            this.signal_mask = this.signal_p_mask.map(row => row.slice());
-            C0 = this.calculate_capacitance(V, true);
-            this.signal_mask = orig_signal_mask;
+            if (this.is_differential) {
+                // Use only positive trace for charge calculation
+                const orig_signal_mask = this.signal_mask.map(row => row.slice());
+                this.signal_mask = this.signal_p_mask.map(row => row.slice());
+                C0 = this.calculate_capacitance(V, true);
+                this.signal_mask = orig_signal_mask;
+            } else {
+                C0 = this.calculate_capacitance(V, true);
+            }
         }
 
         // Solve with dielectric
         V = this._create_voltage_array(mode);
         V = await this.solve_laplace_iterative(V, false);
 
-        // Use only positive trace for charge calculation
-        const orig_signal_mask = this.signal_mask.map(row => row.slice());
-        this.signal_mask = this.signal_p_mask.map(row => row.slice());
-        const C = this.calculate_capacitance(V, false);
-        this.signal_mask = orig_signal_mask;
+        let C;
+        if (this.is_differential) {
+            // Use only positive trace for charge calculation
+            const orig_signal_mask = this.signal_mask.map(row => row.slice());
+            this.signal_mask = this.signal_p_mask.map(row => row.slice());
+            C = this.calculate_capacitance(V, false);
+            this.signal_mask = orig_signal_mask;
+        } else {
+            C = this.calculate_capacitance(V, false);
+        }
 
         // Calculate fields
         const { Ex, Ey } = this.compute_fields(V);
@@ -1032,122 +1054,35 @@ export class FieldSolver2D {
             Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
         }
 
-        return { Z0, eps_eff, C, C0, Ex, Ey, V };
-    }
+        // Calculate losses using unified functions
+        const alpha_c = this.calculate_conductor_loss(Ex, Ey, Z0);
+        const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
+        const alpha_total = alpha_c + alpha_d;
 
-    _calculate_differential_conductor_loss(Ex, Ey, Z0, mode) {
-        /**
-         * Calculate conductor loss for differential pair.
-         */
-        const Rs = Math.sqrt(this.omega * CONSTANTS.MU0 / (2 * this.sigma_cond));
-        const delta = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
+        // Calculate RLGC
+        const { Zc, rlgc } = this.rlgc(alpha_c, alpha_d, C, Z0);
 
-        const nx = this.x.length;
-        const ny = this.y.length;
-        const dx_array = diff(this.x);
-        const dy_array = diff(this.y);
-
-        const get_dx = j => (j >= 0 && j < dx_array.length) ? dx_array[j] : dx_array[dx_array.length - 1];
-        const get_dy = i => (i >= 0 && i < dy_array.length) ? dy_array[i] : dy_array[dy_array.length - 1];
-
-        let Pc = 0.0;
-
-        for (let i = 1; i < ny - 1; i++) {
-            for (let j = 1; j < nx - 1; j++) {
-                if (!this.signal_p_mask[i][j] && !this.signal_n_mask[i][j] && !this.ground_mask[i][j]) {
-                    continue;
-                }
-
-                const neighbors = [
-                    [i, j + 1, 'r', i, get_dy],
-                    [i, j - 1, 'l', i, get_dy],
-                    [i + 1, j, 'u', j, get_dx],
-                    [i - 1, j, 'd', j, get_dx]
-                ];
-
-                let cell_K_sq = 0.0;
-                let cell_dl = 0.0;
-
-                for (const [ni, nj, direction, dl_idx, dl_func] of neighbors) {
-                    if (this.signal_p_mask[ni][nj] || this.signal_n_mask[ni][nj] || this.ground_mask[ni][nj]) {
-                        continue;
-                    }
-
-                    const eps_diel = this.epsilon_r[ni][nj];
-                    const Ex_diel = Ex[ni][nj];
-                    const Ey_diel = Ey[ni][nj];
-
-                    let E_norm;
-                    if (direction === 'r') {
-                        E_norm = Ex_diel;
-                    } else if (direction === 'l') {
-                        E_norm = -Ex_diel;
-                    } else if (direction === 'u') {
-                        E_norm = Ey_diel;
-                    } else if (direction === 'd') {
-                        E_norm = -Ey_diel;
-                    }
-
-                    const Z0_freespace = Math.sqrt(CONSTANTS.MU0 / CONSTANTS.EPS0);
-                    const H_tan = Math.abs(E_norm) * Math.sqrt(eps_diel) / Z0_freespace;
-                    const K = H_tan;
-                    const dl = dl_func(dl_idx);
-
-                    cell_K_sq += K * K * dl;
-                    cell_dl += dl;
-                }
-
-                if (cell_dl > 0) {
-                    const dP = 0.5 * Rs * cell_K_sq;
-                    Pc += dP;
-                }
-            }
-        }
-
-        // Power normalization for 1W
-        const Pc_1W = 0.5 * Pc * 2 * Z0;
-        const alpha_db_per_m = 8.686 * Pc_1W / 2.0;
-
-        return alpha_db_per_m;
-    }
-
-    _calculate_differential_dielectric_loss(Ex, Ey, Z0) {
-        /**
-         * Calculate dielectric loss for differential pair.
-         */
-        const nx = this.x.length;
-        const ny = this.y.length;
-        const dx_array = diff(this.x);
-        const dy_array = diff(this.y);
-
-        let Pd = 0.0;
-
-        for (let i = 0; i < ny - 1; i++) {
-            for (let j = 0; j < nx - 1; j++) {
-                if (this.signal_p_mask[i][j] || this.signal_n_mask[i][j] || this.ground_mask[i][j]) {
-                    continue;
-                }
-                if (this.epsilon_r[i][j] <= 1.01) {
-                    continue;
-                }
-
-                const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
-                const dA = dx_array[j] * dy_array[i];
-                Pd += 0.5 * this.omega * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tan_delta * E2 * dA;
-            }
-        }
-
-        // Power flow for 1W in the transmission line
-        const P_flow = 1.0 / (2 * Z0);
-
-        // Attenuation constant
-        return 8.686 * (0.5 * Pd / (2 * P_flow));
+        return {
+            mode,
+            Z0, eps_eff, C, C0,
+            RLGC: rlgc, Zc,
+            alpha_c, alpha_d, alpha_total,
+            V, Ex, Ey
+        };
     }
 
     async solve_adaptive(options = {}) {
         /**
          * Adaptive mesh solve with robust convergence criteria.
          * Automatically handles both single-ended and differential modes.
+         *
+         * Returns:
+         * --------
+         * {
+         *   modes: [{mode, Z0, eps_eff, C, C0, RLGC, Zc, alpha_c, alpha_d, alpha_total, V, Ex, Ey}, ...],
+         *   Z_diff: (only for differential) 2 * Z_odd,
+         *   Z_common: (only for differential) Z_even / 2
+         * }
          */
         // Ensure mesh is generated
         if (this.ensure_mesh) {
@@ -1168,236 +1103,118 @@ export class FieldSolver2D {
         // Set default refine_frac based on mode
         const refineFrac = refine_frac !== undefined ? refine_frac : (this.is_differential ? 0.15 : 0.2);
 
+        // Define modes to solve
+        const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
+
+        // Tracking variables for convergence
+        const prevEnergy = {};
+        const prevZ0 = {};
         let converged_count = 0;
-        let results = null;
+        let modeResults = null;
 
-        if (this.is_differential) {
-            // ============================================================================
-            // DIFFERENTIAL MODE
-            // ============================================================================
-            let prev_energy_odd = null;
-            let prev_energy_even = null;
-            let prev_Z_odd = null;
-            let prev_Z_even = null;
+        for (let it = 0; it < max_iters; it++) {
+            // Solve all modes
+            modeResults = [];
+            for (const modeName of modeNames) {
+                const result = await this._solve_single_mode(modeName, true);
+                modeResults.push(result);
+            }
 
-            let Z_odd, eps_eff_odd, C_odd, C0_odd, Ex_odd, Ey_odd, V_odd;
-            let Z_even, eps_eff_even, C_even, C0_even, Ex_even, Ey_even, V_even;
+            // Compute max errors across all modes
+            let max_energy_err = 0;
+            let max_param_err = 0;
 
-            for (let it = 0; it < max_iters; it++) {
-                // Solve even mode (+1V and +1V)
-                const even_results = await this._solve_single_mode('even', true);
-                Z_even = even_results.Z0;
-                eps_eff_even = even_results.eps_eff;
-                C_even = even_results.C;
-                C0_even = even_results.C0;
-                Ex_even = even_results.Ex;
-                Ey_even = even_results.Ey;
-                V_even = even_results.V;
+            for (let i = 0; i < modeNames.length; i++) {
+                const modeName = modeNames[i];
+                const r = modeResults[i];
 
-                // Solve odd mode (+1V and -1V)
-                const odd_results = await this._solve_single_mode('odd', true);
-                Z_odd = odd_results.Z0;
-                eps_eff_odd = odd_results.eps_eff;
-                C_odd = odd_results.C;
-                C0_odd = odd_results.C0;
-                Ex_odd = odd_results.Ex;
-                Ey_odd = odd_results.Ey;
-                V_odd = odd_results.V;
+                const { energy, rel_error: energy_err } = this._compute_energy_error(r.Ex, r.Ey, prevEnergy[modeName]);
 
-                // Energy-based error
-                const { energy: energy_odd, rel_error: energy_err_odd } =
-                    this._compute_energy_error(Ex_odd, Ey_odd, prev_energy_odd);
-                const { energy: energy_even, rel_error: energy_err_even } =
-                    this._compute_energy_error(Ex_even, Ey_even, prev_energy_even);
-                const energy_err = Math.max(energy_err_odd, energy_err_even);
+                const param_err = prevZ0[modeName] !== undefined
+                    ? Math.abs(r.Z0 - prevZ0[modeName]) / Math.max(Math.abs(prevZ0[modeName]), 1e-12)
+                    : 1.0;
 
-                // Parameter-based error
-                let param_err;
-                if (prev_Z_odd !== null) {
-                    const z_odd_err = Math.abs(Z_odd - prev_Z_odd) / Math.max(Math.abs(prev_Z_odd), 1e-12);
-                    const z_even_err = Math.abs(Z_even - prev_Z_even) / Math.max(Math.abs(prev_Z_even), 1e-12);
-                    param_err = Math.max(z_odd_err, z_even_err);
+                max_energy_err = Math.max(max_energy_err, energy_err);
+                max_param_err = Math.max(max_param_err, param_err);
+
+                prevEnergy[modeName] = energy;
+                prevZ0[modeName] = r.Z0;
+            }
+
+            console.log(`Pass ${it + 1}: Energy err=${max_energy_err.toExponential(3)}, Param err=${max_param_err.toExponential(3)}, Grid=${this.x.length}x${this.y.length}`);
+
+            // Call progress callback
+            if (onProgress) {
+                onProgress({
+                    iteration: it + 1,
+                    max_iterations: max_iters,
+                    energy_error: max_energy_err,
+                    param_error: max_param_err,
+                    nodes_x: this.x.length,
+                    nodes_y: this.y.length
+                });
+            }
+
+            // Yield to event loop to allow UI updates
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            // Check convergence
+            const hasPrevious = Object.keys(prevZ0).length === modeNames.length &&
+                                Object.values(prevZ0).every(v => v !== undefined);
+            if (hasPrevious && it > 0) {
+                if (max_energy_err < energy_tol && max_param_err < param_tol) {
+                    converged_count++;
+                    if (converged_count >= min_converged_passes) {
+                        console.log(`Converged after ${it + 1} passes`);
+                        break;
+                    }
                 } else {
-                    param_err = 1.0;
-                }
-
-                console.log(`Pass ${it + 1}: Energy err=${energy_err.toExponential(3)}, Param err=${param_err.toExponential(3)}, Grid=${this.x.length}x${this.y.length}`);
-
-                // Call progress callback and yield to event loop
-                if (onProgress) {
-                    onProgress({
-                        iteration: it + 1,
-                        max_iterations: max_iters,
-                        energy_error: energy_err,
-                        param_error: param_err,
-                        nodes_x: this.x.length,
-                        nodes_y: this.y.length
-                    });
-                }
-
-                // Yield to event loop to allow UI updates
-                await new Promise(resolve => setTimeout(resolve, 0));
-
-                // Check convergence
-                if (prev_Z_odd !== null) {
-                    if (energy_err < energy_tol && param_err < param_tol) {
-                        converged_count++;
-                        if (converged_count >= min_converged_passes) {
-                            console.log(`Converged after ${it + 1} passes`);
-                            break;
-                        }
-                    } else {
-                        converged_count = 0;
-                    }
-                }
-
-                prev_energy_odd = energy_odd;
-                prev_energy_even = energy_even;
-                prev_Z_odd = Z_odd;
-                prev_Z_even = Z_even;
-
-                // Node budget check
-                if (this.x.length * this.y.length > max_nodes) {
-                    console.log("Node budget reached");
-                    break;
-                }
-
-                // Check if stop was requested
-                if (shouldStop && shouldStop()) {
-                    console.log("Adaptive solve stopped by user");
-                    break;
-                }
-
-                // Refine mesh (use odd mode fields for refinement)
-                if (it !== max_iters - 1) {
-                    this.refine_mesh(V_odd, Ex_odd, Ey_odd, refineFrac);
-                    this._setup_geometry();
+                    converged_count = 0;
                 }
             }
 
-            // Calculate losses
-            const alpha_c_odd = this._calculate_differential_conductor_loss(Ex_odd, Ey_odd, Z_odd, 'odd');
-            const alpha_d_odd = this._calculate_differential_dielectric_loss(Ex_odd, Ey_odd, Z_odd);
-
-            const alpha_c_even = this._calculate_differential_conductor_loss(Ex_even, Ey_even, Z_even, 'even');
-            const alpha_d_even = this._calculate_differential_dielectric_loss(Ex_even, Ey_even, Z_even);
-
-            // Store fields and potentials as arrays for differential mode
-            this.V = [V_odd, V_even];
-            this.Ex = [Ex_odd, Ex_even];
-            this.Ey = [Ey_odd, Ey_even];
-
-            // Differential and common mode impedances
-            const Z_diff = 2 * Z_odd;
-            const Z_common = Z_even / 2;
-
-            results = {
-                Z_odd: Z_odd,
-                Z_even: Z_even,
-                Z_diff: Z_diff,
-                Z_common: Z_common,
-                eps_eff_odd: eps_eff_odd,
-                eps_eff_even: eps_eff_even,
-                C_odd: C_odd,
-                C_even: C_even,
-                alpha_c_odd: alpha_c_odd,
-                alpha_c_even: alpha_c_even,
-                alpha_d_odd: alpha_d_odd,
-                alpha_d_even: alpha_d_even,
-                alpha_total_odd: alpha_c_odd + alpha_d_odd,
-                alpha_total_even: alpha_c_even + alpha_d_even
-            };
-
-        } else {
-            // ============================================================================
-            // SINGLE-ENDED MODE
-            // ============================================================================
-            let prev_energy = null;
-            let prev_Z0 = null;
-            let prev_C = null;
-            let V, Ex, Ey;
-
-            for (let it = 0; it < max_iters; it++) {
-                // Calculate parameters
-                results = await this.perform_analysis();
-                const Z0 = results.Z0;
-                const eps_eff = results.eps_eff;
-                const C = results.RLGC.C;
-
-                // Get fields and potential from perform_analysis
-                V = results.V;
-                Ex = results.Ex;
-                Ey = results.Ey;
-
-                // Energy-based error (primary criterion)
-                const { energy, rel_error: energy_err } = this._compute_energy_error(Ex, Ey, prev_energy);
-
-                // Parameter-based error (what you actually care about)
-                const param_err = this._compute_parameter_error(Z0, C, prev_Z0, prev_C);
-
-                const nodes = this.x.length * this.y.length;
-
-                console.log(`Pass ${it + 1}: Energy err=${energy_err.toExponential(3)}, Param err=${param_err.toExponential(3)}, Grid=${this.x.length}x${this.y.length}`);
-
-                // Call progress callback
-                if (onProgress) {
-                    onProgress({
-                        iteration: it + 1,
-                        total_iterations: max_iters,
-                        energy_error: energy_err,
-                        param_error: param_err,
-                        nodes_x: this.x.length,
-                        nodes_y: this.y.length,
-                        Z0: Z0,
-                        eps_eff: eps_eff
-                    });
-                }
-
-                // Yield control periodically
-                await new Promise(r => setTimeout(r, 0));
-
-                // Check convergence (both criteria must be met)
-                if (prev_energy !== null) {
-                    if (energy_err < energy_tol && param_err < param_tol) {
-                        converged_count++;
-                        if (converged_count >= min_converged_passes) {
-                            console.log(`Converged after ${it + 1} passes`);
-                            break;
-                        }
-                    } else {
-                        converged_count = 0; // Reset if we diverge
-                    }
-                }
-
-                prev_energy = energy;
-                prev_Z0 = Z0;
-                prev_C = C;
-
-                // Node budget check
-                if (nodes > max_nodes) {
-                    console.log("Node budget reached");
-                    break;
-                }
-
-                // Check if stop was requested
-                if (shouldStop && shouldStop()) {
-                    console.log("Adaptive solve stopped by user");
-                    break;
-                }
-
-                // Refine mesh (skip on last iteration)
-                if (it !== max_iters - 1) {
-                    this.refine_mesh(V, Ex, Ey, refineFrac);
-                    this._setup_geometry();
-                }
+            // Node budget check
+            if (this.x.length * this.y.length > max_nodes) {
+                console.log("Node budget reached");
+                break;
             }
 
-            // Wrap fields and potential in array for consistency with differential mode
-            this.V = [V];
-            this.Ex = [Ex];
-            this.Ey = [Ey];
+            // Check if stop was requested
+            if (shouldStop && shouldStop()) {
+                console.log("Adaptive solve stopped by user");
+                break;
+            }
+
+            // Refine mesh using first mode's fields (odd for differential, single for single-ended)
+            if (it !== max_iters - 1) {
+                const refineMode = modeResults[0];
+                this.refine_mesh(refineMode.V, refineMode.Ex, refineMode.Ey, refineFrac);
+                this._setup_geometry();
+            }
         }
 
-        return results;
+        // Store fields as arrays
+        this.V = modeResults.map(r => r.V);
+        this.Ex = modeResults.map(r => r.Ex);
+        this.Ey = modeResults.map(r => r.Ey);
+
+        // Build unified result structure
+        return this._build_results(modeResults);
+    }
+
+    _build_results(modeResults) {
+        /**
+         * Build the unified result structure from mode results.
+         */
+        const result = { modes: modeResults };
+
+        if (this.is_differential) {
+            const odd = modeResults.find(m => m.mode === 'odd');
+            const even = modeResults.find(m => m.mode === 'even');
+            result.Z_diff = 2 * odd.Z0;
+            result.Z_common = even.Z0 / 2;
+        }
+
+        return result;
     }
 }

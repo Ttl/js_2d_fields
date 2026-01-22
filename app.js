@@ -54,8 +54,6 @@ function getParams() {
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
         gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value) * 1e-3,
         gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value) * 1e-3,
-        // Adaptive meshing parameters - always enabled
-        use_adaptive: true,
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
         tolerance: parseFloat(document.getElementById('inp_tolerance').value),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
@@ -215,33 +213,36 @@ async function runSimulation() {
         // Redraw to show E-field overlay on geometry
         draw();
 
-        // Check if differential results
-        if (results.Z_odd !== undefined) {
+        // Check if differential results (modes array has 2 elements)
+        if (results.modes.length === 2) {
             // Differential microstrip results
+            const odd = results.modes.find(m => m.mode === 'odd');
+            const even = results.modes.find(m => m.mode === 'even');
             log(`\nDIFFERENTIAL RESULTS:\n` +
                      `======================\n` +
                      `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ω  (2 × Z_odd)\n` +
                      `Common-Mode Impedance Z_common: ${results.Z_common.toFixed(2)} Ω  (Z_even / 2)\n` +
                      `\nModal Impedances:\n` +
-                     `  Odd-Mode  Z_odd:  ${results.Z_odd.toFixed(2)} Ω  (εᵣₑff = ${results.eps_eff_odd.toFixed(3)})\n` +
-                     `  Even-Mode Z_even: ${results.Z_even.toFixed(2)} Ω  (εᵣₑff = ${results.eps_eff_even.toFixed(3)})\n` +
+                     `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ω  (εᵣₑff = ${odd.eps_eff.toFixed(3)})\n` +
+                     `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ω  (εᵣₑff = ${even.eps_eff.toFixed(3)})\n` +
                      `\nLosses @ ${(p.freq / 1e9).toFixed(2)} GHz:\n` +
-                     `  Odd-Mode:  Diel=${results.alpha_d_odd.toFixed(4)} dB/m, Cond=${results.alpha_c_odd.toFixed(4)} dB/m, Total=${results.alpha_total_odd.toFixed(4)} dB/m\n` +
-                     `  Even-Mode: Diel=${results.alpha_d_even.toFixed(4)} dB/m, Cond=${results.alpha_c_even.toFixed(4)} dB/m, Total=${results.alpha_total_even.toFixed(4)} dB/m`);
+                     `  Odd-Mode:  Diel=${odd.alpha_d.toFixed(4)} dB/m, Cond=${odd.alpha_c.toFixed(4)} dB/m, Total=${odd.alpha_total.toFixed(4)} dB/m\n` +
+                     `  Even-Mode: Diel=${even.alpha_d.toFixed(4)} dB/m, Cond=${even.alpha_c.toFixed(4)} dB/m, Total=${even.alpha_total.toFixed(4)} dB/m`);
         } else {
             // Single-ended results
+            const mode = results.modes[0];
             log(`\nRESULTS:\n` +
                      `----------------------\n` +
-                     `Characteristic Impedance Z0:  ${results.Z0.toFixed(2)} Ω\n` +
-                     `Z0 (complex):  ${results.Zc.toString()} Ω\n` +
-                     `Effective Permittivity: ${results.eps_eff.toFixed(3)}\n` +
-                     `R:             ${results.RLGC.R.toExponential(3)} Ω/m\n` +
-                     `L:             ${results.RLGC.L.toExponential(3)} H/m\n` +
-                     `G:             ${results.RLGC.G.toExponential(3)} S/m\n` +
-                     `C:             ${results.RLGC.C.toExponential(3)} F/m\n` +
-                     `Dielectric Loss: ${results.alpha_diel_db_m.toFixed(4)} dB/m\n` +
-                     `Conductor Loss:  ${results.alpha_cond_db_m.toFixed(4)} dB/m\n` +
-                     `Total Loss:      ${results.total_alpha_db_m.toFixed(4)} dB/m`);
+                     `Characteristic Impedance Z0:  ${mode.Z0.toFixed(2)} Ω\n` +
+                     `Z0 (complex):  ${mode.Zc.toString()} Ω\n` +
+                     `Effective Permittivity: ${mode.eps_eff.toFixed(3)}\n` +
+                     `R:             ${mode.RLGC.R.toExponential(3)} Ω/m\n` +
+                     `L:             ${mode.RLGC.L.toExponential(3)} H/m\n` +
+                     `G:             ${mode.RLGC.G.toExponential(3)} S/m\n` +
+                     `C:             ${mode.RLGC.C.toExponential(3)} F/m\n` +
+                     `Dielectric Loss: ${mode.alpha_d.toFixed(4)} dB/m\n` +
+                     `Conductor Loss:  ${mode.alpha_c.toFixed(4)} dB/m\n` +
+                     `Total Loss:      ${mode.alpha_total.toFixed(4)} dB/m`);
         }
 
     } catch (e) {
