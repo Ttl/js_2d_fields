@@ -66,6 +66,8 @@ function getParams() {
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
         tolerance: parseFloat(document.getElementById('inp_tolerance').value),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
+        // Surface roughness parameter
+        rq: parseFloat(document.getElementById('inp_rq').value) * 1e-6,
     };
 }
 
@@ -93,6 +95,8 @@ function updateGeometry() {
                 top_gnd_width: p.top_gnd_w,
                 via_gap: p.via_gap,
                 use_vias: true,
+                // Surface roughness
+                rq: p.rq,
             };
             // Add solder mask options
             if (p.use_sm) {
@@ -145,6 +149,8 @@ function updateGeometry() {
                 top_gnd_width: p.top_gnd_w,
                 via_gap: p.via_gap,
                 use_vias: true,
+                // Surface roughness
+                rq: p.rq,
             };
             // Add solder mask options
             if (p.use_sm) {
@@ -190,7 +196,9 @@ function updateGeometry() {
                 freq: p.freq,
                 nx: p.nx,
                 ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"]
+                boundaries: ["open", "open", "open", "gnd"],
+                // Surface roughness
+                rq: p.rq
             };
             // Add solder mask options
             if (p.use_sm) {
@@ -236,7 +244,9 @@ function updateGeometry() {
                 freq: p.freq,
                 nx: p.nx,
                 ny: p.ny,
-                boundaries: ["open", "open", "gnd", "gnd"]
+                boundaries: ["open", "open", "gnd", "gnd"],
+                // Surface roughness
+                rq: p.rq
             };
             // Add solder mask options
             if (p.use_sm) {
@@ -281,7 +291,9 @@ function updateGeometry() {
                 freq: p.freq,
                 nx: p.nx,
                 ny: p.ny,
-                boundaries: ["open", "open", "gnd", "gnd"]
+                boundaries: ["open", "open", "gnd", "gnd"],
+                // Surface roughness
+                rq: p.rq
             };
             // Enclosure options (stripline already has top ground)
             if (p.use_enclosure) {
@@ -304,7 +316,9 @@ function updateGeometry() {
                 freq: p.freq,
                 nx: p.nx,
                 ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"]
+                boundaries: ["open", "open", "open", "gnd"],
+                // Surface roughness
+                rq: p.rq
             };
 
             // Solder mask

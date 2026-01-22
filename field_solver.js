@@ -1,4 +1,6 @@
 import createWASMModule from './wasm_solver/solver.js';
+import { Complex } from "./complex.js";
+import { calculate_Zrough } from './surface_roughness.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -6,58 +8,6 @@ export const CONSTANTS = {
     C: 299792458,
     PI: Math.PI
 };
-
-// --- Complex Number Class ---
-class Complex {
-    constructor(re, im = 0) {
-        this.re = re;
-        this.im = im;
-    }
-
-    add(other) {
-        return new Complex(this.re + other.re, this.im + other.im);
-    }
-
-    sub(other) {
-        return new Complex(this.re - other.re, this.im - other.im);
-    }
-
-    mul(other) {
-        if (typeof other === 'number') {
-            return new Complex(this.re * other, this.im * other);
-        }
-        return new Complex(
-            this.re * other.re - this.im * other.im,
-            this.re * other.im + this.im * other.re
-        );
-    }
-
-    div(other) {
-        if (typeof other === 'number') {
-            return new Complex(this.re / other, this.im / other);
-        }
-        const denominator = other.re * other.re + other.im * other.im;
-        return new Complex(
-            (this.re * other.re + this.im * other.im) / denominator,
-            (this.im * other.re - this.re * other.im) / denominator
-        );
-    }
-
-    sqrt() {
-        const r = Math.sqrt(this.re * this.re + this.im * this.im);
-        const theta = Math.atan2(this.im, this.re);
-        return new Complex(
-            Math.sqrt(r) * Math.cos(theta / 2),
-            Math.sqrt(r) * Math.sin(theta / 2)
-        );
-    }
-
-    toString() {
-        if (this.im === 0) return `${this.re.toFixed(2)}`;
-        if (this.re === 0) return `${this.im.toFixed(2)}j`;
-        return `${this.re.toFixed(2)}${this.im > 0 ? '+' : ''}${this.im.toFixed(2)}j`;
-    }
-}
 
 // --- Math Utils ---
 
@@ -658,32 +608,42 @@ export class FieldSolver2D {
     }
 
     calculate_conductor_loss(Ex, Ey, Z0) {
-        if (!this.solution_valid) {
-            throw new Error("Fields (Ex, Ey) are not valid. Run compute_fields() first.");
-        }
+        if (!this.solution_valid) throw new Error("Fields invalid");
+
+        // Use roughness from constructor
+        const rq = this.rq || 0;
+
+        // Pre-calculate Surface Impedance (Z_rough) using gradient model
+        // Returns Complex object {re, im}
+        const Z_surf = calculate_Zrough(this.freq, this.sigma_cond, rq);
+
         const ny = this.y.length;
         const nx = this.x.length;
         const dx_array = diff(this.x);
         const dy_array = diff(this.y);
 
-        const Rs = Math.sqrt(this.omega * CONSTANTS.MU0 / (2 * this.sigma_cond));
-
         const get_dx = j => (j >= 0 && j < dx_array.length) ? dx_array[j] : dx_array[dx_array.length - 1];
         const get_dy = i => (i >= 0 && i < dy_array.length) ? dy_array[i] : dy_array[dy_array.length - 1];
 
-        // Helper functions for conductor detection based on mode
-        const isConductor = this.is_differential
-            ? (i, j) => this.signal_p_mask[i][j] || this.signal_n_mask[i][j] || this.ground_mask[i][j]
-            : (i, j) => this.signal_mask[i][j] || this.ground_mask[i][j];
+        let sum_H2_dl_R = 0.0; // Sum for Resistance
+        let sum_H2_dl_L = 0.0; // Sum for Inductance
 
-        let Pc = 0.0;
+        // Helper to check mask type
+        const isSignal = (i, j) => this.signal_mask[i][j];
+        const isGround = (i, j) => this.ground_mask[i][j];
+        const isConductor = (i, j) => isSignal(i,j) || isGround(i,j);
 
         for (let i = 1; i < ny - 1; i++) {
             for (let j = 1; j < nx - 1; j++) {
-                if (!isConductor(i, j)) {
-                    continue;
-                }
 
+                // We only care about the boundary *inside* the dielectric
+                // but adjacent to a conductor.
+                // Current loop iterates ALL cells. Let's look for Dielectric cells
+                // that have a conductor neighbor.
+
+                if (isConductor(i, j)) continue; // Skip if we are inside metal
+
+                // Check neighbors to see if we are on a boundary
                 const neighbors = [
                     { ni: i, nj: j + 1, direction: 'r', dl_func: get_dy, idx: i },
                     { ni: i, nj: j - 1, direction: 'l', dl_func: get_dy, idx: i },
@@ -691,54 +651,51 @@ export class FieldSolver2D {
                     { ni: i - 1, nj: j, direction: 'd', dl_func: get_dx, idx: j },
                 ];
 
-                let cell_K_sq = 0.0;
-                let cell_dl = 0.0;
-
                 for (const { ni, nj, direction, dl_func, idx: dl_idx } of neighbors) {
                     if (ni < 0 || ni >= ny || nj < 0 || nj >= nx) continue;
+
+                    // If neighbor is a conductor, we are on the surface
                     if (isConductor(ni, nj)) {
-                        continue;
+
+                        const eps_diel = this.epsilon_r[i][j]; // Use permittivity of current (dielectric) cell
+                        const Ex_val = Ex[i][j];
+                        const Ey_val = Ey[i][j];
+
+                        // Calculate tangential Magnetic Field H_tan
+                        // H_tan = (1/Z_wave) * E_norm
+                        // Z_wave = Z0 / sqrt(eps_r)
+
+                        let E_norm = 0.0;
+                        if (direction === 'r' || direction === 'l') E_norm = Math.abs(Ex_val);
+                        else E_norm = Math.abs(Ey_val);
+
+                        const Z0_freespace = 376.73; // sqrt(mu0/eps0)
+                        const H_tan = E_norm * Math.sqrt(eps_diel) / Z0_freespace;
+
+                        const dl = dl_func(dl_idx);
+                        const H2_dl = H_tan * H_tan * dl;
+
+                        // Accumulate for all conductors (signal and ground use same roughness)
+                        sum_H2_dl_R += Z_surf.re * H2_dl;
+                        sum_H2_dl_L += Z_surf.im * H2_dl;
                     }
-
-                    const eps_diel = this.epsilon_r[ni][nj];
-                    const Ex_diel = Ex[ni][nj];
-                    const Ey_diel = Ey[ni][nj];
-
-                    let E_norm;
-                    if (direction === 'r') {
-                        E_norm = Ex_diel;
-                    } else if (direction === 'l') {
-                        E_norm = -Ex_diel;
-                    } else if (direction === 'u') {
-                        E_norm = Ey_diel;
-                    } else if (direction === 'd') {
-                        E_norm = -Ey_diel;
-                    } else {
-                        E_norm = 0;
-                    }
-
-                    const Z0_freespace = Math.sqrt(CONSTANTS.MU0 / CONSTANTS.EPS0);
-                    const H_tan = Math.abs(E_norm) * Math.sqrt(eps_diel) / Z0_freespace;
-                    const K = H_tan;
-                    const dl = dl_func(dl_idx);
-
-                    cell_K_sq += K * K * dl;
-                    cell_dl += dl;
-                }
-
-                if (cell_dl > 0) {
-                    const dP = 0.5 * Rs * cell_K_sq;
-                    Pc += dP;
                 }
             }
         }
 
-        // Power normalization: differential has 0.5 factor
+        // Power normalization factor: differential has 0.5 factor
+        // This is because we integrate over both traces but report normalized loss
         const power_factor = this.is_differential ? 0.5 : 1.0;
-        const Pc_1W = power_factor * Pc * 2 * Z0;
-        const alpha_db_per_m = 8.686 * Pc_1W / 2.0;
 
-        return alpha_db_per_m;
+        const Z0_sq = Z0 * Z0;
+
+        // Total Resistance per unit length (Ohm/m)
+        const R_ac = power_factor * sum_H2_dl_R * Z0_sq;
+
+        // Total Internal Inductance per unit length (H/m)
+        const L_internal = power_factor * sum_H2_dl_L * Z0_sq / this.omega;
+
+        return { R_ac, L_internal };
     }
 
     calculate_dielectric_loss(Ex, Ey, Z0) {
@@ -780,7 +737,60 @@ export class FieldSolver2D {
         return 8.686 * (power_factor * Pd / (2 * P_flow));
     }
 
-    rlgc(alpha_cond, alpha_diel, C_mode, Z0_mode) {
+    rlgc(R_ac, L_internal, alpha_diel, C_mode, Z0_mode) {
+
+        // Dielectric loss conductance
+        // alpha_d = G * Z0 / 2  => G = 2 * alpha_d / Z0
+        // alpha_d_np = alpha_diel_dB / 8.686
+        const alpha_d_np = alpha_diel / 8.686;
+        const G = 2 * alpha_d_np / Z0_mode;
+
+        // External Inductance (Geometric)
+        // L_ext = Z0^2 * C_mode (Standard TEM relationship for lossless/ext)
+        // Note: If epsilon_r is non-homogeneous, C_mode includes dielectric.
+        // Usually L_ext is derived from C_air (capacitance with air dielectric).
+        // Assuming Z0_mode was calculated correctly using sqrt(L_ext/C_mode),
+        // then L_ext = Z0_mode^2 * C_mode is correct.
+        const L_ext = (Z0_mode * Z0_mode) * C_mode;
+
+        // Total Inductance
+        const L_total = L_ext + L_internal;
+
+        // Total Resistance (Directly from conductor impedance)
+        const R_total = R_ac;
+
+        // Re-calculate complex Zc and Epsilon_eff with the new L and R
+        const omega = this.omega;
+
+        // Zc = sqrt( (R + jwL) / (G + jwC) )
+        const Z_num = new Complex(R_total, omega * L_total);
+        const Z_den = new Complex(G, omega * C_mode);
+        const Zc = Z_num.div(Z_den).sqrt();
+
+        // Effective Permittivity
+        // gamma = sqrt( (R+jwL)(G+jwC) ) = alpha + j*beta
+        // beta = Im(gamma)
+        // eps_eff = (beta / k0)^2  where k0 = omega/c0
+        const gamma = Z_num.mul(Z_den).sqrt();
+        const beta = gamma.im;
+        const k0 = omega / 299792458.0;
+        const eps_eff_new = Math.pow(beta / k0, 2);
+
+        return {
+            Zc: Zc,
+            rlgc: {
+                R: R_total,
+                L: L_total, // Now includes internal inductance
+                G: G,
+                C: C_mode
+            },
+            eps_eff_mode: eps_eff_new,
+            L_internal: L_internal, // Helpful for debugging
+            L_external: L_ext
+        };
+    }
+
+    rlgc_from_alpha(alpha_cond, alpha_diel, C_mode, Z0_mode) {
         // Convert dB/m to Np/m
         const alpha_c_np = alpha_cond / 8.686;
         const alpha_d_np = alpha_diel / 8.686;
@@ -838,15 +848,17 @@ export class FieldSolver2D {
         const { Ex, Ey } = this.compute_fields(V);
 
         // 5. Calculate losses
-        // Conductor loss depends on Ex, Ey, Z0, omega, sigma_cond
-        const alpha_cond_db_m = this.calculate_conductor_loss(Ex, Ey, Z0);
+        // Conductor loss with surface roughness (returns R_ac and L_internal)
+        const { R_ac, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
 
         // Dielectric loss depends on Ex, Ey, Z0, omega, epsilon_r, tan_delta
         const alpha_diel_db_m = this.calculate_dielectric_loss(Ex, Ey, Z0);
 
-        // 6. Calculate RLGC and complex Z0
-        const { Zc, rlgc, eps_eff_mode } = this.rlgc(alpha_cond_db_m, alpha_diel_db_m, C_with_diel, Z0);
+        // 6. Calculate RLGC and complex Z0 using surface roughness aware approach
+        const { Zc, rlgc, eps_eff_mode } = this.rlgc(R_ac, L_internal, alpha_diel_db_m, C_with_diel, Z0);
 
+        // Calculate conductor loss alpha from R_ac for reporting
+        const alpha_cond_db_m = 8.686 * R_ac / (2 * Z0);
         const total_alpha_db_m = alpha_cond_db_m + alpha_diel_db_m;
 
         return {
@@ -1071,7 +1083,6 @@ export class FieldSolver2D {
     _compute_energy_error(Ex, Ey, prev_energy) {
         /**
          * Compute relative change in stored electromagnetic energy.
-         * Fields must be interpolated to cell centers to match epsilon grid.
          */
         const ny = this.y.length;
         const nx = this.x.length;
@@ -1169,19 +1180,27 @@ export class FieldSolver2D {
             Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
         }
 
-        // Calculate losses using unified functions
-        const alpha_c = this.calculate_conductor_loss(Ex, Ey, Z0);
-        const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
-        const alpha_total = alpha_c + alpha_d;
+        // Calculate conductor losses with surface roughness (returns R_ac and L_internal)
+        const { R_ac, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
 
-        // Calculate RLGC
-        const { Zc, rlgc } = this.rlgc(alpha_c, alpha_d, C, Z0);
+        // Calculate dielectric loss (returns alpha in dB/m)
+        const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
+
+        // Calculate RLGC using new surface roughness aware approach
+        const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_ac, L_internal, alpha_d, C, Z0);
+
+        // Calculate conductor loss alpha from R_ac for reporting
+        const alpha_c = 8.686 * R_ac / (2 * Z0);
+        const alpha_total = alpha_c + alpha_d;
 
         return {
             mode,
-            Z0, eps_eff, C, C0,
+            Z0,
+            eps_eff: eps_eff_mode,  // Use the updated eps_eff from rlgc
+            C, C0,
             RLGC: rlgc, Zc,
             alpha_c, alpha_d, alpha_total,
+            L_internal, L_external,  // Include for debugging
             V, Ex, Ey
         };
     }

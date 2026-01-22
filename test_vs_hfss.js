@@ -393,6 +393,99 @@ async function solve_differential_microstrip() {
     return results;
 }
 
+async function solve_stripline() {
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2e-3,
+        trace_width: 0.15e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 16e-6,
+        epsilon_r: 4.1,
+        epsilon_r_top: 4.1,
+        enclosure_height: 0.2e-3 + 35e-6,
+        freq: 1e9,
+        nx: 10,
+        ny: 10,
+        boundaries: ["open", "open", "gnd", "gnd"]
+    });
+
+    const results = await solver.solve_adaptive({energy_tol: 0.01});
+    const mode = results.modes[0];
+
+    const solver_results = {
+        'Z0': mode.Z0,
+        'eps_eff': mode.eps_eff,
+        'diel_loss': mode.alpha_d,
+        'cond_loss': mode.alpha_c,
+        'loss': mode.alpha_total,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
+    };
+
+    // Reference values from HFSS
+    const reference = {
+        "Z0": 50.2,
+        "diel_loss": 3.685,
+        "cond_loss": 3.1
+    };
+
+    // Test against reference
+    test_microstrip_solution(solver_results, reference, "Rough Stripline");
+
+    return results;
+}
+
+async function solve_rough_stripline() {
+    const solver = new MicrostripSolver({
+        substrate_height: 177e-6,
+        trace_width: 160e-6,
+        trace_thickness: 15e-6,
+        gnd_thickness: 15e-6,
+        epsilon_r: 3.54,
+        epsilon_r_top: 3.48,
+        tan_delta: 0.004,
+        enclosure_height: 162e-6 + 15e-6,
+        freq: 40e9,
+        nx: 30,
+        ny: 30,
+        rq: 0.6e-6,
+        boundaries: ["open", "open", "gnd", "gnd"]
+    });
+
+    const results = await solver.solve_adaptive();
+    const mode = results.modes[0];
+
+    const solver_results = {
+        'Z0': mode.Z0,
+        'eps_eff': mode.eps_eff,
+        'diel_loss': mode.alpha_d,
+        'cond_loss': mode.alpha_c,
+        'loss': mode.alpha_total,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
+    };
+
+    const phase_delay = 6.3e-9;
+    const eps_eff = Math.pow(3e8 * phase_delay, 2);
+
+    // Reference values from Gradient model paper
+    // G. Gold and K. Helmreich, "A Physical Surface Roughness Model and Its
+    // Applications," in IEEE Transactions on Microwave Theory and Techniques,
+    // vol. 65, no. 10, pp. 3720-3732, Oct. 2017.
+    const reference = {
+        "eps_eff": eps_eff,
+        "loss": 80,
+    };
+
+    // Test against reference
+    test_microstrip_solution(solver_results, reference, "Rough Stripline");
+
+    return results;
+}
+
 async function solve_differential_stripline() {
     const solver = new MicrostripSolver({
         substrate_height: 0.2e-3,
@@ -449,6 +542,8 @@ async function runTests() {
     await solve_microstrip();
     await solve_microstrip_embed();
     await solve_microstrip_cut();
+    await solve_stripline();
+    await solve_rough_stripline();
     await solve_differential_stripline();
     await solve_differential_microstrip();
 }

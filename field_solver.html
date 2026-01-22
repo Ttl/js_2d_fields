@@ -133,6 +133,75 @@
             width: 0%;
             transition: width 0.1s;
         }
+
+        /* Help Icon */
+        .help-icon {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            line-height: 14px;
+            text-align: center;
+            border-radius: 50%;
+            border: 1px solid #6b7280;
+            color: #6b7280;
+            font-size: 11px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-left: 5px;
+            vertical-align: middle;
+            transition: all 0.2s;
+        }
+        .help-icon:hover {
+            background-color: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        /* Help Modal */
+        .help-modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+        }
+        .help-modal-content {
+            background-color: white;
+            margin: 10% auto;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 500px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .help-modal-close {
+            color: #9ca3af;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            line-height: 20px;
+        }
+        .help-modal-close:hover {
+            color: #1f2937;
+        }
+        .help-modal h3 {
+            margin-top: 0;
+            color: #111827;
+        }
+        .help-modal p {
+            line-height: 1.6;
+            color: #4b5563;
+        }
+        .help-modal a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+        .help-modal a:hover {
+            text-decoration: underline;
+        }
     </style>
 <script src="plotly-2.27.0.min.js.js"></script>
 </head>
@@ -299,6 +368,11 @@
                 <input type="number" id="inp_enclosure_height" placeholder="auto" step="0.1">
             </div>
         </div>
+
+        <div class="control-group">
+            <label>Surface Roughness RMS (μm) <span class="help-icon" onclick="showHelpModal('roughness')">?</span></label>
+            <input type="number" id="inp_rq" value="0" step="0.1" min="0">
+        </div>
     </div>
 
     <h3>Solver Settings</h3>
@@ -311,7 +385,7 @@
         <input type="number" id="inp_max_nodes" value="20000" step="1000" min="1000">
     </div>
     <div class="control-group">
-        <label>Tolerance</label>
+        <label>Tolerance <span class="help-icon" onclick="showHelpModal('tolerance')">?</span></label>
         <input type="number" id="inp_tolerance" value="0.05" step="0.01" min="0.001">
     </div>
 
@@ -330,7 +404,50 @@
 
     <div class="output-panel" id="console_out">Ready. Click 'Solve Physics' to start simulation.</div>
 </div>
+
+<!-- Help Modal -->
+<div id="helpModal" class="help-modal">
+    <div class="help-modal-content">
+        <span class="help-modal-close" onclick="closeHelpModal()">&times;</span>
+        <h3 id="helpModalTitle"></h3>
+        <div id="helpModalBody"></div>
+    </div>
+</div>
+
 <script>
+    // Help Modal Functions
+    const helpContent = {
+        roughness: {
+            title: 'Surface Roughness',
+            body: '<p>Conductor loss is calculated using gradient model (<a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">https://ieeexplore.ieee.org/document/7932148</a>), both loss and inductance caused by the surface roughness is calculated. All conductors use this roughness on all sides. Typical RMS roughness is about 1 - 2 µm for normal copper foil and about 0.5 µm for special low profile foil.</p>'
+        },
+        tolerance: {
+            title: 'Tolerance',
+            body: '<p>Terminates adaptive mesh refinement if the relative change in the total energy stored in electromagnetic field changes less than this value between iterations. 0.05 should be a good balance between fast calculation and good results. Decrease to 0.01 or less for more accurate results. Param error in log is relative error between calculated output parameters Z0 and C.</p>'
+        }
+    };
+
+    function showHelpModal(topic) {
+        const content = helpContent[topic];
+        if (content) {
+            document.getElementById('helpModalTitle').textContent = content.title;
+            document.getElementById('helpModalBody').innerHTML = content.body;
+            document.getElementById('helpModal').style.display = 'block';
+        }
+    }
+
+    function closeHelpModal() {
+        document.getElementById('helpModal').style.display = 'none';
+    }
+
+    // Close modal when clicking outside of it
+    window.onclick = function(event) {
+        const modal = document.getElementById('helpModal');
+        if (event.target === modal) {
+            closeHelpModal();
+        }
+    }
+
     function toggleParameterVisibility() {
         const tlType = document.getElementById('tl_type').value;
         const microstripParams = document.getElementById('microstrip-params');

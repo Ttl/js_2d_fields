@@ -56,6 +56,9 @@ class MicrostripSolver extends FieldSolver2D {
         this.nx = options.nx ?? 300;
         this.ny = options.ny ?? 300;
 
+        // Surface roughness parameter (RMS roughness in meters)
+        this.rq = options.rq ?? 0;
+
         // Domain sizing
         if (this.enclosure_width !== null) {
             // Use explicit enclosure width
