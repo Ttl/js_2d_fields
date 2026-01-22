@@ -112,13 +112,16 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Create mesher but don't generate mesh yet
         // Geometry is centered at x=0, so domain spans from -domain_width/2 to +domain_width/2
+        // Y-coordinate system: bottom ground extends from -t_gnd to 0 (top surface at y=0)
         this.mesher = new Mesher(
             this.domain_width, this.domain_height,
             this.nx, this.ny, this.delta_s,
             this.conductors, this.dielectrics,
             true,  // symmetric
             -this.domain_width / 2,  // x_min
-            this.domain_width / 2    // x_max
+            this.domain_width / 2,   // x_max
+            -this.t_gnd,             // y_min (bottom of bottom ground)
+            this.domain_height       // y_max (top of domain)
         );
 
         // Mesh will be generated when needed
@@ -263,8 +266,8 @@ class MicrostripSolver extends FieldSolver2D {
 
     _calculate_coordinates() {
         // Bottom extension for cut ground
-        this.y_ext_start = this.t_gnd;
-        this.y_ext_end = this.t_gnd + this.gnd_cut_sub_h;
+        this.y_ext_start = 0;
+        this.y_ext_end = this.gnd_cut_sub_h;
 
         // New bottom ground plane location
         this.y_gnd_bot_start = this.y_ext_end;
@@ -490,7 +493,7 @@ class MicrostripSolver extends FieldSolver2D {
         // Bottom ground (beneath everything)
         if (this.t_gnd > 0) {
             conductors.push(new Conductor(
-                x_min, 0,
+                x_min, -this.t_gnd,
                 this.domain_width, this.t_gnd,
                 false
             ));
@@ -635,8 +638,8 @@ class MicrostripSolver extends FieldSolver2D {
         // Left side ground (if boundaries[0] === "gnd")
         if (this.boundaries[0] === "gnd") {
             conductors.push(new Conductor(
-                x_min, 0,
-                side_gnd_thickness, side_gnd_height,
+                x_min, -this.t_gnd,
+                side_gnd_thickness, side_gnd_height + this.t_gnd,
                 false
             ));
         }
@@ -644,8 +647,8 @@ class MicrostripSolver extends FieldSolver2D {
         // Right side ground (if boundaries[1] === "gnd")
         if (this.boundaries[1] === "gnd") {
             conductors.push(new Conductor(
-                x_max - side_gnd_thickness, 0,
-                side_gnd_thickness, side_gnd_height,
+                x_max - side_gnd_thickness, -this.t_gnd,
+                side_gnd_thickness, side_gnd_height + this.t_gnd,
                 false
             ));
         }

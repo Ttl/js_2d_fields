@@ -590,8 +590,8 @@ function draw(resetZoom = false) {
     if (currentView === "geometry") {
         title = "Transmission Line Geometry";
 
-        // Determine display bounds
-        const maxY = Math.min(solver.h + 5 * solver.w, solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0));
+        // Determine display bounds - use actual domain extent
+        const maxY = solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0);
 
         // Draw dielectrics as rectangles (color by epsilon_r)
         for (const diel of solver.dielectrics) {
@@ -689,9 +689,9 @@ function draw(resetZoom = false) {
         nx = solver.x.length;
         ny = solver.y.length;
 
-        // Limit display Y
+        // Limit display Y - use actual domain extent
         const yArr = Array.from(solver.y);
-        const maxY = Math.min(yArr[ny - 1], solver.h + 5 * solver.w);
+        const maxY = yArr[ny - 1];  // Use full domain extent
         const maxYIdx = yArr.findIndex(y => y > maxY);
         nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
 
@@ -724,9 +724,9 @@ function draw(resetZoom = false) {
         nx = solver.x.length;
         ny = solver.y.length;
 
-        // Limit display Y
+        // Limit display Y - use actual domain extent
         const yArr = Array.from(solver.y);
-        const maxY = Math.min(yArr[ny - 1], solver.h + 5 * solver.w);
+        const maxY = yArr[ny - 1];  // Use full domain extent
         const maxYIdx = yArr.findIndex(y => y > maxY);
         nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
 

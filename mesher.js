@@ -69,8 +69,10 @@ class Mesher {
      * @param {boolean} symmetric - Whether to enforce symmetry (default: false)
      * @param {number} x_min - Minimum x-coordinate (default: 0)
      * @param {number} x_max - Maximum x-coordinate (default: domain_width)
+     * @param {number} y_min - Minimum y-coordinate (default: 0)
+     * @param {number} y_max - Maximum y-coordinate (default: domain_height)
      */
-    constructor(domain_width, domain_height, nx, ny, skin_depth, conductors, dielectrics, symmetric = false, x_min = 0, x_max = null) {
+    constructor(domain_width, domain_height, nx, ny, skin_depth, conductors, dielectrics, symmetric = false, x_min = 0, x_max = null, y_min = 0, y_max = null) {
         this.domain_width = domain_width;
         this.domain_height = domain_height;
         this.nx = nx;
@@ -81,6 +83,8 @@ class Mesher {
         this.symmetric = symmetric;
         this.x_min = x_min;
         this.x_max = x_max !== null ? x_max : domain_width;
+        this.y_min = y_min;
+        this.y_max = y_max !== null ? y_max : domain_height;
 
         // Calculate corner mesh parameters
         this.ncorner = Math.max(2, Math.floor(nx / 40));  // About 2-3 lines for nx=100
@@ -142,7 +146,7 @@ class Mesher {
     }
 
     _collect_interfaces_y() {
-        const y_if = new Set([0.0, this.domain_height]);
+        const y_if = new Set([this.y_min, this.y_max]);
 
         for (const cond of this.conductors) {
             y_if.add(cond.y_min);
@@ -150,10 +154,10 @@ class Mesher {
         }
 
         for (const diel of this.dielectrics) {
-            if (diel.y_min > 0) {
+            if (diel.y_min > this.y_min) {
                 y_if.add(diel.y_min);
             }
-            if (diel.y_max < this.domain_height) {
+            if (diel.y_max < this.y_max) {
                 y_if.add(diel.y_max);
             }
         }
@@ -456,7 +460,7 @@ class Mesher {
         // Add center points for all conductors and dielectrics
         const center_points = [];
         const axis_min_for_centers = axis === 'x' ? this.x_min : 0;
-        const axis_max_for_centers = axis === 'x' ? this.x_max : this.domain_height;
+        const axis_max_for_centers = axis === 'x' ? this.x_max : this.y_max;
 
         for (const cond of this.conductors) {
             const center = axis === 'x' ?
@@ -491,8 +495,8 @@ class Mesher {
         // Add boundary lines adjacent to conductor edges
         const boundary_offset = Math.min(this.skin_depth * 3, domain_size / 200);
         const boundary_lines = [];
-        const axis_min = axis === 'x' ? this.x_min : 0;
-        const axis_max = axis === 'x' ? this.x_max : this.domain_height;
+        const axis_min = axis === 'x' ? this.x_min : this.y_min;
+        const axis_max = axis === 'x' ? this.x_max : this.y_max;
 
         for (const cond of this.conductors) {
             const cond_min = axis === 'x' ? cond.x_min : cond.y_min;
@@ -552,8 +556,8 @@ class Mesher {
         if (this.symmetric && axis === 'x') {
             const is_symmetric = this._check_symmetry(axis);
             if (is_symmetric) {
-                const axis_min = axis === 'x' ? this.x_min : 0;
-                const axis_max = axis === 'x' ? this.x_max : this.domain_height;
+                const axis_min = axis === 'x' ? this.x_min : this.y_min;
+                const axis_max = axis === 'x' ? this.x_max : this.y_max;
                 mesh = this._enforce_symmetry(mesh, axis_min, axis_max);
             } else {
                 console.warn('Geometry is not symmetric, but symmetric meshing was requested');
