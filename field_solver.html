@@ -147,6 +147,7 @@
             <option value="microstrip">Microstrip</option>
             <option value="diff_microstrip">Differential Microstrip</option>
             <option value="stripline">Stripline</option>
+            <option value="diff_stripline">Differential Stripline</option>
             <option value="gcpw">GCPW</option>
             <option value="diff_gcpw">Differential GCPW</option>
         </select>
@@ -398,6 +399,35 @@
             if (gndCutGroup) gndCutGroup.style.display = 'block';
             if (enclosureGroup) enclosureGroup.style.display = 'block';
             // Hide top ground checkbox and height for stripline (already has top ground)
+            if (topGndGroup) topGndGroup.style.display = 'none';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
+            if (chkSolderMask) {
+                chkSolderMask.disabled = true;
+                chkSolderMask.checked = false;
+                solderMaskParams.style.display = 'none';
+            }
+            if (chkTopDiel) {
+                chkTopDiel.disabled = true;
+                chkTopDiel.checked = false;
+                topDielParams.style.display = 'none';
+            }
+            if (chkGndCut) {
+                chkGndCut.disabled = true;
+                chkGndCut.checked = false;
+                gndCutParams.style.display = 'none';
+            }
+            if (chkEnclosure) {
+                chkEnclosure.disabled = false;
+            }
+        } else if (tlType === 'diff_stripline') {
+            diffParams.style.display = 'block';
+            striplineParams.style.display = 'block';
+            // Show but disable all advanced options for diff stripline (same as stripline)
+            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
+            if (topDielGroup) topDielGroup.style.display = 'block';
+            if (gndCutGroup) gndCutGroup.style.display = 'block';
+            if (enclosureGroup) enclosureGroup.style.display = 'block';
+            // Hide top ground checkbox and height for diff stripline (already has top ground)
             if (topGndGroup) topGndGroup.style.display = 'none';
             if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
             if (chkSolderMask) {

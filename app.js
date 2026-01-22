@@ -260,6 +260,28 @@ function updateGeometry() {
                 options.enclosure_width = p.enclosure_width;
             }
             solver = new MicrostripSolver(options);
+        } else if (p.tl_type === 'diff_stripline') {
+            const options = {
+                trace_width: p.w,
+                substrate_height: p.h,
+                trace_thickness: p.t,
+                trace_spacing: p.trace_spacing,  // Enable differential mode
+                epsilon_r: p.er,
+                epsilon_r_top: p.er_top,
+                air_top: p.air_top,
+                tan_delta: p.tand,
+                sigma_cond: p.sigma,
+                freq: p.freq,
+                nx: p.nx,
+                ny: p.ny,
+                boundaries: ["open", "open", "gnd", "gnd"]
+            };
+            // Enclosure options (stripline already has top ground)
+            if (p.use_enclosure) {
+                options.use_side_gnd = p.use_side_gnd;
+                options.enclosure_width = p.enclosure_width;
+            }
+            solver = new MicrostripSolver(options);
         } else {
             // Microstrip (with optional solder mask, top dielectric, ground cutout)
             const options = {
