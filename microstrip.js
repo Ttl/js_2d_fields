@@ -9,6 +9,9 @@ class MicrostripSolver extends FieldSolver2D {
     constructor(options) {
         super();
 
+        // Validate parameters before proceeding
+        this._validate_parameters(options);
+
         // Store parameters
         this.h = options.substrate_height;
         this.w = options.trace_width;
@@ -140,6 +143,141 @@ class MicrostripSolver extends FieldSolver2D {
         this.dx = null;
         this.dy = null;
         this.mesh_generated = false;
+    }
+
+    _validate_parameters(options) {
+        const errors = [];
+
+        // Helper function to check if value is a valid number
+        const isValidNumber = (val) => typeof val === 'number' && !isNaN(val) && isFinite(val);
+
+        // Helper to check positive number (> 0)
+        const checkPositive = (val, name) => {
+            if (val === undefined || val === null) return; // Optional parameters handled separately
+            if (!isValidNumber(val)) {
+                errors.push(`${name} must be a valid number (got ${val})`);
+            } else if (val <= 0) {
+                errors.push(`${name} must be positive (> 0), got ${val}`);
+            }
+        };
+
+        // Helper to check non-negative number (>= 0)
+        const checkNonNegative = (val, name) => {
+            if (val === undefined || val === null) return; // Optional parameters
+            if (!isValidNumber(val)) {
+                errors.push(`${name} must be a valid number (got ${val})`);
+            } else if (val < 0) {
+                errors.push(`${name} must be non-negative (>= 0), got ${val}`);
+            }
+        };
+
+        // Required positive parameters
+        checkPositive(options.substrate_height, 'substrate_height');
+        checkPositive(options.trace_width, 'trace_width');
+        checkPositive(options.trace_thickness, 'trace_thickness');
+        checkPositive(options.epsilon_r, 'epsilon_r');
+        checkPositive(options.freq, 'frequency');
+
+        // Optional positive parameters
+        if (options.gnd_thickness !== undefined) checkPositive(options.gnd_thickness, 'gnd_thickness');
+        if (options.epsilon_r_top !== undefined) checkPositive(options.epsilon_r_top, 'epsilon_r_top');
+        if (options.sigma_cond !== undefined) checkPositive(options.sigma_cond, 'sigma_cond');
+        if (options.trace_spacing !== undefined && options.trace_spacing !== null && options.trace_spacing > 0) {
+            checkPositive(options.trace_spacing, 'trace_spacing');
+        }
+
+        // Non-negative parameters
+        checkNonNegative(options.tan_delta, 'tan_delta');
+        checkNonNegative(options.sigma_diel, 'sigma_diel');
+        checkNonNegative(options.gnd_cut_width, 'gnd_cut_width');
+        checkNonNegative(options.gnd_cut_sub_h, 'gnd_cut_sub_h');
+        checkNonNegative(options.top_diel_h, 'top_diel_h');
+        checkNonNegative(options.top_diel_tand, 'top_diel_tand');
+        checkNonNegative(options.gap, 'gap');
+        checkNonNegative(options.top_gnd_width, 'top_gnd_width');
+        checkNonNegative(options.via_gap, 'via_gap');
+
+        // Top dielectric epsilon_r should be positive if top dielectric is used
+        if (options.top_diel_h > 0 && options.top_diel_er !== undefined) {
+            checkPositive(options.top_diel_er, 'top_diel_er');
+        }
+
+        // Solder mask parameters - sm_t_sub and sm_t_trace CAN be negative
+        // But sm_er must be positive if solder mask is used
+        if (options.use_sm) {
+            if (options.sm_t_sub !== undefined && !isValidNumber(options.sm_t_sub)) {
+                errors.push(`sm_t_sub must be a valid number (got ${options.sm_t_sub})`);
+            }
+            if (options.sm_t_trace !== undefined && !isValidNumber(options.sm_t_trace)) {
+                errors.push(`sm_t_trace must be a valid number (got ${options.sm_t_trace})`);
+            }
+            checkNonNegative(options.sm_t_side, 'sm_t_side');
+            checkPositive(options.sm_er, 'sm_er');
+            checkNonNegative(options.sm_tand, 'sm_tand');
+        }
+
+        // Enclosure parameters
+        if (options.enclosure_width !== undefined && options.enclosure_width !== null) {
+            checkPositive(options.enclosure_width, 'enclosure_width');
+        }
+        if (options.enclosure_height !== undefined && options.enclosure_height !== null) {
+            checkPositive(options.enclosure_height, 'enclosure_height');
+        }
+
+        // Grid size parameters
+        if (options.nx !== undefined) {
+            if (!Number.isInteger(options.nx) || options.nx <= 0) {
+                errors.push(`nx must be a positive integer (got ${options.nx})`);
+            }
+        }
+        if (options.ny !== undefined) {
+            if (!Number.isInteger(options.ny) || options.ny <= 0) {
+                errors.push(`ny must be a positive integer (got ${options.ny})`);
+            }
+        }
+
+        // Check that active area fits in enclosure if enclosure is enabled
+        if (options.use_side_gnd && options.enclosure_width !== undefined && options.enclosure_width !== null) {
+            // Calculate active area width based on configuration
+            let active_width = 0;
+            const w = options.trace_width || 0;
+            const trace_spacing = options.trace_spacing || 0;
+            const is_differential = (trace_spacing !== null && trace_spacing > 0);
+
+            if (is_differential) {
+                const trace_span = 2 * w + trace_spacing;
+                if (options.use_coplanar_gnd) {
+                    const gap = options.gap || 0;
+                    const top_gnd_width = options.top_gnd_width || 0;
+                    const via_gap = options.via_gap || 0;
+                    active_width = trace_span + 2 * (gap + Math.max(top_gnd_width, via_gap));
+                } else {
+                    active_width = trace_span;
+                }
+            } else {
+                if (options.use_coplanar_gnd) {
+                    const gap = options.gap || 0;
+                    const top_gnd_width = options.top_gnd_width || 0;
+                    const via_gap = options.via_gap || 0;
+                    active_width = w + 2 * (gap + Math.max(top_gnd_width, via_gap));
+                } else {
+                    active_width = w;
+                }
+            }
+
+            // Add some margin for the side grounds themselves
+            const t_gnd = options.gnd_thickness || 35e-6;
+            const required_width = active_width + 2 * t_gnd;
+
+            if (required_width > options.enclosure_width) {
+                errors.push(`Active area width (${(active_width * 1000).toFixed(3)} mm) with side grounds (${(required_width * 1000).toFixed(3)} mm total) exceeds enclosure width (${(options.enclosure_width * 1000).toFixed(3)} mm)`);
+            }
+        }
+
+        // If there are any errors, throw them
+        if (errors.length > 0) {
+            throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
+        }
     }
 
     _calculate_coordinates(air_top) {
