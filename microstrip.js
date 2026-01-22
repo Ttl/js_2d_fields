@@ -20,7 +20,6 @@ class MicrostripSolver extends FieldSolver2D {
         this.er = options.epsilon_r;
         this.er_top = options.epsilon_r_top ?? 1;
         this.tan_delta = options.tan_delta ?? 0.02;
-        this.sigma_diel = options.sigma_diel ?? 0.0;
         this.sigma_cond = options.sigma_cond ?? 5.8e7;
 
         // Differential mode parameters
@@ -57,10 +56,6 @@ class MicrostripSolver extends FieldSolver2D {
         this.nx = options.nx ?? 300;
         this.ny = options.ny ?? 300;
 
-        // Store air parameters
-        const air_side = options.air_side ?? null;
-        const air_top = options.air_top ?? null;
-
         // Domain sizing
         if (this.enclosure_width !== null) {
             // Use explicit enclosure width
@@ -79,34 +74,18 @@ class MicrostripSolver extends FieldSolver2D {
             if (this.use_coplanar_gnd) {
                 // Coplanar: active width includes gaps, top grounds, vias
                 const active_width = trace_span + 2 * (this.gap + Math.max(this.top_gnd_width, this.via_gap));
-                if (air_side === null) {
-                    this.domain_width = Math.max(active_width * 1.5, this.h * 10);
-                } else {
-                    this.domain_width = active_width + 2 * air_side;
-                }
+                this.domain_width = Math.max(active_width * 1.5, this.h * 10);
             } else {
-                if (air_side === null) {
-                    this.domain_width = 2 * Math.max(trace_span * 4, this.h * 15);
-                } else {
-                    this.domain_width = trace_span + 2 * air_side;
-                }
+                this.domain_width = 2 * Math.max(trace_span * 4, this.h * 15);
             }
         } else {
             // Single-ended
             if (this.use_coplanar_gnd) {
                 // Coplanar: active width includes gaps, top grounds, vias
                 const active_width = this.w + 2 * (this.gap + Math.max(this.top_gnd_width, this.via_gap));
-                if (air_side === null) {
-                    this.domain_width = Math.max(active_width * 1.5, this.h * 10);
-                } else {
-                    this.domain_width = active_width + 2 * air_side;
-                }
+                this.domain_width = Math.max(active_width * 1.5, this.h * 10);
             } else {
-                if (air_side === null) {
-                    this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
-                } else {
-                    this.domain_width = this.w + 2 * air_side;
-                }
+                this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
             }
         }
 
@@ -116,7 +95,7 @@ class MicrostripSolver extends FieldSolver2D {
         this.has_side_gnd = (this.boundaries[0] === "gnd" || this.boundaries[1] === "gnd");
 
         // Calculate physical coordinates
-        this._calculate_coordinates(air_top);
+        this._calculate_coordinates();
 
         // Calculate coplanar geometry if enabled
         if (this.use_coplanar_gnd) {
@@ -193,7 +172,6 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Non-negative parameters
         checkNonNegative(options.tan_delta, 'tan_delta');
-        checkNonNegative(options.sigma_diel, 'sigma_diel');
         checkNonNegative(options.gnd_cut_width, 'gnd_cut_width');
         checkNonNegative(options.gnd_cut_sub_h, 'gnd_cut_sub_h');
         checkNonNegative(options.top_diel_h, 'top_diel_h');
@@ -283,7 +261,7 @@ class MicrostripSolver extends FieldSolver2D {
         }
     }
 
-    _calculate_coordinates(air_top) {
+    _calculate_coordinates() {
         // Bottom extension for cut ground
         this.y_ext_start = this.t_gnd;
         this.y_ext_end = this.t_gnd + this.gnd_cut_sub_h;
@@ -321,12 +299,9 @@ class MicrostripSolver extends FieldSolver2D {
             // Highest dielectric is y_top_start
             this.top_dielectric_h = this.enclosure_height;
             this.has_top_gnd = (this.boundaries[2] === "gnd");
-        } else if (air_top === null) {
+        } else {
             this.top_dielectric_h = this.h * 15;
             this.has_top_gnd = false;
-        } else {
-            this.top_dielectric_h = air_top + this.t;
-            this.has_top_gnd = (this.boundaries[2] === "gnd");
         }
 
         this.y_top_end = this.y_top_start + this.top_dielectric_h;

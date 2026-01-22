@@ -39,7 +39,7 @@ function getParams() {
         top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value) * 1e-3,
         via_gap: parseFloat(document.getElementById('inp_via_gap').value) * 1e-3,
         // Stripline parameters
-        air_top: parseFloat(document.getElementById('inp_air_top').value) * 1e-3,
+        stripline_top_h: parseFloat(document.getElementById('inp_air_top').value) * 1e-3,
         er_top: parseFloat(document.getElementById('inp_er_top').value),
         // Solder mask parameters
         use_sm: document.getElementById('chk_solder_mask').checked,
@@ -123,9 +123,6 @@ function updateGeometry() {
                 const right_bc = p.use_side_gnd ? "gnd" : "open";
                 const top_bc = p.use_top_gnd ? "gnd" : "open";
                 options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
-                if (p.use_top_gnd) {
-                    options.air_top = p.enclosure_height;
-                }
             }
             solver = new MicrostripSolver(options);
         } else if (p.tl_type === 'diff_gcpw') {
@@ -178,9 +175,6 @@ function updateGeometry() {
                 const right_bc = p.use_side_gnd ? "gnd" : "open";
                 const top_bc = p.use_top_gnd ? "gnd" : "open";
                 options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
-                if (p.use_top_gnd) {
-                    options.air_top = p.enclosure_height;
-                }
             }
             solver = new MicrostripSolver(options);
         } else if (p.tl_type === 'diff_microstrip') {
@@ -227,9 +221,6 @@ function updateGeometry() {
                 const right_bc = p.use_side_gnd ? "gnd" : "open";
                 const top_bc = p.use_top_gnd ? "gnd" : "open";
                 options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
-                if (p.use_top_gnd) {
-                    options.air_top = p.enclosure_height;
-                }
             }
             solver = new MicrostripSolver(options);
         } else if (p.tl_type === 'stripline') {
@@ -239,7 +230,7 @@ function updateGeometry() {
                 trace_thickness: p.t,
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
-                air_top: p.air_top,
+                enclosure_height: p.stripline_top_h + p.t,
                 tan_delta: p.tand,
                 sigma_cond: p.sigma,
                 freq: p.freq,
@@ -284,7 +275,7 @@ function updateGeometry() {
                 trace_spacing: p.trace_spacing,  // Enable differential mode
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
-                air_top: p.air_top,
+                enclosure_height: p.stripline_top_h,
                 tan_delta: p.tand,
                 sigma_cond: p.sigma,
                 freq: p.freq,
@@ -348,9 +339,6 @@ function updateGeometry() {
                 const right_bc = p.use_side_gnd ? "gnd" : "open";
                 const top_bc = p.use_top_gnd ? "gnd" : "open";
                 options.boundaries = [left_bc, right_bc, top_bc, "gnd"];
-                if (p.use_top_gnd) {
-                    options.air_top = p.enclosure_height;
-                }
             }
 
             solver = new MicrostripSolver(options);

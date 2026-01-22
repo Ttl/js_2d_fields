@@ -401,7 +401,7 @@ async function solve_differential_stripline() {
         gnd_thickness: 16e-6,
         epsilon_r: 4.1,
         epsilon_r_top: 4.1,
-        air_top: 0.2e-3,
+        enclosure_height: 0.2e-3 + 35e-6,
         freq: 1e9,
         nx: 10,
         ny: 10,
