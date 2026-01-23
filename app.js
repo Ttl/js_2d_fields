@@ -2,6 +2,7 @@ import { MicrostripSolver } from './microstrip.js';
 import { CONSTANTS } from './field_solver.js';
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
+import { exportSnP } from './snp_export.js';
 const Plotly = window.Plotly;
 
 let solver = null;
@@ -449,6 +450,7 @@ async function runSimulation() {
                 ptext.textContent = `Mesh refinement ${info.iteration}/${p.max_iters}: ` +
                                    `Energy err=${info.energy_error.toExponential(2)}, ` +
                                    `Grid=${info.nodes_x}x${info.nodes_y}`;
+                log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, Grid=${info.nodes_x}x${info.nodes_y}`);
             },
             shouldStop: shouldStop
         });
@@ -500,6 +502,9 @@ async function runSimulation() {
             const progress = 0.5 + (i + 1) / frequencies.length * 0.5;
             pbar.style.width = (progress * 100) + "%";
             ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
+
+            // Yield to event loop to prevent UI freeze
+            await new Promise(resolve => setTimeout(resolve, 0));
         }
 
         // Sort results by frequency
@@ -511,11 +516,6 @@ async function runSimulation() {
         const loss0 = frequencySweepResults[0].result.modes[0].alpha_total;
         const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
         const mode0 = frequencySweepResults[0].result.modes[0];
-
-        // Update results header
-        document.getElementById('result-z0').textContent = mode0.Z0.toFixed(2);
-        document.getElementById('result-eps').textContent = mode0.eps_eff.toFixed(3);
-        document.getElementById('result-loss').textContent = `${loss0.toFixed(3)} @ ${f0.toFixed(1)} GHz`;
 
         // Check if differential results
         if (results.modes.length === 2) {
@@ -1300,7 +1300,7 @@ function drawResultsPlot() {
         }
     } else if (selector === 'loss') {
         if (isDifferential) {
-            // Odd mode losses
+            // Odd mode losses (solid lines)
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
@@ -1322,6 +1322,31 @@ function drawResultsPlot() {
                 type: 'scatter',
                 mode: 'lines',
                 line: { width: 2 }
+            });
+            // Even mode losses (dashed lines)
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].alpha_c),
+                name: 'Conductor (even)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { dash: 'dash' }
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].alpha_d),
+                name: 'Dielectric (even)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { dash: 'dash' }
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].alpha_total),
+                name: 'Total (even)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { width: 2, dash: 'dash' }
             });
         } else {
             traces.push({
@@ -1376,10 +1401,11 @@ function drawResultsPlot() {
         }
     }
 
+    const useLogX = document.getElementById('results-log-x').checked;
     const layout = {
         xaxis: {
             title: 'Frequency (GHz)',
-            type: 'log'
+            type: useLogX ? 'log' : 'linear'
         },
         yaxis: {
             title: getYAxisLabel(selector)
@@ -1484,10 +1510,11 @@ function drawSParamPlot() {
         });
     }
 
+    const useLogX = document.getElementById('sparam-log-x').checked;
     const layout = {
         xaxis: {
             title: 'Frequency (GHz)',
-            type: 'log'
+            type: useLogX ? 'log' : 'linear'
         },
         yaxis: {
             title: 'Magnitude (dB)'
@@ -1561,6 +1588,42 @@ function bindEvents() {
             if (frequencySweepResults) {
                 drawSParamPlot();
             }
+        });
+    }
+
+    // Log checkbox for results plot
+    const resultsLogX = document.getElementById('results-log-x');
+    if (resultsLogX) {
+        resultsLogX.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawResultsPlot();
+            }
+        });
+    }
+
+    // Log checkbox for S-parameter plot
+    const sparamLogX = document.getElementById('sparam-log-x');
+    if (sparamLogX) {
+        sparamLogX.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawSParamPlot();
+            }
+        });
+    }
+
+    // Export SnP button
+    const exportSnpBtn = document.getElementById('export-snp');
+    if (exportSnpBtn) {
+        exportSnpBtn.addEventListener('click', () => {
+            if (!frequencySweepResults || frequencySweepResults.length === 0) {
+                log('No results to export. Run simulation first.');
+                return;
+            }
+            const length = parseFloat(document.getElementById('sparam-length').value);
+            const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
+            const isDifferential = solver && solver.is_differential;
+            exportSnP(frequencySweepResults, length, Z_ref, isDifferential);
+            log(`Exported ${isDifferential ? 's4p' : 's2p'} file`);
         });
     }
 
