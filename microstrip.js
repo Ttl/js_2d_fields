@@ -284,13 +284,16 @@ class MicrostripSolver extends FieldSolver2D {
         this.y_top_diel_start = this.y_sub_end;
         this.y_top_diel_end = this.y_top_diel_start + this.top_diel_h;
 
-        // Trace is embedded in top dielectric
+        // Trace position - starts at top of top dielectric (or substrate if no top diel)
+        // Negative thickness means trace extends down into substrate
         this.y_trace_start = this.y_top_diel_start;
         this.y_trace_end = this.y_trace_start + this.t;
 
         // Solder mask extents
         this.y_sm_sub_end = this.y_top_diel_end + this.sm_t_sub;
-        this.y_sm_trace_end = this.y_trace_end + this.sm_t_trace;
+        // For negative trace thickness, solder mask top should be at substrate surface
+        const y_trace_top = Math.max(this.y_trace_start, this.y_trace_end);
+        this.y_sm_trace_end = y_trace_top + this.sm_t_trace;
 
         this.y_top_start = this.y_top_diel_end;
         if (this.use_sm) {
@@ -538,9 +541,10 @@ class MicrostripSolver extends FieldSolver2D {
         if (this.use_coplanar_gnd && this.use_vias) {
             // Vias should extend from bottom ground to top coplanar grounds
             // Start from top of bottom ground (y_ext_start = t_gnd)
-            // End at top of coplanar grounds (y_trace_end)
+            // End at top of coplanar grounds (max of trace start/end for negative thickness)
             const via_y_start = this.y_ext_start;
-            const via_height = this.y_trace_end - this.y_ext_start;
+            const via_y_end = Math.max(this.y_trace_start, this.y_trace_end);
+            const via_height = via_y_end - this.y_ext_start;
 
             // Left via (from inner edge to left boundary)
             if (this.via_x_left_inner > x_min) {

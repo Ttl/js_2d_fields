@@ -4,7 +4,7 @@ class Dielectric {
      * @param {number} x - Bottom-left corner x-coordinate
      * @param {number} y - Bottom-left corner y-coordinate
      * @param {number} width - Width of the rectangle
-     * @param {number} height - Height of the rectangle
+     * @param {number} height - Height of the rectangle (can be negative)
      * @param {number} epsilon_r - Relative permittivity
      * @param {number} tan_delta - Loss tangent (default: 0.0)
      */
@@ -19,17 +19,18 @@ class Dielectric {
 
     get x_min() { return this.x; }
     get x_max() { return this.x + this.width; }
-    get y_min() { return this.y; }
-    get y_max() { return this.y + this.height; }
+    // Handle negative heights - y_min should always be less than y_max
+    get y_min() { return this.height >= 0 ? this.y : this.y + this.height; }
+    get y_max() { return this.height >= 0 ? this.y + this.height : this.y; }
 }
 
 class Conductor {
     /**
      * Represents a rectangular conductor region.
      * @param {number} x - Bottom-left corner x-coordinate
-     * @param {number} y - Bottom-left corner y-coordinate
+     * @param {number} y - Bottom-left corner y-coordinate (or top if height is negative)
      * @param {number} width - Width of the rectangle
-     * @param {number} height - Height of the rectangle
+     * @param {number} height - Height of the rectangle (can be negative for embedded conductors)
      * @param {boolean} is_signal - True for signal conductor, False for ground
      * @param {number} polarity - Signal polarity: +1 (positive), -1 (negative), 0 (ground)
      */
@@ -44,8 +45,9 @@ class Conductor {
 
     get x_min() { return this.x; }
     get x_max() { return this.x + this.width; }
-    get y_min() { return this.y; }
-    get y_max() { return this.y + this.height; }
+    // Handle negative heights - y_min should always be less than y_max
+    get y_min() { return this.height >= 0 ? this.y : this.y + this.height; }
+    get y_max() { return this.height >= 0 ? this.y + this.height : this.y; }
 }
 
 class Mesher {

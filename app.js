@@ -10,6 +10,179 @@ let stopRequested = false;
 let frequencySweepResults = null;  // Array of {freq, result} objects
 let currentTab = 'geometry';
 
+// --- URL Parameter Serialization ---
+
+/**
+ * Get current UI settings as a serializable object (in display units)
+ */
+function getUISettings() {
+    return {
+        tl_type: document.getElementById('tl_type').value,
+        w: parseFloat(document.getElementById('inp_w').value),
+        h: parseFloat(document.getElementById('inp_h').value),
+        t: parseFloat(document.getElementById('inp_t').value),
+        er: parseFloat(document.getElementById('inp_er').value),
+        tand: parseFloat(document.getElementById('inp_tand').value),
+        sigma: parseFloat(document.getElementById('inp_sigma').value),
+        freq_start: parseFloat(document.getElementById('freq-start').value),
+        freq_stop: parseFloat(document.getElementById('freq-stop').value),
+        freq_points: parseInt(document.getElementById('freq-points').value),
+        trace_spacing: parseFloat(document.getElementById('inp_trace_spacing').value),
+        gap: parseFloat(document.getElementById('inp_gap').value),
+        top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value),
+        via_gap: parseFloat(document.getElementById('inp_via_gap').value),
+        stripline_top_h: parseFloat(document.getElementById('inp_air_top').value),
+        er_top: parseFloat(document.getElementById('inp_er_top').value),
+        tand_top: parseFloat(document.getElementById('inp_tand_top').value),
+        use_sm: document.getElementById('chk_solder_mask').checked ? 1 : 0,
+        sm_t_sub: parseFloat(document.getElementById('inp_sm_t_sub').value),
+        sm_t_trace: parseFloat(document.getElementById('inp_sm_t_trace').value),
+        sm_t_side: parseFloat(document.getElementById('inp_sm_t_side').value),
+        sm_er: parseFloat(document.getElementById('inp_sm_er').value),
+        sm_tand: parseFloat(document.getElementById('inp_sm_tand').value),
+        use_top_diel: document.getElementById('chk_top_diel').checked ? 1 : 0,
+        top_diel_h: parseFloat(document.getElementById('inp_top_diel_h').value),
+        top_diel_er: parseFloat(document.getElementById('inp_top_diel_er').value),
+        top_diel_tand: parseFloat(document.getElementById('inp_top_diel_tand').value),
+        use_gnd_cut: document.getElementById('chk_gnd_cut').checked ? 1 : 0,
+        gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value),
+        gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value),
+        use_enclosure: document.getElementById('chk_enclosure').checked ? 1 : 0,
+        use_side_gnd: document.getElementById('chk_side_gnd').checked ? 1 : 0,
+        use_top_gnd: document.getElementById('chk_top_gnd').checked ? 1 : 0,
+        enclosure_width: parseFloat(document.getElementById('inp_enclosure_width').value),
+        enclosure_height: parseFloat(document.getElementById('inp_enclosure_height').value),
+        max_iters: parseInt(document.getElementById('inp_max_iters').value),
+        tolerance: parseFloat(document.getElementById('inp_tolerance').value),
+        max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
+        rq: parseFloat(document.getElementById('inp_rq').value),
+        sparam_length: parseFloat(document.getElementById('sparam-length').value),
+        sparam_z_ref: parseFloat(document.getElementById('sparam-z-ref').value),
+    };
+}
+
+/**
+ * Serialize settings to URL-safe base64 string
+ */
+function settingsToURL(settings) {
+    const json = JSON.stringify(settings);
+    // Use base64 encoding for URL-safe serialization
+    return btoa(encodeURIComponent(json));
+}
+
+/**
+ * Deserialize settings from URL-safe base64 string
+ */
+function settingsFromURL(encoded) {
+    try {
+        const json = decodeURIComponent(atob(encoded));
+        return JSON.parse(json);
+    } catch (e) {
+        console.error('Failed to parse URL parameters:', e);
+        return null;
+    }
+}
+
+/**
+ * Restore UI settings from a settings object
+ */
+function restoreSettings(settings) {
+    if (!settings) return false;
+
+    try {
+        // Set input values
+        if (settings.tl_type) document.getElementById('tl_type').value = settings.tl_type;
+        if (settings.w !== undefined) document.getElementById('inp_w').value = settings.w;
+        if (settings.h !== undefined) document.getElementById('inp_h').value = settings.h;
+        if (settings.t !== undefined) document.getElementById('inp_t').value = settings.t;
+        if (settings.er !== undefined) document.getElementById('inp_er').value = settings.er;
+        if (settings.tand !== undefined) document.getElementById('inp_tand').value = settings.tand;
+        if (settings.sigma !== undefined) document.getElementById('inp_sigma').value = settings.sigma;
+        if (settings.freq_start !== undefined) document.getElementById('freq-start').value = settings.freq_start;
+        if (settings.freq_stop !== undefined) document.getElementById('freq-stop').value = settings.freq_stop;
+        if (settings.freq_points !== undefined) document.getElementById('freq-points').value = settings.freq_points;
+        if (settings.trace_spacing !== undefined) document.getElementById('inp_trace_spacing').value = settings.trace_spacing;
+        if (settings.gap !== undefined) document.getElementById('inp_gap').value = settings.gap;
+        if (settings.top_gnd_w !== undefined) document.getElementById('inp_top_gnd_w').value = settings.top_gnd_w;
+        if (settings.via_gap !== undefined) document.getElementById('inp_via_gap').value = settings.via_gap;
+        if (settings.stripline_top_h !== undefined) document.getElementById('inp_air_top').value = settings.stripline_top_h;
+        if (settings.er_top !== undefined) document.getElementById('inp_er_top').value = settings.er_top;
+        if (settings.tand_top !== undefined) document.getElementById('inp_tand_top').value = settings.tand_top;
+
+        // Checkboxes
+        if (settings.use_sm !== undefined) document.getElementById('chk_solder_mask').checked = !!settings.use_sm;
+        if (settings.sm_t_sub !== undefined) document.getElementById('inp_sm_t_sub').value = settings.sm_t_sub;
+        if (settings.sm_t_trace !== undefined) document.getElementById('inp_sm_t_trace').value = settings.sm_t_trace;
+        if (settings.sm_t_side !== undefined) document.getElementById('inp_sm_t_side').value = settings.sm_t_side;
+        if (settings.sm_er !== undefined) document.getElementById('inp_sm_er').value = settings.sm_er;
+        if (settings.sm_tand !== undefined) document.getElementById('inp_sm_tand').value = settings.sm_tand;
+
+        if (settings.use_top_diel !== undefined) document.getElementById('chk_top_diel').checked = !!settings.use_top_diel;
+        if (settings.top_diel_h !== undefined) document.getElementById('inp_top_diel_h').value = settings.top_diel_h;
+        if (settings.top_diel_er !== undefined) document.getElementById('inp_top_diel_er').value = settings.top_diel_er;
+        if (settings.top_diel_tand !== undefined) document.getElementById('inp_top_diel_tand').value = settings.top_diel_tand;
+
+        if (settings.use_gnd_cut !== undefined) document.getElementById('chk_gnd_cut').checked = !!settings.use_gnd_cut;
+        if (settings.gnd_cut_w !== undefined) document.getElementById('inp_gnd_cut_w').value = settings.gnd_cut_w;
+        if (settings.gnd_cut_h !== undefined) document.getElementById('inp_gnd_cut_h').value = settings.gnd_cut_h;
+
+        if (settings.use_enclosure !== undefined) document.getElementById('chk_enclosure').checked = !!settings.use_enclosure;
+        if (settings.use_side_gnd !== undefined) document.getElementById('chk_side_gnd').checked = !!settings.use_side_gnd;
+        if (settings.use_top_gnd !== undefined) document.getElementById('chk_top_gnd').checked = !!settings.use_top_gnd;
+        if (settings.enclosure_width !== undefined) document.getElementById('inp_enclosure_width').value = settings.enclosure_width;
+        if (settings.enclosure_height !== undefined) document.getElementById('inp_enclosure_height').value = settings.enclosure_height;
+
+        if (settings.max_iters !== undefined) document.getElementById('inp_max_iters').value = settings.max_iters;
+        if (settings.tolerance !== undefined) document.getElementById('inp_tolerance').value = settings.tolerance;
+        if (settings.max_nodes !== undefined) document.getElementById('inp_max_nodes').value = settings.max_nodes;
+        if (settings.rq !== undefined) document.getElementById('inp_rq').value = settings.rq;
+
+        if (settings.sparam_length !== undefined) document.getElementById('sparam-length').value = settings.sparam_length;
+        if (settings.sparam_z_ref !== undefined) document.getElementById('sparam-z-ref').value = settings.sparam_z_ref;
+
+        return true;
+    } catch (e) {
+        console.error('Failed to restore settings:', e);
+        return false;
+    }
+}
+
+/**
+ * Copy current settings as URL to clipboard
+ */
+function copySettingsLink() {
+    const settings = getUISettings();
+    const encoded = settingsToURL(settings);
+    const url = `${window.location.origin}${window.location.pathname}?params=${encoded}`;
+
+    navigator.clipboard.writeText(url).then(() => {
+        const btn = document.getElementById('copy-link-btn');
+        const originalText = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = originalText; }, 2000);
+    }).catch(err => {
+        console.error('Failed to copy link:', err);
+        // Fallback: show prompt with URL
+        prompt('Copy this URL:', url);
+    });
+}
+
+/**
+ * Check URL for params and restore if present
+ */
+function loadSettingsFromURL() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const paramsStr = urlParams.get('params');
+    if (paramsStr) {
+        const settings = settingsFromURL(paramsStr);
+        if (settings && restoreSettings(settings)) {
+            console.log('Settings restored from URL');
+            return true;
+        }
+    }
+    return false;
+}
+
 function shouldStop() {
     return stopRequested;
 }
@@ -1249,6 +1422,9 @@ function drawResultsPlot() {
     const freqs = frequencySweepResults.map(r => r.freq / 1e9);
     const traces = [];
 
+    // Use lines+markers mode so single frequency points are visible
+    const plotMode = freqs.length === 1 ? 'markers' : 'lines+markers';
+
     if (selector === 're_z0') {
         if (isDifferential) {
             traces.push({
@@ -1256,14 +1432,14 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].Zc.re),
                 name: 'Odd mode',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[1].Zc.re),
                 name: 'Even mode',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
         } else {
             traces.push({
@@ -1271,7 +1447,7 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].Zc.re),
                 name: 'Re(Z0)',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
         }
     } else if (selector === 'im_z0') {
@@ -1281,14 +1457,14 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
                 name: 'Odd mode',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[1].Zc.im),
                 name: 'Even mode',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
         } else {
             traces.push({
@@ -1296,7 +1472,7 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
                 name: 'Im(Z0)',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
         }
     } else if (selector === 'loss') {
@@ -1307,21 +1483,21 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
                 name: 'Conductor (odd)',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
                 name: 'Dielectric (odd)',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
                 name: 'Total (odd)',
                 type: 'scatter',
-                mode: 'lines',
+                mode: plotMode,
                 line: { width: 2 }
             });
             // Even mode losses (dashed lines)
@@ -1330,7 +1506,7 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[1].alpha_c),
                 name: 'Conductor (even)',
                 type: 'scatter',
-                mode: 'lines',
+                mode: plotMode,
                 line: { dash: 'dash' }
             });
             traces.push({
@@ -1338,7 +1514,7 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[1].alpha_d),
                 name: 'Dielectric (even)',
                 type: 'scatter',
-                mode: 'lines',
+                mode: plotMode,
                 line: { dash: 'dash' }
             });
             traces.push({
@@ -1346,7 +1522,7 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[1].alpha_total),
                 name: 'Total (even)',
                 type: 'scatter',
-                mode: 'lines',
+                mode: plotMode,
                 line: { width: 2, dash: 'dash' }
             });
         } else {
@@ -1355,21 +1531,21 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
                 name: 'Conductor',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
                 name: 'Dielectric',
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
                 name: 'Total',
                 type: 'scatter',
-                mode: 'lines',
+                mode: plotMode,
                 line: { width: 2 }
             });
         }
@@ -1382,14 +1558,14 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
                 name: `${paramKey} (odd)`,
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[1].RLGC[paramKey]),
                 name: `${paramKey} (even)`,
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
         } else {
             traces.push({
@@ -1397,7 +1573,7 @@ function drawResultsPlot() {
                 y: frequencySweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
                 name: paramKey,
                 type: 'scatter',
-                mode: 'lines'
+                mode: plotMode
             });
         }
     }
@@ -1429,6 +1605,9 @@ function drawSParamPlot() {
     const freqs = frequencySweepResults.map(r => r.freq / 1e9);
     const traces = [];
 
+    // Use lines+markers mode so single frequency points are visible
+    const plotMode = freqs.length === 1 ? 'markers' : 'lines+markers';
+
     if (!isDifferential) {
         // 2-port S-parameters
         const S11_dB = [];
@@ -1445,14 +1624,14 @@ function drawSParamPlot() {
             y: S11_dB,
             name: 'S11 (dB)',
             type: 'scatter',
-            mode: 'lines'
+            mode: plotMode
         });
         traces.push({
             x: freqs,
             y: S21_dB,
             name: 'S21 (dB)',
             type: 'scatter',
-            mode: 'lines'
+            mode: plotMode
         });
     } else {
         // 4-port S-parameters (mixed-mode)
@@ -1484,21 +1663,21 @@ function drawSParamPlot() {
             y: SDD11_dB,
             name: 'SDD11 (dB)',
             type: 'scatter',
-            mode: 'lines'
+            mode: plotMode
         });
         traces.push({
             x: freqs,
             y: SDD21_dB,
             name: 'SDD21 (dB)',
             type: 'scatter',
-            mode: 'lines'
+            mode: plotMode
         });
         traces.push({
             x: freqs,
             y: SCC11_dB,
             name: 'SCC11 (dB)',
             type: 'scatter',
-            mode: 'lines',
+            mode: plotMode,
             line: { dash: 'dash' }
         });
         traces.push({
@@ -1506,7 +1685,7 @@ function drawSParamPlot() {
             y: SCC21_dB,
             name: 'SCC21 (dB)',
             type: 'scatter',
-            mode: 'lines',
+            mode: plotMode,
             line: { dash: 'dash' }
         });
     }
@@ -1748,11 +1927,37 @@ function bindEvents() {
             }
         });
     }
+
+    // Copy link button
+    const copyLinkBtn = document.getElementById('copy-link-btn');
+    if (copyLinkBtn) {
+        copyLinkBtn.addEventListener('click', copySettingsLink);
+    }
 }
 
 
 function init() {
     bindEvents();
+
+    // Check for URL parameters and restore settings if present
+    const hasURLParams = loadSettingsFromURL();
+
+    // Update checkbox section visibility after settings restore
+    if (typeof toggleParameterVisibility === 'function') {
+        toggleParameterVisibility();
+    }
+    // Update checkbox sections
+    ['chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure'].forEach(id => {
+        const checkbox = document.getElementById(id);
+        if (checkbox) {
+            const sectionId = id.replace('chk_', '') + '-params';
+            const section = document.getElementById(sectionId);
+            if (section) {
+                section.style.display = checkbox.checked ? 'block' : 'none';
+            }
+        }
+    });
+
     updateGeometry();
     draw();
     resizeCanvas();

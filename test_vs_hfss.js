@@ -1,4 +1,6 @@
 import { MicrostripSolver } from './microstrip.js';
+import { computeSParamsSingleEnded, computeSParamsDifferential } from './sparameters.js';
+import { readFileSync } from 'fs';
 
 /**
  * Test microstrip solver results against reference values.
@@ -594,6 +596,277 @@ async function solve_differential_stripline() {
     return results;
 }
 
+/**
+ * Parse Touchstone S2P file in DB format (dB + angle)
+ * @param {string} filename - Path to the S2P file
+ * @returns {Array<{freq: number, S11: {mag: number, ang: number}, S21: {mag: number, ang: number}}>}
+ */
+function parseS2P_DB(filename) {
+    const content = readFileSync(filename, 'utf-8');
+    const lines = content.split('\n');
+    const data = [];
+
+    let freqUnit = 1e9; // Default GHz
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('!')) continue;
+
+        // Parse option line
+        if (trimmed.startsWith('#')) {
+            const parts = trimmed.toUpperCase().split(/\s+/);
+            if (parts.includes('HZ')) freqUnit = 1;
+            else if (parts.includes('KHZ')) freqUnit = 1e3;
+            else if (parts.includes('MHZ')) freqUnit = 1e6;
+            else if (parts.includes('GHZ')) freqUnit = 1e9;
+            continue;
+        }
+
+        // Parse data line
+        const parts = trimmed.split(/\s+/).map(parseFloat);
+        if (parts.length >= 9 && !isNaN(parts[0])) {
+            // Format: freq S11_dB S11_ang S21_dB S21_ang S12_dB S12_ang S22_dB S22_ang
+            data.push({
+                freq: parts[0] * freqUnit,
+                S11: { dB: parts[1], ang: parts[2] },
+                S21: { dB: parts[3], ang: parts[4] }
+            });
+        }
+    }
+    return data;
+}
+
+/**
+ * Parse Touchstone S4P file in MA format (magnitude + angle)
+ * @param {string} filename - Path to the S4P file
+ * @returns {Array<{freq: number, S: Array<Array<{mag: number, ang: number}>>}>}
+ */
+function parseS4P_MA(filename) {
+    const content = readFileSync(filename, 'utf-8');
+    const lines = content.split('\n').filter(l => {
+        const t = l.trim();
+        return t && !t.startsWith('!') && !t.startsWith('#');
+    });
+
+    const data = [];
+    let i = 0;
+
+    while (i < lines.length) {
+        const parts1 = lines[i].trim().split(/\s+/).map(parseFloat);
+        if (parts1.length < 9 || isNaN(parts1[0])) {
+            i++;
+            continue;
+        }
+
+        const freq = parts1[0] * 1e9; // GHz to Hz
+        const S = [[null, null, null, null],
+                   [null, null, null, null],
+                   [null, null, null, null],
+                   [null, null, null, null]];
+
+        // Row 1: S11 S12 S13 S14
+        for (let col = 0; col < 4; col++) {
+            S[0][col] = { mag: parts1[1 + col*2], ang: parts1[2 + col*2] };
+        }
+
+        // Rows 2-4
+        for (let row = 1; row < 4; row++) {
+            i++;
+            if (i >= lines.length) break;
+            const parts = lines[i].trim().split(/\s+/).map(parseFloat);
+            for (let col = 0; col < 4; col++) {
+                S[row][col] = { mag: parts[col*2], ang: parts[col*2 + 1] };
+            }
+        }
+
+        data.push({ freq, S });
+        i++;
+    }
+    return data;
+}
+
+/**
+ * Convert magnitude (linear) to dB
+ */
+function magTodB(mag) {
+    return 20 * Math.log10(Math.max(mag, 1e-15));
+}
+
+/**
+ * Test S2P generation against reference file
+ */
+async function test_s2p_generation() {
+    console.log(`\n${'='.repeat(80)}`);
+    console.log('S2P GENERATION TEST (vs HFSS reference)');
+    console.log(`${'='.repeat(80)}`);
+
+    // Parse reference file
+    const reference = parseS2P_DB('./ms_2d_fr4_sweep.s2p');
+    console.log(`Loaded ${reference.length} frequency points from reference`);
+
+    // Setup solver with same parameters as reference
+    // t=35um, w=3mm, z_sub=1.6mm
+    const solver = new MicrostripSolver({
+        substrate_height: 1.6e-3,
+        trace_width: 3e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.5,
+        tan_delta: 0.02,
+        sigma_cond: 5.8e7,
+        freq: reference[0].freq,
+        nx: 10,
+        ny: 10,
+        boundaries: ["open", "open", "open", "gnd"]
+    });
+
+    // Build mesh once
+    solver.ensure_mesh();
+
+    // Solve for each frequency and compute S-parameters
+    const length = 1.0; // 1 m line length (same as HFSS reference)
+    const Z_ref = 50;
+
+    let all_passed = true;
+    let maxS11Error = 0;
+    let maxS21Error = 0;
+
+    console.log(`\n${'Freq (GHz)'.padEnd(12)} ${'S11 Solved'.padEnd(12)} ${'S11 Ref'.padEnd(12)} ${'S21 Solved'.padEnd(12)} ${'S21 Ref'.padEnd(12)} Status`);
+    console.log(`${'-'.repeat(80)}`);
+
+    for (const refPoint of reference) {
+        // Update frequency and solve
+        solver.freq = refPoint.freq;
+        solver.omega = 2 * Math.PI * solver.freq;
+        solver.delta_s = Math.sqrt(2 / (solver.omega * 4 * Math.PI * 1e-7 * solver.sigma_cond));
+
+        const result = await solver.solve_adaptive({energy_tol: 0.05});
+        const mode = result.modes[0];
+
+        // Compute S-parameters
+        const sp = computeSParamsSingleEnded(refPoint.freq, mode.RLGC, length, Z_ref);
+        const S11_dB = magTodB(sp.S11.abs());
+        const S21_dB = magTodB(sp.S21.abs());
+
+        // Compare with reference (allowing larger tolerance for S-params)
+        const S11_error = Math.abs(S11_dB - refPoint.S11.dB);
+        const S21_error = Math.abs(S21_dB - refPoint.S21.dB);
+
+        maxS11Error = Math.max(maxS11Error, S11_error);
+        maxS21Error = Math.max(maxS21Error, S21_error);
+
+        // S11 (return loss) is very sensitive to small Z0 differences - use relaxed tolerance
+        // S21 (insertion loss) is the key metric for transmission line characterization
+        const S11_passed = S11_error < 15;  // S11 varies significantly between solvers
+        const S21_passed = S21_error < 1;   // S21 should match within 1 dB
+        const passed = S11_passed && S21_passed;
+        all_passed = all_passed && passed;
+
+        const freqGHz = (refPoint.freq / 1e9).toFixed(2);
+        const status = passed ? '✓' : '✗';
+        console.log(`${freqGHz.padEnd(12)} ${S11_dB.toFixed(2).padEnd(12)} ${refPoint.S11.dB.toFixed(2).padEnd(12)} ${S21_dB.toFixed(2).padEnd(12)} ${refPoint.S21.dB.toFixed(2).padEnd(12)} ${status}`);
+    }
+
+    console.log(`${'-'.repeat(80)}`);
+    console.log(`Max S11 error: ${maxS11Error.toFixed(2)} dB, Max S21 error: ${maxS21Error.toFixed(2)} dB`);
+    console.log(`Overall Result: ${all_passed ? '✓ ALL TESTS PASSED' : '✗ SOME TESTS FAILED'}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (!all_passed) {
+        throw new Error('S2P generation test failed - see errors above');
+    }
+}
+
+/**
+ * Test S4P generation against reference file
+ */
+async function test_s4p_generation() {
+    console.log(`\n${'='.repeat(80)}`);
+    console.log('S4P GENERATION TEST (vs HFSS reference)');
+    console.log(`${'='.repeat(80)}`);
+
+    // Parse reference file
+    const reference = parseS4P_MA('./stripline_2d_diff_sweep.s4p');
+    console.log(`Loaded ${reference.length} frequency points from reference`);
+
+    // Setup solver with same parameters as reference
+    // s=100um, t=35um, w=0.15mm, z_sub=200um
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2e-3,
+        trace_width: 0.15e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 16e-6,
+        epsilon_r: 4.1,
+        epsilon_r_top: 4.1,
+        tan_delta: 0.02,
+        tan_delta_top: 0.02,
+        enclosure_height: 0.2e-3 + 35e-6,
+        freq: reference[0].freq,
+        nx: 10,
+        ny: 10,
+        trace_spacing: 0.1e-3,
+        boundaries: ["open", "open", "gnd", "gnd"]
+    });
+
+    // Build mesh once
+    solver.ensure_mesh();
+
+    // Solve for each frequency and compute S-parameters
+    const length = 1.0; // 1 m line length (same as HFSS reference)
+    const Z_ref = 50;
+
+    let all_passed = true;
+    let maxS13Error = 0;
+
+    // Reference S4P port assignment: Port[1]=signal1_A, Port[2]=signal2_A, Port[3]=signal1_B, Port[4]=signal2_B
+    // S31 (S[2][0] in 0-indexed) is through transmission from port 1 to port 3 (same trace)
+    // For symmetric diff pair: S13 = (S_odd_21 + S_even_21) / 2
+    console.log(`\n${'Freq (GHz)'.padEnd(12)} ${'S13 Solved'.padEnd(14)} ${'S13 Ref'.padEnd(14)} ${'Error'.padEnd(10)} Status`);
+    console.log(`${'-'.repeat(80)}`);
+
+    for (const refPoint of reference) {
+        // Update frequency and solve
+        solver.freq = refPoint.freq;
+        solver.omega = 2 * Math.PI * solver.freq;
+        solver.delta_s = Math.sqrt(2 / (solver.omega * 4 * Math.PI * 1e-7 * solver.sigma_cond));
+
+        const result = await solver.solve_adaptive({energy_tol: 0.05});
+        const oddMode = result.modes.find(m => m.mode === 'odd');
+        const evenMode = result.modes.find(m => m.mode === 'even');
+
+        // Compute single-ended S-parameters from odd/even mode
+        const sp_odd = computeSParamsSingleEnded(refPoint.freq, oddMode.RLGC, length, Z_ref);
+        const sp_even = computeSParamsSingleEnded(refPoint.freq, evenMode.RLGC, length, Z_ref);
+
+        // S13 = (S21_odd + S21_even) / 2 for symmetric differential pair
+        const S13 = sp_odd.S21.add(sp_even.S21).mul(0.5);
+        const S13_mag = S13.abs();
+
+        // Reference S31 (S[2][0] in 0-indexed matrix)
+        const refS13_mag = refPoint.S[2][0].mag;
+
+        const S13_error = Math.abs(S13_mag - refS13_mag);
+        maxS13Error = Math.max(maxS13Error, S13_error);
+
+        // Use 0.1 linear magnitude tolerance
+        const passed = S13_error < 0.1;
+        all_passed = all_passed && passed;
+
+        const freqGHz = (refPoint.freq / 1e9).toFixed(2);
+        const status = passed ? '✓' : '✗';
+        console.log(`${freqGHz.padEnd(12)} ${S13_mag.toFixed(4).padEnd(14)} ${refS13_mag.toFixed(4).padEnd(14)} ${S13_error.toFixed(4).padEnd(10)} ${status}`);
+    }
+
+    console.log(`${'-'.repeat(80)}`);
+    console.log(`Max S13 error: ${maxS13Error.toFixed(4)}`);
+    console.log(`Overall Result: ${all_passed ? '✓ ALL TESTS PASSED' : '✗ SOME TESTS FAILED'}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (!all_passed) {
+        throw new Error('S4P generation test failed - see errors above');
+    }
+}
+
 // Run tests
 async function runTests() {
     await solve_microstrip();
@@ -604,6 +877,8 @@ async function runTests() {
     await solve_rough_stripline();
     await solve_differential_stripline();
     await solve_differential_microstrip();
+    await test_s2p_generation();
+    await test_s4p_generation();
 }
 
 runTests();
