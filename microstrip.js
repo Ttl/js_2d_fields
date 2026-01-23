@@ -1,10 +1,6 @@
 import { FieldSolver2D, CONSTANTS, diff } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
 
-// ============================================================================
-// MICROSTRIP SOLVER V2
-// ============================================================================
-
 class MicrostripSolver extends FieldSolver2D {
     constructor(options) {
         super();
@@ -36,10 +32,10 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Coplanar ground options (from GCPW)
         this.use_coplanar_gnd = options.use_coplanar_gnd ?? false;
-        this.gap = options.gap ?? 0;                    // Gap from signal to top ground
+        this.gap = options.gap ?? 0; // Gap from signal to top ground
         this.top_gnd_width = options.top_gnd_width ?? 0; // Width of top ground planes
-        this.via_gap = options.via_gap ?? 0;            // Gap from ground edge to via
-        this.use_vias = options.use_vias ?? false;      // Enable via generation
+        this.via_gap = options.via_gap ?? 0; // Gap from ground edge to via
+        this.use_vias = options.use_vias ?? false; // Enable via generation
 
         // Enclosure options
         this.enclosure_width = options.enclosure_width ?? null;
@@ -140,12 +136,10 @@ class MicrostripSolver extends FieldSolver2D {
     _validate_parameters(options) {
         const errors = [];
 
-        // Helper function to check if value is a valid number
         const isValidNumber = (val) => typeof val === 'number' && !isNaN(val) && isFinite(val);
 
-        // Helper to check positive number (> 0)
         const checkPositive = (val, name) => {
-            if (val === undefined || val === null) return; // Optional parameters handled separately
+            if (val === undefined || val === null) return;
             if (!isValidNumber(val)) {
                 errors.push(`${name} must be a valid number (got ${val})`);
             } else if (val <= 0) {
@@ -153,9 +147,8 @@ class MicrostripSolver extends FieldSolver2D {
             }
         };
 
-        // Helper to check non-negative number (>= 0)
         const checkNonNegative = (val, name) => {
-            if (val === undefined || val === null) return; // Optional parameters
+            if (val === undefined || val === null) return;
             if (!isValidNumber(val)) {
                 errors.push(`${name} must be a valid number (got ${val})`);
             } else if (val < 0) {
@@ -166,8 +159,10 @@ class MicrostripSolver extends FieldSolver2D {
         // Required positive parameters
         checkPositive(options.substrate_height, 'substrate_height');
         checkPositive(options.trace_width, 'trace_width');
-        checkPositive(options.trace_thickness, 'trace_thickness');
         checkPositive(options.epsilon_r, 'epsilon_r');
+
+        // Allow negative thickness for conductors inside the substrate
+        isValidNumber(options.trace_thickness, 'trace_thickness');
 
         checkPositive(options.freq, 'frequency');
 
@@ -194,7 +189,7 @@ class MicrostripSolver extends FieldSolver2D {
             checkPositive(options.top_diel_er, 'top_diel_er');
         }
 
-        // Solder mask parameters - sm_t_sub and sm_t_trace CAN be negative
+        // Solder mask parameters - sm_t_sub and sm_t_trace can be negative
         // But sm_er must be positive if solder mask is used
         if (options.use_sm) {
             if (options.sm_t_sub !== undefined && !isValidNumber(options.sm_t_sub)) {
@@ -494,7 +489,7 @@ class MicrostripSolver extends FieldSolver2D {
             }
         }
 
-        // --- CONDUCTORS ---
+        // Conductors
 
         // Bottom ground (beneath everything)
         if (this.t_gnd > 0) {
@@ -626,7 +621,7 @@ class MicrostripSolver extends FieldSolver2D {
             }
         }
 
-        // Top ground plane (if present - for stripline)
+        // Top ground plane (if present, for stripline)
         if (this.has_top_gnd) {
             conductors.push(new Conductor(
                 x_min, this.y_gnd_top_start,
@@ -664,7 +659,6 @@ class MicrostripSolver extends FieldSolver2D {
 
     _add_coplanar_solder_mask(dielectrics) {
         // Coplanar solder mask: covers gaps and tops of conductors
-        // Adapted from gcpw.js lines 194-283
 
         if (this.is_differential) {
             // Differential coplanar solder mask
@@ -769,7 +763,7 @@ class MicrostripSolver extends FieldSolver2D {
                 this.sm_er, this.sm_tand
             ));
         } else {
-            // Single-ended coplanar solder mask (from original gcpw.js)
+            // Single-ended coplanar solder mask
             const xl = this.x_tr_l;
             const xr = this.x_tr_r;
             const xl_gap = this.x_gap_l;
@@ -896,7 +890,7 @@ class MicrostripSolver extends FieldSolver2D {
         const nx = this.x.length;
         const ny = this.y.length;
 
-        // Initialize mask and material arrays (V is created by solver based on mode)
+        // Initialize mask and material arrays
         this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
         this.tand = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
         this.signal_mask = Array(ny).fill().map(() => new Uint8Array(nx));
@@ -924,7 +918,7 @@ class MicrostripSolver extends FieldSolver2D {
             }
         }
 
-        // Apply conductors - use polarity to determine signal_p vs signal_n
+        // Apply conductors
         for (const cond of this.conductors) {
             for (let i = 0; i < ny; i++) {
                 const yc = this.y[i];
@@ -960,7 +954,6 @@ class MicrostripSolver extends FieldSolver2D {
             return row;
         });
     }
-
 }
 
 export { MicrostripSolver };

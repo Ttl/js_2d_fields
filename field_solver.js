@@ -17,61 +17,6 @@ export function diff(arr) {
     return res;
 }
 
-function linspace(start, end, n) {
-    if (n <= 1) return [start];
-    const arr = new Float64Array(n);
-    const step = (end - start) / (n - 1);
-    for (let i = 0; i < n; i++) arr[i] = start + i * step;
-    return arr;
-}
-
-export function _smooth_transition(x0, x1, n, curve_end, beta=4.0) {
-    if (n <= 1) {
-        if (n === 0) return new Float64Array(0); // If 0 points, return empty array
-        return new Float64Array([x0, x1]); // Python returns [start, end] for n_points <= 1
-    }
-
-    const pts = new Float64Array(n);
-    const xi = linspace(0, 1, n);
-
-    for(let i=0; i<n; i++) {
-        let eta;
-        if (curve_end === 'end') {
-            eta = Math.tanh(beta * xi[i]) / Math.tanh(beta);
-        } else if (curve_end === 'both') {
-            eta = (Math.tanh(beta * (xi[i] - 0.5)) / Math.tanh(beta * 0.5) + 1) / 2;
-        } else { // 'start'
-            eta = 1 - Math.tanh(beta * (1 - xi[i])) / Math.tanh(beta);
-        }
-        pts[i] = x0 + eta * (x1 - x0);
-    }
-    return pts;
-}
-
-export function _enforce_interfaces(arr, interfaces) {
-    let list = Array.from(arr);
-
-    // Always add all interface values, then use Set to handle uniqueness and sort.
-    // This directly mirrors the Python np.append and np.sort behavior (with unique implied).
-    for (let val of interfaces) {
-        list.push(val);
-    }
-
-    return Float64Array.from(new Set(list)).sort((a, b) => a - b);
-}
-
-export function _concat_arrays(arrays) {
-    let totalLen = 0;
-    for(let a of arrays) totalLen += a.length;
-    let res = new Float64Array(totalLen);
-    let offset = 0;
-    for(let a of arrays) {
-        res.set(a, offset);
-        offset += a.length;
-    }
-    return res;
-}
-
 function buildCSR(colLists, valLists, N) {
     let nnz = 0;
     for (let i = 0; i < N; i++) nnz += colLists[i].length;
@@ -279,15 +224,14 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
 }
 
 // --- Solver Class ---
-
 export class FieldSolver2D {
     constructor() {
         this.x = null;
         this.y = null;
         this.V = null;  // Stored as array: [V] for single-ended, [V_odd, V_even] for differential
         this.epsilon_r = null;
+        this.tand = null;
         this.conductor_mask = null; // 1 if conductor, 0 if dielectric
-        this.bc_mask = null; // Boundary conditions
         this.solution_valid = false;
 
         // Computed fields - stored as array: [fields] for single-ended, [odd, even] for differential
@@ -362,7 +306,8 @@ export class FieldSolver2D {
         const get_er = (i, j) => vacuum ? 1.0 : this.epsilon_r[i][j];
         const is_cond = (i, j) => this.conductor_mask[i][j];
 
-        // --- Reduced system mapping ---
+        // Remove mesh nodes internal to conductors
+        // E-field inside conductors is known to be 0.
         const is_unknown = new Int8Array(N);
         let N_unknown = 0;
 
@@ -387,12 +332,12 @@ export class FieldSolver2D {
             }
         }
 
-        // --- Build sparse system (lists first) ---
+        // Build sparse system
         const B = new Float64Array(N_unknown);
         const diag = new Float64Array(N_unknown);
 
-        const colLists = Array(N_unknown);  // Column indices for each row
-        const valLists = Array(N_unknown);  // Values for each row
+        const colLists = Array(N_unknown);
+        const valLists = Array(N_unknown);
 
         for (let i = 0; i < N_unknown; i++) {
             colLists[i] = [];
@@ -481,12 +426,11 @@ export class FieldSolver2D {
             }
         }
 
-        // --- Convert to CSR ---
         const { rowPtr, colIdx, values } = buildCSR(colLists, valLists, N_unknown);
         const csr = { rowPtr, colIdx, values };
         const x = await solveWithWASM(csr, B, true);
 
-        // --- Reconstruct solution ---
+        // Reconstruct solution for full mesh
         for (let k = 0; k < N_unknown; k++) {
             const n = red_to_full[k];
             const i = (n / nx) | 0;
@@ -615,7 +559,7 @@ export class FieldSolver2D {
      * For differential mode, includes both signal traces in signal_area.
      * Ground area includes all ground conductors (bottom, top, sides, vias).
      *
-     * @returns {{signal_area: number, ground_area: number}} - Cross-sectional areas in m²
+     * @returns {{signal_area: number, ground_area: number}} - Cross-sectional areas in m^2
      */
     _calculate_conductor_area() {
         if (!this.conductors) {
@@ -626,7 +570,7 @@ export class FieldSolver2D {
         let ground_area = 0;
 
         for (const cond of this.conductors) {
-            const area = cond.width * cond.height;
+            const area = Math.abs(cond.width * cond.height);
             if (cond.is_signal) {
                 signal_area += area;
             } else {
@@ -646,7 +590,6 @@ export class FieldSolver2D {
      *
      * For transmission lines:
      * - Current flows through signal conductor and returns through ground
-     * - Signal and ground resistances add in SERIES: R_dc = R_signal + R_ground
      *
      * For differential traces:
      * - Both signal traces contribute to signal_area
@@ -662,10 +605,6 @@ export class FieldSolver2D {
 
         // Calculate DC resistance from conductor dimensions
         const { signal_area, ground_area } = this._calculate_conductor_area();
-
-        if (signal_area <= 0 || ground_area <= 0) {
-            throw new Error("Signal or ground conductor cross-sectional area is zero or negative");
-        }
 
         // DC resistance per unit length for transmission line
         // Current flows through signal conductor and returns through ground (series connection)
@@ -710,9 +649,9 @@ export class FieldSolver2D {
         for (let i = 1; i < ny - 1; i++) {
             for (let j = 1; j < nx - 1; j++) {
 
-                // We only care about the boundary *inside* the dielectric
+                // We only care about the boundary inside the dielectric
                 // but adjacent to a conductor.
-                // Current loop iterates ALL cells. Let's look for Dielectric cells
+                // Current loop iterates all cells. Look for Dielectric cells
                 // that have a conductor neighbor.
 
                 if (isConductor(i, j)) continue; // Skip if we are inside metal
@@ -766,13 +705,12 @@ export class FieldSolver2D {
         // AC Resistance per unit length from skin effect (Ohm/m)
         const R_ac = power_factor * sum_H2_dl_R * Z0_sq;
 
-        // This doesn't hold if conductor thickness is small than skin depth
+        // This doesn't hold if conductor thickness is smaller than skin depth
         // Need to solve magnetic field for accurate L_internal at low frequency
         // but is not a problem at even moderately high frequency >1 MHz.
+        // In practice very minimal error since DC can be solved correctly.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / this.omega;
 
-        // Total resistance: combine DC and AC components
-        // R_total = sqrt(R_dc^2 + R_ac^2)
         const R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
 
         return { R_ac, R_dc, R_total, L_internal };
@@ -817,17 +755,11 @@ export class FieldSolver2D {
     rlgc(R_total, L_internal, alpha_diel, C_mode, Z0_mode) {
 
         // Dielectric loss conductance
-        // alpha_d = G * Z0 / 2  => G = 2 * alpha_d / Z0
-        // alpha_d_np = alpha_diel_dB / 8.686
         const alpha_d_np = alpha_diel / 8.686;
+        // alpha_d = G * Z0 / 2  => G = 2 * alpha_d / Z0
         const G = 2 * alpha_d_np / Z0_mode;
 
         // External Inductance (Geometric)
-        // L_ext = Z0^2 * C_mode (Standard TEM relationship for lossless/ext)
-        // Note: If epsilon_r is non-homogeneous, C_mode includes dielectric.
-        // Usually L_ext is derived from C_air (capacitance with air dielectric).
-        // Assuming Z0_mode was calculated correctly using sqrt(L_ext/C_mode),
-        // then L_ext = Z0_mode^2 * C_mode is correct.
         const L_ext = (Z0_mode * Z0_mode) * C_mode;
 
         // Total Inductance
@@ -854,12 +786,12 @@ export class FieldSolver2D {
             Zc: Zc,
             rlgc: {
                 R: R_total,
-                L: L_total, // Now includes internal inductance
+                L: L_total,
                 G: G,
                 C: C_mode
             },
             eps_eff_mode: eps_eff_new,
-            L_internal: L_internal, // Helpful for debugging
+            L_internal: L_internal,
             L_external: L_ext
         };
     }
@@ -965,10 +897,7 @@ export class FieldSolver2D {
         };
     }
 
-    // ============================================================================
-    // ADAPTIVE MESHING METHODS
-    // ============================================================================
-
+    // Adaptive Meshing
     _compute_refine_metrics(V, Ex, Ey) {
         /**
          * For each grid interval, compute a metric indicating how much refinement
@@ -1130,6 +1059,7 @@ export class FieldSolver2D {
         for (const j of selected_x) {
             const midpoint = 0.5 * (this.x[j] + this.x[j + 1]);
 
+            // Ensure symmetry by only considering the left side.
             if (x_symmetric) {
                 if (midpoint <= x_center) {
                     new_x.add(midpoint);
@@ -1158,7 +1088,7 @@ export class FieldSolver2D {
 
     refine_mesh(V, Ex, Ey, frac = 0.15) {
         /**
-         * Main refinement routine.
+         * Main mesh refinement routine.
          */
         const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey);
         const { selected_x, selected_y } = this._select_lines_to_refine(x_metrics, y_metrics, frac);
@@ -1202,7 +1132,7 @@ export class FieldSolver2D {
 
     _compute_parameter_error(Z0, C, prev_Z0, prev_C) {
         /**
-         * Track convergence of the quantities you actually care about.
+         * Track convergence of Z0 and C parameters.
          */
         if (prev_Z0 === null) {
             return 1.0;
@@ -1286,11 +1216,11 @@ export class FieldSolver2D {
         return {
             mode,
             Z0,
-            eps_eff: eps_eff_mode,  // Use the updated eps_eff from rlgc
+            eps_eff: eps_eff_mode,
             C, C0,
             RLGC: rlgc, Zc,
             alpha_c, alpha_d, alpha_total,
-            L_internal, L_external,  // Include for debugging
+            L_internal, L_external,
             V, Ex, Ey
         };
     }

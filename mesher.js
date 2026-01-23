@@ -1,7 +1,3 @@
-// ============================================================================
-// GEOMETRY CLASSES
-// ============================================================================
-
 class Dielectric {
     /**
      * Represents a rectangular dielectric region.
@@ -51,10 +47,6 @@ class Conductor {
     get y_min() { return this.y; }
     get y_max() { return this.y + this.height; }
 }
-
-// ============================================================================
-// MESHER CLASS
-// ============================================================================
 
 class Mesher {
     /**
@@ -328,7 +320,7 @@ class Mesher {
             region_weights.push(weight * width);
         }
 
-        // Allocate points - ensure minimum points in SIGNAL conductors
+        // Allocate points. Ensure minimum points in signal conductors
         const MIN_CONDUCTOR_POINTS = 5;
         const region_points = [];
         let reserved_points = 0;
@@ -389,7 +381,7 @@ class Mesher {
             const i1 = interfaces[k + 1];
             const npts = region_points[k];
 
-            // Check if this region is inside a SIGNAL conductor
+            // Check if this region is inside a signal onductor
             let is_signal_conductor = false;
             for (const cond of this.conductors) {
                 if (!cond.is_signal) continue;
@@ -552,7 +544,7 @@ class Mesher {
 
         mesh = Float64Array.from(mesh_unique);
 
-        // Check symmetry and enforce if needed (do this AFTER all additions)
+        // Check symmetry and enforce if needed (do this after all additions)
         if (this.symmetric && axis === 'x') {
             const is_symmetric = this._check_symmetry(axis);
             if (is_symmetric) {

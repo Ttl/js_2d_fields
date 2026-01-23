@@ -1,4 +1,3 @@
-// matrix.js - 2x2 Complex Matrix Operations for Differential Transmission Lines
 import { Complex } from './complex.js';
 
 /**

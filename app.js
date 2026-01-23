@@ -36,13 +36,8 @@ function getFrequencies() {
     }
 
     const freqs = [];
-    if (points === 1) {
-        // Single frequency point - use start frequency
-        freqs.push(start);
-    } else {
-        for (let i = 0; i < points; i++) {
-            freqs.push(start + (stop - start) * i / (points - 1));
-        }
+    for (let i = 0; i < points; i++) {
+        freqs.push(start + (stop - start) * i / (points - 1));
     }
     return freqs;
 }
@@ -503,7 +498,7 @@ async function runSimulation() {
             const result = await solver.solve_adaptive({
                 max_iters: 1,  // Single pass since mesh is fixed
                 tolerance: p.tolerance,
-                param_tol: 0.001,
+                param_tol: 0,
                 max_nodes: p.max_nodes,
                 skip_mesh: true,
                 shouldStop: shouldStop
@@ -652,7 +647,7 @@ function getPlotOptions() {
 }
 
 
-// --- Interpolation functions for higher-resolution plots ---
+// Interpolation functions for higher-resolution plots
 
 // Find the index i such that arr[i] <= val < arr[i+1]
 function find_idx(arr, val) {
@@ -737,13 +732,11 @@ function draw(resetZoom = false) {
     let shapes = [];
     let xMM, yMM, nx, ny, nyDisplay;
 
-    // --------------------
-    // DATA SELECTION
-    // --------------------
+    // View selection
     if (currentView === "geometry") {
         title = "Transmission Line Geometry";
 
-        // Determine display bounds - use actual domain extent
+        // Determine display bounds using actual domain extent
         const maxY = solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0);
 
         // Draw dielectrics as rectangles (color by epsilon_r)
@@ -842,9 +835,9 @@ function draw(resetZoom = false) {
         nx = solver.x.length;
         ny = solver.y.length;
 
-        // Limit display Y - use actual domain extent
+        // Limit display Y to domain extent
         const yArr = Array.from(solver.y);
-        const maxY = yArr[ny - 1];  // Use full domain extent
+        const maxY = yArr[ny - 1];
         const maxYIdx = yArr.findIndex(y => y > maxY);
         nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
 
@@ -877,9 +870,9 @@ function draw(resetZoom = false) {
         nx = solver.x.length;
         ny = solver.y.length;
 
-        // Limit display Y - use actual domain extent
+        // Limit display Y to actual domain extent
         const yArr = Array.from(solver.y);
-        const maxY = yArr[ny - 1];  // Use full domain extent
+        const maxY = yArr[ny - 1];
         const maxYIdx = yArr.findIndex(y => y > maxY);
         nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
 
@@ -916,13 +909,11 @@ function draw(resetZoom = false) {
         yMM = [0, (solver.h || 1) * 1000];
     }
 
-    // --------------------
-    // INTERPOLATION FOR SMOOTHER PLOTS
-    // --------------------
+    // Interpolate for smoother plots
     const INTERP_ENABLED = true; // Control flag for interpolation
-    const INTERP_FACTOR = 5;     // Interpolation multiplier (e.g., 5x resolution)
+    const INTERP_FACTOR = 4; // Interpolation multiplier
 
-    // Save original mesh coordinates for mesh overlay (before interpolation)
+    // Save original mesh coordinates for mesh overlay before interpolation
     let xMM_mesh = xMM;
     let yMM_mesh = yMM;
     let nx_mesh = nx;
@@ -964,9 +955,7 @@ function draw(resetZoom = false) {
     }
 
 
-    // --------------------
-    // MAIN FIELD TRACE
-    // --------------------
+    // Main field trace
     let traces = [];
 
     if (currentView === "geometry" && zData.length > 0) {
@@ -1057,7 +1046,7 @@ function draw(resetZoom = false) {
         }
 
     } else if (currentView === "geometry") {
-        // Geometry only - invisible scatter for axis scaling
+        // Geometry only. Invisible scatter for axis scaling
         traces.push({
             type: "scatter",
             x: xMM,
@@ -1068,7 +1057,7 @@ function draw(resetZoom = false) {
             hoverinfo: "skip"
         });
     } else if (zData.length > 0) {
-        // Field views only - use heatmap with optional contour lines
+        // Field views only. Use heatmap with optional contour lines
         const contourSettings = {
             coloring: 'heatmap',
             showlines: plotOptions.contours > 0,
@@ -1099,7 +1088,7 @@ function draw(resetZoom = false) {
         });
     }
 
-    // MESH OVERLAY
+    // Mesh overlay
     if (showMesh && solver.solution_valid) {
         const stepX = 1;
         const stepY = 1;
@@ -1130,9 +1119,7 @@ function draw(resetZoom = false) {
         }
     }
 
-    // --------------------
-    // UI MENUS
-    // --------------------
+    // UI menues
     const layout = {
         title: title,
         xaxis: {
@@ -1217,7 +1204,7 @@ function draw(resetZoom = false) {
 
     if (!container._viewListenerBound) {
         container.on('plotly_buttonclicked', (event) => {
-            // Simplified view handling: Geometry(0), Potential(1), E-field(2)
+            // View handling: Geometry(0), Potential(1), E-field(2)
             // Mode selector in sidebar controls odd/even for differential lines
             if (event.menu.active === 0) {
                 currentView = "geometry";
@@ -1656,7 +1643,7 @@ function bindEvents() {
         });
     }
 
-    // Frequency points validation - default to 1 when empty
+    // Frequency points validation. Default to 1 when empty
     const freqPointsEl = document.getElementById('freq-points');
     if (freqPointsEl) {
         freqPointsEl.addEventListener('blur', () => {
