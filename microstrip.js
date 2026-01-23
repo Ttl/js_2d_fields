@@ -166,6 +166,7 @@ class MicrostripSolver extends FieldSolver2D {
         checkPositive(options.trace_width, 'trace_width');
         checkPositive(options.trace_thickness, 'trace_thickness');
         checkPositive(options.epsilon_r, 'epsilon_r');
+
         checkPositive(options.freq, 'frequency');
 
         // Optional positive parameters

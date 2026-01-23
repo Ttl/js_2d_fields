@@ -332,7 +332,7 @@ export class FieldSolver2D {
      * @param {function} onProgress - Optional progress callback
      * @returns {Array<Float64Array>} - The solved voltage array (same reference as input)
      */
-    async solve_laplace_iterative(V, vacuum = false, onProgress = null) {
+    async solve_laplace(V, vacuum = false, onProgress = null) {
         // Ensure mesh is generated
         if (this.ensure_mesh) {
             this.ensure_mesh();
@@ -607,8 +607,82 @@ export class FieldSolver2D {
         return Math.abs(Q);
     }
 
+    /**
+     * Calculate conductor cross-sectional area from conductor dimensions.
+     * Uses the Conductor class dimensions directly (width * height) rather than
+     * summing mesh elements for accurate DC resistance calculation.
+     *
+     * For differential mode, includes both signal traces in signal_area.
+     * Ground area includes all ground conductors (bottom, top, sides, vias).
+     *
+     * @returns {{signal_area: number, ground_area: number}} - Cross-sectional areas in m²
+     */
+    _calculate_conductor_area() {
+        if (!this.conductors) {
+            throw new Error("Conductors array not available");
+        }
+
+        let signal_area = 0;
+        let ground_area = 0;
+
+        for (const cond of this.conductors) {
+            const area = cond.width * cond.height;
+            if (cond.is_signal) {
+                signal_area += area;
+            } else {
+                ground_area += area;
+            }
+        }
+
+        return { signal_area, ground_area };
+    }
+
+    /**
+     * Calculate conductor losses including both DC and AC (skin effect) contributions.
+     *
+     * The total resistance is calculated as R_total = sqrt(R_dc^2 + R_ac^2) where:
+     * - R_dc: DC resistance from conductor cross-sectional area (uses Conductor dimensions directly)
+     * - R_ac: AC resistance from skin effect and surface roughness
+     *
+     * For transmission lines:
+     * - Current flows through signal conductor and returns through ground
+     * - Signal and ground resistances add in SERIES: R_dc = R_signal + R_ground
+     *
+     * For differential traces:
+     * - Both signal traces contribute to signal_area
+     * - Power normalization factor of 0.5 is applied to AC components
+     *
+     * @param {Array<Array<number>>} Ex - Electric field x-component
+     * @param {Array<Array<number>>} Ey - Electric field y-component
+     * @param {number} Z0 - Characteristic impedance (real part)
+     * @returns {{R_ac: number, R_dc: number, R_total: number, L_internal: number}}
+     */
     calculate_conductor_loss(Ex, Ey, Z0) {
         if (!this.solution_valid) throw new Error("Fields invalid");
+
+        // Calculate DC resistance from conductor dimensions
+        const { signal_area, ground_area } = this._calculate_conductor_area();
+
+        if (signal_area <= 0 || ground_area <= 0) {
+            throw new Error("Signal or ground conductor cross-sectional area is zero or negative");
+        }
+
+        // DC resistance per unit length for transmission line
+        // Current flows through signal conductor and returns through ground (series connection)
+        // R_dc = R_signal + R_ground = 1/(σ×A_signal) + 1/(σ×A_ground)
+        const R_signal = 1.0 / (this.sigma_cond * signal_area);
+        const R_ground = 1.0 / (this.sigma_cond * ground_area);
+        const R_dc = R_signal + R_ground;
+
+        // Handle DC case (frequency = 0)
+        if (this.freq === 0 || this.omega === 0) {
+            return {
+                R_ac: 0,
+                R_dc: R_dc,
+                R_total: R_dc,
+                L_internal: 0
+            };
+        }
 
         // Use roughness from constructor
         const rq = this.rq || 0;
@@ -689,13 +763,19 @@ export class FieldSolver2D {
 
         const Z0_sq = Z0 * Z0;
 
-        // Total Resistance per unit length (Ohm/m)
+        // AC Resistance per unit length from skin effect (Ohm/m)
         const R_ac = power_factor * sum_H2_dl_R * Z0_sq;
 
-        // Total Internal Inductance per unit length (H/m)
+        // This doesn't hold if conductor thickness is small than skin depth
+        // Need to solve magnetic field for accurate L_internal at low frequency
+        // but is not a problem at even moderately high frequency >1 MHz.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / this.omega;
 
-        return { R_ac, L_internal };
+        // Total resistance: combine DC and AC components
+        // R_total = sqrt(R_dc^2 + R_ac^2)
+        const R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
+
+        return { R_ac, R_dc, R_total, L_internal };
     }
 
     calculate_dielectric_loss(Ex, Ey, Z0) {
@@ -737,7 +817,7 @@ export class FieldSolver2D {
         return 8.686 * (power_factor * Pd / (2 * P_flow));
     }
 
-    rlgc(R_ac, L_internal, alpha_diel, C_mode, Z0_mode) {
+    rlgc(R_total, L_internal, alpha_diel, C_mode, Z0_mode) {
 
         // Dielectric loss conductance
         // alpha_d = G * Z0 / 2  => G = 2 * alpha_d / Z0
@@ -755,9 +835,6 @@ export class FieldSolver2D {
 
         // Total Inductance
         const L_total = L_ext + L_internal;
-
-        // Total Resistance (Directly from conductor impedance)
-        const R_total = R_ac;
 
         // Re-calculate complex Zc and Epsilon_eff with the new L and R
         const omega = this.omega;
@@ -802,6 +879,22 @@ export class FieldSolver2D {
 
         const eps_eff_mode = (L * C_mode) / (CONSTANTS.MU0 * CONSTANTS.EPS0);
 
+        // Handle DC case (omega = 0)
+        if (this.omega === 0) {
+            if (G === 0) {
+                return {
+                    Zc: new Complex(Infinity, 0),
+                    rlgc: { R, L, G: 0, C: C_mode },
+                    eps_eff_mode
+                };
+            }
+            return {
+                Zc: new Complex(Math.sqrt(R / G), 0),
+                rlgc: { R, L, G, C: C_mode },
+                eps_eff_mode
+            };
+        }
+
         // Complex characteristic impedance Zc = sqrt((R + jwL) / (G + jwC))
         const num = new Complex(R, this.omega * L);
         const den = new Complex(G, this.omega * C_mode);
@@ -818,7 +911,7 @@ export class FieldSolver2D {
     }
 
     async perform_analysis(onProgress = null) {
-        const totalSteps = 2; // Two main solve_laplace_iterative calls
+        const totalSteps = 2; // Two main solve_laplace calls
         let currentStep = 0;
 
         const updateProgress = (stepFraction, overallStep) => {
@@ -831,13 +924,13 @@ export class FieldSolver2D {
         // 1. Calculate C0 (vacuum capacitance)
         currentStep = 1;
         let V = this._create_voltage_array('single');
-        V = await this.solve_laplace_iterative(V, true, (i, max) => updateProgress(i / max, currentStep));
+        V = await this.solve_laplace(V, true, (i, max) => updateProgress(i / max, currentStep));
         const C0 = this.calculate_capacitance(V, true);
 
         // 2. Calculate C (with dielectric capacitance)
         currentStep = 2;
         V = this._create_voltage_array('single');
-        V = await this.solve_laplace_iterative(V, false, (i, max) => updateProgress(i / max, currentStep));
+        V = await this.solve_laplace(V, false, (i, max) => updateProgress(i / max, currentStep));
         const C_with_diel = this.calculate_capacitance(V, false);
 
         // 3. Calculate Z0 and effective permittivity
@@ -848,17 +941,17 @@ export class FieldSolver2D {
         const { Ex, Ey } = this.compute_fields(V);
 
         // 5. Calculate losses
-        // Conductor loss with surface roughness (returns R_ac and L_internal)
-        const { R_ac, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
+        // Conductor loss with surface roughness and DC resistance
+        const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
 
         // Dielectric loss depends on Ex, Ey, Z0, omega, epsilon_r, tan_delta
         const alpha_diel_db_m = this.calculate_dielectric_loss(Ex, Ey, Z0);
 
         // 6. Calculate RLGC and complex Z0 using surface roughness aware approach
-        const { Zc, rlgc, eps_eff_mode } = this.rlgc(R_ac, L_internal, alpha_diel_db_m, C_with_diel, Z0);
+        const { Zc, rlgc, eps_eff_mode } = this.rlgc(R_total, L_internal, alpha_diel_db_m, C_with_diel, Z0);
 
-        // Calculate conductor loss alpha from R_ac for reporting
-        const alpha_cond_db_m = 8.686 * R_ac / (2 * Z0);
+        // Calculate conductor loss alpha from R_total for reporting
+        const alpha_cond_db_m = 8.686 * R_total / (2 * Z0);
         const total_alpha_db_m = alpha_cond_db_m + alpha_diel_db_m;
 
         return {
@@ -1142,7 +1235,7 @@ export class FieldSolver2D {
         if (vacuum_first) {
             // Calculate C0 (vacuum capacitance)
             V = this._create_voltage_array(mode);
-            V = await this.solve_laplace_iterative(V, true);
+            V = await this.solve_laplace(V, true);
 
             if (this.is_differential) {
                 // Use only positive trace for charge calculation
@@ -1157,7 +1250,7 @@ export class FieldSolver2D {
 
         // Solve with dielectric
         V = this._create_voltage_array(mode);
-        V = await this.solve_laplace_iterative(V, false);
+        V = await this.solve_laplace(V, false);
 
         let C;
         if (this.is_differential) {
@@ -1180,17 +1273,17 @@ export class FieldSolver2D {
             Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
         }
 
-        // Calculate conductor losses with surface roughness (returns R_ac and L_internal)
-        const { R_ac, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
+        // Calculate conductor losses with surface roughness and DC resistance
+        const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
 
         // Calculate dielectric loss (returns alpha in dB/m)
         const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
 
         // Calculate RLGC using new surface roughness aware approach
-        const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_ac, L_internal, alpha_d, C, Z0);
+        const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, C, Z0);
 
-        // Calculate conductor loss alpha from R_ac for reporting
-        const alpha_c = 8.686 * R_ac / (2 * Z0);
+        // Calculate conductor loss alpha from R_total for reporting
+        const alpha_c = 8.686 * R_total / (2 * Zc.re);
         const alpha_total = alpha_c + alpha_d;
 
         return {

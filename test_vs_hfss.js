@@ -249,6 +249,58 @@ async function solve_microstrip() {
     return solver_results;
 }
 
+async function solve_microstrip_1khz() {
+    const solver = new MicrostripSolver({
+        substrate_height: 1.6e-3,
+        trace_width: 3e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.5,
+        tan_delta: 0,
+        sigma_cond: 1e7,
+        enclosure_width: 50e-3,
+        freq: 1e3,
+        nx: 10,
+        ny: 10,
+        use_sm: false,
+        boundaries: ["open", "open", "open", "gnd"]
+    });
+
+    const results = await solver.solve_adaptive();
+    const mode = results.modes[0];
+
+    // Prepare results dictionary matching Python format
+    const solver_results = {
+        'RZc': mode.Zc.re,
+        'IZc': mode.Zc.im,
+        'eps_eff': mode.eps_eff,
+        'diel_loss': mode.alpha_d,
+        'cond_loss': mode.alpha_c,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
+    };
+
+    // Reference values from HFSS
+    const reference = {
+        "RZc": 866,
+        "IZc": -864,
+        "cond_loss": 0.0058,
+        "C": 123.25e-12,
+        "R": 1.01,
+        "G": 0,
+        // L can't be solved correctly without solving for magnetic field due
+        // to current spreading in the ground plane.
+        // "L": 523e-9
+    };
+
+    // Test against reference
+    test_microstrip_solution(solver_results, reference, "Microstrip 1 kHz");
+
+    return solver_results;
+}
+
 async function solve_microstrip_embed() {
     const solver = new MicrostripSolver({
         substrate_height: 1.6e-3,
@@ -431,7 +483,7 @@ async function solve_stripline() {
     };
 
     // Test against reference
-    test_microstrip_solution(solver_results, reference, "Rough Stripline");
+    test_microstrip_solution(solver_results, reference, "Stripline");
 
     return results;
 }
@@ -540,6 +592,7 @@ async function solve_differential_stripline() {
 // Run tests
 async function runTests() {
     await solve_microstrip();
+    await solve_microstrip_1khz();
     await solve_microstrip_embed();
     await solve_microstrip_cut();
     await solve_stripline();
