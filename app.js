@@ -41,6 +41,7 @@ function getParams() {
         // Stripline parameters
         stripline_top_h: parseFloat(document.getElementById('inp_air_top').value) * 1e-3,
         er_top: parseFloat(document.getElementById('inp_er_top').value),
+        tand_top: parseFloat(document.getElementById('inp_tand_top').value),
         // Solder mask parameters
         use_sm: document.getElementById('chk_solder_mask').checked,
         sm_t_sub: parseFloat(document.getElementById('inp_sm_t_sub').value) * 1e-6,
@@ -238,6 +239,7 @@ function updateGeometry() {
                 trace_thickness: p.t,
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
+                tan_delta_top: p.tand_top,
                 enclosure_height: p.stripline_top_h + p.t,
                 tan_delta: p.tand,
                 sigma_cond: p.sigma,
@@ -287,6 +289,7 @@ function updateGeometry() {
                 epsilon_r_top: p.er_top,
                 enclosure_height: p.stripline_top_h,
                 tan_delta: p.tand,
+                tan_delta_top: p.tand_top,
                 sigma_cond: p.sigma,
                 freq: p.freq,
                 nx: p.nx,
@@ -1166,7 +1169,7 @@ function bindEvents() {
         'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma', 'inp_freq',
         'inp_trace_spacing',
         'inp_gap', 'inp_top_gnd_w', 'inp_via_gap',
-        'inp_air_top', 'inp_er_top',
+        'inp_air_top', 'inp_er_top', 'inp_tand_top',
         'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',
         'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',
         'inp_gnd_cut_w', 'inp_gnd_cut_h',

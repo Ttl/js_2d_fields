@@ -800,14 +800,11 @@ export class FieldSolver2D {
         for (let i = 0; i < ny - 1; i++) {
             for (let j = 0; j < nx - 1; j++) {
                 if (isConductor(i, j)) continue;
-                if (this.epsilon_r[i][j] <= 1.01) continue;
 
                 const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
                 const dA = get_dx(j) * get_dy(i);
 
-                if (this.tan_delta && this.omega) {
-                    Pd += 0.5 * this.omega * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tan_delta * E2 * dA;
-                }
+                Pd += 0.5 * this.omega * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tand[i][j] * E2 * dA;
             }
         }
 

@@ -19,8 +19,10 @@ class MicrostripSolver extends FieldSolver2D {
         this.t_gnd = options.gnd_thickness ?? 35e-6;
         this.er = options.epsilon_r;
         this.er_top = options.epsilon_r_top ?? 1;
+        this.tand_top = options.tan_delta_top ?? 0;
         this.tan_delta = options.tan_delta ?? 0.02;
         this.sigma_cond = options.sigma_cond ?? 5.8e7;
+        console.log([this.er_top, this.tand_top]);
 
         // Differential mode parameters
         this.trace_spacing = options.trace_spacing ?? null;
@@ -402,7 +404,7 @@ class MicrostripSolver extends FieldSolver2D {
         dielectrics.push(new Dielectric(
             x_min, this.y_top_start,
             this.domain_width, this.top_dielectric_h,
-            this.er_top, 0.0
+            this.er_top, this.tand_top
         ));
 
         // Solder mask regions (overwrites previous)
@@ -896,6 +898,7 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Initialize mask and material arrays (V is created by solver based on mode)
         this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
+        this.tand = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
         this.signal_mask = Array(ny).fill().map(() => new Uint8Array(nx));
         this.ground_mask = Array(ny).fill().map(() => new Uint8Array(nx));
 
@@ -914,6 +917,7 @@ class MicrostripSolver extends FieldSolver2D {
                         const xc = this.x[j];
                         if (xc >= diel.x_min - tol && xc <= diel.x_max + tol) {
                             this.epsilon_r[i][j] = diel.epsilon_r;
+                            this.tand[i][j] = diel.tan_delta;
                         }
                     }
                 }
