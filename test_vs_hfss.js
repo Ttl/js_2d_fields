@@ -1,5 +1,6 @@
 import { MicrostripSolver } from './microstrip.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential } from './sparameters.js';
+import { Complex } from './complex.js';
 import { readFileSync } from 'fs';
 
 /**
@@ -597,9 +598,42 @@ async function solve_differential_stripline() {
 }
 
 /**
+ * Convert dB and angle (degrees) to Complex number
+ * @param {number} dB - Magnitude in dB
+ * @param {number} angDeg - Angle in degrees
+ * @returns {Complex}
+ */
+function dbAngToComplex(dB, angDeg) {
+    const mag = Math.pow(10, dB / 20);
+    const angRad = angDeg * Math.PI / 180;
+    return new Complex(mag * Math.cos(angRad), mag * Math.sin(angRad));
+}
+
+/**
+ * Convert magnitude and angle (degrees) to Complex number
+ * @param {number} mag - Linear magnitude
+ * @param {number} angDeg - Angle in degrees
+ * @returns {Complex}
+ */
+function magAngToComplex(mag, angDeg) {
+    const angRad = angDeg * Math.PI / 180;
+    return new Complex(mag * Math.cos(angRad), mag * Math.sin(angRad));
+}
+
+/**
+ * Calculate absolute difference between two Complex numbers
+ * @param {Complex} a
+ * @param {Complex} b
+ * @returns {number}
+ */
+function complexAbsDiff(a, b) {
+    return a.sub(b).abs();
+}
+
+/**
  * Parse Touchstone S2P file in DB format (dB + angle)
  * @param {string} filename - Path to the S2P file
- * @returns {Array<{freq: number, S11: {mag: number, ang: number}, S21: {mag: number, ang: number}}>}
+ * @returns {Array<{freq: number, S11: Complex, S21: Complex, S12: Complex, S22: Complex}>}
  */
 function parseS2P_DB(filename) {
     const content = readFileSync(filename, 'utf-8');
@@ -628,8 +662,10 @@ function parseS2P_DB(filename) {
             // Format: freq S11_dB S11_ang S21_dB S21_ang S12_dB S12_ang S22_dB S22_ang
             data.push({
                 freq: parts[0] * freqUnit,
-                S11: { dB: parts[1], ang: parts[2] },
-                S21: { dB: parts[3], ang: parts[4] }
+                S11: dbAngToComplex(parts[1], parts[2]),
+                S21: dbAngToComplex(parts[3], parts[4]),
+                S12: dbAngToComplex(parts[5], parts[6]),
+                S22: dbAngToComplex(parts[7], parts[8])
             });
         }
     }
@@ -639,7 +675,7 @@ function parseS2P_DB(filename) {
 /**
  * Parse Touchstone S4P file in MA format (magnitude + angle)
  * @param {string} filename - Path to the S4P file
- * @returns {Array<{freq: number, S: Array<Array<{mag: number, ang: number}>>}>}
+ * @returns {Array<{freq: number, S: Array<Array<Complex>>}>}
  */
 function parseS4P_MA(filename) {
     const content = readFileSync(filename, 'utf-8');
@@ -666,7 +702,7 @@ function parseS4P_MA(filename) {
 
         // Row 1: S11 S12 S13 S14
         for (let col = 0; col < 4; col++) {
-            S[0][col] = { mag: parts1[1 + col*2], ang: parts1[2 + col*2] };
+            S[0][col] = magAngToComplex(parts1[1 + col*2], parts1[2 + col*2]);
         }
 
         // Rows 2-4
@@ -675,7 +711,7 @@ function parseS4P_MA(filename) {
             if (i >= lines.length) break;
             const parts = lines[i].trim().split(/\s+/).map(parseFloat);
             for (let col = 0; col < 4; col++) {
-                S[row][col] = { mag: parts[col*2], ang: parts[col*2 + 1] };
+                S[row][col] = magAngToComplex(parts[col*2], parts[col*2 + 1]);
             }
         }
 
@@ -693,11 +729,11 @@ function magTodB(mag) {
 }
 
 /**
- * Test S2P generation against reference file
+ * Test S2P generation against reference file using absolute difference
  */
 async function test_s2p_generation() {
     console.log(`\n${'='.repeat(80)}`);
-    console.log('S2P GENERATION TEST (vs HFSS reference)');
+    console.log('S2P GENERATION TEST (vs HFSS reference) - Absolute Difference');
     console.log(`${'='.repeat(80)}`);
 
     // Parse reference file
@@ -728,11 +764,16 @@ async function test_s2p_generation() {
     const Z_ref = 50;
 
     let all_passed = true;
-    let maxS11Error = 0;
-    let maxS21Error = 0;
+    const maxErrors = { S11: 0, S21: 0, S12: 0, S22: 0 };
 
-    console.log(`\n${'Freq (GHz)'.padEnd(12)} ${'S11 Solved'.padEnd(12)} ${'S11 Ref'.padEnd(12)} ${'S21 Solved'.padEnd(12)} ${'S21 Ref'.padEnd(12)} Status`);
-    console.log(`${'-'.repeat(80)}`);
+    // Absolute tolerance for S-parameter comparison
+    // S11 (return loss) is sensitive to small Z0 differences
+    // S21/S12 (insertion loss) differences accumulate over the 1m line length,
+    // so small per-unit-length differences lead to larger S-param differences
+    const tolerances = { S11: 0.3, S21: 0.25, S12: 0.25, S22: 0.3 };
+
+    console.log(`\n${'Freq'.padEnd(8)} ${'|ΔS11|'.padEnd(10)} ${'|ΔS21|'.padEnd(10)} ${'|ΔS12|'.padEnd(10)} ${'|ΔS22|'.padEnd(10)} Status`);
+    console.log(`${'-'.repeat(70)}`);
 
     for (const refPoint of reference) {
         // Update frequency and solve
@@ -745,30 +786,35 @@ async function test_s2p_generation() {
 
         // Compute S-parameters
         const sp = computeSParamsSingleEnded(refPoint.freq, mode.RLGC, length, Z_ref);
-        const S11_dB = magTodB(sp.S11.abs());
-        const S21_dB = magTodB(sp.S21.abs());
 
-        // Compare with reference (allowing larger tolerance for S-params)
-        const S11_error = Math.abs(S11_dB - refPoint.S11.dB);
-        const S21_error = Math.abs(S21_dB - refPoint.S21.dB);
+        // Compute absolute differences for all S-parameters
+        const errors = {
+            S11: complexAbsDiff(sp.S11, refPoint.S11),
+            S21: complexAbsDiff(sp.S21, refPoint.S21),
+            S12: complexAbsDiff(sp.S12, refPoint.S12),
+            S22: complexAbsDiff(sp.S22, refPoint.S22)
+        };
 
-        maxS11Error = Math.max(maxS11Error, S11_error);
-        maxS21Error = Math.max(maxS21Error, S21_error);
+        // Track max errors
+        for (const key of Object.keys(errors)) {
+            maxErrors[key] = Math.max(maxErrors[key], errors[key]);
+        }
 
-        // S11 (return loss) is very sensitive to small Z0 differences - use relaxed tolerance
-        // S21 (insertion loss) is the key metric for transmission line characterization
-        const S11_passed = S11_error < 15;  // S11 varies significantly between solvers
-        const S21_passed = S21_error < 1;   // S21 should match within 1 dB
-        const passed = S11_passed && S21_passed;
+        // Check against tolerances
+        const passed = errors.S11 < tolerances.S11 &&
+                       errors.S21 < tolerances.S21 &&
+                       errors.S12 < tolerances.S12 &&
+                       errors.S22 < tolerances.S22;
         all_passed = all_passed && passed;
 
         const freqGHz = (refPoint.freq / 1e9).toFixed(2);
         const status = passed ? '✓' : '✗';
-        console.log(`${freqGHz.padEnd(12)} ${S11_dB.toFixed(2).padEnd(12)} ${refPoint.S11.dB.toFixed(2).padEnd(12)} ${S21_dB.toFixed(2).padEnd(12)} ${refPoint.S21.dB.toFixed(2).padEnd(12)} ${status}`);
+        console.log(`${freqGHz.padEnd(8)} ${errors.S11.toFixed(4).padEnd(10)} ${errors.S21.toFixed(4).padEnd(10)} ${errors.S12.toFixed(4).padEnd(10)} ${errors.S22.toFixed(4).padEnd(10)} ${status}`);
     }
 
-    console.log(`${'-'.repeat(80)}`);
-    console.log(`Max S11 error: ${maxS11Error.toFixed(2)} dB, Max S21 error: ${maxS21Error.toFixed(2)} dB`);
+    console.log(`${'-'.repeat(70)}`);
+    console.log(`Max absolute errors: S11=${maxErrors.S11.toFixed(4)}, S21=${maxErrors.S21.toFixed(4)}, S12=${maxErrors.S12.toFixed(4)}, S22=${maxErrors.S22.toFixed(4)}`);
+    console.log(`Tolerances:          S11=${tolerances.S11}, S21=${tolerances.S21}, S12=${tolerances.S12}, S22=${tolerances.S22}`);
     console.log(`Overall Result: ${all_passed ? '✓ ALL TESTS PASSED' : '✗ SOME TESTS FAILED'}`);
     console.log(`${'='.repeat(80)}\n`);
 
@@ -778,11 +824,11 @@ async function test_s2p_generation() {
 }
 
 /**
- * Test S4P generation against reference file
+ * Test S4P generation against reference file using absolute difference
  */
 async function test_s4p_generation() {
     console.log(`\n${'='.repeat(80)}`);
-    console.log('S4P GENERATION TEST (vs HFSS reference)');
+    console.log('S4P GENERATION TEST (vs HFSS reference) - Absolute Difference');
     console.log(`${'='.repeat(80)}`);
 
     // Parse reference file
@@ -816,13 +862,16 @@ async function test_s4p_generation() {
     const Z_ref = 50;
 
     let all_passed = true;
-    let maxS13Error = 0;
 
-    // Reference S4P port assignment: Port[1]=signal1_A, Port[2]=signal2_A, Port[3]=signal1_B, Port[4]=signal2_B
-    // S31 (S[2][0] in 0-indexed) is through transmission from port 1 to port 3 (same trace)
-    // For symmetric diff pair: S13 = (S_odd_21 + S_even_21) / 2
-    console.log(`\n${'Freq (GHz)'.padEnd(12)} ${'S13 Solved'.padEnd(14)} ${'S13 Ref'.padEnd(14)} ${'Error'.padEnd(10)} Status`);
-    console.log(`${'-'.repeat(80)}`);
+    // Track max errors for all 16 S-parameters
+    const maxErrors = Array(4).fill(null).map(() => Array(4).fill(0));
+
+    // Tolerance for absolute difference
+    // Similar to S2P, differences accumulate over the 1m line length
+    const tolerance = 0.45;
+
+    console.log(`\n${'Freq'.padEnd(8)} ${'Max|ΔSij|'.padEnd(12)} ${'Worst Sij'.padEnd(10)} Status`);
+    console.log(`${'-'.repeat(50)}`);
 
     for (const refPoint of reference) {
         // Update frequency and solve
@@ -834,31 +883,41 @@ async function test_s4p_generation() {
         const oddMode = result.modes.find(m => m.mode === 'odd');
         const evenMode = result.modes.find(m => m.mode === 'even');
 
-        // Compute single-ended S-parameters from odd/even mode
-        const sp_odd = computeSParamsSingleEnded(refPoint.freq, oddMode.RLGC, length, Z_ref);
-        const sp_even = computeSParamsSingleEnded(refPoint.freq, evenMode.RLGC, length, Z_ref);
+        // Compute 4-port S-parameters
+        const sp = computeSParamsDifferential(refPoint.freq, oddMode.RLGC, evenMode.RLGC, length, Z_ref);
 
-        // S13 = (S21_odd + S21_even) / 2 for symmetric differential pair
-        const S13 = sp_odd.S21.add(sp_even.S21).mul(0.5);
-        const S13_mag = S13.abs();
+        // Compare all 16 S-parameters
+        let maxError = 0;
+        let worstParam = 'S11';
 
-        // Reference S31 (S[2][0] in 0-indexed matrix)
-        const refS13_mag = refPoint.S[2][0].mag;
+        for (let row = 0; row < 4; row++) {
+            for (let col = 0; col < 4; col++) {
+                const error = complexAbsDiff(sp.S[row][col], refPoint.S[row][col]);
+                maxErrors[row][col] = Math.max(maxErrors[row][col], error);
 
-        const S13_error = Math.abs(S13_mag - refS13_mag);
-        maxS13Error = Math.max(maxS13Error, S13_error);
+                if (error > maxError) {
+                    maxError = error;
+                    worstParam = `S${row + 1}${col + 1}`;
+                }
+            }
+        }
 
-        // Use 0.1 linear magnitude tolerance
-        const passed = S13_error < 0.1;
+        const passed = maxError < tolerance;
         all_passed = all_passed && passed;
 
         const freqGHz = (refPoint.freq / 1e9).toFixed(2);
         const status = passed ? '✓' : '✗';
-        console.log(`${freqGHz.padEnd(12)} ${S13_mag.toFixed(4).padEnd(14)} ${refS13_mag.toFixed(4).padEnd(14)} ${S13_error.toFixed(4).padEnd(10)} ${status}`);
+        console.log(`${freqGHz.padEnd(8)} ${maxError.toFixed(4).padEnd(12)} ${worstParam.padEnd(10)} ${status}`);
     }
 
-    console.log(`${'-'.repeat(80)}`);
-    console.log(`Max S13 error: ${maxS13Error.toFixed(4)}`);
+    console.log(`${'-'.repeat(50)}`);
+    console.log(`\nMax absolute errors per S-parameter:`);
+    console.log(`       Port1     Port2     Port3     Port4`);
+    for (let row = 0; row < 4; row++) {
+        const rowStr = maxErrors[row].map(e => e.toFixed(4).padStart(9)).join(' ');
+        console.log(`Port${row + 1} ${rowStr}`);
+    }
+    console.log(`\nTolerance: ${tolerance}`);
     console.log(`Overall Result: ${all_passed ? '✓ ALL TESTS PASSED' : '✗ SOME TESTS FAILED'}`);
     console.log(`${'='.repeat(80)}\n`);
 

@@ -506,7 +506,7 @@ function updateGeometry() {
                 trace_spacing: p.trace_spacing,  // Enable differential mode
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
-                enclosure_height: p.stripline_top_h,
+                enclosure_height: p.stripline_top_h + p.t,
                 tan_delta: p.tand,
                 tan_delta_top: p.tand_top,
                 sigma_cond: p.sigma,
@@ -652,8 +652,13 @@ async function runSimulation() {
         // Redraw to show E-field overlay on geometry
         draw();
 
-        // Now run frequency sweep with fixed mesh
+        // Now run frequency sweep with cached fields (fast path)
+        // The potential distribution and electric fields don't change with frequency,
+        // only the losses depend on frequency, so we can reuse the cached results.
         log(`Calculating frequency sweep (${frequencies.length} points)...`);
+
+        // Use the initial results as cache for frequency-dependent calculations
+        const cachedResults = results;
 
         for (let i = 0; i < frequencies.length; i++) {
             const freq = frequencies[i];
@@ -663,24 +668,13 @@ async function runSimulation() {
                 continue;
             }
 
-            // Update solver frequency
-            solver.freq = freq;
-            solver.omega = 2 * Math.PI * freq;
-
-            // Solve with existing mesh (skip_mesh = true)
-            const result = await solver.solve_adaptive({
-                max_iters: 1,  // Single pass since mesh is fixed
-                tolerance: p.tolerance,
-                param_tol: 0,
-                max_nodes: p.max_nodes,
-                skip_mesh: true,
-                shouldStop: shouldStop
-            });
-
             if (stopRequested) {
                 log("Simulation stopped by user");
                 break;
             }
+
+            // Use optimized frequency sweep - only recalculates frequency-dependent losses
+            const result = solver.computeAtFrequency(freq, cachedResults);
 
             frequencySweepResults.push({ freq, result });
 
@@ -689,8 +683,10 @@ async function runSimulation() {
             pbar.style.width = (progress * 100) + "%";
             ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
 
-            // Yield to event loop to prevent UI freeze
-            await new Promise(resolve => setTimeout(resolve, 0));
+            // Yield to event loop periodically to prevent UI freeze
+            if (i % 10 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
         }
 
         // Sort results by frequency

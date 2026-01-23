@@ -1391,4 +1391,54 @@ export class FieldSolver2D {
 
         return result;
     }
+
+    /**
+     * Compute frequency-dependent results using cached fields.
+     * This is a fast path for frequency sweeps where only frequency changes,
+     * not the geometry or dielectric distribution.
+     *
+     * @param {number} freq - Frequency in Hz
+     * @param {object} cachedResults - Results from a previous solve containing V, Ex, Ey, C, C0, Z0
+     * @returns {object} - New results with updated frequency-dependent parameters
+     */
+    computeAtFrequency(freq, cachedResults) {
+        // Update frequency
+        this.freq = freq;
+        this.omega = 2 * Math.PI * freq;
+
+        // Recalculate skin depth
+        this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
+
+        const modeResults = [];
+
+        for (const cached of cachedResults.modes) {
+            const { mode, V, Ex, Ey, C, C0, Z0 } = cached;
+
+            // Recalculate conductor losses with new frequency (affects skin depth)
+            const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
+
+            // Recalculate dielectric loss (affects omega)
+            const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
+
+            // Recalculate RLGC with new frequency
+            const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, C, Z0);
+
+            // Calculate conductor loss alpha from R_total
+            const alpha_c = 8.686 * R_total / (2 * Zc.re);
+            const alpha_total = alpha_c + alpha_d;
+
+            modeResults.push({
+                mode,
+                Z0,
+                eps_eff: eps_eff_mode,
+                C, C0,
+                RLGC: rlgc, Zc,
+                alpha_c, alpha_d, alpha_total,
+                L_internal, L_external,
+                V, Ex, Ey
+            });
+        }
+
+        return this._build_results(modeResults);
+    }
 }
