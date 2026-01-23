@@ -786,8 +786,14 @@ function draw(resetZoom = false) {
     const INTERP_ENABLED = true; // Control flag for interpolation
     const INTERP_FACTOR = 5;     // Interpolation multiplier (e.g., 5x resolution)
 
+    // Save original mesh coordinates for mesh overlay (before interpolation)
+    let xMM_mesh = xMM;
+    let yMM_mesh = yMM;
+    let nx_mesh = nx;
+    let nyDisplay_mesh = nyDisplay;
+
     if (INTERP_ENABLED && zData.length > 0 && (currentView.includes("potential") || currentView.includes("efield"))) {
-        
+
         const x_old = Array.from(solver.x); // Original grid X (meters)
         const y_old = Array.from(solver.y).slice(0, nyDisplay); // Original grid Y (meters)
 
@@ -954,11 +960,12 @@ function draw(resetZoom = false) {
         const stepX = 1;
         const stepY = 1;
 
-        for (let j = 0; j < nx; j += stepX) {
+        // Use original mesh coordinates (before interpolation)
+        for (let j = 0; j < nx_mesh; j += stepX) {
             traces.push({
                 type: "scatter",
-                x: [xMM[j], xMM[j]],
-                y: [yMM[0], yMM[nyDisplay - 1]],
+                x: [xMM_mesh[j], xMM_mesh[j]],
+                y: [yMM_mesh[0], yMM_mesh[nyDisplay_mesh - 1]],
                 mode: "lines",
                 line: { width: 0.2, color: "black" },
                 showlegend: false,
@@ -966,11 +973,11 @@ function draw(resetZoom = false) {
             });
         }
 
-        for (let i = 0; i < nyDisplay; i += stepY) {
+        for (let i = 0; i < nyDisplay_mesh; i += stepY) {
             traces.push({
                 type: "scatter",
-                x: [xMM[0], xMM[nx - 1]],
-                y: [yMM[i], yMM[i]],
+                x: [xMM_mesh[0], xMM_mesh[nx_mesh - 1]],
+                y: [yMM_mesh[i], yMM_mesh[i]],
                 mode: "lines",
                 line: { width: 0.2, color: "black" },
                 showlegend: false,
