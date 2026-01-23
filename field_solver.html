@@ -134,6 +134,100 @@
             transition: width 0.1s;
         }
 
+        /* Tab Bar */
+        .tab-bar {
+            display: flex;
+            border-bottom: 1px solid var(--border-color);
+            background: #f5f5f5;
+            margin-bottom: 0;
+        }
+        .tab-button {
+            padding: 10px 20px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-weight: 500;
+            color: #6b7280;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            width: auto;
+        }
+        .tab-button:hover {
+            background: #e5e7eb;
+            color: #1f2937;
+        }
+        .tab-button.active {
+            background: white;
+            border-bottom: 2px solid var(--primary-color);
+            color: var(--primary-color);
+        }
+        .tab-content {
+            display: none;
+            height: 100%;
+            flex: 1;
+        }
+        .tab-content.active {
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Results Tab */
+        .results-header {
+            display: flex;
+            gap: 30px;
+            padding: 15px;
+            background: white;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 1.1em;
+        }
+        .results-header span {
+            font-weight: 500;
+        }
+        .results-controls {
+            padding: 10px 15px;
+            background: #f9fafb;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .results-controls select {
+            padding: 6px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .plot-container {
+            flex: 1;
+            min-height: 400px;
+        }
+
+        /* S-Parameters Tab */
+        .sparam-controls {
+            display: flex;
+            gap: 20px;
+            padding: 10px 15px;
+            background: #f9fafb;
+            border-top: 1px solid var(--border-color);
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .sparam-controls label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9em;
+        }
+        .sparam-controls input[type="number"] {
+            width: 80px;
+            padding: 6px 8px;
+        }
+        .sparam-controls button {
+            width: auto;
+            padding: 8px 16px;
+        }
+        .sparam-controls button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+
         /* Help Icon */
         .help-icon {
             display: inline-block;
@@ -255,9 +349,21 @@
             <label>Conductivity (S/m)</label>
             <input type="number" id="inp_sigma" value="5.8e7" step="1e6">
         </div>
+    </div>
+
+    <div id="freq-sweep-params">
+        <h3>Frequency Sweep</h3>
         <div class="control-group">
-            <label>Frequency (GHz)</label>
-            <input type="number" id="inp_freq" value="1.0" step="0.1">
+            <label>Start (GHz)</label>
+            <input type="number" id="freq-start" value="0.1" step="0.1" min="0.001">
+        </div>
+        <div class="control-group">
+            <label>Stop (GHz)</label>
+            <input type="number" id="freq-stop" value="10" step="0.1" min="0.001">
+        </div>
+        <div class="control-group">
+            <label>Points</label>
+            <input type="number" id="freq-points" value="51" min="2" max="201" step="1">
         </div>
     </div>
     <div id="gcpw-params" style="display: none;">
@@ -402,8 +508,45 @@
 </div>
 
 <div class="main-content">
-    <div class="canvas-container">
-        <div id="sim_canvas"></div>
+    <div class="tab-bar">
+        <button class="tab-button active" data-tab="geometry">Geometry</button>
+        <button class="tab-button" data-tab="results">Results</button>
+        <button class="tab-button" data-tab="sparams">S-Parameters</button>
+    </div>
+
+    <div id="tab-geometry" class="tab-content active">
+        <div class="canvas-container">
+            <div id="sim_canvas"></div>
+        </div>
+    </div>
+
+    <div id="tab-results" class="tab-content">
+        <div class="results-header">
+            <span>Z0: <span id="result-z0">--</span> Ohm</span>
+            <span>eps_eff: <span id="result-eps">--</span></span>
+            <span>Loss: <span id="result-loss">--</span> dB/m</span>
+        </div>
+        <div class="results-controls">
+            <select id="results-plot-selector">
+                <option value="re_z0">Re(Z0)</option>
+                <option value="im_z0">Im(Z0)</option>
+                <option value="loss">Loss (dB/m)</option>
+                <option value="R">R (Ohm/m)</option>
+                <option value="L">L (H/m)</option>
+                <option value="C">C (F/m)</option>
+                <option value="G">G (S/m)</option>
+            </select>
+        </div>
+        <div id="results-plot" class="plot-container"></div>
+    </div>
+
+    <div id="tab-sparams" class="tab-content">
+        <div id="sparam-plot" class="plot-container"></div>
+        <div class="sparam-controls">
+            <label>Line length: <input type="number" id="sparam-length" value="0.01" step="0.001" min="0.0001"> m</label>
+            <label>Reference Impedance: <input type="number" id="sparam-z-ref" value="50" step="1" min="1"> Ohm</label>
+            <button id="export-snp" disabled>Export SnP file</button>
+        </div>
     </div>
 
     <div class="output-panel" id="console_out">Ready. Click 'Solve Physics' to start simulation.</div>

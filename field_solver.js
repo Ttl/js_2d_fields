@@ -1300,6 +1300,10 @@ export class FieldSolver2D {
          * Adaptive mesh solve with robust convergence criteria.
          * Automatically handles both single-ended and differential modes.
          *
+         * Options:
+         * --------
+         * skip_mesh: boolean - If true, skip mesh refinement (use existing mesh)
+         *
          * Returns:
          * --------
          * {
@@ -1321,8 +1325,24 @@ export class FieldSolver2D {
             max_nodes = 20000,
             min_converged_passes = 2,
             onProgress = null,
-            shouldStop = null
+            shouldStop = null,
+            skip_mesh = false
         } = options;
+
+        // If skip_mesh is true, just solve once with existing mesh
+        if (skip_mesh) {
+            const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
+            const modeResults = [];
+            for (const modeName of modeNames) {
+                const result = await this._solve_single_mode(modeName, true);
+                modeResults.push(result);
+            }
+            // Store fields as arrays
+            this.V = modeResults.map(r => r.V);
+            this.Ex = modeResults.map(r => r.Ex);
+            this.Ey = modeResults.map(r => r.Ey);
+            return this._build_results(modeResults);
+        }
 
         // Set default refine_frac based on mode
         const refineFrac = refine_frac !== undefined ? refine_frac : (this.is_differential ? 0.15 : 0.2);

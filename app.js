@@ -1,10 +1,13 @@
 import { MicrostripSolver } from './microstrip.js';
 import { CONSTANTS } from './field_solver.js';
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
+import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 const Plotly = window.Plotly;
 
 let solver = null;
 let stopRequested = false;
+let frequencySweepResults = null;  // Array of {freq, result} objects
+let currentTab = 'geometry';
 
 function shouldStop() {
     return stopRequested;
@@ -20,6 +23,34 @@ function nanToNull(input) {
     return Number.isNaN(input) ? null : input;
 }
 
+function getFrequencies() {
+    const start = parseFloat(document.getElementById('freq-start').value) * 1e9;
+    const stop = parseFloat(document.getElementById('freq-stop').value) * 1e9;
+    const points = parseInt(document.getElementById('freq-points').value);
+    const freqs = [];
+    for (let i = 0; i < points; i++) {
+        freqs.push(start + (stop - start) * i / (points - 1));
+    }
+    return freqs;
+}
+
+function switchTab(tabName) {
+    document.querySelectorAll('.tab-button').forEach(btn =>
+        btn.classList.toggle('active', btn.dataset.tab === tabName));
+    document.querySelectorAll('.tab-content').forEach(div =>
+        div.classList.toggle('active', div.id === `tab-${tabName}`));
+    currentTab = tabName;
+
+    if (tabName === 'results' && frequencySweepResults) {
+        drawResultsPlot();
+    } else if (tabName === 'sparams' && frequencySweepResults) {
+        drawSParamPlot();
+    } else if (tabName === 'geometry') {
+        // Refresh the geometry plot when switching back
+        draw();
+    }
+}
+
 function getParams() {
     return {
         tl_type: document.getElementById('tl_type').value,
@@ -29,7 +60,7 @@ function getParams() {
         er: parseFloat(document.getElementById('inp_er').value),
         tand: parseFloat(document.getElementById('inp_tand').value),
         sigma: parseFloat(document.getElementById('inp_sigma').value),
-        freq: parseFloat(document.getElementById('inp_freq').value) * 1e9,
+        freq: parseFloat(document.getElementById('freq-start').value) * 1e9,
         nx: 30,  // Fixed initial grid size
         ny: 30,  // Fixed initial grid size
         // Differential parameters
@@ -376,6 +407,7 @@ async function runSimulation() {
     }
 
     const p = getParams();
+    const frequencies = getFrequencies();
     const btn = document.getElementById('btn_solve');
     const pbar = document.getElementById('progress_bar');
     const pcont = document.getElementById('progress_container');
@@ -389,73 +421,125 @@ async function runSimulation() {
     log("Starting simulation...");
 
     try {
+        // Clear previous results
+        frequencySweepResults = [];
+
+        // Use the highest frequency for mesh generation (skin depth calculation)
+        const maxFreq = Math.max(...frequencies);
+        solver.freq = maxFreq;
+        solver.omega = 2 * Math.PI * maxFreq;
+
         // Ensure mesh is generated before solving
-        if (!solver.mesh_generated) {
-            log("Generating mesh...");
-            solver.ensure_mesh();
-            log("Mesh generated: " + solver.x.length + "x" + solver.y.length);
-        }
+        log("Calculating mesh...");
+        solver.ensure_mesh();
+        log("Mesh generated: " + solver.x.length + "x" + solver.y.length);
 
-        let results;
-
+        // Run adaptive refinement at highest frequency first
         log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes, tolerance ${p.tolerance})...`);
         ptext.style.display = 'block';
 
-        results = await solver.solve_adaptive({
+        let results = await solver.solve_adaptive({
             max_iters: p.max_iters,
             tolerance: p.tolerance,
-            param_tol: 0.001,  // Fixed parameter tolerance
+            param_tol: 0.001,
             max_nodes: p.max_nodes,
             onProgress: (info) => {
-                const progress = info.iteration / p.max_iters;
+                const progress = info.iteration / p.max_iters * 0.5;  // First half is for mesh refinement
                 pbar.style.width = (progress * 100) + "%";
-                ptext.textContent = `Pass ${info.iteration}/${p.max_iters}: ` +
+                ptext.textContent = `Mesh refinement ${info.iteration}/${p.max_iters}: ` +
                                    `Energy err=${info.energy_error.toExponential(2)}, ` +
-                                   `Param err=${info.param_error.toExponential(2)}, ` +
                                    `Grid=${info.nodes_x}x${info.nodes_y}`;
-                log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, Grid=${info.nodes_x}x${info.nodes_y}`);
             },
             shouldStop: shouldStop
         });
 
         if (stopRequested) {
             log("Simulation stopped by user");
+            return;
         }
+
+        // Store the first result (highest frequency)
+        frequencySweepResults.push({ freq: maxFreq, result: results });
 
         // Redraw to show E-field overlay on geometry
         draw();
 
-        // Check if differential results (modes array has 2 elements)
+        // Now run frequency sweep with fixed mesh
+        log(`Calculating frequency sweep (${frequencies.length} points)...`);
+
+        for (let i = 0; i < frequencies.length; i++) {
+            const freq = frequencies[i];
+
+            // Skip if this is the max frequency (already calculated)
+            if (freq === maxFreq) {
+                continue;
+            }
+
+            // Update solver frequency
+            solver.freq = freq;
+            solver.omega = 2 * Math.PI * freq;
+
+            // Solve with existing mesh (skip_mesh = true)
+            const result = await solver.solve_adaptive({
+                max_iters: 1,  // Single pass since mesh is fixed
+                tolerance: p.tolerance,
+                param_tol: 0.001,
+                max_nodes: p.max_nodes,
+                skip_mesh: true,
+                shouldStop: shouldStop
+            });
+
+            if (stopRequested) {
+                log("Simulation stopped by user");
+                break;
+            }
+
+            frequencySweepResults.push({ freq, result });
+
+            // Update progress (second half is for frequency sweep)
+            const progress = 0.5 + (i + 1) / frequencies.length * 0.5;
+            pbar.style.width = (progress * 100) + "%";
+            ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
+        }
+
+        // Sort results by frequency
+        frequencySweepResults.sort((a, b) => a.freq - b.freq);
+
+        // Display summary
+        const f0 = frequencies[0] / 1e9;
+        const fn = frequencies[frequencies.length - 1] / 1e9;
+        const loss0 = frequencySweepResults[0].result.modes[0].alpha_total;
+        const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
+        const mode0 = frequencySweepResults[0].result.modes[0];
+
+        // Update results header
+        document.getElementById('result-z0').textContent = mode0.Z0.toFixed(2);
+        document.getElementById('result-eps').textContent = mode0.eps_eff.toFixed(3);
+        document.getElementById('result-loss').textContent = `${loss0.toFixed(3)} @ ${f0.toFixed(1)} GHz`;
+
+        // Check if differential results
         if (results.modes.length === 2) {
-            // Differential microstrip results
             const odd = results.modes.find(m => m.mode === 'odd');
             const even = results.modes.find(m => m.mode === 'even');
             log(`\nDIFFERENTIAL RESULTS:\n` +
                      `======================\n` +
-                     `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ω  (2 × Z_odd)\n` +
-                     `Common-Mode Impedance Z_common: ${results.Z_common.toFixed(2)} Ω  (Z_even / 2)\n` +
+                     `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ohm  (2 x Z_odd)\n` +
+                     `Common-Mode Impedance Z_common: ${results.Z_common.toFixed(2)} Ohm  (Z_even / 2)\n` +
                      `\nModal Impedances:\n` +
-                     `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ω  (εᵣₑff = ${odd.eps_eff.toFixed(3)})\n` +
-                     `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ω  (εᵣₑff = ${even.eps_eff.toFixed(3)})\n` +
-                     `\nLosses @ ${(p.freq / 1e9).toFixed(2)} GHz:\n` +
-                     `  Odd-Mode:  Diel=${odd.alpha_d.toFixed(4)} dB/m, Cond=${odd.alpha_c.toFixed(4)} dB/m, Total=${odd.alpha_total.toFixed(4)} dB/m\n` +
-                     `  Even-Mode: Diel=${even.alpha_d.toFixed(4)} dB/m, Cond=${even.alpha_c.toFixed(4)} dB/m, Total=${even.alpha_total.toFixed(4)} dB/m`);
+                     `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ohm  (eps_eff = ${odd.eps_eff.toFixed(3)})\n` +
+                     `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ohm  (eps_eff = ${even.eps_eff.toFixed(3)})\n` +
+                     `\nLoss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`);
         } else {
-            // Single-ended results
-            const mode = results.modes[0];
             log(`\nRESULTS:\n` +
                      `----------------------\n` +
-                     `Characteristic Impedance Z0:  ${mode.Z0.toFixed(2)} Ω\n` +
-                     `Z0 (complex):  ${mode.Zc.toString()} Ω\n` +
-                     `Effective Permittivity: ${mode.eps_eff.toFixed(3)}\n` +
-                     `R:             ${mode.RLGC.R.toExponential(3)} Ω/m\n` +
-                     `L:             ${mode.RLGC.L.toExponential(3)} H/m\n` +
-                     `G:             ${mode.RLGC.G.toExponential(3)} S/m\n` +
-                     `C:             ${mode.RLGC.C.toExponential(3)} F/m\n` +
-                     `Dielectric Loss: ${mode.alpha_d.toFixed(4)} dB/m\n` +
-                     `Conductor Loss:  ${mode.alpha_c.toFixed(4)} dB/m\n` +
-                     `Total Loss:      ${mode.alpha_total.toFixed(4)} dB/m`);
+                     `Z0: ${mode0.Z0.toFixed(2)} Ohm\n` +
+                     `eps_eff: ${mode0.eps_eff.toFixed(3)}\n` +
+                     `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`);
         }
+
+        // Update plots
+        drawResultsPlot();
+        drawSParamPlot();
 
     } catch (e) {
         console.error(e);
@@ -1142,6 +1226,280 @@ function resizeCanvas() {
     }
 }
 
+function getYAxisLabel(selector) {
+    const labels = {
+        're_z0': 'Re(Z0) (Ohm)',
+        'im_z0': 'Im(Z0) (Ohm)',
+        'loss': 'Loss (dB/m)',
+        'R': 'R (Ohm/m)',
+        'L': 'L (H/m)',
+        'C': 'C (F/m)',
+        'G': 'G (S/m)'
+    };
+    return labels[selector] || selector;
+}
+
+function drawResultsPlot() {
+    if (!frequencySweepResults || frequencySweepResults.length === 0) return;
+
+    const selector = document.getElementById('results-plot-selector').value;
+    const isDifferential = solver && solver.is_differential;
+
+    const freqs = frequencySweepResults.map(r => r.freq / 1e9);
+    const traces = [];
+
+    if (selector === 're_z0') {
+        if (isDifferential) {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].Zc.re),
+                name: 'Odd mode',
+                type: 'scatter',
+                mode: 'lines'
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].Zc.re),
+                name: 'Even mode',
+                type: 'scatter',
+                mode: 'lines'
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].Zc.re),
+                name: 'Re(Z0)',
+                type: 'scatter',
+                mode: 'lines'
+            });
+        }
+    } else if (selector === 'im_z0') {
+        if (isDifferential) {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
+                name: 'Odd mode',
+                type: 'scatter',
+                mode: 'lines'
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].Zc.im),
+                name: 'Even mode',
+                type: 'scatter',
+                mode: 'lines'
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
+                name: 'Im(Z0)',
+                type: 'scatter',
+                mode: 'lines'
+            });
+        }
+    } else if (selector === 'loss') {
+        if (isDifferential) {
+            // Odd mode losses
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
+                name: 'Conductor (odd)',
+                type: 'scatter',
+                mode: 'lines'
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
+                name: 'Dielectric (odd)',
+                type: 'scatter',
+                mode: 'lines'
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
+                name: 'Total (odd)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { width: 2 }
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
+                name: 'Conductor',
+                type: 'scatter',
+                mode: 'lines'
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
+                name: 'Dielectric',
+                type: 'scatter',
+                mode: 'lines'
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
+                name: 'Total',
+                type: 'scatter',
+                mode: 'lines',
+                line: { width: 2 }
+            });
+        }
+    } else {
+        // RLGC parameters
+        const paramKey = selector; // R, L, G, or C
+        if (isDifferential) {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
+                name: `${paramKey} (odd)`,
+                type: 'scatter',
+                mode: 'lines'
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].RLGC[paramKey]),
+                name: `${paramKey} (even)`,
+                type: 'scatter',
+                mode: 'lines'
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
+                name: paramKey,
+                type: 'scatter',
+                mode: 'lines'
+            });
+        }
+    }
+
+    const layout = {
+        xaxis: {
+            title: 'Frequency (GHz)',
+            type: 'log'
+        },
+        yaxis: {
+            title: getYAxisLabel(selector)
+        },
+        margin: { l: 80, r: 40, t: 40, b: 60 },
+        showlegend: true,
+        legend: { x: 0.02, y: 0.98 }
+    };
+
+    Plotly.newPlot('results-plot', traces, layout, { responsive: true });
+}
+
+function drawSParamPlot() {
+    if (!frequencySweepResults || frequencySweepResults.length === 0) return;
+
+    const length = parseFloat(document.getElementById('sparam-length').value);
+    const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
+    const isDifferential = solver && solver.is_differential;
+
+    const freqs = frequencySweepResults.map(r => r.freq / 1e9);
+    const traces = [];
+
+    if (!isDifferential) {
+        // 2-port S-parameters
+        const S11_dB = [];
+        const S21_dB = [];
+
+        for (const { freq, result } of frequencySweepResults) {
+            const sp = computeSParamsSingleEnded(freq, result.modes[0].RLGC, length, Z_ref);
+            S11_dB.push(sParamTodB(sp.S11));
+            S21_dB.push(sParamTodB(sp.S21));
+        }
+
+        traces.push({
+            x: freqs,
+            y: S11_dB,
+            name: 'S11 (dB)',
+            type: 'scatter',
+            mode: 'lines'
+        });
+        traces.push({
+            x: freqs,
+            y: S21_dB,
+            name: 'S21 (dB)',
+            type: 'scatter',
+            mode: 'lines'
+        });
+    } else {
+        // 4-port S-parameters (mixed-mode)
+        const SDD11_dB = [];
+        const SDD21_dB = [];
+        const SCC11_dB = [];
+        const SCC21_dB = [];
+
+        for (const { freq, result } of frequencySweepResults) {
+            const oddMode = result.modes.find(m => m.mode === 'odd');
+            const evenMode = result.modes.find(m => m.mode === 'even');
+
+            const sp = computeSParamsDifferential(
+                freq,
+                oddMode.RLGC,
+                evenMode.RLGC,
+                length,
+                Z_ref
+            );
+
+            SDD11_dB.push(sParamTodB(sp.SDD11));
+            SDD21_dB.push(sParamTodB(sp.SDD21));
+            SCC11_dB.push(sParamTodB(sp.SCC11));
+            SCC21_dB.push(sParamTodB(sp.SCC21));
+        }
+
+        traces.push({
+            x: freqs,
+            y: SDD11_dB,
+            name: 'SDD11 (dB)',
+            type: 'scatter',
+            mode: 'lines'
+        });
+        traces.push({
+            x: freqs,
+            y: SDD21_dB,
+            name: 'SDD21 (dB)',
+            type: 'scatter',
+            mode: 'lines'
+        });
+        traces.push({
+            x: freqs,
+            y: SCC11_dB,
+            name: 'SCC11 (dB)',
+            type: 'scatter',
+            mode: 'lines',
+            line: { dash: 'dash' }
+        });
+        traces.push({
+            x: freqs,
+            y: SCC21_dB,
+            name: 'SCC21 (dB)',
+            type: 'scatter',
+            mode: 'lines',
+            line: { dash: 'dash' }
+        });
+    }
+
+    const layout = {
+        xaxis: {
+            title: 'Frequency (GHz)',
+            type: 'log'
+        },
+        yaxis: {
+            title: 'Magnitude (dB)'
+        },
+        margin: { l: 80, r: 40, t: 40, b: 60 },
+        showlegend: true,
+        legend: { x: 0.02, y: 0.02 }
+    };
+
+    Plotly.newPlot('sparam-plot', traces, layout, { responsive: true });
+}
+
 function viridis(t) {
     // Simple heatmap approximation
     t = Math.max(0, Math.min(1, t));
@@ -1171,16 +1529,52 @@ function bindEvents() {
         }
     };
 
+    // Tab switching
+    document.querySelectorAll('.tab-button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            switchTab(btn.dataset.tab);
+        });
+    });
+
+    // Results plot selector change
+    const resultsSelector = document.getElementById('results-plot-selector');
+    if (resultsSelector) {
+        resultsSelector.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawResultsPlot();
+            }
+        });
+    }
+
+    // S-parameter controls
+    const sparamLength = document.getElementById('sparam-length');
+    const sparamZref = document.getElementById('sparam-z-ref');
+    if (sparamLength) {
+        sparamLength.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawSParamPlot();
+            }
+        });
+    }
+    if (sparamZref) {
+        sparamZref.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawSParamPlot();
+            }
+        });
+    }
+
     // Real-time geometry updates for all parameter inputs
     const geometryInputs = [
-        'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma', 'inp_freq',
+        'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma',
         'inp_trace_spacing',
         'inp_gap', 'inp_top_gnd_w', 'inp_via_gap',
         'inp_air_top', 'inp_er_top', 'inp_tand_top',
         'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',
         'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',
         'inp_gnd_cut_w', 'inp_gnd_cut_h',
-        'inp_enclosure_width', 'inp_enclosure_height'
+        'inp_enclosure_width', 'inp_enclosure_height',
+        'freq-start'
     ];
 
     geometryInputs.forEach(id => {

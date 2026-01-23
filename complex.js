@@ -6,10 +6,16 @@ class Complex {
     }
 
     add(other) {
+        if (typeof other === 'number') {
+            return new Complex(this.re + other, this.im);
+        }
         return new Complex(this.re + other.re, this.im + other.im);
     }
 
     sub(other) {
+        if (typeof other === 'number') {
+            return new Complex(this.re - other, this.im);
+        }
         return new Complex(this.re - other.re, this.im - other.im);
     }
 
@@ -41,6 +47,49 @@ class Complex {
             Math.sqrt(r) * Math.cos(theta / 2),
             Math.sqrt(r) * Math.sin(theta / 2)
         );
+    }
+
+    neg() {
+        return new Complex(-this.re, -this.im);
+    }
+
+    abs() {
+        return Math.sqrt(this.re * this.re + this.im * this.im);
+    }
+
+    arg() {
+        return Math.atan2(this.im, this.re);
+    }
+
+    exp() {
+        // e^(a+bi) = e^a * (cos(b) + i*sin(b))
+        const ea = Math.exp(this.re);
+        return new Complex(ea * Math.cos(this.im), ea * Math.sin(this.im));
+    }
+
+    sinh() {
+        // sinh(z) = (e^z - e^(-z)) / 2
+        // For z = a + bi:
+        // sinh(z) = sinh(a)*cos(b) + i*cosh(a)*sin(b)
+        return new Complex(
+            Math.sinh(this.re) * Math.cos(this.im),
+            Math.cosh(this.re) * Math.sin(this.im)
+        );
+    }
+
+    cosh() {
+        // cosh(z) = (e^z + e^(-z)) / 2
+        // For z = a + bi:
+        // cosh(z) = cosh(a)*cos(b) + i*sinh(a)*sin(b)
+        return new Complex(
+            Math.cosh(this.re) * Math.cos(this.im),
+            Math.sinh(this.re) * Math.sin(this.im)
+        );
+    }
+
+    tanh() {
+        // tanh(z) = sinh(z) / cosh(z)
+        return this.sinh().div(this.cosh());
     }
 
     toString() {
