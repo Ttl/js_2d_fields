@@ -10,53 +10,88 @@ let stopRequested = false;
 let frequencySweepResults = null;  // Array of {freq, result} objects
 let currentTab = 'geometry';
 
+// --- Unit Parsing Helper ---
+
+/**
+ * Get value from input field with unit parsing
+ * Returns value in SI base units (meters for length, Hz for frequency)
+ * @param {string} id - Input element ID
+ * @returns {number} - Parsed value in SI units
+ */
+function getInputValue(id) {
+    const element = document.getElementById(id);
+    if (!element) return NaN;
+
+    const defaultUnit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
+    return window.parseValueWithUnit ?
+        window.parseValueWithUnit(element.value, defaultUnit) :
+        parseFloat(element.value);
+}
+
 // --- URL Parameter Serialization ---
 
 /**
  * Get current UI settings as a serializable object (in display units)
  */
 function getUISettings() {
+    // Helper to get display value (strip unit and return raw number)
+    const getDisplayValue = (id) => {
+        const element = document.getElementById(id);
+        if (!element) return NaN;
+        const defaultUnit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
+        const siValue = window.parseValueWithUnit ?
+            window.parseValueWithUnit(element.value, defaultUnit) :
+            parseFloat(element.value);
+
+        // Convert back to display units for serialization
+        const unitMap = {
+            'mm': 1e3, 'μm': 1e6, 'GHz': 1e-9, 'm': 1
+        };
+        const scale = unitMap[defaultUnit] || 1;
+        return siValue * scale;
+    };
+
     return {
         tl_type: document.getElementById('tl_type').value,
-        w: parseFloat(document.getElementById('inp_w').value),
-        h: parseFloat(document.getElementById('inp_h').value),
-        t: parseFloat(document.getElementById('inp_t').value),
+        w: getDisplayValue('inp_w'),
+        h: getDisplayValue('inp_h'),
+        t: getDisplayValue('inp_t'),
         er: parseFloat(document.getElementById('inp_er').value),
         tand: parseFloat(document.getElementById('inp_tand').value),
         sigma: parseFloat(document.getElementById('inp_sigma').value),
-        freq_start: parseFloat(document.getElementById('freq-start').value),
-        freq_stop: parseFloat(document.getElementById('freq-stop').value),
+        freq_start: getDisplayValue('freq-start'),
+        freq_stop: getDisplayValue('freq-stop'),
         freq_points: parseInt(document.getElementById('freq-points').value),
-        trace_spacing: parseFloat(document.getElementById('inp_trace_spacing').value),
-        gap: parseFloat(document.getElementById('inp_gap').value),
-        top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value),
-        via_gap: parseFloat(document.getElementById('inp_via_gap').value),
-        stripline_top_h: parseFloat(document.getElementById('inp_air_top').value),
+        trace_spacing: getDisplayValue('inp_trace_spacing'),
+        gap: getDisplayValue('inp_gap'),
+        top_gnd_w: getDisplayValue('inp_top_gnd_w'),
+        via_gap: getDisplayValue('inp_via_gap'),
+        stripline_top_h: getDisplayValue('inp_air_top'),
         er_top: parseFloat(document.getElementById('inp_er_top').value),
         tand_top: parseFloat(document.getElementById('inp_tand_top').value),
         use_sm: document.getElementById('chk_solder_mask').checked ? 1 : 0,
-        sm_t_sub: parseFloat(document.getElementById('inp_sm_t_sub').value),
-        sm_t_trace: parseFloat(document.getElementById('inp_sm_t_trace').value),
-        sm_t_side: parseFloat(document.getElementById('inp_sm_t_side').value),
+        sm_t_sub: getDisplayValue('inp_sm_t_sub'),
+        sm_t_trace: getDisplayValue('inp_sm_t_trace'),
+        sm_t_side: getDisplayValue('inp_sm_t_side'),
         sm_er: parseFloat(document.getElementById('inp_sm_er').value),
         sm_tand: parseFloat(document.getElementById('inp_sm_tand').value),
         use_top_diel: document.getElementById('chk_top_diel').checked ? 1 : 0,
-        top_diel_h: parseFloat(document.getElementById('inp_top_diel_h').value),
+        top_diel_h: getDisplayValue('inp_top_diel_h'),
         top_diel_er: parseFloat(document.getElementById('inp_top_diel_er').value),
         top_diel_tand: parseFloat(document.getElementById('inp_top_diel_tand').value),
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked ? 1 : 0,
-        gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value),
-        gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value),
+        gnd_cut_w: getDisplayValue('inp_gnd_cut_w'),
+        gnd_cut_h: getDisplayValue('inp_gnd_cut_h'),
         use_enclosure: document.getElementById('chk_enclosure').checked ? 1 : 0,
         use_side_gnd: document.getElementById('chk_side_gnd').checked ? 1 : 0,
         use_top_gnd: document.getElementById('chk_top_gnd').checked ? 1 : 0,
-        enclosure_width: parseFloat(document.getElementById('inp_enclosure_width').value),
-        enclosure_height: parseFloat(document.getElementById('inp_enclosure_height').value),
+        enclosure_width: getDisplayValue('inp_enclosure_width'),
+        enclosure_height: getDisplayValue('inp_enclosure_height'),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
         tolerance: parseFloat(document.getElementById('inp_tolerance').value),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
-        rq: parseFloat(document.getElementById('inp_rq').value),
-        sparam_length: parseFloat(document.getElementById('sparam-length').value),
+        rq: getDisplayValue('inp_rq'),
+        sparam_length: getDisplayValue('sparam-length'),
         sparam_z_ref: parseFloat(document.getElementById('sparam-z-ref').value),
     };
 }
@@ -90,54 +125,66 @@ function restoreSettings(settings) {
     if (!settings) return false;
 
     try {
+        // Helper to restore value with unit
+        const setValueWithUnit = (id, value) => {
+            const element = document.getElementById(id);
+            if (!element || value === undefined || value === null || isNaN(value)) return;
+            const unit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
+            if (unit && element.classList.contains('unit-input')) {
+                element.value = `${value} ${unit}`;
+            } else {
+                element.value = value;
+            }
+        };
+
         // Set input values
         if (settings.tl_type) document.getElementById('tl_type').value = settings.tl_type;
-        if (settings.w !== undefined) document.getElementById('inp_w').value = settings.w;
-        if (settings.h !== undefined) document.getElementById('inp_h').value = settings.h;
-        if (settings.t !== undefined) document.getElementById('inp_t').value = settings.t;
+        setValueWithUnit('inp_w', settings.w);
+        setValueWithUnit('inp_h', settings.h);
+        setValueWithUnit('inp_t', settings.t);
         if (settings.er !== undefined) document.getElementById('inp_er').value = settings.er;
         if (settings.tand !== undefined) document.getElementById('inp_tand').value = settings.tand;
         if (settings.sigma !== undefined) document.getElementById('inp_sigma').value = settings.sigma;
-        if (settings.freq_start !== undefined) document.getElementById('freq-start').value = settings.freq_start;
-        if (settings.freq_stop !== undefined) document.getElementById('freq-stop').value = settings.freq_stop;
+        setValueWithUnit('freq-start', settings.freq_start);
+        setValueWithUnit('freq-stop', settings.freq_stop);
         if (settings.freq_points !== undefined) document.getElementById('freq-points').value = settings.freq_points;
-        if (settings.trace_spacing !== undefined) document.getElementById('inp_trace_spacing').value = settings.trace_spacing;
-        if (settings.gap !== undefined) document.getElementById('inp_gap').value = settings.gap;
-        if (settings.top_gnd_w !== undefined) document.getElementById('inp_top_gnd_w').value = settings.top_gnd_w;
-        if (settings.via_gap !== undefined) document.getElementById('inp_via_gap').value = settings.via_gap;
-        if (settings.stripline_top_h !== undefined) document.getElementById('inp_air_top').value = settings.stripline_top_h;
+        setValueWithUnit('inp_trace_spacing', settings.trace_spacing);
+        setValueWithUnit('inp_gap', settings.gap);
+        setValueWithUnit('inp_top_gnd_w', settings.top_gnd_w);
+        setValueWithUnit('inp_via_gap', settings.via_gap);
+        setValueWithUnit('inp_air_top', settings.stripline_top_h);
         if (settings.er_top !== undefined) document.getElementById('inp_er_top').value = settings.er_top;
         if (settings.tand_top !== undefined) document.getElementById('inp_tand_top').value = settings.tand_top;
 
         // Checkboxes
         if (settings.use_sm !== undefined) document.getElementById('chk_solder_mask').checked = !!settings.use_sm;
-        if (settings.sm_t_sub !== undefined) document.getElementById('inp_sm_t_sub').value = settings.sm_t_sub;
-        if (settings.sm_t_trace !== undefined) document.getElementById('inp_sm_t_trace').value = settings.sm_t_trace;
-        if (settings.sm_t_side !== undefined) document.getElementById('inp_sm_t_side').value = settings.sm_t_side;
+        setValueWithUnit('inp_sm_t_sub', settings.sm_t_sub);
+        setValueWithUnit('inp_sm_t_trace', settings.sm_t_trace);
+        setValueWithUnit('inp_sm_t_side', settings.sm_t_side);
         if (settings.sm_er !== undefined) document.getElementById('inp_sm_er').value = settings.sm_er;
         if (settings.sm_tand !== undefined) document.getElementById('inp_sm_tand').value = settings.sm_tand;
 
         if (settings.use_top_diel !== undefined) document.getElementById('chk_top_diel').checked = !!settings.use_top_diel;
-        if (settings.top_diel_h !== undefined) document.getElementById('inp_top_diel_h').value = settings.top_diel_h;
+        setValueWithUnit('inp_top_diel_h', settings.top_diel_h);
         if (settings.top_diel_er !== undefined) document.getElementById('inp_top_diel_er').value = settings.top_diel_er;
         if (settings.top_diel_tand !== undefined) document.getElementById('inp_top_diel_tand').value = settings.top_diel_tand;
 
         if (settings.use_gnd_cut !== undefined) document.getElementById('chk_gnd_cut').checked = !!settings.use_gnd_cut;
-        if (settings.gnd_cut_w !== undefined) document.getElementById('inp_gnd_cut_w').value = settings.gnd_cut_w;
-        if (settings.gnd_cut_h !== undefined) document.getElementById('inp_gnd_cut_h').value = settings.gnd_cut_h;
+        setValueWithUnit('inp_gnd_cut_w', settings.gnd_cut_w);
+        setValueWithUnit('inp_gnd_cut_h', settings.gnd_cut_h);
 
         if (settings.use_enclosure !== undefined) document.getElementById('chk_enclosure').checked = !!settings.use_enclosure;
         if (settings.use_side_gnd !== undefined) document.getElementById('chk_side_gnd').checked = !!settings.use_side_gnd;
         if (settings.use_top_gnd !== undefined) document.getElementById('chk_top_gnd').checked = !!settings.use_top_gnd;
-        if (settings.enclosure_width !== undefined) document.getElementById('inp_enclosure_width').value = settings.enclosure_width;
-        if (settings.enclosure_height !== undefined) document.getElementById('inp_enclosure_height').value = settings.enclosure_height;
+        setValueWithUnit('inp_enclosure_width', settings.enclosure_width);
+        setValueWithUnit('inp_enclosure_height', settings.enclosure_height);
 
         if (settings.max_iters !== undefined) document.getElementById('inp_max_iters').value = settings.max_iters;
         if (settings.tolerance !== undefined) document.getElementById('inp_tolerance').value = settings.tolerance;
         if (settings.max_nodes !== undefined) document.getElementById('inp_max_nodes').value = settings.max_nodes;
-        if (settings.rq !== undefined) document.getElementById('inp_rq').value = settings.rq;
+        setValueWithUnit('inp_rq', settings.rq);
 
-        if (settings.sparam_length !== undefined) document.getElementById('sparam-length').value = settings.sparam_length;
+        setValueWithUnit('sparam-length', settings.sparam_length);
         if (settings.sparam_z_ref !== undefined) document.getElementById('sparam-z-ref').value = settings.sparam_z_ref;
 
         return true;
@@ -198,8 +245,8 @@ function nanToNull(input) {
 }
 
 function getFrequencies() {
-    const start = parseFloat(document.getElementById('freq-start').value) * 1e9;
-    const stop = parseFloat(document.getElementById('freq-stop').value) * 1e9;
+    const start = getInputValue('freq-start');
+    const stop = getInputValue('freq-stop');
     let points = parseInt(document.getElementById('freq-points').value);
 
     // Validate points - default to 1 if invalid
@@ -235,52 +282,52 @@ function switchTab(tabName) {
 function getParams() {
     return {
         tl_type: document.getElementById('tl_type').value,
-        w: parseFloat(document.getElementById('inp_w').value) * 1e-3,
-        h: parseFloat(document.getElementById('inp_h').value) * 1e-3,
-        t: parseFloat(document.getElementById('inp_t').value) * 1e-6,
+        w: getInputValue('inp_w'),
+        h: getInputValue('inp_h'),
+        t: getInputValue('inp_t'),
         er: parseFloat(document.getElementById('inp_er').value),
         tand: parseFloat(document.getElementById('inp_tand').value),
         sigma: parseFloat(document.getElementById('inp_sigma').value),
-        freq: parseFloat(document.getElementById('freq-start').value) * 1e9,
+        freq: getInputValue('freq-start'),
         nx: 30,  // Fixed initial grid size
         ny: 30,  // Fixed initial grid size
         // Differential parameters
-        trace_spacing: parseFloat(document.getElementById('inp_trace_spacing').value) * 1e-3,
+        trace_spacing: getInputValue('inp_trace_spacing'),
         // GCPW specific parameters
-        gap: parseFloat(document.getElementById('inp_gap').value) * 1e-3,
-        top_gnd_w: parseFloat(document.getElementById('inp_top_gnd_w').value) * 1e-3,
-        via_gap: parseFloat(document.getElementById('inp_via_gap').value) * 1e-3,
+        gap: getInputValue('inp_gap'),
+        top_gnd_w: getInputValue('inp_top_gnd_w'),
+        via_gap: getInputValue('inp_via_gap'),
         // Stripline parameters
-        stripline_top_h: parseFloat(document.getElementById('inp_air_top').value) * 1e-3,
+        stripline_top_h: getInputValue('inp_air_top'),
         er_top: parseFloat(document.getElementById('inp_er_top').value),
         tand_top: parseFloat(document.getElementById('inp_tand_top').value),
         // Solder mask parameters
         use_sm: document.getElementById('chk_solder_mask').checked,
-        sm_t_sub: parseFloat(document.getElementById('inp_sm_t_sub').value) * 1e-6,
-        sm_t_trace: parseFloat(document.getElementById('inp_sm_t_trace').value) * 1e-6,
-        sm_t_side: parseFloat(document.getElementById('inp_sm_t_side').value) * 1e-6,
+        sm_t_sub: getInputValue('inp_sm_t_sub'),
+        sm_t_trace: getInputValue('inp_sm_t_trace'),
+        sm_t_side: getInputValue('inp_sm_t_side'),
         sm_er: parseFloat(document.getElementById('inp_sm_er').value),
         sm_tand: parseFloat(document.getElementById('inp_sm_tand').value),
         // Top dielectric parameters
         use_top_diel: document.getElementById('chk_top_diel').checked,
-        top_diel_h: parseFloat(document.getElementById('inp_top_diel_h').value) * 1e-3,
+        top_diel_h: getInputValue('inp_top_diel_h'),
         top_diel_er: parseFloat(document.getElementById('inp_top_diel_er').value),
         top_diel_tand: parseFloat(document.getElementById('inp_top_diel_tand').value),
         // Ground cutout parameters
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
-        gnd_cut_w: parseFloat(document.getElementById('inp_gnd_cut_w').value) * 1e-3,
-        gnd_cut_h: parseFloat(document.getElementById('inp_gnd_cut_h').value) * 1e-3,
+        gnd_cut_w: getInputValue('inp_gnd_cut_w'),
+        gnd_cut_h: getInputValue('inp_gnd_cut_h'),
         // Enclosure parameters
         use_enclosure: document.getElementById('chk_enclosure').checked,
         use_side_gnd: document.getElementById('chk_side_gnd').checked,
         use_top_gnd: document.getElementById('chk_top_gnd').checked,
-        enclosure_width: nanToNull(parseFloat(document.getElementById('inp_enclosure_width').value) * 1e-3),
-        enclosure_height: nanToNull(parseFloat(document.getElementById('inp_enclosure_height').value) * 1e-3),
+        enclosure_width: nanToNull(getInputValue('inp_enclosure_width')),
+        enclosure_height: nanToNull(getInputValue('inp_enclosure_height')),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
         tolerance: parseFloat(document.getElementById('inp_tolerance').value),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         // Surface roughness parameter
-        rq: parseFloat(document.getElementById('inp_rq').value) * 1e-6,
+        rq: getInputValue('inp_rq'),
     };
 }
 
@@ -1594,7 +1641,7 @@ function drawResultsPlot() {
 function drawSParamPlot() {
     if (!frequencySweepResults || frequencySweepResults.length === 0) return;
 
-    const length = parseFloat(document.getElementById('sparam-length').value);
+    const length = getInputValue('sparam-length');
     const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
     const isDifferential = solver && solver.is_differential;
 
@@ -1795,7 +1842,7 @@ function bindEvents() {
                 log('No results to export. Run simulation first.');
                 return;
             }
-            const length = parseFloat(document.getElementById('sparam-length').value);
+            const length = getInputValue('sparam-length');
             const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
             const isDifferential = solver && solver.is_differential;
             const p = getParams();
