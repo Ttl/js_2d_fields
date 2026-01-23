@@ -120,12 +120,11 @@
 
         /* Progress Bar */
         .progress-container {
-            height: 4px;
+            height: 6px;
             background: #e5e7eb;
             margin-top: 10px;
-            border-radius: 2px;
+            border-radius: 3px;
             overflow: hidden;
-            display: none;
         }
         .progress-bar {
             height: 100%;
@@ -304,14 +303,73 @@
         .help-modal a:hover {
             text-decoration: underline;
         }
+
+        /* About Tab */
+        .about-content {
+            padding: 30px;
+            max-width: 800px;
+            line-height: 1.6;
+            overflow-y: auto;
+        }
+        .about-content h2 {
+            color: #1f2937;
+            margin-bottom: 15px;
+        }
+        .about-content h3 {
+            color: #374151;
+            margin-top: 25px;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        .about-content p {
+            color: #4b5563;
+            margin-bottom: 12px;
+        }
+        .about-content a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+        .about-content a:hover {
+            text-decoration: underline;
+        }
+
+        /* Collapsible Sections */
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            padding: 8px 0;
+            margin: 10px 0 5px 0;
+            user-select: none;
+        }
+        .section-header h3 {
+            margin: 0;
+            flex: 1;
+        }
+        .section-header::after {
+            content: '▼';
+            font-size: 0.7em;
+            color: #6b7280;
+            transition: transform 0.2s;
+        }
+        .section-header.collapsed::after {
+            transform: rotate(-90deg);
+        }
+        .section-content {
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+            max-height: 1000px;
+        }
+        .section-content.collapsed {
+            max-height: 0;
+        }
     </style>
 <script src="plotly-2.27.0.min.js.js"></script>
 </head>
 <body>
 
 <div class="sidebar">
-    <h2>Transmission Line Solver</h2>
-    
     <div class="control-group">
         <label for="tl_type">Transmission Line Type</label>
         <select id="tl_type">
@@ -325,10 +383,14 @@
     </div>
 
     <div id="diff-params" style="display: none;">
-        <h3>Differential Pair Parameters</h3>
-        <div class="control-group">
-            <label>Trace Spacing (mm)</label>
-            <input type="number" id="inp_trace_spacing" value="1.0" step="0.1">
+        <div class="section-header" onclick="toggleSection(this)">
+            <h3>Differential Pair</h3>
+        </div>
+        <div class="section-content">
+            <div class="control-group">
+                <label>Trace Spacing (mm)</label>
+                <input type="number" id="inp_trace_spacing" value="1.0" step="0.1">
+            </div>
         </div>
     </div>
 
@@ -360,54 +422,69 @@
     </div>
 
     <div id="freq-sweep-params">
-        <h3>Frequency Sweep</h3>
-        <div class="control-group">
-            <label>Start (GHz)</label>
-            <input type="number" id="freq-start" value="0.1" step="0.1" min="0.001">
+        <div class="section-header" onclick="toggleSection(this)">
+            <h3>Frequency Sweep</h3>
         </div>
-        <div class="control-group">
-            <label>Stop (GHz)</label>
-            <input type="number" id="freq-stop" value="10" step="0.1" min="0.001">
-        </div>
-        <div class="control-group">
-            <label>Points</label>
-            <input type="number" id="freq-points" value="51" min="2" max="201" step="1">
+        <div class="section-content">
+            <div class="control-group">
+                <label>Start (GHz)</label>
+                <input type="number" id="freq-start" value="0.1" step="0.1" min="0.001">
+            </div>
+            <div class="control-group">
+                <label>Stop (GHz)</label>
+                <input type="number" id="freq-stop" value="10" step="0.1" min="0.001">
+            </div>
+            <div class="control-group">
+                <label>Points</label>
+                <input type="number" id="freq-points" value="51" min="2" max="201" step="1">
+            </div>
         </div>
     </div>
     <div id="gcpw-params" style="display: none;">
-        <h3>GCPW Specific Parameters</h3>
-        <div class="control-group">
-            <label>Gap (mm)</label>
-            <input type="number" id="inp_gap" value="0.1" step="0.01">
+        <div class="section-header" onclick="toggleSection(this)">
+            <h3>GCPW Parameters</h3>
         </div>
-        <div class="control-group">
-            <label>Top Ground Width (mm)</label>
-            <input type="number" id="inp_top_gnd_w" value="0.2" step="0.01">
-        </div>
-        <div class="control-group">
-            <label>Via Gap (mm)</label>
-            <input type="number" id="inp_via_gap" value="0.1" step="0.01">
+        <div class="section-content">
+            <div class="control-group">
+                <label>Gap (mm)</label>
+                <input type="number" id="inp_gap" value="0.1" step="0.01">
+            </div>
+            <div class="control-group">
+                <label>Top Ground Width (mm)</label>
+                <input type="number" id="inp_top_gnd_w" value="0.2" step="0.01">
+            </div>
+            <div class="control-group">
+                <label>Via Gap (mm)</label>
+                <input type="number" id="inp_via_gap" value="0.1" step="0.01">
+            </div>
         </div>
     </div>
 
     <div id="stripline-params" style="display: none;">
-        <h3>Stripline Parameters</h3>
-        <div class="control-group">
-            <label>Top Dielectric Height (mm)</label>
-            <input type="number" id="inp_air_top" value="1.6" step="0.01">
+        <div class="section-header" onclick="toggleSection(this)">
+            <h3>Stripline Parameters</h3>
         </div>
-        <div class="control-group">
-            <label>Top Permittivity (&epsilon;<sub>r,top</sub>)</label>
-            <input type="number" id="inp_er_top" value="4.5" step="0.1">
-        </div>
-        <div class="control-group">
-            <label>Top Loss Tangent</label>
-            <input type="number" id="inp_tand_top" value="0.02" step="0.01">
+        <div class="section-content">
+            <div class="control-group">
+                <label>Top Dielectric Height (mm)</label>
+                <input type="number" id="inp_air_top" value="1.6" step="0.01">
+            </div>
+            <div class="control-group">
+                <label>Top Permittivity (&epsilon;<sub>r,top</sub>)</label>
+                <input type="number" id="inp_er_top" value="4.5" step="0.1">
+            </div>
+            <div class="control-group">
+                <label>Top Loss Tangent</label>
+                <input type="number" id="inp_tand_top" value="0.02" step="0.01">
+            </div>
         </div>
     </div>
 
     <div id="advanced-params">
-        <h3>Advanced Options</h3>
+        <div class="section-header collapsed" onclick="toggleSection(this)">
+            <h3>Advanced Options</h3>
+        </div>
+        <div class="section-content collapsed">
 
         <div class="control-group">
             <label><input type="checkbox" id="chk_solder_mask"> Enable Solder Mask</label>
@@ -491,9 +568,34 @@
             <label>Surface Roughness RMS (μm) <span class="help-icon" onclick="showHelpModal('roughness')">?</span></label>
             <input type="number" id="inp_rq" value="0" step="0.1" min="0">
         </div>
+        </div>
     </div>
 
-    <h3>Solver Settings</h3>
+    <div class="section-header" onclick="toggleSection(this)">
+        <h3>Plot Options</h3>
+    </div>
+    <div id="plot-options" class="section-content">
+        <div class="control-group" id="plot-mode-group" style="display: none;">
+            <label>Mode</label>
+            <select id="plot-mode">
+                <option value="odd">Odd</option>
+                <option value="even">Even</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label>Streamlines</label>
+            <input type="number" id="plot-streamlines" value="20" step="5" min="0" placeholder="None">
+        </div>
+        <div class="control-group">
+            <label>Contours</label>
+            <input type="number" id="plot-contours" value="" step="5" min="0" placeholder="None">
+        </div>
+    </div>
+
+    <div class="section-header" onclick="toggleSection(this)">
+        <h3>Solver Settings</h3>
+    </div>
+    <div class="section-content">
     <div class="control-group">
         <label>Max Iterations</label>
         <input type="number" id="inp_max_iters" value="10" step="1" min="1">
@@ -505,6 +607,7 @@
     <div class="control-group">
         <label>Tolerance <span class="help-icon" onclick="showHelpModal('tolerance')">?</span></label>
         <input type="number" id="inp_tolerance" value="0.05" step="0.01" min="0.001">
+    </div>
     </div>
 
     <button id="btn_solve">Solve Physics</button>
@@ -520,6 +623,7 @@
         <button class="tab-button active" data-tab="geometry">Geometry</button>
         <button class="tab-button" data-tab="results">Results</button>
         <button class="tab-button" data-tab="sparams">S-Parameters</button>
+        <button class="tab-button" data-tab="about">About</button>
     </div>
 
     <div id="tab-geometry" class="tab-content active">
@@ -554,6 +658,30 @@
         </div>
     </div>
 
+    <div id="tab-about" class="tab-content">
+        <div class="about-content">
+            <h2>2D Transmission Line Field Solver</h2>
+            <p>A quasi-static 2D field solver for transmission line analysis using the finite difference method with adaptive mesh refinement.</p>
+
+            <h3>Methodology</h3>
+            <p>The solver computes the characteristic impedance and propagation parameters of transmission lines by solving Laplace's equation for the electric potential distribution in the cross-section:</p>
+            <p style="text-align: center; font-family: serif; font-size: 1.1em;">&nabla;&sup2;V = 0</p>
+            <p>From the potential solution, the capacitance per unit length is calculated by integrating the electric field around the conductor. The inductance is determined by solving the same problem with air dielectric to find C<sub>0</sub>, then using:</p>
+            <p style="text-align: center; font-family: serif; font-size: 1.1em;">L = 1 / (c&sup2; &middot; C<sub>0</sub>)</p>
+            <p>where c is the speed of light.</p>
+
+            <h3>Loss Calculations</h3>
+            <p><strong>Conductor loss</strong> is computed using Wheeler's incremental inductance rule, with skin effect and surface roughness corrections. The surface roughness model follows the gradient approach from <a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">IEEE literature</a>.</p>
+            <p><strong>Dielectric loss</strong> is calculated from the loss tangent of each dielectric region, weighted by the field energy distribution.</p>
+
+            <h3>S-Parameters</h3>
+            <p>S-parameters are computed from the RLGC transmission line model using standard ABCD matrix formulation. For differential lines, modal decomposition separates odd and even modes, which are then combined into 4-port S-parameters.</p>
+
+            <h3>Adaptive Mesh Refinement</h3>
+            <p>The solver uses adaptive mesh refinement to concentrate grid points where the field gradients are highest (near conductor edges and dielectric interfaces), improving accuracy while keeping computation tractable.</p>
+        </div>
+    </div>
+
     <div class="output-panel" id="console_out">Ready. Click 'Solve Physics' to start simulation.</div>
 </div>
 
@@ -567,6 +695,15 @@
 </div>
 
 <script>
+    // Collapsible Section Toggle
+    function toggleSection(header) {
+        header.classList.toggle('collapsed');
+        const content = header.nextElementSibling;
+        if (content && content.classList.contains('section-content')) {
+            content.classList.toggle('collapsed');
+        }
+    }
+
     // Help Modal Functions
     const helpContent = {
         roughness: {

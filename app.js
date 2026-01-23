@@ -27,10 +27,22 @@ function nanToNull(input) {
 function getFrequencies() {
     const start = parseFloat(document.getElementById('freq-start').value) * 1e9;
     const stop = parseFloat(document.getElementById('freq-stop').value) * 1e9;
-    const points = parseInt(document.getElementById('freq-points').value);
+    let points = parseInt(document.getElementById('freq-points').value);
+
+    // Validate points - default to 1 if invalid
+    if (isNaN(points) || points < 1) {
+        points = 1;
+        document.getElementById('freq-points').value = '1';
+    }
+
     const freqs = [];
-    for (let i = 0; i < points; i++) {
-        freqs.push(start + (stop - start) * i / (points - 1));
+    if (points === 1) {
+        // Single frequency point - use start frequency
+        freqs.push(start);
+    } else {
+        for (let i = 0; i < points; i++) {
+            freqs.push(start + (stop - start) * i / (points - 1));
+        }
     }
     return freqs;
 }
@@ -107,6 +119,13 @@ function getParams() {
 function updateGeometry() {
     const p = getParams();
     currentView = "geometry";
+
+    // Show/hide mode selector based on differential transmission line
+    const isDiff = p.tl_type.startsWith('diff_');
+    const modeGroup = document.getElementById('plot-mode-group');
+    if (modeGroup) {
+        modeGroup.style.display = isDiff ? 'block' : 'none';
+    }
 
     try {
         if (p.tl_type === 'gcpw') {
@@ -411,14 +430,14 @@ async function runSimulation() {
     const frequencies = getFrequencies();
     const btn = document.getElementById('btn_solve');
     const pbar = document.getElementById('progress_bar');
-    const pcont = document.getElementById('progress_container');
     const ptext = document.getElementById('progress_text');
 
     // Change button to "Stop" mode
     btn.textContent = 'Stop';
     btn.classList.add('stop-mode');
     stopRequested = false;
-    pcont.style.display = 'block';
+    pbar.style.width = '0%';
+    ptext.style.display = 'block';
     log("Starting simulation...");
 
     try {
@@ -437,7 +456,6 @@ async function runSimulation() {
 
         // Run adaptive refinement at highest frequency first
         log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes, tolerance ${p.tolerance})...`);
-        ptext.style.display = 'block';
 
         let results = await solver.solve_adaptive({
             max_iters: p.max_iters,
@@ -512,15 +530,22 @@ async function runSimulation() {
 
         // Display summary
         const f0 = frequencies[0] / 1e9;
-        const fn = frequencies[frequencies.length - 1] / 1e9;
-        const loss0 = frequencySweepResults[0].result.modes[0].alpha_total;
-        const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
         const mode0 = frequencySweepResults[0].result.modes[0];
+        const loss0 = mode0.alpha_total;
+        const isSingleFreq = frequencies.length === 1;
 
         // Check if differential results
         if (results.modes.length === 2) {
             const odd = results.modes.find(m => m.mode === 'odd');
             const even = results.modes.find(m => m.mode === 'even');
+            let lossStr;
+            if (isSingleFreq) {
+                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz`;
+            } else {
+                const fn = frequencies[frequencies.length - 1] / 1e9;
+                const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
+                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`;
+            }
             log(`\nDIFFERENTIAL RESULTS:\n` +
                      `======================\n` +
                      `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ohm  (2 x Z_odd)\n` +
@@ -528,13 +553,21 @@ async function runSimulation() {
                      `\nModal Impedances:\n` +
                      `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ohm  (eps_eff = ${odd.eps_eff.toFixed(3)})\n` +
                      `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ohm  (eps_eff = ${even.eps_eff.toFixed(3)})\n` +
-                     `\nLoss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`);
+                     `\n${lossStr}`);
         } else {
+            let lossStr;
+            if (isSingleFreq) {
+                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz`;
+            } else {
+                const fn = frequencies[frequencies.length - 1] / 1e9;
+                const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
+                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`;
+            }
             log(`\nRESULTS:\n` +
                      `----------------------\n` +
                      `Z0: ${mode0.Z0.toFixed(2)} Ohm\n` +
                      `eps_eff: ${mode0.eps_eff.toFixed(3)}\n` +
-                     `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`);
+                     `${lossStr}`);
         }
 
         // Update plots
@@ -548,7 +581,7 @@ async function runSimulation() {
         // Restore button to "Solve Physics" mode
         btn.textContent = 'Solve Physics';
         btn.classList.remove('stop-mode');
-        pcont.style.display = 'none';
+        pbar.style.width = '100%';
         ptext.style.display = 'none';
         stopRequested = false;
     }
@@ -568,6 +601,12 @@ function isDifferentialMode() {
            Array.isArray(solver.Ex[1]);
 }
 
+// Get the selected mode index from sidebar (0=odd, 1=even)
+function getSelectedModeIndex() {
+    const modeSelect = document.getElementById('plot-mode');
+    return modeSelect && modeSelect.value === 'even' ? 1 : 0;
+}
+
 // Helper function to get Ex/Ey fields (handles differential mode)
 function getFields() {
     if (!solver || !solver.Ex || !solver.Ey) {
@@ -575,8 +614,7 @@ function getFields() {
     }
 
     if (isDifferentialMode()) {
-        // Differential mode: determine which mode based on currentView
-        const modeIndex = currentView === "efield_even" ? 1 : 0;  // Default to odd (0)
+        const modeIndex = getSelectedModeIndex();
         return { Ex: solver.Ex[modeIndex], Ey: solver.Ey[modeIndex] };
     } else {
         // Single-ended mode
@@ -591,13 +629,26 @@ function getPotential() {
     }
 
     if (isDifferentialMode()) {
-        // Differential mode: determine which mode based on currentView
-        const modeIndex = currentView === "potential_even" ? 1 : 0;  // Default to odd (0)
+        const modeIndex = getSelectedModeIndex();
         return solver.V[modeIndex];
     } else {
         // Single-ended mode
         return solver.V[0];
     }
+}
+
+// Get plot options from sidebar
+function getPlotOptions() {
+    const streamlinesEl = document.getElementById('plot-streamlines');
+    const contoursEl = document.getElementById('plot-contours');
+
+    const streamlinesVal = streamlinesEl ? streamlinesEl.value.trim() : '';
+    const contoursVal = contoursEl ? contoursEl.value.trim() : '';
+
+    return {
+        streamlines: streamlinesVal === '' ? 0 : parseInt(streamlinesVal) || 0,
+        contours: contoursVal === '' ? 0 : parseInt(contoursVal) || 0
+    };
 }
 
 
@@ -669,6 +720,7 @@ function draw(resetZoom = false) {
     if (!solver) return;
 
     const container = document.getElementById('sim_canvas');
+    const plotOptions = getPlotOptions();
 
     // Preserve current view state if plot exists (unless resetZoom is requested)
     let currentXRange = null;
@@ -990,16 +1042,19 @@ function draw(resetZoom = false) {
         //        "|E|: %{z:.3e} V/m<extra></extra>"
         //});
 
-        traces.push(
-            makeStreamlineTraceFromConductors(
-                Ex,
-                Ey,
-                solver.x,
-                solver.y,
-                solver.conductors,
-                50
-            )
-        );
+        // Add streamlines if requested via plot options
+        if (plotOptions.streamlines > 0) {
+            traces.push(
+                makeStreamlineTraceFromConductors(
+                    Ex,
+                    Ey,
+                    solver.x,
+                    solver.y,
+                    solver.conductors,
+                    plotOptions.streamlines
+                )
+            );
+        }
 
     } else if (currentView === "geometry") {
         // Geometry only - invisible scatter for axis scaling
@@ -1013,17 +1068,22 @@ function draw(resetZoom = false) {
             hoverinfo: "skip"
         });
     } else if (zData.length > 0) {
-        // Field views only - use heatmap
+        // Field views only - use heatmap with optional contour lines
+        const contourSettings = {
+            coloring: 'heatmap',
+            showlines: plotOptions.contours > 0,
+        };
+        if (plotOptions.contours > 0) {
+            contourSettings.size = 0;  // Auto-calculate based on data
+            contourSettings.ncontours = plotOptions.contours;
+        }
         traces.push({
             type: "contour",
             x: xMM,
             y: yMM,
             z: zData,
             colorscale: colorscale,
-            contours: {
-                coloring: 'heatmap',
-                showlines: true,
-            },
+            contours: contourSettings,
             line: {
               smoothing: 1.3,
               width: 0.5
@@ -1098,17 +1158,8 @@ function draw(resetZoom = false) {
                 showactive: true,
                 active: (() => {
                     if (currentView === "geometry") return 0;
-                    if (isDifferentialMode()) {
-                        // Differential: Geometry, Potential(odd), Potential(even), E-field(odd), E-field(even)
-                        if (currentView === "potential_odd" || currentView === "potential") return 1;
-                        if (currentView === "potential_even") return 2;
-                        if (currentView === "efield_odd" || currentView === "efield") return 3;
-                        if (currentView === "efield_even") return 4;
-                    } else {
-                        // Single-ended: Geometry, Potential, E-field
-                        if (currentView === "potential") return 1;
-                        if (currentView === "efield") return 2;
-                    }
+                    if (currentView === "potential") return 1;
+                    if (currentView === "efield") return 2;
                     return 0;
                 })(),
                 buttons: (() => {
@@ -1121,41 +1172,16 @@ function draw(resetZoom = false) {
                     ];
 
                     if (solver.solution_valid) {
-                        if (isDifferentialMode()) {
-                            // Add separate buttons for odd and even modes
-                            buttons.push({
-                                label: "Potential (odd)",
-                                method: "skip",
-                                args: []
-                            });
-                            buttons.push({
-                                label: "Potential (even)",
-                                method: "skip",
-                                args: []
-                            });
-                            buttons.push({
-                                label: "E-field (odd)",
-                                method: "skip",
-                                args: []
-                            });
-                            buttons.push({
-                                label: "E-field (even)",
-                                method: "skip",
-                                args: []
-                            });
-                        } else {
-                            // Single-ended: just one Potential and one E-field button
-                            buttons.push({
-                                label: "Potential",
-                                method: "skip",
-                                args: []
-                            });
-                            buttons.push({
-                                label: "|E| Field",
-                                method: "skip",
-                                args: []
-                            });
-                        }
+                        buttons.push({
+                            label: "Potential",
+                            method: "skip",
+                            args: []
+                        });
+                        buttons.push({
+                            label: "|E| Field",
+                            method: "skip",
+                            args: []
+                        });
                     }
 
                     return buttons;
@@ -1191,26 +1217,14 @@ function draw(resetZoom = false) {
 
     if (!container._viewListenerBound) {
         container.on('plotly_buttonclicked', (event) => {
+            // Simplified view handling: Geometry(0), Potential(1), E-field(2)
+            // Mode selector in sidebar controls odd/even for differential lines
             if (event.menu.active === 0) {
                 currentView = "geometry";
-            } else if (isDifferentialMode()) {
-                // Differential mode: Geometry(0), Potential(odd)(1), Potential(even)(2), E-field(odd)(3), E-field(even)(4)
-                if (event.menu.active === 1) {
-                    currentView = "potential_odd";
-                } else if (event.menu.active === 2) {
-                    currentView = "potential_even";
-                } else if (event.menu.active === 3) {
-                    currentView = "efield_odd";
-                } else if (event.menu.active === 4) {
-                    currentView = "efield_even";
-                }
-            } else {
-                // Single-ended mode: Geometry(0), Potential(1), E-field(2)
-                if (event.menu.active === 1) {
-                    currentView = "potential";
-                } else if (event.menu.active === 2) {
-                    currentView = "efield";
-                }
+            } else if (event.menu.active === 1) {
+                currentView = "potential";
+            } else if (event.menu.active === 2) {
+                currentView = "efield";
             }
             draw();
         });
@@ -1622,10 +1636,59 @@ function bindEvents() {
             const length = parseFloat(document.getElementById('sparam-length').value);
             const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
             const isDifferential = solver && solver.is_differential;
-            exportSnP(frequencySweepResults, length, Z_ref, isDifferential);
-            log(`Exported ${isDifferential ? 's4p' : 's2p'} file`);
+            const p = getParams();
+            const params = {
+                tlType: p.tl_type,
+                traceWidth: p.w,
+                traceThickness: p.t,
+                substrateHeight: p.h,
+                epsilonR: p.er,
+                tanDelta: p.tand,
+                sigma: p.sigma,
+                traceSpacing: p.trace_spacing,
+                surfaceRoughness: p.rq,
+                freqStart: frequencySweepResults[0].freq,
+                freqStop: frequencySweepResults[frequencySweepResults.length - 1].freq,
+                numPoints: frequencySweepResults.length
+            };
+            const filename = exportSnP(frequencySweepResults, length, Z_ref, isDifferential, params);
+            log(`Exported ${filename}`);
         });
     }
+
+    // Frequency points validation - default to 1 when empty
+    const freqPointsEl = document.getElementById('freq-points');
+    if (freqPointsEl) {
+        freqPointsEl.addEventListener('blur', () => {
+            const val = parseInt(freqPointsEl.value);
+            if (isNaN(val) || val < 1 || freqPointsEl.value.trim() === '') {
+                freqPointsEl.value = '1';
+            }
+        });
+    }
+
+    // Solver and plot parameter validation
+    const validationRules = {
+        'freq-start': { min: 0.001, default: 0.1, label: 'Start frequency' },
+        'freq-stop': { min: 0.001, default: 10, label: 'Stop frequency' },
+        'inp_max_iters': { min: 1, default: 10, integer: true, label: 'Max iterations' },
+        'inp_max_nodes': { min: 100, default: 20000, integer: true, label: 'Max nodes' },
+        'inp_tolerance': { min: 0.0001, default: 0.05, label: 'Tolerance' },
+        'sparam-length': { min: 0.0001, default: 0.01, label: 'Line length' },
+        'sparam-z-ref': { min: 1, default: 50, label: 'Reference impedance' }
+    };
+
+    Object.entries(validationRules).forEach(([id, rule]) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('blur', () => {
+                let val = rule.integer ? parseInt(el.value) : parseFloat(el.value);
+                if (isNaN(val) || val < rule.min || el.value.trim() === '') {
+                    el.value = rule.default;
+                }
+            });
+        }
+    });
 
     // Real-time geometry updates for all parameter inputs
     const geometryInputs = [
@@ -1670,6 +1733,34 @@ function bindEvents() {
         updateGeometry();
         draw(true);  // Reset zoom/pan for new geometry
     });
+
+    // Plot options - mode selector
+    const plotModeEl = document.getElementById('plot-mode');
+    if (plotModeEl) {
+        plotModeEl.addEventListener('change', () => {
+            if (solver && solver.solution_valid) {
+                draw();
+            }
+        });
+    }
+
+    // Plot options - streamlines and contours
+    const plotStreamlinesEl = document.getElementById('plot-streamlines');
+    const plotContoursEl = document.getElementById('plot-contours');
+    if (plotStreamlinesEl) {
+        plotStreamlinesEl.addEventListener('change', () => {
+            if (solver && solver.solution_valid) {
+                draw();
+            }
+        });
+    }
+    if (plotContoursEl) {
+        plotContoursEl.addEventListener('change', () => {
+            if (solver && solver.solution_valid) {
+                draw();
+            }
+        });
+    }
 }
 
 
