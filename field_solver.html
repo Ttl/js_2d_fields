@@ -64,6 +64,10 @@
         input.unit-parsed {
             background-color: #f0f9ff;
         }
+        input.unit-input.invalid {
+            border-color: #dc2626;
+            box-shadow: 0 0 0 3px rgba(220,38,38,0.2);
+        }
 
         button {
             background-color: var(--primary-color);
@@ -689,7 +693,7 @@
         <div id="sparam-plot" class="plot-container"></div>
         <div class="sparam-controls">
             <label class="checkbox-label"><input type="checkbox" id="sparam-log-x"> Log frequency axis</label>
-            <label>Line Length: <input type="text" class="unit-input" id="sparam-length" value="10 mm" step="0.001" min="0.0001"></label>
+            <label>Line Length: <input type="text" class="unit-input" id="sparam-length" value="10 mm" step="0.001"></label>
             <label>Reference Impedance: <input type="number" id="sparam-z-ref" value="50" step="1" min="1"> Ohm</label>
             <button id="export-snp">Export SnP file</button>
             <div id="sparam-notice" style="display: none; padding: 6px 10px; background: #fef3c7; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; flex-shrink: 0;">
@@ -886,7 +890,7 @@
             'freq-start': 'GHz',
             'freq-stop': 'GHz',
 
-            // S-param length - mm (more common for PCB)
+            // S-param length - mm
             'sparam-length': 'mm',
         };
 
@@ -905,16 +909,10 @@
         const parsedSI = parseValueWithUnit(inputValue, defaultUnit);
 
         if (isNaN(parsedSI)) {
-            // Invalid unit - show error
-            inputElement.style.borderColor = '#dc2626';
+            inputElement.classList.add('invalid');
             inputElement.title = 'Invalid unit';
-            setTimeout(() => {
-                inputElement.style.borderColor = '';
-                inputElement.title = '';
-            }, 2000);
         } else {
-            // Valid - clear any error
-            inputElement.style.borderColor = '';
+            inputElement.classList.remove('invalid');
             inputElement.title = '';
         }
     }

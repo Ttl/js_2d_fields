@@ -2062,12 +2062,12 @@ function bindEvents() {
 
     // Solver and plot parameter validation
     const validationRules = {
-        'freq-start': { min: 0.001, default: 0.1, label: 'Start frequency' },
-        'freq-stop': { min: 0.001, default: 10, label: 'Stop frequency' },
+        'freq-start': { default: 0.1, label: 'Start frequency' },
+        'freq-stop': { default: 10, label: 'Stop frequency' },
         'inp_max_iters': { min: 1, default: 10, integer: true, label: 'Max iterations' },
-        'inp_max_nodes': { min: 100, default: 20000, integer: true, label: 'Max nodes' },
-        'inp_tolerance': { min: 0.0001, default: 0.05, label: 'Tolerance' },
-        'sparam-length': { min: 0.0001, default: 0.01, label: 'Line length' },
+        'inp_max_nodes': { min: 1000, default: 20000, integer: true, label: 'Max nodes' },
+        'inp_tolerance': { min: 0, max: 1, default: 0.05, label: 'Tolerance' },
+        'sparam-length': { default: 0.01, label: 'Line length' },
         'sparam-z-ref': { min: 1, default: 50, label: 'Reference impedance' }
     };
 
@@ -2076,8 +2076,14 @@ function bindEvents() {
         if (el) {
             el.addEventListener('blur', () => {
                 let val = rule.integer ? parseInt(el.value) : parseFloat(el.value);
-                if (isNaN(val) || val < rule.min || el.value.trim() === '') {
+                if (isNaN(val) || el.value.trim() === '') {
                     el.value = rule.default;
+                }
+                else if (val < rule.min) {
+                    el.value = rule.min;
+                }
+                else if (val > rule.max) {
+                    el.value = rule.max;
                 }
             });
         }
