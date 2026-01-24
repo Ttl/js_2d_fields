@@ -64,6 +64,28 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
 }
 
 /**
+ * Compute modal characteristic impedance from RLGC parameters
+ * @param {number} freq - Frequency in Hz
+ * @param {object} rlgc - RLGC parameters {R, L, G, C}
+ * @returns {number} - Modal Z0 magnitude in Ohms
+ */
+function computeZ0(freq, rlgc) {
+    const omega = 2 * Math.PI * freq;
+    const { R, L, G, C } = rlgc;
+
+    // Series impedance per unit length: Z = R + jwL
+    const Z_per_length = new Complex(R, omega * L);
+
+    // Shunt admittance per unit length: Y = G + jwC
+    const Y_per_length = new Complex(G, omega * C);
+
+    // Characteristic impedance: Z0 = sqrt(Z / Y)
+    const Z0 = Z_per_length.div(Y_per_length).sqrt();
+
+    return Z0.abs();
+}
+
+/**
  * Compute 4-port S-parameters for a differential transmission line
  * Ports 1,3 are at one end (positive and negative), Ports 2,4 at the other end
  *
@@ -77,9 +99,13 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
  * @returns {object} - {S: 4x4 array of Complex, SDD11, SDD21, SCC11, SCC21, SDC11, SDC21, SCD11, SCD21}
  */
 function computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref) {
-    // Compute single-ended S-params for each mode
-    const S_odd = computeSParamsSingleEnded(freq, rlgc_odd, length, Z_ref);
-    const S_even = computeSParamsSingleEnded(freq, rlgc_even, length, Z_ref);
+    // Compute modal characteristic impedances
+    const Z0_odd = computeZ0(freq, rlgc_odd);
+    const Z0_even = computeZ0(freq, rlgc_even);
+
+    // Compute single-ended S-params for each mode using modal impedances as reference
+    const S_odd = computeSParamsSingleEnded(freq, rlgc_odd, length, Z0_odd);
+    const S_even = computeSParamsSingleEnded(freq, rlgc_even, length, Z0_even);
 
     // For ideal symmetric differential pairs with no coupling between modes,
     // the 4-port S-matrix can be constructed from odd and even mode responses.
@@ -116,11 +142,12 @@ function computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref) {
     const S14 = S_even.S12.sub(S_odd.S12).mul(half);
 
     // Build 4x4 matrix (symmetric coupled line)
+    // Port assignment: 1=in+, 2=out+, 3=in-, 4=out-
     const S = [
-        [S11, S21, S13, S23],  // Row 1: S11, S12, S13, S14 -> S11, S21, S13, S23
-        [S12, S22, S14, S24],  // Row 2: S21, S22, S23, S24 -> S12, S22, S14, S24
-        [S13, S23, S11, S21],  // Row 3: S31, S32, S33, S34 -> S13, S23, S11, S21
-        [S14, S24, S12, S22]   // Row 4: S41, S42, S43, S44 -> S14, S24, S12, S22
+        [S11, S12, S13, S14],  // Row 1: S11, S12, S13, S14
+        [S21, S22, S23, S24],  // Row 2: S21, S22, S23, S24
+        [S13, S14, S11, S12],  // Row 3: S31, S32, S33, S34
+        [S23, S24, S21, S22]   // Row 4: S41, S42, S43, S44
     ];
 
     // Mixed-mode S-parameters (for plotting)
@@ -166,6 +193,7 @@ function sParamToPhase(s) {
 export {
     computeSParamsSingleEnded,
     computeSParamsDifferential,
+    computeZ0,
     sParamTodB,
     sParamToPhase
 };

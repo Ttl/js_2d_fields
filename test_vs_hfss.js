@@ -770,7 +770,7 @@ async function test_s2p_generation() {
     // S11 (return loss) is sensitive to small Z0 differences
     // S21/S12 (insertion loss) differences accumulate over the 1m line length,
     // so small per-unit-length differences lead to larger S-param differences
-    const tolerances = { S11: 0.3, S21: 0.25, S12: 0.25, S22: 0.3 };
+    const tolerances = { S11: 0.1, S21: 0.25, S12: 0.25, S22: 0.1 };
 
     console.log(`\n${'Freq'.padEnd(8)} ${'|ΔS11|'.padEnd(10)} ${'|ΔS21|'.padEnd(10)} ${'|ΔS12|'.padEnd(10)} ${'|ΔS22|'.padEnd(10)} Status`);
     console.log(`${'-'.repeat(70)}`);
@@ -868,7 +868,7 @@ async function test_s4p_generation() {
 
     // Tolerance for absolute difference
     // Similar to S2P, differences accumulate over the 1m line length
-    const tolerance = 0.45;
+    const tolerance = 0.25;
 
     console.log(`\n${'Freq'.padEnd(8)} ${'Max|ΔSij|'.padEnd(12)} ${'Worst Sij'.padEnd(10)} Status`);
     console.log(`${'-'.repeat(50)}`);

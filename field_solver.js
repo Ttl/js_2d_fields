@@ -1315,7 +1315,7 @@ export class FieldSolver2D {
                 prevZ0[modeName] = r.Z0;
             }
 
-            console.log(`Pass ${it + 1}: Energy err=${max_energy_err.toExponential(3)}, Param err=${max_param_err.toExponential(3)}, Grid=${this.x.length}x${this.y.length}`);
+            //console.log(`Pass ${it + 1}: Energy err=${max_energy_err.toExponential(3)}, Param err=${max_param_err.toExponential(3)}, Grid=${this.x.length}x${this.y.length}`);
 
             // Call progress callback
             if (onProgress) {

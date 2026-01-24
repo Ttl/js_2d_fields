@@ -403,7 +403,7 @@
         </div>
         <div class="section-content">
             <div class="control-group">
-                <label>Trace Spacing (mm)</label>
+                <label>Trace Spacing</label>
                 <input type="text" class="unit-input" id="inp_trace_spacing" value="1.0 mm" step="0.1">
             </div>
         </div>
@@ -415,15 +415,15 @@
         </div>
         <div class="section-content">
             <div class="control-group">
-                <label>Trace Width (mm)</label>
+                <label>Trace Width</label>
                 <input type="text" class="unit-input" id="inp_w" value="3.0 mm" step="0.1">
             </div>
             <div class="control-group">
-                <label>Substrate Height (mm)</label>
+                <label>Substrate Height</label>
                 <input type="text" class="unit-input" id="inp_h" value="1.6 mm" step="0.1">
             </div>
             <div class="control-group">
-                <label>Trace Thickness (μm)</label>
+                <label>Trace Thickness</label>
                 <input type="text" class="unit-input" id="inp_t" value="35 μm" step="1">
             </div>
             <div class="control-group">
@@ -447,11 +447,11 @@
         </div>
         <div class="section-content">
             <div class="control-group">
-                <label>Start (GHz)</label>
+                <label>Start Frequency</label>
                 <input type="text" class="unit-input" id="freq-start" value="0.1 GHz" step="0.1" min="0.001">
             </div>
             <div class="control-group">
-                <label>Stop (GHz)</label>
+                <label>Stop Frequency</label>
                 <input type="text" class="unit-input" id="freq-stop" value="10 GHz" step="0.1" min="0.001">
             </div>
             <div class="control-group">
@@ -466,15 +466,15 @@
         </div>
         <div class="section-content">
             <div class="control-group">
-                <label>Gap (mm)</label>
+                <label>Gap</label>
                 <input type="text" class="unit-input" id="inp_gap" value="0.1 mm" step="0.01">
             </div>
             <div class="control-group">
-                <label>Top Ground Width (mm)</label>
+                <label>Top Ground Width</label>
                 <input type="text" class="unit-input" id="inp_top_gnd_w" value="0.2 mm" step="0.01">
             </div>
             <div class="control-group">
-                <label>Via Gap (mm)</label>
+                <label>Via Gap</label>
                 <input type="text" class="unit-input" id="inp_via_gap" value="0.1 mm" step="0.01">
             </div>
         </div>
@@ -486,7 +486,7 @@
         </div>
         <div class="section-content">
             <div class="control-group">
-                <label>Top Dielectric Height (mm)</label>
+                <label>Top Dielectric Height</label>
                 <input type="text" class="unit-input" id="inp_air_top" value="1.6 mm" step="0.01">
             </div>
             <div class="control-group">
@@ -511,15 +511,15 @@
         </div>
         <div id="solder-mask-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
             <div class="control-group">
-                <label>Mask over Substrate (μm)</label>
+                <label>Mask over Substrate</label>
                 <input type="text" class="unit-input" id="inp_sm_t_sub" value="20 μm" step="1">
             </div>
             <div class="control-group">
-                <label>Mask over Trace (μm)</label>
+                <label>Mask over Trace</label>
                 <input type="text" class="unit-input" id="inp_sm_t_trace" value="20 μm" step="1">
             </div>
             <div class="control-group">
-                <label>Mask Side Thickness (μm)</label>
+                <label>Mask Side Thickness</label>
                 <input type="text" class="unit-input" id="inp_sm_t_side" value="20 μm" step="1">
             </div>
             <div class="control-group">
@@ -537,7 +537,7 @@
         </div>
         <div id="top-diel-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
             <div class="control-group">
-                <label>Top Dielectric Height (mm)</label>
+                <label>Top Dielectric Height</label>
                 <input type="text" class="unit-input" id="inp_top_diel_h" value="0.2 mm" step="0.01">
             </div>
             <div class="control-group">
@@ -555,11 +555,11 @@
         </div>
         <div id="gnd-cut-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
             <div class="control-group">
-                <label>Cutout Width (mm)</label>
+                <label>Cutout Width</label>
                 <input type="text" class="unit-input" id="inp_gnd_cut_w" value="3.0 mm" step="0.1">
             </div>
             <div class="control-group">
-                <label>Substrate Below Cutout (mm)</label>
+                <label>Substrate Below Cutout</label>
                 <input type="text" class="unit-input" id="inp_gnd_cut_h" value="1.0 mm" step="0.1">
             </div>
         </div>
@@ -575,26 +575,28 @@
                 <label><input type="checkbox" id="chk_top_gnd"> Top Ground</label>
             </div>
             <div class="control-group">
-                <label>Width (mm)</label>
+                <label>Width</label>
                 <input type="text" class="unit-input" id="inp_enclosure_width" placeholder="auto" step="0.1">
             </div>
             <div class="control-group" id="enclosure-height-group">
-                <label>Height (mm)</label>
+                <label>Height</label>
                 <input type="text" class="unit-input" id="inp_enclosure_height" placeholder="auto" step="0.1">
             </div>
         </div>
 
         <div class="control-group">
-            <label>Surface Roughness RMS (μm) <span class="help-icon" onclick="showHelpModal('roughness')">?</span></label>
+            <label>Surface Roughness RMS <span class="help-icon" onclick="showHelpModal('roughness')">?</span></label>
             <input type="text" class="unit-input" id="inp_rq" value="0 μm" step="0.1" min="0">
         </div>
         </div>
     </div>
 
+
+    <div id="plot-options">
     <div class="section-header" onclick="toggleSection(this)">
         <h3>Plot Options</h3>
     </div>
-    <div id="plot-options" class="section-content">
+    <div class="section-content">
         <div class="control-group" id="plot-mode-group" style="display: none;">
             <label>Mode</label>
             <select id="plot-mode">
@@ -611,7 +613,9 @@
             <input type="number" id="plot-contours" value="" step="5" min="0" placeholder="None">
         </div>
     </div>
+    </div>
 
+    <div id="solver-settings">
     <div class="section-header" onclick="toggleSection(this)">
         <h3>Solver Settings</h3>
     </div>
@@ -627,6 +631,7 @@
     <div class="control-group">
         <label>Tolerance <span class="help-icon" onclick="showHelpModal('tolerance')">?</span></label>
         <input type="number" id="inp_tolerance" value="0.05" step="0.01" min="0.001">
+    </div>
     </div>
     </div>
 
@@ -668,16 +673,28 @@
         <div class="results-controls bottom">
             <label class="checkbox-label"><input type="checkbox" id="results-log-x"> Log frequency axis</label>
             <button id="copy-link-btn">Copy link</button>
+            <div id="results-notice" style="display: none; padding: 6px 10px; background: #fef3c7; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px;">
+                <strong>⚠</strong> <span id="results-notice-text"></span>
+            </div>
         </div>
     </div>
 
     <div id="tab-sparams" class="tab-content">
+        <div class="results-controls">
+            <select id="sparam-plot-mode">
+                <option value="magnitude">Magnitude (dB)</option>
+                <option value="phase">Phase (degrees)</option>
+            </select>
+        </div>
         <div id="sparam-plot" class="plot-container"></div>
         <div class="sparam-controls">
             <label class="checkbox-label"><input type="checkbox" id="sparam-log-x"> Log frequency axis</label>
-            <label>Line length: <input type="text" class="unit-input" id="sparam-length" value="0.01 m" step="0.001" min="0.0001"></label>
+            <label>Line Length: <input type="text" class="unit-input" id="sparam-length" value="10 mm" step="0.001" min="0.0001"></label>
             <label>Reference Impedance: <input type="number" id="sparam-z-ref" value="50" step="1" min="1"> Ohm</label>
             <button id="export-snp">Export SnP file</button>
+            <div id="sparam-notice" style="display: none; padding: 6px 10px; background: #fef3c7; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; flex-shrink: 0;">
+                <strong>⚠</strong> <span id="sparam-notice-text"></span>
+            </div>
         </div>
     </div>
 
@@ -759,10 +776,11 @@
         };
 
         // Frequency units - convert to Hz
+        // Note: 'm' is MHz (milliHertz not supported), 't' is THz
         const frequencyUnits = {
             'hz': 1,
             'khz': 1e3, 'k': 1e3,
-            'mhz': 1e6, 'm': 1e6,
+            'mhz': 1e6, 'm': 1e6,  // 'm' = MHz, not milliHertz
             'ghz': 1e9, 'g': 1e9,
             'thz': 1e12, 't': 1e12,
         };
@@ -777,8 +795,19 @@
             return value * frequencyUnits[unit];
         }
 
-        // No unit or unknown unit - return value as-is
-        return value;
+        // No unit specified and defaultUnit was provided - use default
+        if (unit === '' && defaultUnit !== '') {
+            // Reparse with default unit
+            return parseValueWithUnit(value, defaultUnit);
+        }
+
+        // No unit specified and no default - return value as-is (assume SI base unit)
+        if (unit === '') {
+            return value;
+        }
+
+        // Unknown unit - return NaN to indicate invalid input
+        return NaN;
     }
 
     /**
@@ -857,16 +886,16 @@
             'freq-start': 'GHz',
             'freq-stop': 'GHz',
 
-            // S-param length - m
-            'sparam-length': 'm',
+            // S-param length - mm (more common for PCB)
+            'sparam-length': 'mm',
         };
 
         return unitMap[inputId] || '';
     }
 
     /**
-     * Parse and normalize an input field with units
-     * Provides visual feedback and updates the field value
+     * Validate an input field with units (but don't modify user input)
+     * Provides visual feedback for invalid units
      */
     function parseAndNormalizeInput(inputElement) {
         const inputValue = inputElement.value.trim();
@@ -876,20 +905,17 @@
         const parsedSI = parseValueWithUnit(inputValue, defaultUnit);
 
         if (isNaN(parsedSI)) {
-            inputElement.classList.remove('unit-parsed');
-            return;
-        }
-
-        // Format back with the default unit for clear display
-        const formatted = formatValueWithUnit(parsedSI, defaultUnit);
-        if (formatted && formatted !== inputValue) {
-            inputElement.value = formatted;
-            inputElement.classList.add('unit-parsed');
-
-            // Remove the highlight after a short delay
+            // Invalid unit - show error
+            inputElement.style.borderColor = '#dc2626';
+            inputElement.title = 'Invalid unit';
             setTimeout(() => {
-                inputElement.classList.remove('unit-parsed');
-            }, 1500);
+                inputElement.style.borderColor = '';
+                inputElement.title = '';
+            }, 2000);
+        } else {
+            // Valid - clear any error
+            inputElement.style.borderColor = '';
+            inputElement.title = '';
         }
     }
 

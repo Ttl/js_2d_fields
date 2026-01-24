@@ -18,7 +18,6 @@ class MicrostripSolver extends FieldSolver2D {
         this.tand_top = options.tan_delta_top ?? 0;
         this.tan_delta = options.tan_delta ?? 0.02;
         this.sigma_cond = options.sigma_cond ?? 5.8e7;
-        console.log([this.er_top, this.tand_top]);
 
         // Differential mode parameters
         this.trace_spacing = options.trace_spacing ?? null;

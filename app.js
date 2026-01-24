@@ -9,6 +9,9 @@ let solver = null;
 let stopRequested = false;
 let frequencySweepResults = null;  // Array of {freq, result} objects
 let currentTab = 'geometry';
+let geometryChanged = false;  // Track if geometry has changed since last solve
+let lastSolvedGeometry = null;  // Hash of geometry params from last solve
+let lastSolvedFrequency = null;  // Frequency params from last solve
 
 // --- Unit Parsing Helper ---
 
@@ -256,10 +259,142 @@ function getFrequencies() {
     }
 
     const freqs = [];
-    for (let i = 0; i < points; i++) {
-        freqs.push(start + (stop - start) * i / (points - 1));
+    if (points === 1) {
+        // Single frequency point - use start frequency
+        freqs.push(start);
+    } else {
+        // Multiple points - linear spacing
+        for (let i = 0; i < points; i++) {
+            freqs.push(start + (stop - start) * i / (points - 1));
+        }
     }
     return freqs;
+}
+
+/**
+ * Get a hash of geometry parameters for change tracking
+ */
+function getGeometryHash() {
+    const p = getParams();
+    return JSON.stringify({
+        tl_type: p.tl_type,
+        w: p.w,
+        h: p.h,
+        t: p.t,
+        er: p.er,
+        tand: p.tand,
+        sigma: p.sigma,
+        trace_spacing: p.trace_spacing,
+        gap: p.gap,
+        top_gnd_w: p.top_gnd_w,
+        via_gap: p.via_gap,
+        stripline_top_h: p.stripline_top_h,
+        er_top: p.er_top,
+        tand_top: p.tand_top,
+        use_sm: p.use_sm,
+        sm_t_sub: p.sm_t_sub,
+        sm_t_trace: p.sm_t_trace,
+        sm_t_side: p.sm_t_side,
+        sm_er: p.sm_er,
+        sm_tand: p.sm_tand,
+        use_top_diel: p.use_top_diel,
+        top_diel_h: p.top_diel_h,
+        top_diel_er: p.top_diel_er,
+        top_diel_tand: p.top_diel_tand,
+        use_gnd_cut: p.use_gnd_cut,
+        gnd_cut_w: p.gnd_cut_w,
+        gnd_cut_h: p.gnd_cut_h,
+        use_enclosure: p.use_enclosure,
+        use_side_gnd: p.use_side_gnd,
+        use_top_gnd: p.use_top_gnd,
+        enclosure_width: p.enclosure_width,
+        enclosure_height: p.enclosure_height,
+        rq: p.rq
+    });
+}
+
+/**
+ * Get a hash of frequency parameters for change tracking
+ */
+function getFrequencyHash() {
+    return JSON.stringify({
+        freq_start: getInputValue('freq-start'),
+        freq_stop: getInputValue('freq-stop'),
+        freq_points: parseInt(document.getElementById('freq-points').value)
+    });
+}
+
+/**
+ * Update notices on Results and S-parameters tabs
+ */
+function updateResultNotices() {
+    const resultsNotice = document.getElementById('results-notice');
+    const resultsNoticeText = document.getElementById('results-notice-text');
+    const sparamNotice = document.getElementById('sparam-notice');
+    const sparamNoticeText = document.getElementById('sparam-notice-text');
+    const exportBtn = document.getElementById('export-snp');
+
+    if (!frequencySweepResults || frequencySweepResults.length === 0) {
+        // No results exist
+        if (resultsNotice) {
+            resultsNoticeText.textContent = 'No results available. Run solver to view results.';
+            resultsNotice.style.display = 'block';
+        }
+        if (sparamNotice) {
+            sparamNoticeText.textContent = 'No results available. Run solver to view S-parameters.';
+            sparamNotice.style.display = 'block';
+        }
+        if (exportBtn) {
+            exportBtn.disabled = true;
+        }
+    } else {
+        const currentGeometry = getGeometryHash();
+        const currentFrequency = getFrequencyHash();
+        const geometryChanged = lastSolvedGeometry && currentGeometry !== lastSolvedGeometry;
+        const frequencyChanged = lastSolvedFrequency && currentFrequency !== lastSolvedFrequency;
+
+        if (geometryChanged) {
+            // Geometry changed - show notice but keep old results visible
+            if (resultsNotice) {
+                resultsNoticeText.textContent = 'Geometry changed. Solve to update results.';
+                resultsNotice.style.display = 'block';
+            }
+            if (sparamNotice) {
+                sparamNoticeText.textContent = 'Geometry changed. Solve to update results.';
+                sparamNotice.style.display = 'block';
+            }
+            if (exportBtn) {
+                exportBtn.disabled = true;
+                exportBtn.title = 'Cannot export - geometry or frequency changed';
+            }
+        } else if (frequencyChanged) {
+            // Only frequency changed
+            if (resultsNotice) {
+                resultsNoticeText.textContent = 'Frequency changed. Solve to update results.';
+                resultsNotice.style.display = 'block';
+            }
+            if (sparamNotice) {
+                sparamNoticeText.textContent = 'Frequency changed. Solve to update results.';
+                sparamNotice.style.display = 'block';
+            }
+            if (exportBtn) {
+                exportBtn.disabled = true;
+                exportBtn.title = 'Cannot export - geometry or frequency changed';
+            }
+        } else {
+            // No changes - hide notices, enable export
+            if (resultsNotice) {
+                resultsNotice.style.display = 'none';
+            }
+            if (sparamNotice) {
+                sparamNotice.style.display = 'none';
+            }
+            if (exportBtn) {
+                exportBtn.disabled = false;
+                exportBtn.title = '';
+            }
+        }
+    }
 }
 
 function switchTab(tabName) {
@@ -269,10 +404,16 @@ function switchTab(tabName) {
         div.classList.toggle('active', div.id === `tab-${tabName}`));
     currentTab = tabName;
 
-    if (tabName === 'results' && frequencySweepResults) {
-        drawResultsPlot();
-    } else if (tabName === 'sparams' && frequencySweepResults) {
-        drawSParamPlot();
+    if (tabName === 'results') {
+        updateResultNotices();
+        if (frequencySweepResults) {
+            drawResultsPlot();
+        }
+    } else if (tabName === 'sparams') {
+        updateResultNotices();
+        if (frequencySweepResults) {
+            drawSParamPlot();
+        }
     } else if (tabName === 'geometry') {
         // Refresh the geometry plot when switching back
         draw();
@@ -784,6 +925,11 @@ async function runSimulation() {
         // Update plots
         drawResultsPlot();
         drawSParamPlot();
+
+        // Save geometry and frequency hash for change tracking
+        lastSolvedGeometry = getGeometryHash();
+        lastSolvedFrequency = getFrequencyHash();
+        updateResultNotices();
 
     } catch (e) {
         console.error(e);
@@ -1644,44 +1790,56 @@ function drawSParamPlot() {
     const length = getInputValue('sparam-length');
     const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
     const isDifferential = solver && solver.is_differential;
+    const plotMode = document.getElementById('sparam-plot-mode').value; // 'magnitude' or 'phase'
 
     const freqs = frequencySweepResults.map(r => r.freq / 1e9);
     const traces = [];
 
     // Use lines+markers mode so single frequency points are visible
-    const plotMode = freqs.length === 1 ? 'markers' : 'lines+markers';
+    const lineMode = freqs.length === 1 ? 'markers' : 'lines+markers';
+
+    // Helper to convert complex S-parameter to phase in degrees
+    const sParamToPhase = (complexVal) => {
+        return complexVal.arg() * 180 / Math.PI;
+    };
 
     if (!isDifferential) {
         // 2-port S-parameters
-        const S11_dB = [];
-        const S21_dB = [];
+        const S11_data = [];
+        const S21_data = [];
 
         for (const { freq, result } of frequencySweepResults) {
             const sp = computeSParamsSingleEnded(freq, result.modes[0].RLGC, length, Z_ref);
-            S11_dB.push(sParamTodB(sp.S11));
-            S21_dB.push(sParamTodB(sp.S21));
+            if (plotMode === 'magnitude') {
+                S11_data.push(sParamTodB(sp.S11));
+                S21_data.push(sParamTodB(sp.S21));
+            } else {
+                S11_data.push(sParamToPhase(sp.S11));
+                S21_data.push(sParamToPhase(sp.S21));
+            }
         }
 
+        const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
         traces.push({
             x: freqs,
-            y: S11_dB,
-            name: 'S11 (dB)',
+            y: S11_data,
+            name: `S11 ${label}`,
             type: 'scatter',
-            mode: plotMode
+            mode: lineMode
         });
         traces.push({
             x: freqs,
-            y: S21_dB,
-            name: 'S21 (dB)',
+            y: S21_data,
+            name: `S21 ${label}`,
             type: 'scatter',
-            mode: plotMode
+            mode: lineMode
         });
     } else {
         // 4-port S-parameters (mixed-mode)
-        const SDD11_dB = [];
-        const SDD21_dB = [];
-        const SCC11_dB = [];
-        const SCC21_dB = [];
+        const SDD11_data = [];
+        const SDD21_data = [];
+        const SCC11_data = [];
+        const SCC21_data = [];
 
         for (const { freq, result } of frequencySweepResults) {
             const oddMode = result.modes.find(m => m.mode === 'odd');
@@ -1695,52 +1853,61 @@ function drawSParamPlot() {
                 Z_ref
             );
 
-            SDD11_dB.push(sParamTodB(sp.SDD11));
-            SDD21_dB.push(sParamTodB(sp.SDD21));
-            SCC11_dB.push(sParamTodB(sp.SCC11));
-            SCC21_dB.push(sParamTodB(sp.SCC21));
+            if (plotMode === 'magnitude') {
+                SDD11_data.push(sParamTodB(sp.SDD11));
+                SDD21_data.push(sParamTodB(sp.SDD21));
+                SCC11_data.push(sParamTodB(sp.SCC11));
+                SCC21_data.push(sParamTodB(sp.SCC21));
+            } else {
+                SDD11_data.push(sParamToPhase(sp.SDD11));
+                SDD21_data.push(sParamToPhase(sp.SDD21));
+                SCC11_data.push(sParamToPhase(sp.SCC11));
+                SCC21_data.push(sParamToPhase(sp.SCC21));
+            }
         }
 
+        const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
         traces.push({
             x: freqs,
-            y: SDD11_dB,
-            name: 'SDD11 (dB)',
+            y: SDD11_data,
+            name: `SDD11 ${label}`,
             type: 'scatter',
-            mode: plotMode
+            mode: lineMode
         });
         traces.push({
             x: freqs,
-            y: SDD21_dB,
-            name: 'SDD21 (dB)',
+            y: SDD21_data,
+            name: `SDD21 ${label}`,
             type: 'scatter',
-            mode: plotMode
+            mode: lineMode
         });
         traces.push({
             x: freqs,
-            y: SCC11_dB,
-            name: 'SCC11 (dB)',
+            y: SCC11_data,
+            name: `SCC11 ${label}`,
             type: 'scatter',
-            mode: plotMode,
+            mode: lineMode,
             line: { dash: 'dash' }
         });
         traces.push({
             x: freqs,
-            y: SCC21_dB,
-            name: 'SCC21 (dB)',
+            y: SCC21_data,
+            name: `SCC21 ${label}`,
             type: 'scatter',
-            mode: plotMode,
+            mode: lineMode,
             line: { dash: 'dash' }
         });
     }
 
     const useLogX = document.getElementById('sparam-log-x').checked;
+    const yTitle = plotMode === 'magnitude' ? 'Magnitude (dB)' : 'Phase (degrees)';
     const layout = {
         xaxis: {
             title: 'Frequency (GHz)',
             type: useLogX ? 'log' : 'linear'
         },
         yaxis: {
-            title: 'Magnitude (dB)'
+            title: yTitle
         },
         margin: { l: 80, r: 40, t: 40, b: 60 },
         showlegend: true,
@@ -1799,6 +1966,7 @@ function bindEvents() {
     // S-parameter controls
     const sparamLength = document.getElementById('sparam-length');
     const sparamZref = document.getElementById('sparam-z-ref');
+    const sparamMode = document.getElementById('sparam-plot-mode');
     if (sparamLength) {
         sparamLength.addEventListener('change', () => {
             if (frequencySweepResults) {
@@ -1808,6 +1976,13 @@ function bindEvents() {
     }
     if (sparamZref) {
         sparamZref.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawSParamPlot();
+            }
+        });
+    }
+    if (sparamMode) {
+        sparamMode.addEventListener('change', () => {
             if (frequencySweepResults) {
                 drawSParamPlot();
             }
@@ -1840,6 +2015,15 @@ function bindEvents() {
         exportSnpBtn.addEventListener('click', () => {
             if (!frequencySweepResults || frequencySweepResults.length === 0) {
                 log('No results to export. Run simulation first.');
+                return;
+            }
+
+            // Check if geometry or frequency has changed
+            const currentGeometry = getGeometryHash();
+            const currentFrequency = getFrequencyHash();
+            if ((lastSolvedGeometry && currentGeometry !== lastSolvedGeometry) ||
+                (lastSolvedFrequency && currentFrequency !== lastSolvedFrequency)) {
+                log('Cannot export: Geometry or frequency has changed. Run simulation again.');
                 return;
             }
             const length = getInputValue('sparam-length');
@@ -1918,6 +2102,7 @@ function bindEvents() {
             el.addEventListener('input', () => {
                 updateGeometry();
                 draw();
+                updateResultNotices();
             });
         }
     });
@@ -1933,6 +2118,7 @@ function bindEvents() {
             el.addEventListener('change', () => {
                 updateGeometry();
                 draw();
+                updateResultNotices();
             });
         }
     });
@@ -1941,6 +2127,17 @@ function bindEvents() {
     document.getElementById('tl_type').addEventListener('change', () => {
         updateGeometry();
         draw(true);  // Reset zoom/pan for new geometry
+        updateResultNotices();
+    });
+
+    // Frequency inputs - update notices when changed
+    ['freq-start', 'freq-stop', 'freq-points'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('change', () => {
+                updateResultNotices();
+            });
+        }
     });
 
     // Plot options - mode selector
