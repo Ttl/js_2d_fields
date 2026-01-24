@@ -183,6 +183,14 @@ class MicrostripSolver extends FieldSolver2D {
         checkNonNegative(options.top_gnd_width, 'top_gnd_width');
         checkNonNegative(options.via_gap, 'via_gap');
 
+        if (options.trace_thickness <= -options.substrate_height) {
+            errors.push("trace_thickness must be > -substrate_height");
+        }
+
+        if (options.enclosure_height !== undefined && (options.trace_thickness > options.enclosure_height)) {
+            errors.push("trace_thickness > enclosure_height");
+        }
+
         // Top dielectric epsilon_r should be positive if top dielectric is used
         if (options.top_diel_h > 0 && options.top_diel_er !== undefined) {
             checkPositive(options.top_diel_er, 'top_diel_er');

@@ -643,7 +643,7 @@ function updateGeometry() {
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
                 tan_delta_top: p.tand_top,
-                enclosure_height: p.stripline_top_h + p.t,
+                enclosure_height: p.stripline_top_h,
                 tan_delta: p.tand,
                 sigma_cond: p.sigma,
                 freq: p.freq,
@@ -690,7 +690,7 @@ function updateGeometry() {
                 trace_spacing: p.trace_spacing,  // Enable differential mode
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
-                enclosure_height: p.stripline_top_h + p.t,
+                enclosure_height: p.stripline_top_h,
                 tan_delta: p.tand,
                 tan_delta_top: p.tand_top,
                 sigma_cond: p.sigma,
@@ -1069,7 +1069,6 @@ function interpolateGrid(x_old, y_old, z_old, x_new, y_new) {
     return z_new;
 }
 
-
 function draw(resetZoom = false) {
     if (!solver) return;
 
@@ -1267,51 +1266,11 @@ function draw(resetZoom = false) {
         yMM = [0, (solver.h || 1) * 1000];
     }
 
-    // Interpolate for smoother plots
-    const INTERP_ENABLED = true; // Control flag for interpolation
-    const INTERP_FACTOR = 4; // Interpolation multiplier
-
     // Save original mesh coordinates for mesh overlay before interpolation
     let xMM_mesh = xMM;
     let yMM_mesh = yMM;
     let nx_mesh = nx;
     let nyDisplay_mesh = nyDisplay;
-
-    if (INTERP_ENABLED && zData.length > 0 && (currentView.includes("potential") || currentView.includes("efield"))) {
-
-        const x_old = Array.from(solver.x); // Original grid X (meters)
-        const y_old = Array.from(solver.y).slice(0, nyDisplay); // Original grid Y (meters)
-
-        if (x_old.length > 1 && y_old.length > 1 && zData.length > 1 && zData[0].length > 1) {
-            const nx_interp = (nx - 1) * INTERP_FACTOR + 1;
-            const ny_interp = (nyDisplay - 1) * INTERP_FACTOR + 1;
-
-            // Create a new, uniformly spaced, finer grid for interpolation
-            const x_new = new Float64Array(nx_interp);
-            const y_new = new Float64Array(ny_interp);
-
-            const x_min = x_old[0];
-            const x_max = x_old[x_old.length - 1];
-            const y_min = y_old[0];
-            const y_max = y_old[y_old.length - 1];
-
-            for (let i = 0; i < nx_interp; i++) {
-                x_new[i] = x_min + (x_max - x_min) * i / (nx_interp - 1);
-            }
-            for (let j = 0; j < ny_interp; j++) {
-                y_new[j] = y_min + (y_max - y_min) * j / (ny_interp - 1);
-            }
-
-            // Perform interpolation from the original zData to the new grid
-            const z_interp = interpolateGrid(x_old, y_old, zData, x_new, y_new);
-
-            // Update plot variables with the new, higher-resolution data
-            xMM = Array.from(x_new, v => v * 1000);
-            yMM = Array.from(y_new, v => v * 1000);
-            zData = z_interp;
-        }
-    }
-
 
     // Main field trace
     let traces = [];
@@ -1495,6 +1454,9 @@ function draw(resetZoom = false) {
                     if (currentView === "efield") return 2;
                     return 0;
                 })(),
+                bgcolor: '#2a2a2a',
+                bordercolor: '#444',
+                font: { color: '#aaa' },
                 buttons: (() => {
                     const buttons = [
                         {
@@ -1529,6 +1491,9 @@ function draw(resetZoom = false) {
                     y: 1.15,
                     showactive: true,
                     active: modeIndex,
+                    bgcolor: '#2a2a2a',
+                    bordercolor: '#444',
+                    font: { color: '#aaa' },
                     buttons: [
                         {
                             label: "Odd Mode",
@@ -1818,6 +1783,12 @@ function drawSParamPlot() {
 
     const length = getInputValue('sparam-length');
     const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
+
+    // Check for invalid inputs
+    if (isNaN(length) || length <= 0 || isNaN(Z_ref) || Z_ref <= 0) {
+        return;
+    }
+
     const isDifferential = solver && solver.is_differential;
     const plotMode = document.getElementById('sparam-plot-mode').value; // 'magnitude' or 'phase'
 
@@ -2006,14 +1977,14 @@ function bindEvents() {
     const sparamZref = document.getElementById('sparam-z-ref');
     const sparamMode = document.getElementById('sparam-plot-mode');
     if (sparamLength) {
-        sparamLength.addEventListener('change', () => {
+        sparamLength.addEventListener('input', () => {
             if (frequencySweepResults) {
                 drawSParamPlot();
             }
         });
     }
     if (sparamZref) {
-        sparamZref.addEventListener('change', () => {
+        sparamZref.addEventListener('input', () => {
             if (frequencySweepResults) {
                 drawSParamPlot();
             }
