@@ -1393,6 +1393,143 @@ export class FieldSolver2D {
     }
 
     /**
+     * Update frequency-dependent parameters.
+     * @param {number} freq - Frequency in Hz
+     */
+    _setFrequency(freq) {
+        this.freq = freq;
+        this.omega = 2 * Math.PI * freq;
+        this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
+    }
+
+    /**
+     * Perform a frequency sweep with automatic mesh generation at optimal frequency.
+     * This is the recommended single-entry-point API for frequency sweeps.
+     *
+     * @param {object} options - Sweep configuration
+     * @param {number[]} options.frequencies - Array of frequencies in Hz
+     * @param {number} [options.energy_tol=0.02] - Energy convergence tolerance for adaptive mesh
+     * @param {number} [options.max_nodes=20000] - Maximum mesh nodes
+     * @param {function} [options.onProgress] - Progress callback
+     * @param {function} [options.shouldStop] - Stop check callback
+     * @returns {Promise<object>} - Results organized for plotting:
+     *   {
+     *     frequencies: [...],
+     *     modes: [{
+     *       mode: 'single'|'odd'|'even',
+     *       Z0: [...], Zc_re: [...], Zc_im: [...],
+     *       eps_eff: [...],
+     *       alpha_c: [...], alpha_d: [...], alpha_total: [...],
+     *       RLGC: { R: [...], L: [...], G: [...], C: [...] },
+     *       C: number, C0: number  // static values
+     *     }, ...],
+     *     Z_diff: [...],    // differential only
+     *     Z_common: [...],  // differential only
+     *     mesh: { nx, ny }
+     *   }
+     */
+    async solve_sweep(options = {}) {
+        const {
+            frequencies,
+            energy_tol = 0.02,
+            max_nodes = 20000,
+            onProgress = null,
+            shouldStop = null
+        } = options;
+
+        // Validate frequencies
+        if (!frequencies || !Array.isArray(frequencies) || frequencies.length === 0) {
+            throw new Error('frequencies must be a non-empty array');
+        }
+
+        // Sort frequencies and find max for optimal meshing
+        const sortedFreqs = [...frequencies].sort((a, b) => a - b);
+        const maxFreq = sortedFreqs[sortedFreqs.length - 1];
+
+        // Set frequency to max for finest skin depth mesh
+        this._setFrequency(maxFreq);
+
+        // Force mesh regeneration
+        this.mesh_generated = false;
+
+        // Generate mesh and run adaptive refinement
+        if (this.ensure_mesh) {
+            this.ensure_mesh();
+        }
+
+        const initResult = await this.solve_adaptive({
+            energy_tol,
+            max_nodes,
+            onProgress,
+            shouldStop
+        });
+
+        // Initialize result arrays
+        const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
+        const resultModes = modeNames.map(modeName => {
+            const initMode = initResult.modes.find(m => m.mode === modeName);
+            return {
+                mode: modeName,
+                Z0: [],
+                Zc_re: [],
+                Zc_im: [],
+                eps_eff: [],
+                alpha_c: [],
+                alpha_d: [],
+                alpha_total: [],
+                RLGC: { R: [], L: [], G: [], C: [] },
+                C: initMode.C,
+                C0: initMode.C0
+            };
+        });
+
+        const result = {
+            frequencies: [],
+            modes: resultModes,
+            mesh: { nx: this.x.length, ny: this.y.length }
+        };
+
+        if (this.is_differential) {
+            result.Z_diff = [];
+            result.Z_common = [];
+        }
+
+        // Compute at each frequency
+        for (const freq of sortedFreqs) {
+            const freqResult = this.computeAtFrequency(freq, initResult);
+
+            result.frequencies.push(freq);
+
+            // Extract mode results
+            for (let i = 0; i < modeNames.length; i++) {
+                const modeName = modeNames[i];
+                const modeResult = freqResult.modes.find(m => m.mode === modeName);
+                const outMode = resultModes[i];
+
+                outMode.Z0.push(modeResult.Z0);
+                outMode.Zc_re.push(modeResult.Zc.re);
+                outMode.Zc_im.push(modeResult.Zc.im);
+                outMode.eps_eff.push(modeResult.eps_eff);
+                outMode.alpha_c.push(modeResult.alpha_c);
+                outMode.alpha_d.push(modeResult.alpha_d);
+                outMode.alpha_total.push(modeResult.alpha_total);
+                outMode.RLGC.R.push(modeResult.RLGC.R);
+                outMode.RLGC.L.push(modeResult.RLGC.L);
+                outMode.RLGC.G.push(modeResult.RLGC.G);
+                outMode.RLGC.C.push(modeResult.RLGC.C);
+            }
+
+            // Differential-specific results
+            if (this.is_differential) {
+                result.Z_diff.push(freqResult.Z_diff);
+                result.Z_common.push(freqResult.Z_common);
+            }
+        }
+
+        return result;
+    }
+
+    /**
      * Compute frequency-dependent results using cached fields.
      * This is a fast path for frequency sweeps where only frequency changes,
      * not the geometry or dielectric distribution.
