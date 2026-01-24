@@ -170,7 +170,7 @@ function draw(resetZoom = false) {
         const V = getPotential();
         if (V && V.length >= nyDisplay) {
             for (let i = 0; i < nyDisplay; i++) {
-                zData.push(V[i].slice(0, nx));
+                zData.push(Array.from(V[i].slice(0, nx)));
             }
         }
     }
