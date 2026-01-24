@@ -99,55 +99,48 @@ function computeZ0(freq, rlgc) {
  * @returns {object} - {S: 4x4 array of Complex, SDD11, SDD21, SCC11, SCC21, SDC11, SDC21, SCD11, SCD21}
  */
 function computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref) {
-    // Compute modal characteristic impedances
-    const Z0_odd = computeZ0(freq, rlgc_odd);
-    const Z0_even = computeZ0(freq, rlgc_even);
-
-    // Compute single-ended S-params for each mode using modal impedances as reference
-    const S_odd = computeSParamsSingleEnded(freq, rlgc_odd, length, Z0_odd);
-    const S_even = computeSParamsSingleEnded(freq, rlgc_even, length, Z0_even);
+    // Compute single-ended S-params for each mode using system reference impedance
+    const S_odd = computeSParamsSingleEnded(freq, rlgc_odd, length, Z_ref);
+    const S_even = computeSParamsSingleEnded(freq, rlgc_even, length, Z_ref);
 
     // For ideal symmetric differential pairs with no coupling between modes,
     // the 4-port S-matrix can be constructed from odd and even mode responses.
     //
-    // Mixed-mode S-parameters:
-    // SDD = (S_odd) - differential mode
-    // SCC = (S_even) - common mode
-    // SDC = 0 (no mode conversion for symmetric line)
-    // SCD = 0
-
-    // The full 4-port S-matrix (standard single-ended ports):
-    // Port assignment: 1=in+, 2=out+, 3=in-, 4=out-
+    // Port assignment:
+    //   Port 1 = near end, trace + (in+)
+    //   Port 2 = near end, trace - (in-)
+    //   Port 3 = far end, trace + (out+)
+    //   Port 4 = far end, trace - (out-)
     //
-    // For symmetric coupled lines:
-    // S11 = S33 = (S_odd_11 + S_even_11) / 2
-    // S22 = S44 = (S_odd_22 + S_even_22) / 2
-    // S21 = S43 = (S_odd_21 + S_even_21) / 2
-    // S12 = S34 = (S_odd_12 + S_even_12) / 2
-    // S13 = S31 = (S_even_11 - S_odd_11) / 2
-    // S24 = S42 = (S_even_22 - S_odd_22) / 2
-    // S23 = S41 = (S_even_21 - S_odd_21) / 2
-    // S14 = S32 = (S_even_12 - S_odd_12) / 2
+    // Modal decomposition for symmetric coupled lines:
+    //   When exciting port 1 (a1=1, others=0):
+    //   - Odd mode excitation: a_odd = (a1 - a2)/√2 = 1/√2
+    //   - Even mode excitation: a_even = (a1 + a2)/√2 = 1/√2
+    //
+    // S-parameter formulas (for symmetric coupled lines):
+    //   S11 = S22 = (S_odd_11 + S_even_11) / 2  (reflection at near end)
+    //   S33 = S44 = (S_odd_22 + S_even_22) / 2  (reflection at far end)
+    //   S21 = S12 = (S_even_11 - S_odd_11) / 2  (near-end coupling, NEXT)
+    //   S43 = S34 = (S_even_22 - S_odd_22) / 2  (far-end reflection coupling)
+    //   S31 = S13 = S42 = S24 = (S_odd_21 + S_even_21) / 2  (through transmission)
+    //   S41 = S14 = S32 = S23 = (S_even_21 - S_odd_21) / 2  (far-end coupling, FEXT)
 
     const half = new Complex(0.5, 0);
 
     // Calculate 4-port S-parameters
-    const S11 = S_odd.S11.add(S_even.S11).mul(half);
-    const S22 = S_odd.S22.add(S_even.S22).mul(half);
-    const S21 = S_odd.S21.add(S_even.S21).mul(half);
-    const S12 = S_odd.S12.add(S_even.S12).mul(half);
-    const S13 = S_even.S11.sub(S_odd.S11).mul(half);
-    const S24 = S_even.S22.sub(S_odd.S22).mul(half);
-    const S23 = S_even.S21.sub(S_odd.S21).mul(half);
-    const S14 = S_even.S12.sub(S_odd.S12).mul(half);
+    const Snn = S_odd.S11.add(S_even.S11).mul(half);   // Near-end reflection (S11, S22)
+    const Sff = S_odd.S22.add(S_even.S22).mul(half);   // Far-end reflection (S33, S44)
+    const Snext = S_even.S11.sub(S_odd.S11).mul(half); // Near-end coupling (S21, S12)
+    const Sfref = S_even.S22.sub(S_odd.S22).mul(half); // Far-end reflection coupling (S43, S34)
+    const Sthru = S_odd.S21.add(S_even.S21).mul(half); // Through transmission (S31, S13, S42, S24)
+    const Sfext = S_even.S21.sub(S_odd.S21).mul(half); // Far-end coupling (S41, S14, S32, S23)
 
     // Build 4x4 matrix (symmetric coupled line)
-    // Port assignment: 1=in+, 2=out+, 3=in-, 4=out-
     const S = [
-        [S11, S12, S13, S14],  // Row 1: S11, S12, S13, S14
-        [S21, S22, S23, S24],  // Row 2: S21, S22, S23, S24
-        [S13, S14, S11, S12],  // Row 3: S31, S32, S33, S34
-        [S23, S24, S21, S22]   // Row 4: S41, S42, S43, S44
+        [Snn,   Snext, Sthru, Sfext],  // Row 1: S11, S12, S13, S14
+        [Snext, Snn,   Sfext, Sthru],  // Row 2: S21, S22, S23, S24
+        [Sthru, Sfext, Sff,   Sfref],  // Row 3: S31, S32, S33, S34
+        [Sfext, Sthru, Sfref, Sff  ]   // Row 4: S41, S42, S43, S44
     ];
 
     // Mixed-mode S-parameters (for plotting)
