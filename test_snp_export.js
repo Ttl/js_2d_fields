@@ -47,6 +47,7 @@ function parseS2P_DB(filename) {
     const data = [];
 
     let freqUnit = 1e9; // Default GHz
+    let formatVerified = false;
 
     for (const line of lines) {
         const trimmed = line.trim();
@@ -55,6 +56,13 @@ function parseS2P_DB(filename) {
         // Parse option line
         if (trimmed.startsWith('#')) {
             const parts = trimmed.toUpperCase().split(/\s+/);
+
+            // Verify format is DB
+            if (!parts.includes('DB')) {
+                throw new Error(`Expected DB format but found: ${trimmed}`);
+            }
+            formatVerified = true;
+
             if (parts.includes('HZ')) freqUnit = 1;
             else if (parts.includes('KHZ')) freqUnit = 1e3;
             else if (parts.includes('MHZ')) freqUnit = 1e6;
@@ -65,6 +73,9 @@ function parseS2P_DB(filename) {
         // Parse data line
         const parts = trimmed.split(/\s+/).map(parseFloat);
         if (parts.length >= 9 && !isNaN(parts[0])) {
+            if (!formatVerified) {
+                throw new Error('Missing format specification line (# ...)');
+            }
             // Format: freq S11_dB S11_ang S21_dB S21_ang S12_dB S12_ang S22_dB S22_ang
             data.push({
                 freq: parts[0] * freqUnit,
@@ -79,13 +90,96 @@ function parseS2P_DB(filename) {
 }
 
 /**
+ * Parse Touchstone S2P file in MA format (magnitude + angle)
+ * @param {string} filename - Path to the S2P file
+ * @returns {Array<{freq: number, S11: Complex, S21: Complex, S12: Complex, S22: Complex}>}
+ */
+function parseS2P_MA(filename) {
+    const content = readFileSync(filename, 'utf-8');
+    const lines = content.split('\n');
+    const data = [];
+
+    let freqUnit = 1e9; // Default GHz
+    let formatVerified = false;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('!')) continue;
+
+        // Parse option line
+        if (trimmed.startsWith('#')) {
+            const parts = trimmed.toUpperCase().split(/\s+/);
+
+            // Verify format is MA
+            if (!parts.includes('MA')) {
+                throw new Error(`Expected MA format but found: ${trimmed}`);
+            }
+            formatVerified = true;
+
+            if (parts.includes('HZ')) freqUnit = 1;
+            else if (parts.includes('KHZ')) freqUnit = 1e3;
+            else if (parts.includes('MHZ')) freqUnit = 1e6;
+            else if (parts.includes('GHZ')) freqUnit = 1e9;
+            continue;
+        }
+
+        // Parse data line
+        const parts = trimmed.split(/\s+/).map(parseFloat);
+        if (parts.length >= 9 && !isNaN(parts[0])) {
+            if (!formatVerified) {
+                throw new Error('Missing format specification line (# ...)');
+            }
+            // Format: freq S11_mag S11_ang S21_mag S21_ang S12_mag S12_ang S22_mag S22_ang
+            data.push({
+                freq: parts[0] * freqUnit,
+                S11: magAngToComplex(parts[1], parts[2]),
+                S21: magAngToComplex(parts[3], parts[4]),
+                S12: magAngToComplex(parts[5], parts[6]),
+                S22: magAngToComplex(parts[7], parts[8])
+            });
+        }
+    }
+    return data;
+}
+
+/**
  * Parse Touchstone S4P file in MA format (magnitude + angle)
  * @param {string} filename - Path to the S4P file
  * @returns {Array<{freq: number, S: Array<Array<Complex>>}>}
  */
 function parseS4P_MA(filename) {
     const content = readFileSync(filename, 'utf-8');
-    const lines = content.split('\n').filter(l => {
+    const allLines = content.split('\n');
+
+    let freqUnit = 1e9; // Default GHz
+    let formatVerified = false;
+
+    // Check format in header
+    for (const line of allLines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('#')) {
+            const parts = trimmed.toUpperCase().split(/\s+/);
+
+            // Verify format is MA
+            if (!parts.includes('MA')) {
+                throw new Error(`Expected MA format but found: ${trimmed}`);
+            }
+            formatVerified = true;
+
+            if (parts.includes('HZ')) freqUnit = 1;
+            else if (parts.includes('KHZ')) freqUnit = 1e3;
+            else if (parts.includes('MHZ')) freqUnit = 1e6;
+            else if (parts.includes('GHZ')) freqUnit = 1e9;
+            break;
+        }
+    }
+
+    if (!formatVerified) {
+        throw new Error('Missing format specification line (# ...)');
+    }
+
+    // Filter out comments and option lines for data parsing
+    const lines = allLines.filter(l => {
         const t = l.trim();
         return t && !t.startsWith('!') && !t.startsWith('#');
     });
@@ -100,7 +194,7 @@ function parseS4P_MA(filename) {
             continue;
         }
 
-        const freq = parts1[0] * 1e9; // GHz to Hz
+        const freq = parts1[0] * freqUnit;
         const S = [[null, null, null, null],
                    [null, null, null, null],
                    [null, null, null, null],
@@ -133,13 +227,13 @@ async function test_s2p_generation() {
     console.log('S2P GENERATION TEST');
     console.log(`${'='.repeat(80)}`);
 
-    const reference = parseS2P_DB('./ms_2d_fr4_sweep.s2p');
+    const reference = parseS2P_MA('./ms_2d_fr4_causal_5mm.s2p');
     console.log(`Loaded ${reference.length} frequency points from reference`);
 
     // Setup solver with same parameters as reference
     const solver = new MicrostripSolver({
         substrate_height: 1.6e-3,
-        trace_width: 3e-3,
+        trace_width: 1e-3,
         trace_thickness: 35e-6,
         gnd_thickness: 35e-6,
         epsilon_r: 4.5,
@@ -150,7 +244,7 @@ async function test_s2p_generation() {
         ny: 10,
         boundaries: ["open", "open", "open", "gnd"]
     });
-    solver.use_causal_materials = false;
+    solver.use_causal_materials = true;
 
     const sweepResults = await solver.solve_sweep({
         frequencies: reference.map(r => r.freq),
@@ -160,7 +254,103 @@ async function test_s2p_generation() {
     console.log(`Mesh: ${sweepResults.mesh.nx}x${sweepResults.mesh.ny}`);
     console.log(`Frequencies: ${sweepResults.frequencies.length} points`);
 
-    const length = 1.0; // 1 m line length
+    const length = 5e-3;
+    const Z_ref = 50;
+
+    let all_passed = true;
+    const maxErrors = { S11: 0, S21: 0, S12: 0, S22: 0 };
+    const tolerances = { S11: 0.1, S21: 0.25, S12: 0.25, S22: 0.1 };
+
+    console.log(`\n${'Freq'.padEnd(8)} ${'|ΔS11|'.padEnd(10)} ${'|ΔS21|'.padEnd(10)} ${'|ΔS12|'.padEnd(10)} ${'|ΔS22|'.padEnd(10)} Status`);
+    console.log(`${'-'.repeat(70)}`);
+
+    for (let i = 0; i < reference.length; i++) {
+        const refPoint = reference[i];
+        const freq = sweepResults.frequencies[i];
+        const mode = sweepResults.modes[0];
+
+        // Build RLGC object from arrays
+        const RLGC = {
+            R: mode.RLGC.R[i],
+            L: mode.RLGC.L[i],
+            G: mode.RLGC.G[i],
+            C: mode.RLGC.C[i]
+        };
+
+        // Compute S-parameters
+        const sp = computeSParamsSingleEnded(freq, RLGC, length, Z_ref);
+
+        // Compute absolute differences
+        const errors = {
+            S11: complexAbsDiff(sp.S11, refPoint.S11),
+            S21: complexAbsDiff(sp.S21, refPoint.S21),
+            S12: complexAbsDiff(sp.S12, refPoint.S12),
+            S22: complexAbsDiff(sp.S22, refPoint.S22)
+        };
+
+        // Track max errors
+        for (const key of Object.keys(errors)) {
+            maxErrors[key] = Math.max(maxErrors[key], errors[key]);
+        }
+
+        const passed = errors.S11 < tolerances.S11 &&
+                       errors.S21 < tolerances.S21 &&
+                       errors.S12 < tolerances.S12 &&
+                       errors.S22 < tolerances.S22;
+        all_passed = all_passed && passed;
+
+        const freqGHz = (freq / 1e9).toFixed(2);
+        const status = passed ? '✓' : '✗';
+        console.log(`${freqGHz.padEnd(8)} ${errors.S11.toFixed(4).padEnd(10)} ${errors.S21.toFixed(4).padEnd(10)} ${errors.S12.toFixed(4).padEnd(10)} ${errors.S22.toFixed(4).padEnd(10)} ${status}`);
+    }
+
+    console.log(`${'-'.repeat(70)}`);
+    console.log(`Max absolute errors: S11=${maxErrors.S11.toFixed(4)}, S21=${maxErrors.S21.toFixed(4)}, S12=${maxErrors.S12.toFixed(4)}, S22=${maxErrors.S22.toFixed(4)}`);
+    console.log(`Overall Result: ${all_passed ? '✓ ALL TESTS PASSED' : '✗ SOME TESTS FAILED'}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (!all_passed) {
+        throw new Error('S2P solve_sweep test failed');
+    }
+}
+
+async function test_s2p_generation2() {
+    console.log(`\n${'='.repeat(80)}`);
+    console.log('S2P GENERATION TEST 2');
+    console.log(`${'='.repeat(80)}`);
+
+    const reference = parseS2P_MA('./stripline_2d_causal.s2p');
+    console.log(`Loaded ${reference.length} frequency points from reference`);
+
+    // Setup solver with same parameters as reference
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2e-3,
+        trace_width: 0.3e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 16e-6,
+        epsilon_r: 4.1,
+        epsilon_r_top: 4.1,
+        tan_delta: 0.02,
+        tan_delta_top: 0.02,
+        enclosure_height: 0.2e-3 + 35e-6,
+        enclosure_width: 3e-3,
+        freq: 67e9,
+        nx: 10,
+        ny: 10,
+        boundaries: ["gnd", "gnd", "gnd", "gnd"]
+    });
+
+    solver.use_causal_materials = true;
+
+    const sweepResults = await solver.solve_sweep({
+        frequencies: reference.map(r => r.freq),
+        energy_tol: 0.01
+    });
+
+    console.log(`Mesh: ${sweepResults.mesh.nx}x${sweepResults.mesh.ny}`);
+    console.log(`Frequencies: ${sweepResults.frequencies.length} points`);
+
+    const length = 50e-3;
     const Z_ref = 50;
 
     let all_passed = true;
@@ -436,9 +626,10 @@ async function test_s4p_generation_lossless() {
 
 // Run tests
 async function runTests() {
+    await test_s2p_generation2();
+    await test_s2p_generation();
     await test_s4p_generation_lossless();
     await test_s4p_generation();
-    await test_s2p_generation();
 }
 
 runTests();
