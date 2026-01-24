@@ -601,13 +601,11 @@
         <h3>Plot Options</h3>
     </div>
     <div class="section-content">
-        <div class="control-group" id="plot-mode-group" style="display: none;">
-            <label>Mode</label>
-            <select id="plot-mode">
-                <option value="odd">Odd</option>
-                <option value="even">Even</option>
-            </select>
-        </div>
+        <!-- Mode selector hidden - now in Plotly menu -->
+        <select id="plot-mode" style="display: none;">
+            <option value="odd">Odd</option>
+            <option value="even">Even</option>
+        </select>
         <div class="control-group">
             <label>Streamlines</label>
             <input type="number" id="plot-streamlines" value="20" step="5" min="0" placeholder="None">

@@ -476,13 +476,6 @@ function updateGeometry() {
     const p = getParams();
     currentView = "geometry";
 
-    // Show/hide mode selector based on differential transmission line
-    const isDiff = p.tl_type.startsWith('diff_');
-    const modeGroup = document.getElementById('plot-mode-group');
-    if (modeGroup) {
-        modeGroup.style.display = isDiff ? 'block' : 'none';
-    }
-
     try {
         if (p.tl_type === 'gcpw') {
             const options = {
@@ -1323,85 +1316,55 @@ function draw(resetZoom = false) {
     if (currentView === "geometry" && zData.length > 0) {
         const { Ex, Ey } = getFields();
 
-        //const fieldTraces = [];
-
-        //const stepX = Math.max(1, Math.floor(nx / 30));        // density control
-        //const stepY = Math.max(1, Math.floor(nyDisplay / 30));
-        //const scale = 0.8; // arrow length in mm
-
-
-        //if (Ex && Ey && Ex.length >= nyDisplay) {
-        //    const xLines = [];
-        //    const yLines = [];
-
-        //    for (let i = 0; i < nyDisplay; i += stepY) {
-        //        for (let j = 0; j < nx; j += stepX) {
-        //            const ex = Ex[i]?.[j];
-        //            const ey = Ey[i]?.[j];
-        //            if (!ex || !ey) continue;
-
-        //            const mag = Math.hypot(ex, ey);
-        //            if (mag === 0) continue;
-
-        //            // Base point (mm)
-        //            const x0 = xMM[j];
-        //            const y0 = yMM[i];
-
-        //            // Direction (normalized)
-        //            const dx = (ex / mag) * scale;
-        //            const dy = (ey / mag) * scale;
-
-        //            // Line segment
-        //            xLines.push(x0, x0 + dx, null);
-        //            yLines.push(y0, y0 + dy, null);
-        //        }
-        //    }
-
-        //    traces.push({
-        //        type: "scatter",
-        //        mode: "lines",
-        //        x: xLines,
-        //        y: yLines,
-        //        line: {
-        //            width: 1.2,
-        //            color: "black"
-        //        },
-        //        hoverinfo: "skip",
-        //        name: "E-field lines"
-        //    });
-        //}
-        //
-        //traces.push({
-        //    type: "contour",
-        //    x: xMM,
-        //    y: yMM,
-        //    z: zData,
-        //    colorscale: "Hot",
-        //    opacity: 0.6,
-        //    contours: {
-        //        showlines: true,
-        //        coloring: "heatmap",
-        //        ncontours: 15
-        //    },
-        //    colorbar: {
-        //        title: "|E| (V/m)",
-        //        len: 0.6
-        //    },
-        //    hovertemplate:
-        //        "x: %{x:.2f} mm<br>" +
-        //        "y: %{y:.2f} mm<br>" +
-        //        "|E|: %{z:.3e} V/m<extra></extra>"
-        //});
+        // Add E-field contours if requested
+        if (plotOptions.contours > 0) {
+            traces.push({
+                type: "contour",
+                x: xMM,
+                y: yMM,
+                z: zData,
+                colorscale: "Hot",
+                opacity: 0.5,
+                contours: {
+                    showlines: true,
+                    coloring: "heatmap",
+                    size: 0,  // Auto-calculate
+                    ncontours: plotOptions.contours
+                },
+                line: {
+                    smoothing: 1.3,
+                    width: 0.5
+                },
+                colorbar: {
+                    title: "|E| (V/m)",
+                    len: 0.6
+                },
+                hovertemplate:
+                    "x: %{x:.2f} mm<br>" +
+                    "y: %{y:.2f} mm<br>" +
+                    "|E|: %{z:.3e} V/m<extra></extra>"
+            });
+        }
 
         // Add streamlines if requested via plot options
         if (plotOptions.streamlines > 0) {
+            // Adjust conductor polarities for even mode
+            const modeIndex = getSelectedModeIndex();
+            const adjustedConductors = solver.conductors.map(c => {
+                // In even mode, both signal conductors should have positive polarity
+                if (modeIndex === 1 && c.is_signal) {
+                    return { ...c, polarity: 1 };
+                }
+                return c;
+            });
+
             traces.push(
                 makeStreamlineTraceFromConductors(
                     Ex,
                     Ey,
                     solver.x,
                     solver.y,
-                    solver.conductors,
+                    adjustedConductors,
                     plotOptions.streamlines
                 )
             );
@@ -1500,8 +1463,11 @@ function draw(resetZoom = false) {
         plot_bgcolor: "#f8f9fa",
         shapes: shapes,  // Add vector shapes for geometry
 
-        updatemenus: [
-            {
+        updatemenus: (() => {
+            const menus = [];
+
+            // View selector (Geometry/Potential/E-field)
+            menus.push({
                 x: 0.01,
                 y: 1.15,
                 showactive: true,
@@ -1535,8 +1501,33 @@ function draw(resetZoom = false) {
 
                     return buttons;
                 })()
+            });
+
+            // Mode selector (Odd/Even) - only for differential lines
+            if (isDifferentialMode()) {
+                const modeIndex = getSelectedModeIndex();
+                menus.push({
+                    x: 0.25,
+                    y: 1.15,
+                    showactive: true,
+                    active: modeIndex,
+                    buttons: [
+                        {
+                            label: "Odd Mode",
+                            method: "skip",
+                            args: []
+                        },
+                        {
+                            label: "Even Mode",
+                            method: "skip",
+                            args: []
+                        }
+                    ]
+                });
             }
-        ]
+
+            return menus;
+        })()
     };
 
     const config = {
@@ -1566,14 +1557,25 @@ function draw(resetZoom = false) {
 
     if (!container._viewListenerBound) {
         container.on('plotly_buttonclicked', (event) => {
-            // View handling: Geometry(0), Potential(1), E-field(2)
-            // Mode selector in sidebar controls odd/even for differential lines
-            if (event.menu.active === 0) {
-                currentView = "geometry";
-            } else if (event.menu.active === 1) {
-                currentView = "potential";
-            } else if (event.menu.active === 2) {
-                currentView = "efield";
+            // Determine which menu was clicked based on x position
+            // First menu (x=0.01): View selector (Geometry/Potential/E-field)
+            // Second menu (x=0.25): Mode selector (Odd/Even) - only for differential
+
+            if (event.menu.x < 0.2) {
+                // View selector clicked
+                if (event.menu.active === 0) {
+                    currentView = "geometry";
+                } else if (event.menu.active === 1) {
+                    currentView = "potential";
+                } else if (event.menu.active === 2) {
+                    currentView = "efield";
+                }
+            } else {
+                // Mode selector clicked (differential lines only)
+                const plotModeEl = document.getElementById('plot-mode');
+                if (plotModeEl) {
+                    plotModeEl.value = event.menu.active === 0 ? 'odd' : 'even';
+                }
             }
             draw();
         });
