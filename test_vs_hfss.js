@@ -728,9 +728,6 @@ function magTodB(mag) {
     return 20 * Math.log10(Math.max(mag, 1e-15));
 }
 
-/**
- * Test S2P generation against reference file using absolute difference
- */
 async function test_s2p_generation() {
     console.log(`\n${'='.repeat(80)}`);
     console.log('S2P GENERATION TEST (vs HFSS reference) - Absolute Difference');
@@ -771,17 +768,18 @@ async function test_s2p_generation() {
     // S21/S12 (insertion loss) differences accumulate over the 1m line length,
     // so small per-unit-length differences lead to larger S-param differences
     const tolerances = { S11: 0.1, S21: 0.25, S12: 0.25, S22: 0.1 };
+    const init_result = await solver.solve_adaptive({energy_tol: 0.01});
 
     console.log(`\n${'Freq'.padEnd(8)} ${'|ΔS11|'.padEnd(10)} ${'|ΔS21|'.padEnd(10)} ${'|ΔS12|'.padEnd(10)} ${'|ΔS22|'.padEnd(10)} Status`);
     console.log(`${'-'.repeat(70)}`);
 
     for (const refPoint of reference) {
         // Update frequency and solve
-        solver.freq = refPoint.freq;
+        const freq = refPoint.freq;
         solver.omega = 2 * Math.PI * solver.freq;
         solver.delta_s = Math.sqrt(2 / (solver.omega * 4 * Math.PI * 1e-7 * solver.sigma_cond));
 
-        const result = await solver.solve_adaptive({energy_tol: 0.05});
+        const result = solver.computeAtFrequency(freq, init_result);
         const mode = result.modes[0];
 
         // Compute S-parameters
@@ -869,17 +867,18 @@ async function test_s4p_generation() {
     // Tolerance for absolute difference
     // Similar to S2P, differences accumulate over the 1m line length
     const tolerance = 0.25;
+    const init_result = await solver.solve_adaptive({energy_tol: 0.01});
 
     console.log(`\n${'Freq'.padEnd(8)} ${'Max|ΔSij|'.padEnd(12)} ${'Worst Sij'.padEnd(10)} Status`);
     console.log(`${'-'.repeat(50)}`);
 
     for (const refPoint of reference) {
         // Update frequency and solve
-        solver.freq = refPoint.freq;
+        const freq = refPoint.freq;
         solver.omega = 2 * Math.PI * solver.freq;
         solver.delta_s = Math.sqrt(2 / (solver.omega * 4 * Math.PI * 1e-7 * solver.sigma_cond));
 
-        const result = await solver.solve_adaptive({energy_tol: 0.05});
+        const result = solver.computeAtFrequency(freq, init_result);
         const oddMode = result.modes.find(m => m.mode === 'odd');
         const evenMode = result.modes.find(m => m.mode === 'even');
 
