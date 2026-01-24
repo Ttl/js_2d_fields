@@ -150,6 +150,7 @@ async function test_s2p_generation() {
         ny: 10,
         boundaries: ["open", "open", "open", "gnd"]
     });
+    solver.use_causal_materials = false;
 
     const sweepResults = await solver.solve_sweep({
         frequencies: reference.map(r => r.freq),

@@ -4,6 +4,7 @@ import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView } from './plot.js';
+import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 const Plotly = window.Plotly;
 
 let solver = null;
@@ -97,6 +98,7 @@ function getUISettings() {
         rq: getDisplayValue('inp_rq'),
         sparam_length: getDisplayValue('sparam-length'),
         sparam_z_ref: parseFloat(document.getElementById('sparam-z-ref').value),
+        use_causal_materials: document.getElementById('chk_causal_materials').checked ? 1 : 0,
     };
 }
 
@@ -187,6 +189,8 @@ function restoreSettings(settings) {
         if (settings.tolerance !== undefined) document.getElementById('inp_tolerance').value = settings.tolerance;
         if (settings.max_nodes !== undefined) document.getElementById('inp_max_nodes').value = settings.max_nodes;
         setValueWithUnit('inp_rq', settings.rq);
+
+        if (settings.use_causal_materials !== undefined) document.getElementById('chk_causal_materials').checked = !!settings.use_causal_materials;
 
         setValueWithUnit('sparam-length', settings.sparam_length);
         if (settings.sparam_z_ref !== undefined) document.getElementById('sparam-z-ref').value = settings.sparam_z_ref;
@@ -470,6 +474,8 @@ function getParams() {
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         // Surface roughness parameter
         rq: getInputValue('inp_rq'),
+        // Causal material parameters
+        use_causal_materials: document.getElementById('chk_causal_materials').checked,
     };
 }
 
@@ -764,6 +770,11 @@ function updateGeometry() {
 
             solver = new MicrostripSolver(options);
         }
+
+        // Store causal materials option on solver
+        if (solver) {
+            solver.use_causal_materials = p.use_causal_materials;
+        }
     } catch (error) {
         // Log validation errors to the console
         log('ERROR: ' + error.message);
@@ -807,6 +818,7 @@ async function runSimulation() {
         log("Mesh generated: " + solver.x.length + "x" + solver.y.length);
 
         // Run adaptive refinement at highest frequency first
+        // Note: Causal materials will be applied during frequency sweep in computeAtFrequency()
         log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes, tolerance ${p.tolerance})...`);
 
         let results = await solver.solve_adaptive({
@@ -831,8 +843,18 @@ async function runSimulation() {
             return;
         }
 
-        // Store the first result (highest frequency)
-        frequencySweepResults.push({ freq: maxFreq, result: results });
+        // Use the initial results as cache for frequency-dependent calculations
+        const cachedResults = results;
+
+        // If causal materials are enabled, recalculate max frequency with the model applied
+        // (solve_adaptive used non-causal materials during mesh refinement)
+        if (solver.use_causal_materials) {
+            const maxFreqResult = await solver.computeAtFrequency(maxFreq, cachedResults);
+            frequencySweepResults.push({ freq: maxFreq, result: maxFreqResult });
+        } else {
+            // Store the result from solve_adaptive (non-causal)
+            frequencySweepResults.push({ freq: maxFreq, result: results });
+        }
 
         // Redraw to show E-field overlay on geometry
         draw();
@@ -842,13 +864,10 @@ async function runSimulation() {
         // only the losses depend on frequency, so we can reuse the cached results.
         log(`Calculating frequency sweep (${frequencies.length} points)...`);
 
-        // Use the initial results as cache for frequency-dependent calculations
-        const cachedResults = results;
-
         for (let i = 0; i < frequencies.length; i++) {
             const freq = frequencies[i];
 
-            // Skip if this is the max frequency (already calculated)
+            // Skip if this is the max frequency (already calculated above)
             if (freq === maxFreq) {
                 continue;
             }
@@ -859,7 +878,8 @@ async function runSimulation() {
             }
 
             // Use optimized frequency sweep - only recalculates frequency-dependent losses
-            const result = solver.computeAtFrequency(freq, cachedResults);
+            // (or full solve if causal materials are enabled)
+            const result = await solver.computeAtFrequency(freq, cachedResults);
 
             frequencySweepResults.push({ freq, result });
 

@@ -1,6 +1,7 @@
 import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
 import { calculate_Zrough } from './surface_roughness.js';
+import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -230,6 +231,7 @@ export class FieldSolver2D {
         this.tand = null;
         this.conductor_mask = null; // 1 if conductor, 0 if dielectric
         this.solution_valid = false;
+        this.use_causal_materials = true;
 
         // Computed fields - stored as array: [fields] for single-ended, [odd, even] for differential
         this.Ex = null;
@@ -1428,7 +1430,7 @@ export class FieldSolver2D {
 
         // Compute at each frequency
         for (const freq of sortedFreqs) {
-            const freqResult = this.computeAtFrequency(freq, initResult);
+            const freqResult = await this.computeAtFrequency(freq, initResult);
 
             result.frequencies.push(freq);
 
@@ -1470,10 +1472,85 @@ export class FieldSolver2D {
      * @param {object} cachedResults - Results from a previous solve containing V, Ex, Ey, C, C0, Z0
      * @returns {object} - New results with updated frequency-dependent parameters
      */
-    computeAtFrequency(freq, cachedResults) {
+    async computeAtFrequency(freq, cachedResults) {
         // Update frequency
         this.freq = freq;
 
+        // If causal materials are enabled, we must re-solve the Laplace equation
+        // because epsilon_r changes with frequency, which changes the field distribution
+        if (this.use_causal_materials) {
+            // Apply the causal model to update epsilon_r and tand
+            applyDjordjevicSarkar(this);
+
+            // Re-solve at this frequency with updated material parameters
+            const modeResults = [];
+
+            if (this.is_differential) {
+                // Solve both odd and even modes
+                const oddMode = await this._solve_single_mode('odd', false);
+                const evenMode = await this._solve_single_mode('even', false);
+
+                // Use cached C0 values from initial solve (vacuum doesn't change)
+                oddMode.C0 = cachedResults.modes.find(m => m.mode === 'odd').C0;
+                evenMode.C0 = cachedResults.modes.find(m => m.mode === 'even').C0;
+
+                // Recalculate eps_eff and Z0 with new C and cached C0
+                oddMode.eps_eff = oddMode.C / oddMode.C0;
+                oddMode.Z0 = 1 / (CONSTANTS.C * Math.sqrt(oddMode.C * oddMode.C0));
+                evenMode.eps_eff = evenMode.C / evenMode.C0;
+                evenMode.Z0 = 1 / (CONSTANTS.C * Math.sqrt(evenMode.C * evenMode.C0));
+
+                // Recalculate RLGC parameters with corrected Z0
+                const recalc = (mode) => {
+                    const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(mode.Ex, mode.Ey, mode.Z0);
+                    const alpha_d = this.calculate_dielectric_loss(mode.Ex, mode.Ey, mode.Z0);
+                    const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, mode.C, mode.Z0);
+                    mode.RLGC = rlgc;
+                    mode.Zc = Zc;
+                    mode.eps_eff = eps_eff_mode;
+                    mode.alpha_c = 8.686 * R_total / (2 * Zc.re);
+                    mode.alpha_d = alpha_d;
+                    mode.alpha_total = mode.alpha_c + alpha_d;
+                    mode.L_internal = L_internal;
+                    mode.L_external = L_external;
+                };
+
+                recalc(oddMode);
+                recalc(evenMode);
+
+                modeResults.push(oddMode, evenMode);
+            } else {
+                // Solve single mode
+                const result = await this._solve_single_mode('single', false);
+
+                // Use cached C0 from initial solve
+                result.C0 = cachedResults.modes[0].C0;
+
+                // Recalculate eps_eff and Z0 with new C and cached C0
+                result.eps_eff = result.C / result.C0;
+                result.Z0 = 1 / (CONSTANTS.C * Math.sqrt(result.C * result.C0));
+
+                // Recalculate RLGC parameters with corrected Z0
+                const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(result.Ex, result.Ey, result.Z0);
+                const alpha_d = this.calculate_dielectric_loss(result.Ex, result.Ey, result.Z0);
+                const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, result.C, result.Z0);
+
+                result.RLGC = rlgc;
+                result.Zc = Zc;
+                result.eps_eff = eps_eff_mode;
+                result.alpha_c = 8.686 * R_total / (2 * Zc.re);
+                result.alpha_d = alpha_d;
+                result.alpha_total = result.alpha_c + alpha_d;
+                result.L_internal = L_internal;
+                result.L_external = L_external;
+
+                modeResults.push(result);
+            }
+
+            return this._build_results(modeResults);
+        }
+
+        // Fast path: Non-causal materials - use cached fields
         const modeResults = [];
 
         for (const cached of cachedResults.modes) {
