@@ -520,7 +520,7 @@ async function test_s4p_generation() {
 
 async function test_s4p_generation_lossless() {
     console.log(`\n${'='.repeat(80)}`);
-    console.log('S4P GENERATION TEST 2');
+    console.log('S4P GENERATION TEST Lossless');
     console.log(`${'='.repeat(80)}`);
 
     const reference = parseS4P_MA('./stripline_2d_diff_lossless_fsweep.s4p');

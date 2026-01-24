@@ -707,6 +707,13 @@ export class FieldSolver2D {
         if (!this.solution_valid) {
             throw new Error("Fields (Ex, Ey) are not valid. Run compute_fields() first.");
         }
+
+        // No dielectric loss at DC
+        // TODO: If material conductivity is implemented this might not be true
+        if (this.freq === 0) {
+            return 0;
+        }
+
         const ny = this.y.length;
         const nx = this.x.length;
         const dx_array = diff(this.x);
@@ -751,6 +758,32 @@ export class FieldSolver2D {
 
         // Total Inductance
         const L_total = L_ext + L_internal;
+
+        // Handle DC case (frequency = 0)
+        if (this.freq === 0) {
+            // At DC, Zc = sqrt(R/G) = sqrt(R/0) = infinity
+            // For S-parameter calculations, use a very large impedance
+            const Zc = new Complex(1e12, 0);  // Effectively infinite impedance
+
+            // eps_eff at DC is calculated from C/C0
+            // From Z0 = 1/(c*sqrt(C*C0)), we get C0 = 1/(c^2*Z0^2*C)
+            // Therefore eps_eff = C/C0 = c^2 * Z0^2 * C^2
+            const c2 = CONSTANTS.C * CONSTANTS.C;
+            const eps_eff_dc = c2 * Z0_mode * Z0_mode * C_mode * C_mode;
+
+            return {
+                Zc: Zc,
+                rlgc: {
+                    R: R_total,
+                    L: L_total,
+                    G: G,
+                    C: C_mode
+                },
+                eps_eff_mode: eps_eff_dc,
+                L_internal: L_internal,
+                L_external: L_ext
+            };
+        }
 
         // Re-calculate complex Zc and Epsilon_eff with the new L and R
         const omega = 2 * Math.PI * this.freq;

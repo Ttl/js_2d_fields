@@ -102,7 +102,7 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         // Skin depth
-        this.delta_s = Math.sqrt(2 / (2 * Math.PI * this.freq * CONSTANTS.MU0 * this.sigma_cond));
+        this.delta_s = Math.sqrt(2 / (2 * Math.PI * Math.max(1e6, this.freq) * CONSTANTS.MU0 * this.sigma_cond));
 
         // Build geometry lists
         const [dielectrics, conductors] = this._build_geometry_lists();
@@ -162,7 +162,7 @@ class MicrostripSolver extends FieldSolver2D {
         // Allow negative thickness for conductors inside the substrate
         isValidNumber(options.trace_thickness, 'trace_thickness');
 
-        checkPositive(options.freq, 'frequency');
+        checkNonNegative(options.freq, 'frequency');
 
         // Optional positive parameters
         if (options.gnd_thickness !== undefined) checkPositive(options.gnd_thickness, 'gnd_thickness');

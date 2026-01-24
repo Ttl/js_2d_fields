@@ -15,6 +15,37 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
     const omega = 2 * Math.PI * freq;
     const { R, L, G, C } = rlgc;
 
+    // Handle DC case (frequency = 0)
+    // At DC, the transmission line behaves as a simple series resistance R*length
+    if (freq === 0 || omega === 0) {
+        const R_total = R * length;
+        const Zr = Z_ref;
+
+        // ABCD matrix for series resistance:
+        // A = 1, B = R_total, C = 0, D = 1
+        const A = new Complex(1, 0);
+        const B = new Complex(R_total, 0);
+        const C_abcd = new Complex(0, 0);
+        const D = new Complex(1, 0);
+
+        // Convert to S-parameters
+        // den = A + B/Zr + C*Zr + D = 1 + R_total/Zr + 0 + 1 = 2 + R_total/Zr
+        const den = new Complex(2 + R_total / Zr, 0);
+
+        // S11 = (A + B/Zr - C*Zr - D) / den = (1 + R_total/Zr - 0 - 1) / den = (R_total/Zr) / den
+        const S11 = new Complex(R_total / Zr, 0).div(den);
+
+        // S21 = 2 / den
+        const S21 = new Complex(2, 0).div(den);
+
+        const S12 = S21;  // Reciprocal
+
+        // S22 = (-A + B/Zr - C*Zr + D) / den = (-1 + R_total/Zr - 0 + 1) / den = (R_total/Zr) / den
+        const S22 = new Complex(R_total / Zr, 0).div(den);
+
+        return { S11, S21, S12, S22 };
+    }
+
     // Series impedance per unit length: Z = R + jwL
     const Z_per_length = new Complex(R, omega * L);
 
@@ -72,6 +103,12 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
 function computeZ0(freq, rlgc) {
     const omega = 2 * Math.PI * freq;
     const { R, L, G, C } = rlgc;
+
+    // Handle DC case (frequency = 0)
+    // At DC, Z0 = sqrt(R/G) with G=0 gives infinity
+    if (freq === 0 || omega === 0) {
+        return 1e12;  // Return very large impedance for DC
+    }
 
     // Series impedance per unit length: Z = R + jwL
     const Z_per_length = new Complex(R, omega * L);
