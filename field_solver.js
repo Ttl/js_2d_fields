@@ -1195,7 +1195,7 @@ export class FieldSolver2D {
             energy_tol = 0.02,
             param_tol = 0.1,
             max_nodes = 20000,
-            min_converged_passes = 2,
+            min_converged_passes = 1,
             onProgress = null,
             shouldStop = null,
             skip_mesh = false

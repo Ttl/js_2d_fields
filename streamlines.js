@@ -206,7 +206,8 @@ function makeStreamlineTraceFromConductors(
     Ex, Ey,
     xSolver, ySolver,
     conductors,
-    numStreamlines = null
+    numStreamlines = null,
+    mode = 'odd'
 ) {
     const xLines = [];
     const yLines = [];
@@ -215,8 +216,17 @@ function makeStreamlineTraceFromConductors(
     const ds = spacing / 2;
     const maxSteps = 800;
 
+    // Adjust conductor polarities based on mode
+    const adjustedConductors = conductors.map(c => {
+        // In even mode, both signal conductors should have positive polarity
+        if (mode === 'even' && c.is_signal) {
+            return { ...c, polarity: 1 };
+        }
+        return c;
+    });
+
     const seeds = generateConductorSeedsWeighted(
-        conductors, spacing,
+        adjustedConductors, spacing,
         xSolver, ySolver,
         Ex, Ey,
         numStreamlines
@@ -228,7 +238,7 @@ function makeStreamlineTraceFromConductors(
             xSolver, ySolver,
             Ex, Ey,
             ds, maxSteps,
-            conductors,
+            adjustedConductors,
             seed.polarity
         );
 

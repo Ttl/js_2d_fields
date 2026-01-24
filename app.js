@@ -808,8 +808,8 @@ async function runSimulation() {
 
         let results = await solver.solve_adaptive({
             max_iters: p.max_iters,
-            tolerance: p.tolerance,
-            param_tol: 0.001,
+            energy_tol: p.tolerance,
+            param_tol: 0.05,
             max_nodes: p.max_nodes,
             onProgress: (info) => {
                 const progress = info.iteration / p.max_iters * 0.5;  // First half is for mesh refinement
@@ -1092,7 +1092,10 @@ function draw(resetZoom = false) {
         title = "Transmission Line Geometry";
 
         // Determine display bounds using actual domain extent
-        const maxY = solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0);
+        const maxY = Math.max(
+            solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0),
+            solver.conductors.reduce((max, c) => Math.max(max, c.y_max), 0)
+        );
 
         // Draw dielectrics as rectangles (color by epsilon_r)
         for (const diel of solver.dielectrics) {
@@ -1323,22 +1326,18 @@ function draw(resetZoom = false) {
                 x: xMM,
                 y: yMM,
                 z: zData,
-                colorscale: "Hot",
-                opacity: 0.5,
                 contours: {
                     showlines: true,
-                    coloring: "heatmap",
+                    coloring: "none",  // Just lines, no heatmap
                     size: 0,  // Auto-calculate
                     ncontours: plotOptions.contours
                 },
                 line: {
                     smoothing: 1.3,
-                    width: 0.5
+                    width: 1,
+                    color: "rgba(0, 0, 0, 0.4)"
                 },
-                colorbar: {
-                    title: "|E| (V/m)",
-                    len: 0.6
-                },
+                showscale: false,  // No colorbar
                 hovertemplate:
                     "x: %{x:.2f} mm<br>" +
                     "y: %{y:.2f} mm<br>" +
@@ -1348,15 +1347,8 @@ function draw(resetZoom = false) {
 
         // Add streamlines if requested via plot options
         if (plotOptions.streamlines > 0) {
-            // Adjust conductor polarities for even mode
             const modeIndex = getSelectedModeIndex();
-            const adjustedConductors = solver.conductors.map(c => {
-                // In even mode, both signal conductors should have positive polarity
-                if (modeIndex === 1 && c.is_signal) {
-                    return { ...c, polarity: 1 };
-                }
-                return c;
-            });
+            const mode = modeIndex === 1 ? 'even' : 'odd';
 
             traces.push(
                 makeStreamlineTraceFromConductors(
@@ -1364,8 +1356,9 @@ function draw(resetZoom = false) {
                     Ey,
                     solver.x,
                     solver.y,
-                    adjustedConductors,
-                    plotOptions.streamlines
+                    solver.conductors,
+                    plotOptions.streamlines,
+                    mode
                 )
             );
         }
