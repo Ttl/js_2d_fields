@@ -143,7 +143,6 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
     const ny = y.length;
     const nx = x.length;
 
-    // --- Shape checks ---
     if (!isArrayLike2D(V, ny, nx)) {
         errors.push("V must be a (ny, nx) 2D array matching mesh dimensions")
     }
@@ -156,7 +155,6 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
         errors.push("epsilon_r must be a (ny, nx) 2D array matching mesh dimensions when vacuum=false")
     }
 
-    // --- dx/dy checks ---
     const dx = diff(x);
     const dy = diff(y);
 
@@ -178,7 +176,7 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
     if (dx.length > 0) check_spacing(dx, "dx");
     if (dy.length > 0) check_spacing(dy, "dy");
 
-    // --- conductor presence ---
+    // Check for at least one conductor
     let has_conductor = false;
     for (let i = 0; i < ny && !has_conductor; i++) {
         for (let j = 0; j < nx; j++) {
@@ -192,7 +190,7 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
         errors.push("No conductor cells found in conductor_mask");
     }
 
-    // --- V validity ---
+    // V
     for (let i = 0; i < ny; i++) {
         for (let j = 0; j < nx; j++) {
             const v = V[i][j];
@@ -203,7 +201,7 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
         }
     }
 
-    // --- epsilon_r validity ---
+    // epsilon_r
     if (!vacuum) {
         for (let i = 0; i < ny; i++) {
             for (let j = 0; j < nx; j++) {
@@ -223,7 +221,6 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
     return errors;
 }
 
-// --- Solver Class ---
 export class FieldSolver2D {
     constructor() {
         this.x = null;
@@ -307,7 +304,7 @@ export class FieldSolver2D {
         const is_cond = (i, j) => this.conductor_mask[i][j];
 
         // Remove mesh nodes internal to conductors
-        // E-field inside conductors is known to be 0.
+        // E-field inside conductors is 0.
         const is_unknown = new Int8Array(N);
         let N_unknown = 0;
 
@@ -585,15 +582,8 @@ export class FieldSolver2D {
      * Calculate conductor losses including both DC and AC (skin effect) contributions.
      *
      * The total resistance is calculated as R_total = sqrt(R_dc^2 + R_ac^2) where:
-     * - R_dc: DC resistance from conductor cross-sectional area (uses Conductor dimensions directly)
+     * - R_dc: DC resistance from conductor cross-sectional area
      * - R_ac: AC resistance from skin effect and surface roughness
-     *
-     * For transmission lines:
-     * - Current flows through signal conductor and returns through ground
-     *
-     * For differential traces:
-     * - Both signal traces contribute to signal_area
-     * - Power normalization factor of 0.5 is applied to AC components
      *
      * @param {Array<Array<number>>} Ex - Electric field x-component
      * @param {Array<Array<number>>} Ey - Electric field y-component
@@ -603,12 +593,10 @@ export class FieldSolver2D {
     calculate_conductor_loss(Ex, Ey, Z0) {
         if (!this.solution_valid) throw new Error("Fields invalid");
 
-        // Calculate DC resistance from conductor dimensions
         const { signal_area, ground_area } = this._calculate_conductor_area();
 
         // DC resistance per unit length for transmission line
         // Current flows through signal conductor and returns through ground (series connection)
-        // R_dc = R_signal + R_ground = 1/(σ×A_signal) + 1/(σ×A_ground)
         const R_signal = 1.0 / (this.sigma_cond * signal_area);
         const R_ground = 1.0 / (this.sigma_cond * ground_area);
         const R_dc = R_signal + R_ground;
@@ -626,8 +614,7 @@ export class FieldSolver2D {
         // Use roughness from constructor
         const rq = this.rq || 0;
 
-        // Pre-calculate Surface Impedance (Z_rough) using gradient model
-        // Returns Complex object {re, im}
+        // Z_surf is Complex
         const Z_surf = calculate_Zrough(this.freq, this.sigma_cond, rq);
 
         const ny = this.y.length;
@@ -641,16 +628,14 @@ export class FieldSolver2D {
         let sum_H2_dl_R = 0.0; // Sum for Resistance
         let sum_H2_dl_L = 0.0; // Sum for Inductance
 
-        // Helper to check mask type
         const isSignal = (i, j) => this.signal_mask[i][j];
         const isGround = (i, j) => this.ground_mask[i][j];
         const isConductor = (i, j) => isSignal(i,j) || isGround(i,j);
 
         for (let i = 1; i < ny - 1; i++) {
             for (let j = 1; j < nx - 1; j++) {
-
                 // We only care about the boundary inside the dielectric
-                // but adjacent to a conductor.
+                // adjacent to a conductor.
                 // Current loop iterates all cells. Look for Dielectric cells
                 // that have a conductor neighbor.
 
@@ -796,49 +781,6 @@ export class FieldSolver2D {
         };
     }
 
-    rlgc_from_alpha(alpha_cond, alpha_diel, C_mode, Z0_mode) {
-        // Convert dB/m to Np/m
-        const alpha_c_np = alpha_cond / 8.686;
-        const alpha_d_np = alpha_diel / 8.686;
-
-        const R = 2 * Z0_mode * alpha_c_np;
-        const G = 2 * alpha_d_np / Z0_mode;
-
-        const L = (Z0_mode * Z0_mode) * C_mode;
-
-        const eps_eff_mode = (L * C_mode) / (CONSTANTS.MU0 * CONSTANTS.EPS0);
-
-        // Handle DC case (omega = 0)
-        if (this.omega === 0) {
-            if (G === 0) {
-                return {
-                    Zc: new Complex(Infinity, 0),
-                    rlgc: { R, L, G: 0, C: C_mode },
-                    eps_eff_mode
-                };
-            }
-            return {
-                Zc: new Complex(Math.sqrt(R / G), 0),
-                rlgc: { R, L, G, C: C_mode },
-                eps_eff_mode
-            };
-        }
-
-        // Complex characteristic impedance Zc = sqrt((R + jwL) / (G + jwC))
-        const num = new Complex(R, this.omega * L);
-        const den = new Complex(G, this.omega * C_mode);
-        const Zc = (num.div(den)).sqrt();
-
-        const rlgc = {
-            R: R,
-            L: L,
-            G: G,
-            C: C_mode
-        };
-
-        return { Zc, rlgc, eps_eff_mode };
-    }
-
     async perform_analysis(onProgress = null) {
         const totalSteps = 2; // Two main solve_laplace calls
         let currentStep = 0;
@@ -876,7 +818,7 @@ export class FieldSolver2D {
         // Dielectric loss depends on Ex, Ey, Z0, omega, epsilon_r, tan_delta
         const alpha_diel_db_m = this.calculate_dielectric_loss(Ex, Ey, Z0);
 
-        // 6. Calculate RLGC and complex Z0 using surface roughness aware approach
+        // 6. Calculate RLGC and complex Z0
         const { Zc, rlgc, eps_eff_mode } = this.rlgc(R_total, L_internal, alpha_diel_db_m, C_with_diel, Z0);
 
         // Calculate conductor loss alpha from R_total for reporting
@@ -884,8 +826,8 @@ export class FieldSolver2D {
         const total_alpha_db_m = alpha_cond_db_m + alpha_diel_db_m;
 
         return {
-            Z0: Z0, // Characteristic Impedance (real part approximation)
-            Zc: Zc, // Complex Characteristic Impedance
+            Z0: Z0, // Characteristic Impedance (static approximation)
+            Zc: Zc, // Complex Characteristic Impedance (includes loss)
             eps_eff: eps_eff,
             RLGC: rlgc,
             alpha_cond_db_m: alpha_cond_db_m,
