@@ -6,11 +6,14 @@
     <title>2D Transmission Line Field Solver</title>
     <style>
         :root {
-            --bg-color: #f4f4f9;
-            --panel-color: #ffffff;
-            --primary-color: #2563eb;
-            --text-color: #1f2937;
-            --border-color: #e5e7eb;
+            --bg-color: #1a1a1a;
+            --panel-color: #2a2a2a;
+            --primary-color: #4CAF50;
+            --primary-hover: #45a049;
+            --text-color: #fff;
+            --text-muted: #aaa;
+            --border-color: #444;
+            --input-bg: #333;
         }
 
         body {
@@ -25,30 +28,41 @@
 
         /* Sidebar Layout */
         .sidebar {
-            width: 320px;
+            width: 300px;
             background-color: var(--panel-color);
             border-right: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
-            padding: 20px;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            padding: 15px;
+            background: #333;
+            border-bottom: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+
+        .sidebar-scroll {
+            flex: 1;
             overflow-y: auto;
-            box-shadow: 2px 0 5px rgba(0,0,0,0.05);
+            padding: 15px;
         }
 
         .main-content {
             flex: 1;
             display: flex;
             flex-direction: column;
-            padding: 20px;
+            padding: 15px;
             overflow: hidden;
         }
 
         /* Form Elements */
-        h2, h3 { margin-top: 0; font-size: 1.1em; color: #111827; }
-        h2 { font-size: 1.4em; margin-bottom: 20px; }
+        h2, h3 { margin-top: 0; font-size: 1em; color: var(--text-color); }
+        h2 { font-size: 1.2em; margin-bottom: 15px; }
 
-        .control-group { margin-bottom: 15px; }
-        .control-group label { display: block; font-size: 0.85em; font-weight: 500; margin-bottom: 5px; color: #4b5563; }
+        .control-group { margin-bottom: 12px; }
+        .control-group label { display: block; font-size: 0.8em; font-weight: 500; margin-bottom: 4px; color: var(--text-muted); }
 
         .input-row { display: flex; gap: 10px; align-items: center; }
         input[type="number"], input[type="text"], select {
@@ -57,42 +71,56 @@
             border: 1px solid var(--border-color);
             border-radius: 4px;
             font-size: 0.9em;
+            background: var(--input-bg);
+            color: var(--text-color);
+        }
+        select {
+            cursor: pointer;
+        }
+        select option {
+            background: var(--input-bg);
+            color: var(--text-color);
+        }
+        input[type="number"]:focus, input[type="text"]:focus, select:focus {
+            outline: none;
+            border-color: var(--primary-color);
         }
         input.unit-input {
             font-family: 'Consolas', 'Monaco', monospace;
         }
         input.unit-parsed {
-            background-color: #f0f9ff;
+            background-color: #3a4a3a;
         }
         input.unit-input.invalid {
-            border-color: #dc2626;
-            box-shadow: 0 0 0 3px rgba(220,38,38,0.2);
+            border-color: #f44336;
+            box-shadow: 0 0 0 2px rgba(244,67,54,0.3);
         }
 
         button {
             background-color: var(--primary-color);
             color: white;
             border: none;
-            padding: 10px 15px;
-            border-radius: 6px;
+            padding: 12px 15px;
+            border-radius: 4px;
             cursor: pointer;
             font-weight: 600;
+            font-size: 14px;
             width: 100%;
             transition: background-color 0.2s;
         }
-        button:hover { background-color: #1d4ed8; }
-        button:disabled { background-color: #93c5fd; cursor: wait; }
+        button:hover { background-color: var(--primary-hover); }
+        button:disabled { background-color: #666; cursor: wait; }
         button.stop-mode {
-            background-color: #dc2626;
+            background-color: #f44336;
         }
         button.stop-mode:hover {
-            background-color: #b91c1c;
+            background-color: #da190b;
         }
 
         /* Visualization Area */
         .canvas-container {
             flex: 1;
-            background: white;
+            background: var(--panel-color);
             border: 1px solid var(--border-color);
             border-radius: 8px;
             position: relative;
@@ -105,35 +133,31 @@
         #sim_canvas {
             width: 100%;
             height: 100%;
-        }
-
-        canvas { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
-
-        #sim_canvas {
             position: relative;
             z-index: 1;
         }
 
         /* Output Console */
         .output-panel {
-            height: 150px;
-            margin-top: 20px;
+            height: 120px;
+            margin-top: 15px;
             background: #1e1e1e;
             color: #00ff00;
             font-family: 'Consolas', 'Monaco', monospace;
-            padding: 15px;
-            border-radius: 8px;
-            font-size: 0.85em;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 0.8em;
             overflow-y: auto;
             white-space: pre-wrap;
+            border: 1px solid var(--border-color);
         }
 
         /* Progress Bar */
         .progress-container {
-            height: 6px;
-            background: #e5e7eb;
+            height: 4px;
+            background: #444;
             margin-top: 10px;
-            border-radius: 3px;
+            border-radius: 2px;
             overflow: hidden;
         }
         .progress-bar {
@@ -147,8 +171,9 @@
         .tab-bar {
             display: flex;
             border-bottom: 1px solid var(--border-color);
-            background: #f5f5f5;
+            background: #333;
             margin-bottom: 0;
+            border-radius: 6px 6px 0 0;
         }
         .tab-button {
             padding: 10px 20px;
@@ -156,17 +181,17 @@
             background: transparent;
             cursor: pointer;
             font-weight: 500;
-            color: #6b7280;
+            color: var(--text-muted);
             border-bottom: 2px solid transparent;
             transition: all 0.2s;
             width: auto;
         }
         .tab-button:hover {
-            background: #e5e7eb;
-            color: #1f2937;
+            background: #3a3a3a;
+            color: var(--text-color);
         }
         .tab-button.active {
-            background: white;
+            background: var(--panel-color);
             border-bottom: 2px solid var(--primary-color);
             color: var(--primary-color);
         }
@@ -186,7 +211,7 @@
             align-items: center;
             gap: 15px;
             padding: 10px 15px;
-            background: #f9fafb;
+            background: #333;
             border-bottom: 1px solid var(--border-color);
         }
         .results-controls.bottom {
@@ -203,6 +228,8 @@
             border: 1px solid var(--border-color);
             border-radius: 4px;
             font-size: 0.9em;
+            background: var(--input-bg);
+            color: var(--text-color);
         }
         .plot-container {
             flex: 1;
@@ -214,7 +241,7 @@
             display: flex;
             gap: 20px;
             padding: 10px 15px;
-            background: #f9fafb;
+            background: #333;
             border-top: 1px solid var(--border-color);
             align-items: center;
             flex-wrap: wrap;
@@ -224,8 +251,9 @@
             align-items: center;
             gap: 8px;
             font-size: 0.9em;
+            color: var(--text-muted);
         }
-        .sparam-controls input[type="number"] {
+        .sparam-controls input[type="number"], .sparam-controls input[type="text"] {
             width: 80px;
             padding: 6px 8px;
         }
@@ -234,7 +262,7 @@
             padding: 8px 16px;
         }
         .sparam-controls button:disabled {
-            background-color: #9ca3af;
+            background-color: #555;
             cursor: not-allowed;
         }
 
@@ -245,10 +273,12 @@
             gap: 5px;
             font-size: 0.9em;
             cursor: pointer;
+            color: var(--text-muted);
         }
         .checkbox-label input[type="checkbox"] {
             width: auto;
             margin: 0;
+            accent-color: var(--primary-color);
         }
         .results-controls .checkbox-label {
             margin-left: 0;
@@ -257,14 +287,14 @@
         /* Help Icon */
         .help-icon {
             display: inline-block;
-            width: 16px;
-            height: 16px;
-            line-height: 14px;
+            width: 14px;
+            height: 14px;
+            line-height: 12px;
             text-align: center;
             border-radius: 50%;
-            border: 1px solid #6b7280;
-            color: #6b7280;
-            font-size: 11px;
+            border: 1px solid var(--text-muted);
+            color: var(--text-muted);
+            font-size: 10px;
             font-weight: bold;
             cursor: pointer;
             margin-left: 5px;
@@ -286,18 +316,18 @@
             top: 0;
             width: 100%;
             height: 100%;
-            background-color: rgba(0, 0, 0, 0.5);
+            background-color: rgba(0, 0, 0, 0.7);
         }
         .help-modal-content {
-            background-color: white;
+            background-color: var(--panel-color);
             margin: 10% auto;
             padding: 20px;
             border-radius: 8px;
             max-width: 500px;
-
+            border: 1px solid var(--border-color);
         }
         .help-modal-close {
-            color: #9ca3af;
+            color: var(--text-muted);
             float: right;
             font-size: 28px;
             font-weight: bold;
@@ -305,15 +335,15 @@
             line-height: 20px;
         }
         .help-modal-close:hover {
-            color: #1f2937;
+            color: var(--text-color);
         }
         .help-modal h3 {
             margin-top: 0;
-            color: #111827;
+            color: var(--text-color);
         }
         .help-modal p {
             line-height: 1.6;
-            color: #4b5563;
+            color: var(--text-muted);
         }
         .help-modal a {
             color: var(--primary-color);
@@ -331,17 +361,17 @@
             overflow-y: auto;
         }
         .about-content h2 {
-            color: #1f2937;
+            color: var(--text-color);
             margin-bottom: 15px;
         }
         .about-content h3 {
-            color: #374151;
+            color: var(--text-muted);
             margin-top: 25px;
             margin-bottom: 10px;
             font-size: 1.1em;
         }
         .about-content p {
-            color: #4b5563;
+            color: var(--text-muted);
             margin-bottom: 12px;
         }
         .about-content a {
@@ -358,18 +388,22 @@
             align-items: center;
             justify-content: space-between;
             cursor: pointer;
-            padding: 8px 0;
-            margin: 10px 0 5px 0;
+            padding: 10px 0;
+            margin: 5px 0;
             user-select: none;
+            border-bottom: 1px solid var(--border-color);
         }
         .section-header h3 {
             margin: 0;
             flex: 1;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         .section-header::after {
             content: '▼';
-            font-size: 0.7em;
-            color: #6b7280;
+            font-size: 0.6em;
+            color: var(--text-muted);
             transition: transform 0.2s;
         }
         .section-header.collapsed::after {
@@ -379,9 +413,18 @@
             overflow: hidden;
             transition: max-height 0.3s ease-out;
             max-height: 1000px;
+            padding-top: 10px;
         }
         .section-content.collapsed {
             max-height: 0;
+            padding-top: 0;
+        }
+
+        /* Nested options styling */
+        .nested-options {
+            margin-left: 10px;
+            padding-left: 10px;
+            border-left: 2px solid var(--border-color);
         }
     </style>
 <script src="plotly-2.27.0.min.js.js"></script>
@@ -389,6 +432,13 @@
 <body>
 
 <div class="sidebar">
+    <div class="sidebar-header">
+        <button id="btn_solve">Solve</button>
+        <div class="progress-container" id="progress_container">
+            <div class="progress-bar" id="progress_bar"></div>
+        </div>
+    </div>
+    <div class="sidebar-scroll">
     <div class="control-group">
         <label for="tl_type">Transmission Line Type</label>
         <select id="tl_type">
@@ -494,7 +544,7 @@
         <div class="control-group">
             <label><input type="checkbox" id="chk_solder_mask"> Enable Solder Mask</label>
         </div>
-        <div id="solder-mask-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
+        <div id="solder-mask-params" class="nested-options" style="display: none;">
             <div class="control-group">
                 <label>Mask over Substrate</label>
                 <input type="text" class="unit-input" id="inp_sm_t_sub" value="20 μm" step="1">
@@ -520,7 +570,7 @@
         <div class="control-group">
             <label><input type="checkbox" id="chk_top_diel"> Enable Top Dielectric</label>
         </div>
-        <div id="top-diel-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
+        <div id="top-diel-params" class="nested-options" style="display: none;">
             <div class="control-group">
                 <label>Top Dielectric Height</label>
                 <input type="text" class="unit-input" id="inp_top_diel_h" value="0.2 mm" step="0.01">
@@ -538,7 +588,7 @@
         <div class="control-group">
             <label><input type="checkbox" id="chk_gnd_cut"> Enable Ground Cutout</label>
         </div>
-        <div id="gnd-cut-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
+        <div id="gnd-cut-params" class="nested-options" style="display: none;">
             <div class="control-group">
                 <label>Cutout Width</label>
                 <input type="text" class="unit-input" id="inp_gnd_cut_w" value="3.0 mm" step="0.1">
@@ -552,7 +602,7 @@
         <div class="control-group">
             <label><input type="checkbox" id="chk_enclosure"> Enable Enclosure</label>
         </div>
-        <div id="enclosure-params" style="display: none; margin-left: 10px; padding-left: 10px; border-left: 2px solid var(--border-color);">
+        <div id="enclosure-params" class="nested-options" style="display: none;">
             <div class="control-group">
                 <label><input type="checkbox" id="chk_side_gnd"> Side Ground</label>
             </div>
@@ -598,10 +648,10 @@
 
 
     <div id="plot-options">
-    <div class="section-header" onclick="toggleSection(this)">
+    <div class="section-header collapsed" onclick="toggleSection(this)">
         <h3>Plot Options</h3>
     </div>
-    <div class="section-content">
+    <div class="section-content collapsed">
         <!-- Mode selector hidden - now in Plotly menu -->
         <select id="plot-mode" style="display: none;">
             <option value="odd">Odd</option>
@@ -619,10 +669,10 @@
     </div>
 
     <div id="solver-settings">
-    <div class="section-header" onclick="toggleSection(this)">
+    <div class="section-header collapsed" onclick="toggleSection(this)">
         <h3>Solver Settings</h3>
     </div>
-    <div class="section-content">
+    <div class="section-content collapsed">
     <div class="control-group">
         <label>Max Iterations</label>
         <input type="number" id="inp_max_iters" value="10" step="1" min="1">
@@ -638,12 +688,7 @@
     </div>
     </div>
 
-    <button id="btn_solve">Solve Physics</button>
-
-    <div class="progress-container" id="progress_container">
-        <div class="progress-bar" id="progress_bar"></div>
-    </div>
-    <div id="progress_text" style="font-size: 0.85em; margin-top: 5px; color: #6b7280; display: none;"></div>
+    </div><!-- end sidebar-scroll -->
 </div>
 
 <div class="main-content">
@@ -676,7 +721,7 @@
         <div class="results-controls bottom">
             <label class="checkbox-label"><input type="checkbox" id="results-log-x"> Log frequency axis</label>
             <button id="copy-link-btn">Copy link</button>
-            <div id="results-notice" style="display: none; padding: 6px 10px; background: #fef3c7; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px;">
+            <div id="results-notice" style="display: none; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; color: #fbbf24;">
                 <strong>⚠</strong> <span id="results-notice-text"></span>
             </div>
         </div>
@@ -695,7 +740,7 @@
             <label>Line Length: <input type="text" class="unit-input" id="sparam-length" value="10 mm" step="0.001"></label>
             <label>Reference Impedance: <input type="number" id="sparam-z-ref" value="50" step="1" min="1"> Ohm</label>
             <button id="export-snp">Export SnP file</button>
-            <div id="sparam-notice" style="display: none; padding: 6px 10px; background: #fef3c7; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; flex-shrink: 0;">
+            <div id="sparam-notice" style="display: none; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; flex-shrink: 0; color: #fbbf24;">
                 <strong>⚠</strong> <span id="sparam-notice-text"></span>
             </div>
         </div>
@@ -725,7 +770,7 @@
         </div>
     </div>
 
-    <div class="output-panel" id="console_out">Ready. Click 'Solve Physics' to start simulation.</div>
+    <div class="output-panel" id="console_out">Ready. Click 'Solve' to start simulation.</div>
 </div>
 
 <!-- Help Modal -->

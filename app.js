@@ -476,6 +476,9 @@ function updateGeometry() {
     const p = getParams();
     currentView = "geometry";
 
+    const pbar = document.getElementById('progress_bar');
+    pbar.style.width = "0%";
+
     try {
         if (p.tl_type === 'gcpw') {
             const options = {
@@ -786,7 +789,7 @@ async function runSimulation() {
     btn.classList.add('stop-mode');
     stopRequested = false;
     pbar.style.width = '0%';
-    ptext.style.display = 'block';
+    if (ptext) ptext.style.display = 'block';
     log("Starting simulation...");
 
     try {
@@ -814,7 +817,7 @@ async function runSimulation() {
             onProgress: (info) => {
                 const progress = info.iteration / p.max_iters * 0.5;  // First half is for mesh refinement
                 pbar.style.width = (progress * 100) + "%";
-                ptext.textContent = `Mesh refinement ${info.iteration}/${p.max_iters}: ` +
+                if (ptext) ptext.textContent = `Mesh refinement ${info.iteration}/${p.max_iters}: ` +
                                    `Energy err=${info.energy_error.toExponential(2)}, ` +
                                    `Grid=${info.nodes_x}x${info.nodes_y}`;
                 log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, Grid=${info.nodes_x}x${info.nodes_y}`);
@@ -824,6 +827,7 @@ async function runSimulation() {
 
         if (stopRequested) {
             log("Simulation stopped by user");
+            pbar.style.width = "0%";
             return;
         }
 
@@ -862,7 +866,7 @@ async function runSimulation() {
             // Update progress (second half is for frequency sweep)
             const progress = 0.5 + (i + 1) / frequencies.length * 0.5;
             pbar.style.width = (progress * 100) + "%";
-            ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
+            if (ptext) ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
 
             // Yield to event loop periodically to prevent UI freeze
             if (i % 10 === 0) {
@@ -928,11 +932,11 @@ async function runSimulation() {
         console.error(e);
         log("Error: " + e.message);
     } finally {
-        // Restore button to "Solve Physics" mode
-        btn.textContent = 'Solve Physics';
+        // Restore button to "Solve" mode
+        btn.textContent = 'Solve';
         btn.classList.remove('stop-mode');
         pbar.style.width = '100%';
-        ptext.style.display = 'none';
+        if (ptext) ptext.style.display = 'none';
         stopRequested = false;
     }
 }
@@ -1173,10 +1177,6 @@ function draw(resetZoom = false) {
                     zData.push(row);
                 }
             }
-
-            // In geometry view with differential solver, always show odd mode
-            const modeLabel = isDifferentialMode() ? " (Odd Mode)" : "";
-            title = `Transmission Line Geometry with E-field${modeLabel}`;
         } else {
             // No solution - just axis scaling
             xMM = [0, solver.w * 2000];
@@ -1456,21 +1456,29 @@ function draw(resetZoom = false) {
 
     // UI menues
     const layout = {
-        title: title,
+        title: { text: title, font: { color: '#fff' } },
         xaxis: {
-            title: "Width (mm)",
+            title: { text: "Width (mm)", font: { color: '#aaa' } },
             scaleanchor: "y",
             scaleratio: 1,
-            range: currentXRange  // Preserve zoom/pan
+            range: currentXRange,  // Preserve zoom/pan
+            color: '#aaa',
+            gridcolor: '#444',
+            zerolinecolor: '#555'
         },
         yaxis: {
-            title: "Height (mm)",
-            range: currentYRange  // Preserve zoom/pan
+            title: { text: "Height (mm)", font: { color: '#aaa' } },
+            range: currentYRange,  // Preserve zoom/pan
+            color: '#aaa',
+            gridcolor: '#444',
+            zerolinecolor: '#555'
         },
         margin: { l: 70, r: 90, t: 50, b: 60 },
         hovermode: "closest",
         dragmode: "pan",
-        plot_bgcolor: "#f8f9fa",
+        paper_bgcolor: '#2a2a2a',
+        plot_bgcolor: '#1a1a1a',
+        font: { color: '#fff' },
         shapes: shapes,  // Add vector shapes for geometry
 
         updatemenus: (() => {
@@ -1782,15 +1790,24 @@ function drawResultsPlot() {
     const useLogX = document.getElementById('results-log-x').checked;
     const layout = {
         xaxis: {
-            title: 'Frequency (GHz)',
-            type: useLogX ? 'log' : 'linear'
+            title: { text: 'Frequency (GHz)', font: { color: '#aaa' } },
+            type: useLogX ? 'log' : 'linear',
+            color: '#aaa',
+            gridcolor: '#444',
+            zerolinecolor: '#555'
         },
         yaxis: {
-            title: getYAxisLabel(selector)
+            title: { text: getYAxisLabel(selector), font: { color: '#aaa' } },
+            color: '#aaa',
+            gridcolor: '#444',
+            zerolinecolor: '#555'
         },
         margin: { l: 80, r: 40, t: 40, b: 60 },
         showlegend: true,
-        legend: { x: 0.02, y: 0.98 }
+        legend: { x: 0.02, y: 0.98, font: { color: '#fff' } },
+        paper_bgcolor: '#2a2a2a',
+        plot_bgcolor: '#1a1a1a',
+        font: { color: '#fff' }
     };
 
     Plotly.newPlot('results-plot', traces, layout, { responsive: true });
@@ -1915,15 +1932,24 @@ function drawSParamPlot() {
     const yTitle = plotMode === 'magnitude' ? 'Magnitude (dB)' : 'Phase (degrees)';
     const layout = {
         xaxis: {
-            title: 'Frequency (GHz)',
-            type: useLogX ? 'log' : 'linear'
+            title: { text: 'Frequency (GHz)', font: { color: '#aaa' } },
+            type: useLogX ? 'log' : 'linear',
+            color: '#aaa',
+            gridcolor: '#444',
+            zerolinecolor: '#555'
         },
         yaxis: {
-            title: yTitle
+            title: { text: yTitle, font: { color: '#aaa' } },
+            color: '#aaa',
+            gridcolor: '#444',
+            zerolinecolor: '#555'
         },
         margin: { l: 80, r: 40, t: 40, b: 60 },
         showlegend: true,
-        legend: { x: 0.02, y: 0.02 }
+        legend: { x: 0.02, y: 0.02, font: { color: '#fff' } },
+        paper_bgcolor: '#2a2a2a',
+        plot_bgcolor: '#1a1a1a',
+        font: { color: '#fff' }
     };
 
     Plotly.newPlot('sparam-plot', traces, layout, { responsive: true });
