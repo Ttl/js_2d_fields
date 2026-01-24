@@ -602,7 +602,7 @@ export class FieldSolver2D {
         const R_dc = R_signal + R_ground;
 
         // Handle DC case (frequency = 0)
-        if (this.freq === 0 || this.omega === 0) {
+        if (this.freq === 0) {
             return {
                 R_ac: 0,
                 R_dc: R_dc,
@@ -694,7 +694,7 @@ export class FieldSolver2D {
         // Need to solve magnetic field for accurate L_internal at low frequency
         // but is not a problem at even moderately high frequency >1 MHz.
         // In practice very minimal error since DC can be solved correctly.
-        const L_internal = power_factor * sum_H2_dl_L * Z0_sq / this.omega;
+        const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
         const R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
 
@@ -727,7 +727,7 @@ export class FieldSolver2D {
                 const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
                 const dA = get_dx(j) * get_dy(i);
 
-                Pd += 0.5 * this.omega * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tand[i][j] * E2 * dA;
+                Pd += 0.5 * (2 * Math.PI * this.freq) * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tand[i][j] * E2 * dA;
             }
         }
 
@@ -751,7 +751,7 @@ export class FieldSolver2D {
         const L_total = L_ext + L_internal;
 
         // Re-calculate complex Zc and Epsilon_eff with the new L and R
-        const omega = this.omega;
+        const omega = 2 * Math.PI * this.freq;
 
         // Zc = sqrt( (R + jwL) / (G + jwC) )
         const Z_num = new Complex(R_total, omega * L_total);
@@ -1335,16 +1335,6 @@ export class FieldSolver2D {
     }
 
     /**
-     * Update frequency-dependent parameters.
-     * @param {number} freq - Frequency in Hz
-     */
-    _setFrequency(freq) {
-        this.freq = freq;
-        this.omega = 2 * Math.PI * freq;
-        this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
-    }
-
-    /**
      * Perform a frequency sweep with automatic mesh generation at optimal frequency.
      * This is the recommended single-entry-point API for frequency sweeps.
      *
@@ -1389,7 +1379,7 @@ export class FieldSolver2D {
         const maxFreq = sortedFreqs[sortedFreqs.length - 1];
 
         // Set frequency to max for finest skin depth mesh
-        this._setFrequency(maxFreq);
+        this.freq = maxFreq;
 
         // Force mesh regeneration
         this.mesh_generated = false;
@@ -1483,10 +1473,6 @@ export class FieldSolver2D {
     computeAtFrequency(freq, cachedResults) {
         // Update frequency
         this.freq = freq;
-        this.omega = 2 * Math.PI * freq;
-
-        // Recalculate skin depth
-        this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
 
         const modeResults = [];
 

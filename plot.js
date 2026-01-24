@@ -528,6 +528,7 @@ function getYAxisLabel(selector) {
     const labels = {
         're_z0': 'Re(Z0) (Ohm)',
         'im_z0': 'Im(Z0) (Ohm)',
+        'eps_eff': 'Effective permittivity',
         'loss': 'Loss (dB/m)',
         'R': 'R (Ohm/m)',
         'L': 'L (H/m)',
@@ -597,6 +598,31 @@ function drawResultsPlot() {
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
                 name: 'Im(Z0)',
+                type: 'scatter',
+                mode: plotMode
+            });
+        }
+    } else if (selector === 'eps_eff') {
+        if (isDifferential) {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].eps_eff),
+                name: 'Odd mode',
+                type: 'scatter',
+                mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].eps_eff),
+                name: 'Even mode',
+                type: 'scatter',
+                mode: plotMode
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].eps_eff),
+                name: 'eps_eff',
                 type: 'scatter',
                 mode: plotMode
             });

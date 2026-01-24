@@ -800,7 +800,6 @@ async function runSimulation() {
         // Use the highest frequency for mesh generation (skin depth calculation)
         const maxFreq = Math.max(...frequencies);
         solver.freq = maxFreq;
-        solver.omega = 2 * Math.PI * maxFreq;
 
         // Ensure mesh is generated before solving
         log("Calculating mesh...");

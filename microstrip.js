@@ -49,7 +49,6 @@ class MicrostripSolver extends FieldSolver2D {
         this.sm_tand = options.sm_tand ?? 0.02;
 
         this.freq = options.freq ?? 1e9;
-        this.omega = 2 * Math.PI * this.freq;
         this.nx = options.nx ?? 300;
         this.ny = options.ny ?? 300;
 
@@ -103,7 +102,7 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         // Skin depth
-        this.delta_s = Math.sqrt(2 / (this.omega * CONSTANTS.MU0 * this.sigma_cond));
+        this.delta_s = Math.sqrt(2 / (2 * Math.PI * this.freq * CONSTANTS.MU0 * this.sigma_cond));
 
         // Build geometry lists
         const [dielectrics, conductors] = this._build_geometry_lists();
@@ -187,7 +186,7 @@ class MicrostripSolver extends FieldSolver2D {
             errors.push("trace_thickness must be > -substrate_height");
         }
 
-        if (options.enclosure_height !== undefined && (options.trace_thickness > options.enclosure_height)) {
+        if (options.enclosure_height != null && (options.trace_thickness > options.enclosure_height)) {
             errors.push("trace_thickness > enclosure_height");
         }
 
@@ -303,9 +302,6 @@ class MicrostripSolver extends FieldSolver2D {
         this.y_sm_trace_end = y_trace_top + this.sm_t_trace;
 
         this.y_top_start = this.y_top_diel_end;
-        if (this.use_sm) {
-            this.y_top_start = Math.max(this.y_sm_sub_end, this.y_sm_trace_end);
-        }
 
         // Top air/dielectric region
         if (this.enclosure_height !== null) {
@@ -812,7 +808,7 @@ class MicrostripSolver extends FieldSolver2D {
             }
 
             // Solder mask on left side of trace
-            if (xsl >= 0) {
+            if (xsl > -this.domain_width/2) {
                 dielectrics.push(new Dielectric(
                     xsl, this.y_trace_start,
                     this.sm_t_side, this.t + this.sm_t_trace,
@@ -821,7 +817,7 @@ class MicrostripSolver extends FieldSolver2D {
             }
 
             // Solder mask on right side of trace
-            if (xsr <= this.domain_width) {
+            if (xsr <= this.domain_width/2) {
                 dielectrics.push(new Dielectric(
                     xr, this.y_trace_start,
                     this.sm_t_side, this.t + this.sm_t_trace,
@@ -902,8 +898,8 @@ class MicrostripSolver extends FieldSolver2D {
         const ny = this.y.length;
 
         // Initialize mask and material arrays
-        this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
-        this.tand = Array(ny).fill().map(() => new Float64Array(nx).fill(1.0));
+        this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1));
+        this.tand = Array(ny).fill().map(() => new Float64Array(nx).fill(1));
         this.signal_mask = Array(ny).fill().map(() => new Uint8Array(nx));
         this.ground_mask = Array(ny).fill().map(() => new Uint8Array(nx));
 

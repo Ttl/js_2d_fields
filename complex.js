@@ -96,6 +96,10 @@ class Complex {
         if (this.re === 0) return `${this.im.toFixed(2)}j`;
         return `${this.re.toFixed(2)}${this.im > 0 ? '+' : ''}${this.im.toFixed(2)}j`;
     }
+
+    pow2() {
+        return this.mul(this);
+    }
 }
 
 export { Complex };
