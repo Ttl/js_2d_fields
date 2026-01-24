@@ -79,6 +79,7 @@ function generateConductorSeedsWeighted(
     conductors, spacing,
     xArr, yArr, Ex, Ey,
     numStreamlines = null,
+    mode = 'odd',
     edgeOffset = 1e-7
 ) {
     const seeds = [];
@@ -88,17 +89,15 @@ function generateConductorSeedsWeighted(
     let totalPerimeter = 0;
     const signalConductors = conductors.filter(c => c.is_signal);
     for (const c of signalConductors) {
-        const width = c.x_max - c.x_min;
-        const height = c.y_max - c.y_min;
-        totalPerimeter += 2 * (width + height);
+        totalPerimeter += 2 * (c.width + c.height);
     }
 
     for (const c of conductors) {
         if (!c.is_signal) continue;
 
-        const width = c.x_max - c.x_min;
-        const height = c.y_max - c.y_min;
-        const polarity = c.polarity;
+        const width = c.width;
+        const height = c.height;
+        const polarity = mode === 'odd' ? c.polarity : 1;
         const perimeter = 2 * (width + height);
 
         // Calculate sample counts based on dimensions
@@ -153,8 +152,11 @@ function generateConductorSeedsWeighted(
             }
         ];
 
+        // First pass: calculate flux for all edges to find maximum
+        const edgeData = [];
+        let maxFlux = 0;
+
         for (const edge of edges) {
-            // Sample points along edge
             const positions = [];
             const w = [];
 
@@ -172,16 +174,26 @@ function generateConductorSeedsWeighted(
                 }
             }
 
+            const sum = w.reduce((a, b) => a + b, 0);
+            maxFlux = Math.max(maxFlux, sum);
+
+            edgeData.push({ edge, positions, w, sum });
+        }
+
+        // Second pass: generate seeds from edges with significant flux
+        for (const { edge, positions, w, sum } of edgeData) {
+            // Skip edge if flux is negligible compared to maximum
+            // Use relative threshold: 0.1% of max flux, or absolute minimum
+            const threshold = Math.max(eps * edge.nSamples, maxFlux * 0.001);
+            if (sum < threshold) continue;
+
             // Build CDF
             const C = [];
-            let sum = 0;
+            let cdfSum = 0;
             for (let i = 0; i < w.length; i++) {
-                sum += w[i];
-                C.push(sum);
+                cdfSum += w[i];
+                C.push(cdfSum);
             }
-
-            // Skip edge if no field flux
-            if (sum < eps * edge.nSamples * 2) continue;
 
             // Uniform sampling in CDF space
             for (let k = 0; k <= edge.nSeeds; k++) {
@@ -216,20 +228,12 @@ function makeStreamlineTraceFromConductors(
     const ds = spacing / 2;
     const maxSteps = 800;
 
-    // Adjust conductor polarities based on mode
-    const adjustedConductors = conductors.map(c => {
-        // In even mode, both signal conductors should have positive polarity
-        if (mode === 'even' && c.is_signal) {
-            return { ...c, polarity: 1 };
-        }
-        return c;
-    });
-
     const seeds = generateConductorSeedsWeighted(
-        adjustedConductors, spacing,
+        conductors, spacing,
         xSolver, ySolver,
         Ex, Ey,
-        numStreamlines
+        numStreamlines,
+        mode
     );
 
     for (const seed of seeds) {
@@ -238,7 +242,7 @@ function makeStreamlineTraceFromConductors(
             xSolver, ySolver,
             Ex, Ey,
             ds, maxSteps,
-            adjustedConductors,
+            conductors,
             seed.polarity
         );
 

@@ -1319,29 +1319,34 @@ function draw(resetZoom = false) {
     if (currentView === "geometry" && zData.length > 0) {
         const { Ex, Ey } = getFields();
 
+        const zMax = Math.max(...zData.flat());
+        const zMin = Math.max(Math.max(1, zMax*1e-3), Math.min(...zData.flat()));
+
+        const n = plotOptions.contours;
+        const logStep = (Math.log10(zMax) - Math.log10(zMin)) / n;
+
         // Add E-field contours if requested
         if (plotOptions.contours > 0) {
             traces.push({
                 type: "contour",
                 x: xMM,
                 y: yMM,
-                z: zData,
                 contours: {
                     showlines: true,
-                    coloring: "none",  // Just lines, no heatmap
-                    size: 0,  // Auto-calculate
-                    ncontours: plotOptions.contours
+                    coloring: "none",
+                    start: Math.log10(zMin),
+                    end: Math.log10(zMax),
+                    size: logStep
                 },
+                z: zData.map(row => row.map(v => Math.log10(Math.max(v, 1)))),
                 line: {
                     smoothing: 1.3,
                     width: 1,
                     color: "rgba(0, 0, 0, 0.4)"
                 },
                 showscale: false,  // No colorbar
-                hovertemplate:
-                    "x: %{x:.2f} mm<br>" +
-                    "y: %{y:.2f} mm<br>" +
-                    "|E|: %{z:.3e} V/m<extra></extra>"
+                name: "E-field contours",
+                hoverinfo: "skip"
             });
         }
 
@@ -1376,16 +1381,28 @@ function draw(resetZoom = false) {
         });
     } else if (zData.length > 0) {
         // Field views only. Use heatmap with optional contour lines
+
+        const flatZ = zData.flat();
+        const zMin = Math.min(...flatZ);
+        const zMax = Math.max(...flatZ);
+
+        const n = plotOptions.contours;
+
         const contourSettings = {
             coloring: 'heatmap',
-            showlines: plotOptions.contours > 0,
+            showlines: n > 0
         };
-        if (plotOptions.contours > 0) {
-            contourSettings.size = 0;  // Auto-calculate based on data
-            contourSettings.ncontours = plotOptions.contours;
+
+        if (n > 0) {
+            const step = (zMax - zMin) / n;
+            contourSettings.start = zMin;
+            contourSettings.end = zMax;
+            contourSettings.size = step;
         }
+
         traces.push({
-            type: "contour",
+            type: n > 0 ? "contour" : "heatmap",
+            zsmooth: "best",
             x: xMM,
             y: yMM,
             z: zData,
