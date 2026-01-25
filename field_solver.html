@@ -9,7 +9,10 @@
 </head>
 <body>
 
-<div class="sidebar">
+<button class="mobile-menu-toggle" id="mobileMenuToggle">☰ Menu</button>
+<div class="mobile-backdrop" id="mobileBackdrop"></div>
+
+<div class="sidebar" id="sidebar">
     <div class="sidebar-header">
         <button id="btn_solve">Solve</button>
         <div class="progress-container" id="progress_container">
@@ -815,6 +818,33 @@
         section.style.display = checkbox.checked ? 'block' : 'none';
     }
 
+    // Mobile menu toggle functionality
+    function toggleMobileMenu() {
+        const sidebar = document.getElementById('sidebar');
+        const backdrop = document.getElementById('mobileBackdrop');
+        const menuBtn = document.getElementById('mobileMenuToggle');
+
+        sidebar.classList.toggle('mobile-open');
+        backdrop.classList.toggle('active');
+
+        // Hide menu button when sidebar is open to prevent overlap with Solve button
+        if (sidebar.classList.contains('mobile-open')) {
+            menuBtn.classList.add('hidden');
+        } else {
+            menuBtn.classList.remove('hidden');
+        }
+    }
+
+    function closeMobileMenu() {
+        const sidebar = document.getElementById('sidebar');
+        const backdrop = document.getElementById('mobileBackdrop');
+        const menuBtn = document.getElementById('mobileMenuToggle');
+
+        sidebar.classList.remove('mobile-open');
+        backdrop.classList.remove('active');
+        menuBtn.classList.remove('hidden');
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('tl_type').addEventListener('change', toggleParameterVisibility);
         toggleParameterVisibility(); // Set initial visibility
@@ -851,6 +881,19 @@
                 if (e.key === 'Enter') {
                     parseAndNormalizeInput(this);
                     this.blur();
+                }
+            });
+        });
+
+        // Mobile menu toggle
+        document.getElementById('mobileMenuToggle').addEventListener('click', toggleMobileMenu);
+        document.getElementById('mobileBackdrop').addEventListener('click', closeMobileMenu);
+
+        // Close mobile menu when clicking a tab (to see the content)
+        document.querySelectorAll('.tab-button').forEach(button => {
+            button.addEventListener('click', () => {
+                if (window.innerWidth <= 768) {
+                    closeMobileMenu();
                 }
             });
         });

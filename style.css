@@ -47,7 +47,8 @@ body {
     display: flex;
     flex-direction: column;
     padding: 15px;
-    overflow: hidden;
+    overflow: auto;
+    min-height: 0;
 }
 
 /* Form Elements */
@@ -145,6 +146,7 @@ button.stop-mode:hover {
     overflow-y: auto;
     white-space: pre-wrap;
     border: 1px solid var(--border-color);
+    flex-shrink: 0;
 }
 
 /* Progress Bar */
@@ -192,8 +194,9 @@ button.stop-mode:hover {
 }
 .tab-content {
     display: none;
-    height: 100%;
     flex: 1;
+    min-height: 0;
+    overflow-y: auto;
 }
 .tab-content.active {
     display: flex;
@@ -420,4 +423,254 @@ button.stop-mode:hover {
     margin-left: 10px;
     padding-left: 10px;
     border-left: 2px solid var(--border-color);
+}
+
+/* Mobile Toggle Button */
+.mobile-menu-toggle {
+    display: none;
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 1001;
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 10px 15px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.mobile-menu-toggle:hover {
+    background-color: var(--primary-hover);
+}
+
+/* Hide menu button when sidebar is open to prevent overlap */
+.mobile-menu-toggle.hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50px);
+}
+
+/* Mobile Responsive Layout */
+@media (max-width: 768px) {
+    body {
+        flex-direction: column;
+        overflow: hidden;
+        height: 100vh;
+    }
+
+    /* Show mobile toggle button */
+    .mobile-menu-toggle {
+        display: block;
+    }
+
+    /* Sidebar becomes overlay on mobile */
+    .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 280px;
+        max-width: 85vw;
+        height: 100vh;
+        z-index: 1000;
+        transform: translateX(-100%);
+        transition: transform 0.3s ease;
+        box-shadow: 2px 0 10px rgba(0,0,0,0.3);
+    }
+
+    .sidebar.mobile-open {
+        transform: translateX(0);
+    }
+
+    /* Overlay backdrop when sidebar is open */
+    .mobile-backdrop {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 999;
+    }
+
+    .mobile-backdrop.active {
+        display: block;
+    }
+
+    /* Main content takes full width and height */
+    .main-content {
+        width: 100%;
+        height: calc(100vh - 50px);
+        padding: 10px;
+        margin-top: 50px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        min-height: 0;
+        box-sizing: border-box;
+    }
+
+    /* Adjust tab bar for mobile - make it sticky */
+    .tab-bar {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        flex-shrink: 0;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .tab-button {
+        padding: 8px 12px;
+        font-size: 0.85em;
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+
+    /* Tab content should fill available space and scroll */
+    .tab-content {
+        display: none;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        min-height: 0;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .tab-content.active {
+        display: flex !important;
+        flex-direction: column;
+    }
+
+    /* Canvas container adjustments */
+    .canvas-container {
+        flex: 1;
+        min-height: 300px;
+        max-height: calc(100vh - 200px);
+    }
+
+    /* Geometry tab specific */
+    #tab-geometry {
+        overflow: hidden;
+    }
+
+    #tab-geometry .canvas-container {
+        margin-bottom: 10px;
+    }
+
+    /* Results and S-Parameters tabs structure - only when active */
+    #tab-results.active,
+    #tab-sparams.active {
+        display: flex;
+        flex-direction: column;
+        overflow-y: auto;
+    }
+
+    /* Ensure plots don't overflow */
+    #results-plot,
+    #sparam-plot {
+        flex: 0 1 auto;
+        min-height: 300px;
+        max-height: 400px;
+        overflow: hidden;
+    }
+
+    /* Make plots responsive */
+    .plot-container {
+        flex: 1;
+        min-height: 300px;
+    }
+
+    /* Adjust output console */
+    .output-panel {
+        height: 100px;
+        font-size: 0.7em;
+        flex-shrink: 0;
+        margin-top: 10px;
+    }
+
+    /* Results controls should not overlap */
+    .results-controls {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+        flex-shrink: 0;
+    }
+
+    .results-controls select {
+        width: 100%;
+    }
+
+    .results-controls.bottom {
+        flex-wrap: nowrap;
+    }
+
+    .results-controls.bottom button {
+        width: auto;
+    }
+
+    /* S-param controls */
+    .sparam-controls {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+        flex-shrink: 0;
+    }
+
+    .sparam-controls input,
+    .sparam-controls button {
+        width: 100%;
+    }
+
+    .sparam-controls label {
+        width: 100%;
+    }
+
+    /* About content scrollable */
+    .about-content {
+        padding: 15px;
+        overflow-y: auto;
+        flex: 1;
+    }
+
+    /* Make scale dialog responsive */
+    #scaleDialog {
+        right: 10px;
+        top: 60px;
+        width: 150px;
+    }
+
+    /* Help modal responsive */
+    .help-modal-content {
+        margin: 5% auto;
+        width: 90%;
+        max-width: 90%;
+    }
+}
+
+/* Extra small screens */
+@media (max-width: 400px) {
+    .sidebar {
+        width: 90vw;
+    }
+
+    .mobile-menu-toggle {
+        padding: 8px 12px;
+        font-size: 12px;
+    }
+
+    .main-content {
+        padding: 8px;
+    }
+
+    .tab-button {
+        padding: 6px 10px;
+        font-size: 0.8em;
+    }
 }
