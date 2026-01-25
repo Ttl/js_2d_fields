@@ -51,15 +51,15 @@
             </div>
             <div class="control-group">
                 <label>Relative Permittivity (&epsilon;<sub>r</sub>)</label>
-                <input type="number" id="inp_er" value="4.5" step="0.1">
+                <input type="number" id="inp_er" value="4.5" inputmode="decimal">
             </div>
             <div class="control-group">
                 <label>Loss Tangent (tan &delta;)</label>
-                <input type="number" id="inp_tand" value="0.02" step="0.001" placeholder="0">
+                <input type="number" id="inp_tand" value="0.02" inputmode="decimal" placeholder="0">
             </div>
             <div class="control-group">
                 <label>Conductivity (S/m)</label>
-                <input type="number" id="inp_sigma" value="5.8e7" step="1e6">
+                <input type="number" id="inp_sigma" value="5.8e7" inputmode="decimal">
             </div>
         </div>
     </div>
@@ -95,11 +95,11 @@
             </div>
             <div class="control-group">
                 <label>Top Permittivity (&epsilon;<sub>r,top</sub>)</label>
-                <input type="number" id="inp_er_top" value="4.5" step="0.1">
+                <input type="number" id="inp_er_top" value="4.5" inputmode="decimal">
             </div>
             <div class="control-group">
                 <label>Top Loss Tangent</label>
-                <input type="number" id="inp_tand_top" value="0.02" step="0.001" placeholder="0">
+                <input type="number" id="inp_tand_top" value="0.02" inputmode="decimal" placeholder="0">
             </div>
         </div>
     </div>
@@ -140,11 +140,11 @@
             </div>
             <div class="control-group">
                 <label>Mask Permittivity (&epsilon;<sub>r,sm</sub>)</label>
-                <input type="number" id="inp_sm_er" value="3.5" step="0.1">
+                <input type="number" id="inp_sm_er" value="3.5" inputmode="decimal">
             </div>
             <div class="control-group">
                 <label>Mask Loss Tangent</label>
-                <input type="number" id="inp_sm_tand" value="0.02" step="0.001" placeholder="0">
+                <input type="number" id="inp_sm_tand" value="0.02" inputmode="decimal" placeholder="0">
             </div>
         </div>
 
@@ -162,7 +162,7 @@
             </div>
             <div class="control-group">
                 <label>Top Dielectric Loss Tangent</label>
-                <input type="number" id="inp_top_diel_tand" value="0.02" step="0.001" placeholder="0">
+                <input type="number" id="inp_top_diel_tand" value="0.02" inputmode="decimal" placeholder="0">
             </div>
         </div>
 
@@ -218,11 +218,11 @@
         <div class="section-content">
             <div class="control-group">
                 <label>Start Frequency</label>
-                <input type="text" class="unit-input" id="freq-start" value="0.1 GHz" step="0.1" min="0.001">
+                <input type="text" class="unit-input" id="freq-start" value="0.1 GHz" inputmode="decimal" min="0">
             </div>
             <div class="control-group">
                 <label>Stop Frequency</label>
-                <input type="text" class="unit-input" id="freq-stop" value="10 GHz" step="0.1" min="0.001">
+                <input type="text" class="unit-input" id="freq-stop" value="10 GHz" inputmode="decimal" min="0">
             </div>
             <div class="control-group">
                 <label>Points</label>
@@ -272,7 +272,7 @@
     </div>
     <div class="control-group">
         <label>Tolerance <span class="help-icon" onclick="showHelpModal('tolerance')">?</span></label>
-        <input type="number" id="inp_tolerance" value="0.05" step="0.01" min="0.001">
+        <input type="number" id="inp_tolerance" value="0.05" inputmode="decimal" min="0" max="1">
     </div>
     </div>
     </div>
