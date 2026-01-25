@@ -36,15 +36,15 @@
         <div class="section-content">
             <div class="control-group">
                 <label>Trace Width</label>
-                <input type="text" class="unit-input" id="inp_w" value="3.0 mm" step="0.1">
+                <input type="text" class="unit-input" id="inp_w" value="3.0 mm">
             </div>
             <div class="control-group">
                 <label>Substrate Height</label>
-                <input type="text" class="unit-input" id="inp_h" value="1.6 mm" step="0.1">
+                <input type="text" class="unit-input" id="inp_h" value="1.6 mm">
             </div>
             <div class="control-group">
                 <label>Trace Thickness</label>
-                <input type="text" class="unit-input" id="inp_t" value="35 μm" step="1">
+                <input type="text" class="unit-input" id="inp_t" value="35 μm">
             </div>
             <div class="control-group">
                 <label>Relative Permittivity (&epsilon;<sub>r</sub>)</label>
@@ -52,7 +52,7 @@
             </div>
             <div class="control-group">
                 <label>Loss Tangent (tan &delta;)</label>
-                <input type="number" id="inp_tand" value="0.02" step="0.001">
+                <input type="number" id="inp_tand" value="0.02" step="0.001" placeholder="0">
             </div>
             <div class="control-group">
                 <label>Conductivity (S/m)</label>
@@ -68,15 +68,15 @@
         <div class="section-content">
             <div class="control-group">
                 <label>Gap</label>
-                <input type="text" class="unit-input" id="inp_gap" value="0.1 mm" step="0.01">
+                <input type="text" class="unit-input" id="inp_gap" value="0.1 mm">
             </div>
             <div class="control-group">
                 <label>Top Ground Width</label>
-                <input type="text" class="unit-input" id="inp_top_gnd_w" value="0.2 mm" step="0.01">
+                <input type="text" class="unit-input" id="inp_top_gnd_w" value="0.2 mm">
             </div>
             <div class="control-group">
                 <label>Via Gap</label>
-                <input type="text" class="unit-input" id="inp_via_gap" value="0.1 mm" step="0.01">
+                <input type="text" class="unit-input" id="inp_via_gap" value="0.1 mm">
             </div>
         </div>
     </div>
@@ -88,7 +88,7 @@
         <div class="section-content">
             <div class="control-group">
                 <label>Top Dielectric Height</label>
-                <input type="text" class="unit-input" id="inp_air_top" value="1.6 mm" step="0.01">
+                <input type="text" class="unit-input" id="inp_air_top" value="1.6 mm">
             </div>
             <div class="control-group">
                 <label>Top Permittivity (&epsilon;<sub>r,top</sub>)</label>
@@ -96,7 +96,7 @@
             </div>
             <div class="control-group">
                 <label>Top Loss Tangent</label>
-                <input type="number" id="inp_tand_top" value="0.02" step="0.01">
+                <input type="number" id="inp_tand_top" value="0.02" step="0.001" placeholder="0">
             </div>
         </div>
     </div>
@@ -108,7 +108,7 @@
         <div class="section-content">
             <div class="control-group">
                 <label>Trace Spacing</label>
-                <input type="text" class="unit-input" id="inp_trace_spacing" value="1.0 mm" step="0.1">
+                <input type="text" class="unit-input" id="inp_trace_spacing" value="1.0 mm">
             </div>
         </div>
     </div>
@@ -125,15 +125,15 @@
         <div id="solder-mask-params" class="nested-options" style="display: none;">
             <div class="control-group">
                 <label>Mask over Substrate</label>
-                <input type="text" class="unit-input" id="inp_sm_t_sub" value="20 μm" step="1">
+                <input type="text" class="unit-input" id="inp_sm_t_sub" value="20 μm">
             </div>
             <div class="control-group">
                 <label>Mask over Trace</label>
-                <input type="text" class="unit-input" id="inp_sm_t_trace" value="20 μm" step="1">
+                <input type="text" class="unit-input" id="inp_sm_t_trace" value="20 μm">
             </div>
             <div class="control-group">
                 <label>Mask Side Thickness</label>
-                <input type="text" class="unit-input" id="inp_sm_t_side" value="20 μm" step="1">
+                <input type="text" class="unit-input" id="inp_sm_t_side" value="20 μm">
             </div>
             <div class="control-group">
                 <label>Mask Permittivity (&epsilon;<sub>r,sm</sub>)</label>
@@ -141,7 +141,7 @@
             </div>
             <div class="control-group">
                 <label>Mask Loss Tangent</label>
-                <input type="number" id="inp_sm_tand" value="0.02" step="0.001">
+                <input type="number" id="inp_sm_tand" value="0.02" step="0.001" placeholder="0">
             </div>
         </div>
 
@@ -151,15 +151,15 @@
         <div id="top-diel-params" class="nested-options" style="display: none;">
             <div class="control-group">
                 <label>Top Dielectric Height</label>
-                <input type="text" class="unit-input" id="inp_top_diel_h" value="0.2 mm" step="0.01">
+                <input type="text" class="unit-input" id="inp_top_diel_h" value="0.2 mm">
             </div>
             <div class="control-group">
                 <label>Top Dielectric Permittivity</label>
-                <input type="number" id="inp_top_diel_er" value="4.5" step="0.1">
+                <input type="number" id="inp_top_diel_er" value="4.5">
             </div>
             <div class="control-group">
                 <label>Top Dielectric Loss Tangent</label>
-                <input type="number" id="inp_top_diel_tand" value="0.02" step="0.001">
+                <input type="number" id="inp_top_diel_tand" value="0.02" step="0.001" placeholder="0">
             </div>
         </div>
 
@@ -169,11 +169,11 @@
         <div id="gnd-cut-params" class="nested-options" style="display: none;">
             <div class="control-group">
                 <label>Cutout Width</label>
-                <input type="text" class="unit-input" id="inp_gnd_cut_w" value="3.0 mm" step="0.1">
+                <input type="text" class="unit-input" id="inp_gnd_cut_w" value="3.0 mm">
             </div>
             <div class="control-group">
                 <label>Substrate Below Cutout</label>
-                <input type="text" class="unit-input" id="inp_gnd_cut_h" value="1.0 mm" step="0.1">
+                <input type="text" class="unit-input" id="inp_gnd_cut_h" value="1.0 mm">
             </div>
         </div>
 
@@ -189,17 +189,17 @@
             </div>
             <div class="control-group">
                 <label>Width</label>
-                <input type="text" class="unit-input" id="inp_enclosure_width" placeholder="auto" step="0.1">
+                <input type="text" class="unit-input" id="inp_enclosure_width" placeholder="auto">
             </div>
             <div class="control-group" id="enclosure-height-group">
                 <label>Height</label>
-                <input type="text" class="unit-input" id="inp_enclosure_height" placeholder="auto" step="0.1">
+                <input type="text" class="unit-input" id="inp_enclosure_height" placeholder="auto">
             </div>
         </div>
 
         <div class="control-group">
             <label>Surface Roughness RMS <span class="help-icon" onclick="showHelpModal('roughness')">?</span></label>
-            <input type="text" class="unit-input" id="inp_rq" value="0 μm" step="0.1" min="0">
+            <input type="text" class="unit-input" id="inp_rq" value="0 μm" min="0">
         </div>
 
         <div class="control-group">
@@ -262,6 +262,10 @@
     <div class="control-group">
         <label>Max Nodes</label>
         <input type="number" id="inp_max_nodes" value="20000" step="1000" min="1000">
+    </div>
+    <div class="control-group">
+        <label>Min Converged Passes</label>
+        <input type="number" id="inp_min_converged_passes" value="2" step="1" min="1">
     </div>
     <div class="control-group">
         <label>Tolerance <span class="help-icon" onclick="showHelpModal('tolerance')">?</span></label>
@@ -624,7 +628,7 @@
         },
         causal: {
             title: 'Causal Material Parameters',
-            body: '<p>Applies the Djordjevic-Sarkar (Wideband Debye) model to enforce causality in dielectric materials. This model adjusts both permittivity and loss tangent as a function of frequency to satisfy Kramers-Kronig relations. The model uses a wideband fit from 1 kHz to 1 THz, with the reference frequency set at 1 GHz. This is the same model used by Ansys HFSS and other commercial EM solvers.</p><p><strong>Performance Impact:</strong> Enabling causal materials requires solving the Laplace equation at each frequency point (since field distributions change with frequency-dependent permittivity). This makes frequency sweeps significantly slower</p><p><strong>When to use:</strong>Broadband sweeps (multiple decades) where causality is required such as signal integrity simulation using export S-parameters.'
+            body: '<p>Applies the Djordjevic-Sarkar (Wideband Debye) model to enforce causality in dielectric materials. This model adjusts both permittivity and loss tangent as a function of frequency to satisfy Kramers-Kronig relations. The model uses a wideband fit from 1 kHz to 1 THz, with the reference frequency set at 1 GHz. This is the same model used by Ansys HFSS and other commercial EM solvers.</p><p><strong>Performance Impact:</strong> Enabling causal materials requires solving the Laplace equation at each frequency point (since field distributions change with frequency-dependent permittivity). This makes frequency sweeps significantly slower</p><p><strong>When to use:</strong> Broadband sweeps (multiple decades) where causality is required such as signal integrity simulation using export S-parameters.'
         },
         tolerance: {
             title: 'Tolerance',

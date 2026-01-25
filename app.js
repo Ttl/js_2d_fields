@@ -28,9 +28,28 @@ function getInputValue(id) {
     if (!element) return NaN;
 
     const defaultUnit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
-    return window.parseValueWithUnit ?
-        window.parseValueWithUnit(element.value, defaultUnit) :
-        parseFloat(element.value);
+
+    // Use value if present, otherwise fallback to placeholder
+    let raw = element.value;
+    if (!raw || raw.trim() === '') {
+        raw = element.placeholder || '';
+    }
+
+    return window.parseValueWithUnit
+        ? window.parseValueWithUnit(raw, defaultUnit)
+        : parseFloat(raw);
+}
+
+function getInputValueUnitless(id) {
+    const el = document.getElementById(id);
+    if (!el) return NaN;
+
+    let raw = el.value;
+    if (!raw || raw.trim() === '') {
+        raw = el.placeholder || '';
+    }
+
+    return parseFloat(raw);
 }
 
 // --- URL Parameter Serialization ---
@@ -61,9 +80,9 @@ function getUISettings() {
         w: getDisplayValue('inp_w'),
         h: getDisplayValue('inp_h'),
         t: getDisplayValue('inp_t'),
-        er: parseFloat(document.getElementById('inp_er').value),
-        tand: parseFloat(document.getElementById('inp_tand').value),
-        sigma: parseFloat(document.getElementById('inp_sigma').value),
+        er: getInputValueUnitless('inp_er'),
+        tand: getInputValueUnitless('inp_tand'),
+        sigma: getInputValueUnitless('inp_sigma'),
         freq_start: getDisplayValue('freq-start'),
         freq_stop: getDisplayValue('freq-stop'),
         freq_points: parseInt(document.getElementById('freq-points').value),
@@ -72,18 +91,18 @@ function getUISettings() {
         top_gnd_w: getDisplayValue('inp_top_gnd_w'),
         via_gap: getDisplayValue('inp_via_gap'),
         stripline_top_h: getDisplayValue('inp_air_top'),
-        er_top: parseFloat(document.getElementById('inp_er_top').value),
-        tand_top: parseFloat(document.getElementById('inp_tand_top').value),
+        er_top: getInputValueUnitless('inp_er_top'),
+        tand_top: getInputValueUnitless('inp_tand_top'),
         use_sm: document.getElementById('chk_solder_mask').checked ? 1 : 0,
         sm_t_sub: getDisplayValue('inp_sm_t_sub'),
         sm_t_trace: getDisplayValue('inp_sm_t_trace'),
         sm_t_side: getDisplayValue('inp_sm_t_side'),
-        sm_er: parseFloat(document.getElementById('inp_sm_er').value),
-        sm_tand: parseFloat(document.getElementById('inp_sm_tand').value),
+        sm_er: getInputValueUnitless('inp_sm_er'),
+        sm_tand: getInputValueUnitless('inp_sm_tand'),
         use_top_diel: document.getElementById('chk_top_diel').checked ? 1 : 0,
         top_diel_h: getDisplayValue('inp_top_diel_h'),
-        top_diel_er: parseFloat(document.getElementById('inp_top_diel_er').value),
-        top_diel_tand: parseFloat(document.getElementById('inp_top_diel_tand').value),
+        top_diel_er: getInputValueUnitless('inp_top_diel_er'),
+        top_diel_tand: getInputValueUnitless('inp_top_diel_tand'),
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked ? 1 : 0,
         gnd_cut_w: getDisplayValue('inp_gnd_cut_w'),
         gnd_cut_h: getDisplayValue('inp_gnd_cut_h'),
@@ -93,11 +112,11 @@ function getUISettings() {
         enclosure_width: getDisplayValue('inp_enclosure_width'),
         enclosure_height: getDisplayValue('inp_enclosure_height'),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
-        tolerance: parseFloat(document.getElementById('inp_tolerance').value),
+        tolerance: getInputValueUnitless('inp_tolerance'),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         rq: getDisplayValue('inp_rq'),
         sparam_length: getDisplayValue('sparam-length'),
-        sparam_z_ref: parseFloat(document.getElementById('sparam-z-ref').value),
+        sparam_z_ref: getInputValueUnitless('sparam-z-ref'),
         use_causal_materials: document.getElementById('chk_causal_materials').checked ? 1 : 0,
     };
 }
@@ -188,6 +207,7 @@ function restoreSettings(settings) {
         if (settings.max_iters !== undefined) document.getElementById('inp_max_iters').value = settings.max_iters;
         if (settings.tolerance !== undefined) document.getElementById('inp_tolerance').value = settings.tolerance;
         if (settings.max_nodes !== undefined) document.getElementById('inp_max_nodes').value = settings.max_nodes;
+        if (settings.min_converged_passes !== undefined) document.getElementById('inp_min_converged_passes').value = settings.min_converged_passes;
         setValueWithUnit('inp_rq', settings.rq);
 
         if (settings.use_causal_materials !== undefined) document.getElementById('chk_causal_materials').checked = !!settings.use_causal_materials;
@@ -246,10 +266,6 @@ function log(msg) {
     const c = document.getElementById('console_out');
     c.textContent += msg + "\n";
     c.scrollTop = c.scrollHeight;
-}
-
-function nanToNull(input) {
-    return Number.isNaN(input) ? null : input;
 }
 
 function getFrequencies() {
@@ -431,9 +447,9 @@ function getParams() {
         w: getInputValue('inp_w'),
         h: getInputValue('inp_h'),
         t: getInputValue('inp_t'),
-        er: parseFloat(document.getElementById('inp_er').value),
-        tand: parseFloat(document.getElementById('inp_tand').value),
-        sigma: parseFloat(document.getElementById('inp_sigma').value),
+        er: getInputValueUnitless('inp_er'),
+        tand: getInputValueUnitless('inp_tand'),
+        sigma: getInputValueUnitless('inp_sigma'),
         freq: getInputValue('freq-start'),
         nx: 30,  // Fixed initial grid size
         ny: 30,  // Fixed initial grid size
@@ -445,20 +461,20 @@ function getParams() {
         via_gap: getInputValue('inp_via_gap'),
         // Stripline parameters
         stripline_top_h: getInputValue('inp_air_top'),
-        er_top: parseFloat(document.getElementById('inp_er_top').value),
-        tand_top: parseFloat(document.getElementById('inp_tand_top').value),
+        er_top: getInputValueUnitless('inp_er_top'),
+        tand_top: getInputValueUnitless('inp_tand_top'),
         // Solder mask parameters
         use_sm: document.getElementById('chk_solder_mask').checked,
         sm_t_sub: getInputValue('inp_sm_t_sub'),
         sm_t_trace: getInputValue('inp_sm_t_trace'),
         sm_t_side: getInputValue('inp_sm_t_side'),
-        sm_er: parseFloat(document.getElementById('inp_sm_er').value),
-        sm_tand: parseFloat(document.getElementById('inp_sm_tand').value),
+        sm_er: getInputValueUnitless('inp_sm_er'),
+        sm_tand: getInputValueUnitless('inp_sm_tand'),
         // Top dielectric parameters
         use_top_diel: document.getElementById('chk_top_diel').checked,
         top_diel_h: getInputValue('inp_top_diel_h'),
-        top_diel_er: parseFloat(document.getElementById('inp_top_diel_er').value),
-        top_diel_tand: parseFloat(document.getElementById('inp_top_diel_tand').value),
+        top_diel_er: getInputValueUnitless('inp_top_diel_er'),
+        top_diel_tand: getInputValueUnitless('inp_top_diel_tand'),
         // Ground cutout parameters
         use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
         gnd_cut_w: getInputValue('inp_gnd_cut_w'),
@@ -467,10 +483,11 @@ function getParams() {
         use_enclosure: document.getElementById('chk_enclosure').checked,
         use_side_gnd: document.getElementById('chk_side_gnd').checked,
         use_top_gnd: document.getElementById('chk_top_gnd').checked,
-        enclosure_width: nanToNull(getInputValue('inp_enclosure_width')),
-        enclosure_height: nanToNull(getInputValue('inp_enclosure_height')),
+        enclosure_width: getInputValue('inp_enclosure_width'),
+        enclosure_height: getInputValue('inp_enclosure_height'),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
-        tolerance: parseFloat(document.getElementById('inp_tolerance').value),
+        tolerance: getInputValueUnitless('inp_tolerance'),
+        min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         // Surface roughness parameter
         rq: getInputValue('inp_rq'),
@@ -826,6 +843,7 @@ async function runSimulation() {
             energy_tol: p.tolerance,
             param_tol: 0.05,
             max_nodes: p.max_nodes,
+            min_converged_passes: p.min_converged_passes,
             onProgress: (info) => {
                 const progress = info.iteration / p.max_iters * 0.5;  // First half is for mesh refinement
                 pbar.style.width = (progress * 100) + "%";
@@ -1063,7 +1081,7 @@ function bindEvents() {
                 return;
             }
             const length = getInputValue('sparam-length');
-            const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
+            const Z_ref = getInputValueUnitless('sparam-z-ref');
             const isDifferential = solver && solver.is_differential;
             const p = getParams();
             const params = {
