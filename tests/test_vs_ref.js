@@ -1,6 +1,6 @@
-import { MicrostripSolver } from './microstrip.js';
-import { computeSParamsSingleEnded, computeSParamsDifferential } from './sparameters.js';
-import { Complex } from './complex.js';
+import { MicrostripSolver } from '../src/microstrip.js';
+import { computeSParamsSingleEnded, computeSParamsDifferential } from '../src/sparameters.js';
+import { Complex } from '../src/complex.js';
 import { readFileSync } from 'fs';
 import { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation } from './test_snp_export.js';
 

@@ -1,6 +1,6 @@
-import { MicrostripSolver } from './microstrip.js';
-import { computeSParamsSingleEnded, computeSParamsDifferential } from './sparameters.js';
-import { Complex } from './complex.js';
+import { MicrostripSolver } from '../src/microstrip.js';
+import { computeSParamsSingleEnded, computeSParamsDifferential } from '../src/sparameters.js';
+import { Complex } from '../src/complex.js';
 import { readFileSync } from 'fs';
 
 /**
@@ -227,7 +227,7 @@ async function test_s2p_generation() {
     console.log('S2P GENERATION TEST');
     console.log(`${'='.repeat(80)}`);
 
-    const reference = parseS2P_MA('./ms_2d_fr4_causal_5mm.s2p');
+    const reference = parseS2P_MA('./data/ms_2d_fr4_causal_5mm.s2p');
     console.log(`Loaded ${reference.length} frequency points from reference`);
 
     // Setup solver with same parameters as reference
@@ -319,7 +319,7 @@ async function test_s2p_generation2() {
     console.log('S2P GENERATION TEST 2');
     console.log(`${'='.repeat(80)}`);
 
-    const reference = parseS2P_MA('./stripline_2d_causal.s2p');
+    const reference = parseS2P_MA('./data/stripline_2d_causal.s2p');
     console.log(`Loaded ${reference.length} frequency points from reference`);
 
     // Setup solver with same parameters as reference
@@ -415,7 +415,7 @@ async function test_s4p_generation() {
     console.log('S4P GENERATION TEST');
     console.log(`${'='.repeat(80)}`);
 
-    const reference = parseS4P_MA('./stripline_2d_diff_sweep.s4p');
+    const reference = parseS4P_MA('./data/stripline_2d_diff_sweep.s4p');
     console.log(`Loaded ${reference.length} frequency points from reference`);
 
     // Setup solver
@@ -523,7 +523,7 @@ async function test_s4p_generation_lossless() {
     console.log('S4P GENERATION TEST Lossless');
     console.log(`${'='.repeat(80)}`);
 
-    const reference = parseS4P_MA('./stripline_2d_diff_lossless_fsweep.s4p');
+    const reference = parseS4P_MA('./data/stripline_2d_diff_lossless_fsweep.s4p');
     console.log(`Loaded ${reference.length} frequency points from reference`);
 
     const solver = new MicrostripSolver({
