@@ -470,6 +470,7 @@ function draw(resetZoom = false) {
             zerolinecolor: '#555'
         },
         margin: { l: 70, r: 90, t: 50, b: 60 },
+        showlegend: false,
         hovermode: "closest",
         dragmode: "pan",
         paper_bgcolor: '#2a2a2a',

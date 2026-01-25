@@ -34,6 +34,9 @@ function getInputValue(id) {
     if (!raw || raw.trim() === '') {
         raw = element.placeholder || '';
     }
+    if (raw === "auto") {
+        return raw;
+    }
 
     return window.parseValueWithUnit
         ? window.parseValueWithUnit(raw, defaultUnit)

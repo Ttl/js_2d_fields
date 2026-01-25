@@ -38,7 +38,9 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Enclosure options
         this.enclosure_width = options.enclosure_width ?? null;
+        this.enclosure_width = this.enclosure_width === "auto" ? null : this.enclosure_width;
         this.enclosure_height = options.enclosure_height ?? null;
+        this.enclosure_height = this.enclosure_height === "auto" ? null : this.enclosure_height;
 
         // Solder Mask Parameters
         this.use_sm = options.use_sm ?? false;
@@ -210,10 +212,10 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         // Enclosure parameters
-        if (options.enclosure_width !== undefined && options.enclosure_width !== null) {
+        if (options.enclosure_width !== undefined && options.enclosure_width !== "auto") {
             checkPositive(options.enclosure_width, 'enclosure_width');
         }
-        if (options.enclosure_height !== undefined && options.enclosure_height !== null) {
+        if (options.enclosure_height !== undefined && options.enclosure_height !== "auto") {
             checkPositive(options.enclosure_height, 'enclosure_height');
         }
 
@@ -231,7 +233,7 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Check that active area fits in enclosure if enclosure is enabled
         const has_side_gnd_temp = (options.boundaries && (options.boundaries[0] === "gnd" || options.boundaries[1] === "gnd"));
-        if (has_side_gnd_temp && options.enclosure_width !== undefined && options.enclosure_width !== null) {
+        if (has_side_gnd_temp && options.enclosure_width !== undefined && options.enclosure_width !== "auto") {
             // Calculate active area width based on configuration
             let active_width = 0;
             const w = options.trace_width || 0;
@@ -310,7 +312,7 @@ class MicrostripSolver extends FieldSolver2D {
             this.top_dielectric_h = this.enclosure_height;
             this.has_top_gnd = (this.boundaries[2] === "gnd");
         } else {
-            this.top_dielectric_h = this.h * 15;
+            this.top_dielectric_h = (this.h + this.t) * 15;
             this.has_top_gnd = false;
         }
 
