@@ -263,8 +263,8 @@
         <input type="number" id="inp_max_iters" value="10" step="1" min="1">
     </div>
     <div class="control-group">
-        <label>Max Nodes</label>
-        <input type="number" id="inp_max_nodes" value="20000" step="1000" min="1000">
+        <label>Max Nodes (thousands)<span class="help-icon" onclick="showHelpModal('maxnodes')">?</span></label>
+        <input type="number" id="inp_max_nodes" value="20" step="1" min="1" max="200">
     </div>
     <div class="control-group">
         <label>Min Converged Passes</label>
@@ -272,7 +272,7 @@
     </div>
     <div class="control-group">
         <label>Tolerance <span class="help-icon" onclick="showHelpModal('tolerance')">?</span></label>
-        <input type="number" id="inp_tolerance" value="0.05" inputmode="decimal" min="0" max="1">
+        <input type="number" id="inp_tolerance" value="0.01" inputmode="decimal" min="0" max="1">
     </div>
     </div>
     </div>
@@ -636,7 +636,11 @@
         },
         tolerance: {
             title: 'Tolerance',
-            body: '<p>Terminates adaptive mesh refinement if the relative change in the total energy stored in electromagnetic field changes less than this value between iterations. 0.05 should be a good balance between fast calculation and good results. Decrease to 0.01 or less for more accurate results. Param error in log is relative error between calculated output parameters Z0 and C.</p>'
+            body: '<p>Terminates adaptive mesh refinement if the relative change in the total energy stored in electromagnetic field changes less than this value between iterations. 0.05 should result in <1 ohm impedance error with fast calculation speed. Decrease to 0.01 or less for more accurate results. Param error in log is relative error between calculated output parameters Z0 and C.</p>'
+        },
+        maxnodes: {
+            title: 'Max nodes (thousands)',
+            body: '<p>Maximum node budget for adaptive meshing. About 200k nodes will need 1 GB of memory and will be very slow to solve, avoid going above that unless really needed. 20k nodes is a good default.</p>'
         },
         copylink: {
             title: 'Copy link',

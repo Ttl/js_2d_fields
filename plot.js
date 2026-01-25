@@ -8,6 +8,9 @@ let currentView = "geometry";
 let zMin = null;
 let zMax = null;
 
+// Geometry view zoom constants
+const SIGNAL_CONDUCTOR_VIEW_FRACTION = 1/3;  // Signal conductors take up this fraction of X-axis view
+
 // Globals imported from app.js
 let getSolver = () => null;
 let getFrequencySweepResults = () => null;
@@ -109,6 +112,47 @@ function draw(resetZoom = false) {
             solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0),
             solver.conductors.reduce((max, c) => Math.max(max, c.y_max), 0)
         );
+
+        // Calculate intelligent zoom ranges for initial view (only if no current view exists)
+        if (!currentXRange || resetZoom) {
+            // Find signal conductors to determine interesting region
+            const signalConductors = solver.conductors.filter(c => c.is_signal);
+
+            if (signalConductors.length > 0) {
+                // Find leftmost and rightmost signal conductor edges
+                const xl = Math.min(...signalConductors.map(c => c.x_min));
+                const xr = Math.max(...signalConductors.map(c => c.x_max));
+                const signalWidth = xr - xl;
+                const signalCenter = (xl + xr) / 2;
+
+                // Calculate X-axis range so signal conductors take up SIGNAL_CONDUCTOR_VIEW_FRACTION
+                const viewWidth = signalWidth / SIGNAL_CONDUCTOR_VIEW_FRACTION;
+                const xMin = (signalCenter - viewWidth / 2) * 1000;  // Convert to mm
+                const xMax = (signalCenter + viewWidth / 2) * 1000;
+                currentXRange = [xMin, xMax];
+
+                // Calculate Y-axis range
+                const groundConductors = solver.conductors.filter(c => !c.is_signal);
+                const bottomGround = groundConductors.find(c => c.y_min === Math.min(...groundConductors.map(g => g.y_min)));
+                const hasTopGround = groundConductors.some(c => c.y_max >= maxY * 0.9);
+
+                if (hasTopGround) {
+                    // Show full domain height if top ground exists
+                    const yMin = bottomGround ? bottomGround.y_min * 1000 : 0;
+                    const yMax = maxY * 1000;
+                    currentYRange = [yMin, yMax];
+                } else {
+                    // No top ground: scale so conductors are 1/3 from bottom, 2/3 is air
+                    const topOfConductors = Math.max(...solver.conductors.map(c => c.y_max));
+                    const bottomY = bottomGround ? bottomGround.y_min : 0;
+                    const yMin = bottomY * 1000;
+                    const conductorHeight = topOfConductors - bottomY;
+                    const viewHeight = conductorHeight / (1/3);  // Conductors are 1/3 of view
+                    const yMax = (bottomY + viewHeight) * 1000;
+                    currentYRange = [yMin, yMax];
+                }
+            }
+        }
 
         // Draw dielectrics as rectangles (color by epsilon_r)
         for (const diel of solver.dielectrics) {

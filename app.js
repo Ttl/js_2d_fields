@@ -846,7 +846,7 @@ async function runSimulation() {
             max_iters: p.max_iters,
             energy_tol: p.tolerance,
             param_tol: 0.05,
-            max_nodes: p.max_nodes,
+            max_nodes: p.max_nodes*1000,
             min_converged_passes: p.min_converged_passes,
             onProgress: (info) => {
                 const progress = info.iteration / p.max_iters * 0.5;  // First half is for mesh refinement
@@ -1131,7 +1131,7 @@ function bindEvents() {
         'freq-start': { default: 0.1, label: 'Start frequency' },
         'freq-stop': { default: 10, label: 'Stop frequency' },
         'inp_max_iters': { min: 1, default: 10, integer: true, label: 'Max iterations' },
-        'inp_max_nodes': { min: 1000, default: 20000, integer: true, label: 'Max nodes' },
+        'inp_max_nodes': { min: 1, default: 20, integer: true, label: 'Max nodes' },
         'inp_tolerance': { min: 0, max: 1, default: 0.05, label: 'Tolerance' },
         'sparam-length': { default: 0.01, label: 'Line length' },
         'sparam-z-ref': { min: 1, default: 50, label: 'Reference impedance' }

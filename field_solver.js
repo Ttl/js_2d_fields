@@ -63,6 +63,12 @@ async function solveWithWASM(csr, B, useLU = false) {
     const N = B.length;
     const nnz = csr.values.length;
 
+    const bytesNeeded = 10 * (12 * nnz + 20 * N);
+
+    if (bytesNeeded > 1e9) {
+      throw new Error(`Problem too large. Tried to allocate ${bytesNeeded/1e9} GB.`);
+    }
+
     // Allocate memory
     const pRow = WASMModuleInstance._malloc(4 * (N + 1));
     const pCol = WASMModuleInstance._malloc(4 * nnz);
