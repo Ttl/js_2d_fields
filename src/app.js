@@ -1295,14 +1295,14 @@ function setupScaleDialog() {
 
     if (zMinSlider) {
         zMinSlider.addEventListener("input", (e) => {
-            zMinInput.value = e.target.value;
+            zMinInput.value = Number(e.target.value).toFixed(2);
             updateScaleFromDialog();
         });
     }
 
     if (zMaxSlider) {
         zMaxSlider.addEventListener("input", (e) => {
-            zMaxInput.value = e.target.value;
+            zMaxInput.value = Number(e.target.value).toFixed(2);
             updateScaleFromDialog();
         });
     }
@@ -1353,8 +1353,8 @@ function openScaleDialog() {
         scaleRanges[viewType].max = maxVal;
     }
 
-    document.getElementById("zMinInput").value = minVal;
-    document.getElementById("zMaxInput").value = maxVal;
+    document.getElementById("zMinInput").value = Number(minVal).toFixed(2);
+    document.getElementById("zMaxInput").value = Number(maxVal).toFixed(2);
 
     const minSlider = document.getElementById("zMinSlider");
     const maxSlider = document.getElementById("zMaxSlider");
