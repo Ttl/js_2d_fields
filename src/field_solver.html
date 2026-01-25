@@ -111,7 +111,7 @@
         <div class="section-content">
             <div class="control-group">
                 <label>Trace Spacing</label>
-                <input type="text" class="unit-input" id="inp_trace_spacing" value="1.0 mm">
+                <input type="text" class="unit-input" id="inp_trace_spacing" value="0.2 mm">
             </div>
         </div>
     </div>
@@ -342,6 +342,24 @@
             <h2>2D Transmission Line Field Solver</h2>
             <p>A quasi-static 2D field solver for transmission line analysis using the finite difference method with adaptive mesh refinement.</p>
 
+            <h3>Validity</h3>
+            <ul>
+                <li>Designed for microstrip, stripline, and coplanar waveguide structures commonly used in PCB RF and high-speed digital designs.</li>
+                <li>Provides good results when the transmission line supports TEM or quasi-TEM propagation, which covers most practical PCB geometries below the onset of higher-order modes.</li>
+                <li>Results have been checked against EM solver and actual measurement data with different geometries and transmission line types, showing close agreement with small error in typical use cases.</li>
+                <li>Accurate from RF through microwave and high-speed digital frequencies where return currents are confined and skin effect is significant.</li>
+                <li>Suitable for impedance control, loss estimation, and S-parameter generation in the vast majority of PCB transmission line applications.</li>
+            </ul>
+
+            <h3>Limitations</h3>
+            <ul>
+                <li>Higher-order modes, dispersion, and cutoff behavior are not modeled. Structures that support non-TEM modes (e.g., waveguides) are outside the solver's validity range.</li>
+                <li>Current is modeled at the surface for AC and DC resistance is blended smoothly at low frequencies. Full 2D/3D current density inside conductors is not solved, which can reduce accuracy at frequencies where skin depth is comparable to conductor thickness.</li>
+                <li>At DC and low frequencies (~&lt;1 MHz), return current spreads over the ground plane. Since the solver infers inductance from capacitance, partial inductance and finite ground width effects may be inaccurate.</li>
+                <li>Results apply to uniform, infinitely long transmission lines.</li>
+                <li>Radiation is not modeled</li>
+            </ul>
+
             <h3>Methodology</h3>
             <p>The solver computes the characteristic impedance and propagation parameters of transmission lines by solving Laplace's equation for the electric potential distribution in the cross-section:</p>
             <p style="text-align: center; font-family: serif; font-size: 1.1em;">&nabla;&sup2;V = 0</p>
@@ -350,7 +368,7 @@
             <p>where c is the speed of light.</p>
 
             <h3>Loss Calculations</h3>
-            <p><strong>Conductor loss</strong> is computed using Wheeler's incremental inductance rule, with skin effect and surface roughness corrections. The surface roughness model follows the gradient approach from <a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">IEEE literature</a>.</p>
+            <p><strong>Conductor loss</strong> is computed with perturbation method that calculates losses only on conductor boundaries. DC bulk resistance is blended at low frequencies for better loss at frequencies where skin depth is of similar scale as conductor dimensions. The surface roughness model implements <a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">Gradient model</a>.</p>
             <p><strong>Dielectric loss</strong> is calculated from the loss tangent of each dielectric region, weighted by the field energy distribution.</p>
 
             <h3>S-Parameters</h3>

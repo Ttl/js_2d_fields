@@ -372,6 +372,10 @@ button.stop-mode:hover {
     color: var(--text-muted);
     margin-bottom: 12px;
 }
+.about-content ul {
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
 .about-content a {
     color: var(--primary-color);
     text-decoration: none;

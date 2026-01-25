@@ -24,26 +24,26 @@ Open `src/field_solver.html` in a browser.
 3. Laplace Solve: Solve ∇²V = 0. Refine mesh until solution converges
 4. Parameter Extraction:
    - Capacitance from field energy
-   - Losses from perturbation methods
+   - Losses from perturbation method
    - RLGC extraction
 5. Frequency Sweep: Repeat for multiple frequencies
 6. S-Parameters: Convert RLGC to S-parameters via ABCD matrix
 
 ### Validity
 
-- Optimized for PCB Transmission Lines: Designed for microstrip, stripline, and coplanar waveguide structures commonly used in PCB RF and high-speed digital designs.
-- TEM/Quasi-TEM Regime Accuracy: Provides reliable results when the transmission line supports TEM or quasi-TEM propagation, which covers most practical PCB geometries below the onset of higher-order modes.
-- Validated Against Full-Wave Solvers: Results have been checked against full-wave EM solver and actual measurement data with different geometries and transmission line types, showing close agreement with small error in typical use cases.
-- Wide Frequency Applicability: Accurate from RF through microwave and high-speed digital frequencies where return currents are confined and skin effect is significant.
-- Sufficient for Most Practical Designs: Suitable for impedance control, loss estimation, and S-parameter generation in the vast majority of PCB transmission line applications.
+- Designed for microstrip, stripline, and coplanar waveguide structures commonly used in PCB RF and high-speed digital designs.
+- Provides good results when the transmission line supports TEM or quasi-TEM propagation, which covers most practical PCB geometries below the onset of higher-order modes.
+- Results have been checked against EM solver and actual measurement data with different geometries and transmission line types, showing close agreement with small error in typical use cases (`tests` folder).
+- Accurate from RF through microwave and high-speed digital frequencies where return currents are confined and skin effect is significant.
+- Sufficient for Most Practical Designs. Suitable for impedance control, loss estimation, and S-parameter generation in the vast majority of PCB transmission line applications.
 
 ### Limitations
 
-- Mode Limitations (TEM/Quasi-TEM Only): Higher-order modes, dispersion, and cutoff behavior are not modeled. Structures that support non-TEM modes (e.g., waveguides) are outside the solver’s validity range.
-- Conductor Current Distribution: Current is modeled at the surface for AC and DC resistance is blended smoothly at low frequencies. Full 2D/3D current density inside conductors is not solved, which can reduce accuracy at frequencies where skin depth is comparable to conductor thickness.
-- Low-Frequency Inductance Accuracy: At DC and low frequencies (~<1 MHz), return current spreads over the ground plane. Since the solver infers inductance from capacitance, partial inductance and finite ground width effects may be inaccurate.
-- 2D Cross-Section Only: Longitudinal variations, bends, vias, tapers, connectors, and transitions are not supported. Results apply to uniform, infinitely long transmission lines.
-- Radiation is not modeled
+- Higher-order modes, dispersion, and cutoff behavior are not modeled. Structures that support non-TEM modes (e.g., waveguides) are outside the solver’s validity range.
+- Current is modeled at the surface for AC and DC resistance is blended smoothly at low frequencies. Full 2D/3D current density inside conductors is not solved, which can reduce accuracy at frequencies where skin depth is comparable to conductor thickness.
+- At DC and low frequencies (~<1 MHz), return current spreads over the ground plane. Since the solver infers inductance from capacitance, partial inductance and finite ground width effects may be inaccurate.
+- Results apply to uniform, infinitely long transmission lines. Bends can often be approximated to behave similarly to straight line if they curve smoothly.
+- Radiation is not modeled.
 
 ## Common Tasks
 

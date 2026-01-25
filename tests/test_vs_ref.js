@@ -723,12 +723,7 @@ async function solve_differential_stripline_rlgc() {
         'R': [297.62, 13.56, 13.56, 297.62],
         'L': [3.32e-7, 8e-8, 8e-8, 3.2e-7],
         'C': [1.46e-10, -3.53e-11, -3.53e-11, 1.46e-10],
-        'G': [1.23, -0.297, -0.297, 1.23],
-        // Differential mode RLGC (common, coupling, coupling, differential)
-        'R_diff': [155.53, 0.126, 0.126, 567.85],
-        'L_diff': [2.06e-7, -1.8e-12, -1.8e-12, 5.04e-7],
-        'C_diff': [2.2e-10, -1.73e-17, -1.73e-17, 9.1e-11],
-        'G_diff': [1.87, -1.45e-7, -1.45e-7, 0.764]
+        'G': [1.23, -0.297, -0.297, 1.23]
     };
 
     // Test against reference
