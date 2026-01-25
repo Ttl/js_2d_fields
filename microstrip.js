@@ -103,9 +103,6 @@ class MicrostripSolver extends FieldSolver2D {
             this._calculate_coplanar_geometry_x();
         }
 
-        // Skin depth
-        this.delta_s = Math.sqrt(2 / (2 * Math.PI * Math.max(1e6, this.freq) * CONSTANTS.MU0 * this.sigma_cond));
-
         // Build geometry lists
         const [dielectrics, conductors] = this._build_geometry_lists();
         this.dielectrics = dielectrics;
@@ -116,7 +113,7 @@ class MicrostripSolver extends FieldSolver2D {
         // Y-coordinate system: bottom ground extends from -t_gnd to 0 (top surface at y=0)
         this.mesher = new Mesher(
             this.domain_width, this.domain_height,
-            this.nx, this.ny, this.delta_s,
+            this.nx, this.ny,
             this.conductors, this.dielectrics,
             true,  // symmetric
             -this.domain_width / 2,  // x_min

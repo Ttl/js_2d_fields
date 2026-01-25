@@ -57,7 +57,6 @@ class Mesher {
      * @param {number} domain_height - Physical domain height
      * @param {number} nx - Approximate number of mesh points in x-direction
      * @param {number} ny - Approximate number of mesh points in y-direction
-     * @param {number} skin_depth - Skin depth for conductor meshing
      * @param {Array<Conductor>} conductors - List of conductor objects
      * @param {Array<Dielectric>} dielectrics - List of dielectric objects
      * @param {boolean} symmetric - Whether to enforce symmetry (default: false)
@@ -66,12 +65,11 @@ class Mesher {
      * @param {number} y_min - Minimum y-coordinate (default: 0)
      * @param {number} y_max - Maximum y-coordinate (default: domain_height)
      */
-    constructor(domain_width, domain_height, nx, ny, skin_depth, conductors, dielectrics, symmetric = false, x_min = 0, x_max = null, y_min = 0, y_max = null) {
+    constructor(domain_width, domain_height, nx, ny, conductors, dielectrics, symmetric = false, x_min = 0, x_max = null, y_min = 0, y_max = null) {
         this.domain_width = domain_width;
         this.domain_height = domain_height;
         this.nx = nx;
         this.ny = ny;
-        this.skin_depth = skin_depth;
         this.conductors = conductors;
         this.dielectrics = dielectrics;
         this.symmetric = symmetric;
@@ -82,7 +80,7 @@ class Mesher {
 
         // Calculate corner mesh parameters
         this.ncorner = Math.max(2, Math.floor(nx / 40));  // About 2-3 lines for nx=100
-        this.corner_size = Math.min(3 * skin_depth, this._min_conductor_dimension() / 4);
+        this.corner_size = this._min_conductor_dimension() / 10;
     }
 
     _min_conductor_dimension() {
@@ -169,33 +167,35 @@ class Mesher {
             }
         }
 
+        // Calculate minimum conductor dimension in x-direction
+        let min_dim = Infinity;
+        for (const cond of this.conductors) {
+            min_dim = Math.min(min_dim, cond.width);
+        }
+        if (min_dim === Infinity) {
+            min_dim = 1e-3;  // fallback
+        }
+
         // Check if region is near a conductor
-        let min_dist_signal = Infinity;
-        let min_dist_ground = Infinity;
+        let min_dist = Infinity;
 
         for (const cond of this.conductors) {
             const dist = Math.min(
                 Math.abs(x0 - cond.x_min), Math.abs(x0 - cond.x_max),
                 Math.abs(x1 - cond.x_min), Math.abs(x1 - cond.x_max)
             );
-            if (cond.is_signal) {
-                min_dist_signal = Math.min(min_dist_signal, dist);
-            } else {
-                min_dist_ground = Math.min(min_dist_ground, dist);
-            }
+            min_dist = Math.min(min_dist, dist);
         }
 
-        // Weight based on distance from signal conductors
-        if (min_dist_signal < this.skin_depth * 5) {
-            return 5.0;  // Very close to signal conductor
-        } else if (min_dist_signal < this.skin_depth * 20) {
-            return 2.5;  // Near signal conductor
-        } else if (min_dist_signal < this.skin_depth * 50) {
-            return 1.0;  // Moderate distance
-        } else if (min_dist_ground < this.skin_depth * 5) {
-            return 1.5;  // Near ground conductor edges
+        // Weight based on distance relative to conductor dimensions
+        if (min_dist < 0.1 * min_dim) {
+            return 5.0;
+        } else if (min_dist < 0.25 * min_dim) {
+            return 2.5;
+        } else if (min_dist < min_dim) {
+            return 1.0;
         } else {
-            return 0.2;  // Far field
+            return 0.2;
         }
     }
 
@@ -209,20 +209,24 @@ class Mesher {
             }
         }
 
+        // Calculate minimum conductor dimension in y-direction
+        let min_dim = Infinity;
+        for (const cond of this.conductors) {
+            min_dim = Math.min(min_dim, Math.abs(cond.height));
+        }
+        if (min_dim === Infinity) {
+            min_dim = 1e-3;  // fallback
+        }
+
         // Check if region is near a conductor
-        let min_dist_signal = Infinity;
-        let min_dist_ground = Infinity;
+        let min_dist = Infinity;
 
         for (const cond of this.conductors) {
             const dist = Math.min(
                 Math.abs(y0 - cond.y_min), Math.abs(y0 - cond.y_max),
                 Math.abs(y1 - cond.y_min), Math.abs(y1 - cond.y_max)
             );
-            if (cond.is_signal) {
-                min_dist_signal = Math.min(min_dist_signal, dist);
-            } else {
-                min_dist_ground = Math.min(min_dist_ground, dist);
-            }
+            min_dist = Math.min(min_dist, dist);
         }
 
         // Check for dielectric interfaces
@@ -235,19 +239,18 @@ class Mesher {
             }
         }
 
-        // Weight based on distance from signal
-        if (min_dist_signal < this.skin_depth * 5) {
-            return 6.0;  // Very close to signal conductor
-        } else if (min_dist_signal < this.skin_depth * 20) {
-            return 3.0;  // Near signal conductor
-        } else if (at_interface && min_dist_signal < this.skin_depth * 50) {
-            return 1.5;  // At dielectric interface near signal
-        } else if (min_dist_signal < this.skin_depth * 50) {
-            return 1.0;  // Moderate distance from signal
-        } else if (min_dist_ground < this.skin_depth * 5) {
-            return 1.5;  // Near ground conductor edges
+        // Weight based on distance relative to conductor dimensions
+        // Apply higher base weight if at dielectric interface
+        const base_weight_multiplier = at_interface ? 1.5 : 1.0;
+
+        if (min_dist < 0.1 * min_dim) {
+            return 5.0 * base_weight_multiplier;
+        } else if (min_dist < 0.25 * min_dim) {
+            return 2.5 * base_weight_multiplier;
+        } else if (min_dist < min_dim) {
+            return 1.0 * base_weight_multiplier;
         } else {
-            return 0.15;  // Far field
+            return 0.2;
         }
     }
 
@@ -487,12 +490,12 @@ class Mesher {
         }
 
         // Add boundary lines adjacent to conductor edges
-        const boundary_offset = Math.min(this.skin_depth * 3, domain_size / 200);
         const boundary_lines = [];
         const axis_min = axis === 'x' ? this.x_min : this.y_min;
         const axis_max = axis === 'x' ? this.x_max : this.y_max;
 
         for (const cond of this.conductors) {
+            const boundary_offset = Math.min(cond.width, cond.height) / 20;
             const cond_min = axis === 'x' ? cond.x_min : cond.y_min;
             const cond_max = axis === 'x' ? cond.x_max : cond.y_max;
             const edges = [cond_min, cond_max];
@@ -514,15 +517,17 @@ class Mesher {
                 }
 
                 if (axis_min < outside_line && outside_line < axis_max) {
-                    boundary_lines.push(outside_line);
+                    boundary_lines.push([outside_line, boundary_offset]);
                 }
                 if (cond_min < inside_line && inside_line < cond_max) {
-                    boundary_lines.push(inside_line);
+                    boundary_lines.push([inside_line, boundary_offset]);
                 }
             }
         }
 
-        for (const line of boundary_lines) {
+        for (const lines of boundary_lines) {
+            const line = lines[0];
+            const boundary_offset = lines[1];
             let min_dist = Infinity;
             for (const val of mesh) {
                 min_dist = Math.min(min_dist, Math.abs(val - line));
