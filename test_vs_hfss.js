@@ -646,8 +646,6 @@ async function solve_differential_stripline() {
         'alpha_total_odd': odd.alpha_total,
         'alpha_total_even': even.alpha_total
     };
-    console.log(odd.RLGC);
-    console.log(even.RLGC);
 
     const reference = {
         'Z_odd': 37.6,
@@ -705,12 +703,6 @@ async function solve_differential_stripline_rlgc() {
         'alpha_total_even': even.alpha_total
     };
 
-    console.log("\nINTERMEDIATE VALUES:");
-    console.log(`R_odd from RLGC: ${odd.RLGC.R.toFixed(4)} Ω/m`);
-    console.log(`R_even from RLGC: ${even.RLGC.R.toFixed(4)} Ω/m`);
-    console.log(`R_odd from formula (2*Z*alpha_c/8.686): ${(2 * odd.Z0 * odd.alpha_c / 8.686).toFixed(4)} Ω/m`);
-    console.log(`R_even from formula (2*Z*alpha_c/8.686): ${(2 * even.Z0 * even.alpha_c / 8.686).toFixed(4)} Ω/m`);
-
     // Add 2x2 RLGC matrix values (flattened for comparison)
     if (results.RLGC_matrix) {
         const m = results.RLGC_matrix;
@@ -718,18 +710,6 @@ async function solve_differential_stripline_rlgc() {
         solver_results.L = [m.L[0][0], m.L[0][1], m.L[1][0], m.L[1][1]];
         solver_results.G = [m.G[0][0], m.G[0][1], m.G[1][0], m.G[1][1]];
         solver_results.C = [m.C[0][0], m.C[0][1], m.C[1][0], m.C[1][1]];
-    }
-
-    console.log("\nMODAL RLGC:");
-    console.log("ODD MODE:", odd.RLGC);
-    console.log("EVEN MODE:", even.RLGC);
-
-    console.log("\nPHYSICAL 2x2 RLGC MATRIX:");
-    if (results.RLGC_matrix) {
-        console.log("R (Ohm/m):", results.RLGC_matrix.R);
-        console.log("L (H/m):", results.RLGC_matrix.L);
-        console.log("G (S/m):", results.RLGC_matrix.G);
-        console.log("C (F/m):", results.RLGC_matrix.C);
     }
 
     const reference = {

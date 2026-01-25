@@ -841,6 +841,7 @@ function drawSParamPlot() {
 
     const length = get.inputValue('sparam-length');
     const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
+    const useMixedMode = document.getElementById('sparam-diff').checked;
 
     // Check for invalid inputs
     if (isNaN(length) || length <= 0 || isNaN(Z_ref) || Z_ref <= 0) {
@@ -894,68 +895,143 @@ function drawSParamPlot() {
             mode: lineMode
         });
     } else {
-        // 4-port S-parameters (mixed-mode)
-        const SDD11_data = [];
-        const SDD21_data = [];
-        const SCC11_data = [];
-        const SCC21_data = [];
+        // 4-port S-parameters
 
-        for (const { freq, result } of frequencySweepResults) {
-            const oddMode = result.modes.find(m => m.mode === 'odd');
-            const evenMode = result.modes.find(m => m.mode === 'even');
+        if (useMixedMode) {
+            // Mixed-mode S-parameters
+            const SDD11_data = [];
+            const SDD21_data = [];
+            const SCC11_data = [];
+            const SCC21_data = [];
 
-            const sp = computeSParamsDifferential(
-                freq,
-                oddMode.RLGC,
-                evenMode.RLGC,
-                length,
-                Z_ref
-            );
+            for (const { freq, result } of frequencySweepResults) {
+                const oddMode = result.modes.find(m => m.mode === 'odd');
+                const evenMode = result.modes.find(m => m.mode === 'even');
 
-            if (plotMode === 'magnitude') {
-                SDD11_data.push(sParamTodB(sp.SDD11));
-                SDD21_data.push(sParamTodB(sp.SDD21));
-                SCC11_data.push(sParamTodB(sp.SCC11));
-                SCC21_data.push(sParamTodB(sp.SCC21));
-            } else {
-                SDD11_data.push(sParamToPhase(sp.SDD11));
-                SDD21_data.push(sParamToPhase(sp.SDD21));
-                SCC11_data.push(sParamToPhase(sp.SCC11));
-                SCC21_data.push(sParamToPhase(sp.SCC21));
+                const sp = computeSParamsDifferential(
+                    freq,
+                    oddMode.RLGC,
+                    evenMode.RLGC,
+                    length,
+                    Z_ref
+                );
+
+                if (plotMode === 'magnitude') {
+                    SDD11_data.push(sParamTodB(sp.SDD11));
+                    SDD21_data.push(sParamTodB(sp.SDD21));
+                    SCC11_data.push(sParamTodB(sp.SCC11));
+                    SCC21_data.push(sParamTodB(sp.SCC21));
+                } else {
+                    SDD11_data.push(sParamToPhase(sp.SDD11));
+                    SDD21_data.push(sParamToPhase(sp.SDD21));
+                    SCC11_data.push(sParamToPhase(sp.SCC11));
+                    SCC21_data.push(sParamToPhase(sp.SCC21));
+                }
             }
-        }
 
-        const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
-        traces.push({
-            x: freqs,
-            y: SDD11_data,
-            name: `SDD11 ${label}`,
-            type: 'scatter',
-            mode: lineMode
-        });
-        traces.push({
-            x: freqs,
-            y: SDD21_data,
-            name: `SDD21 ${label}`,
-            type: 'scatter',
-            mode: lineMode
-        });
-        traces.push({
-            x: freqs,
-            y: SCC11_data,
-            name: `SCC11 ${label}`,
-            type: 'scatter',
-            mode: lineMode,
-            line: { dash: 'dash' }
-        });
-        traces.push({
-            x: freqs,
-            y: SCC21_data,
-            name: `SCC21 ${label}`,
-            type: 'scatter',
-            mode: lineMode,
-            line: { dash: 'dash' }
-        });
+            const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
+            traces.push({
+                x: freqs,
+                y: SDD11_data,
+                name: `SDD11 ${label}`,
+                type: 'scatter',
+                mode: lineMode
+            });
+            traces.push({
+                x: freqs,
+                y: SDD21_data,
+                name: `SDD21 ${label}`,
+                type: 'scatter',
+                mode: lineMode
+            });
+            traces.push({
+                x: freqs,
+                y: SCC11_data,
+                name: `SCC11 ${label}`,
+                type: 'scatter',
+                mode: lineMode,
+                line: { dash: 'dash' }
+            });
+            traces.push({
+                x: freqs,
+                y: SCC21_data,
+                name: `SCC21 ${label}`,
+                type: 'scatter',
+                mode: lineMode,
+                line: { dash: 'dash' }
+            });
+        } else {
+            // Single-ended 4-port S-parameters
+            // Port 1 = near end trace+, Port 2 = near end trace-
+            // Port 3 = far end trace+, Port 4 = far end trace-
+            const S11_data = [];  // Reflection at port 1
+            const S21_data = [];  // Near-end crosstalk (port 2 <- port 1)
+            const S31_data = [];  // Transmission (port 3 <- port 1)
+            const S41_data = [];  // Far-end crosstalk (port 4 <- port 1)
+
+            for (const { freq, result } of frequencySweepResults) {
+                const oddMode = result.modes.find(m => m.mode === 'odd');
+                const evenMode = result.modes.find(m => m.mode === 'even');
+
+                const sp = computeSParamsDifferential(
+                    freq,
+                    oddMode.RLGC,
+                    evenMode.RLGC,
+                    length,
+                    Z_ref
+                );
+
+                // Extract single-ended parameters from 4x4 S matrix
+                // S[row][col] where indices are 0-3 for ports 1-4
+                const S11 = sp.S[0][0];
+                const S21 = sp.S[1][0];
+                const S31 = sp.S[2][0];
+                const S41 = sp.S[3][0];
+
+                if (plotMode === 'magnitude') {
+                    S11_data.push(sParamTodB(S11));
+                    S21_data.push(sParamTodB(S21));
+                    S31_data.push(sParamTodB(S31));
+                    S41_data.push(sParamTodB(S41));
+                } else {
+                    S11_data.push(sParamToPhase(S11));
+                    S21_data.push(sParamToPhase(S21));
+                    S31_data.push(sParamToPhase(S31));
+                    S41_data.push(sParamToPhase(S41));
+                }
+            }
+
+            const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
+            traces.push({
+                x: freqs,
+                y: S11_data,
+                name: `S11 ${label}`,
+                type: 'scatter',
+                mode: lineMode
+            });
+            traces.push({
+                x: freqs,
+                y: S21_data,
+                name: `S21 ${label}`,
+                type: 'scatter',
+                mode: lineMode
+            });
+            traces.push({
+                x: freqs,
+                y: S31_data,
+                name: `S31 ${label}`,
+                type: 'scatter',
+                mode: lineMode
+            });
+            traces.push({
+                x: freqs,
+                y: S41_data,
+                name: `S41 ${label}`,
+                type: 'scatter',
+                mode: lineMode,
+                line: { dash: 'dash' }
+            });
+        }
     }
 
     const useLogX = document.getElementById('sparam-log-x').checked;

@@ -183,6 +183,7 @@ class MicrostripSolver extends FieldSolver2D {
         checkNonNegative(options.gap, 'gap');
         checkNonNegative(options.top_gnd_width, 'top_gnd_width');
         checkNonNegative(options.via_gap, 'via_gap');
+        checkNonNegative(options.rq, 'rq');
 
         if (options.trace_thickness <= -options.substrate_height) {
             errors.push("trace_thickness must be > -substrate_height");

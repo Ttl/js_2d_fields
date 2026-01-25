@@ -791,6 +791,7 @@ function updateGeometry() {
             solver = new MicrostripSolver(options);
         }
 
+        document.getElementById('sparam-diff').disabled = !solver.is_differential;
         // Store causal materials option on solver
         if (solver) {
             solver.use_causal_materials = p.use_causal_materials;
@@ -1024,6 +1025,7 @@ function bindEvents() {
     const sparamLength = document.getElementById('sparam-length');
     const sparamZref = document.getElementById('sparam-z-ref');
     const sparamMode = document.getElementById('sparam-plot-mode');
+    const sparamDiff = document.getElementById('sparam-diff');
     if (sparamLength) {
         sparamLength.addEventListener('input', () => {
             if (frequencySweepResults) {
@@ -1040,6 +1042,13 @@ function bindEvents() {
     }
     if (sparamMode) {
         sparamMode.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawSParamPlot();
+            }
+        });
+    }
+    if (sparamDiff) {
+        sparamDiff.addEventListener('change', () => {
             if (frequencySweepResults) {
                 drawSParamPlot();
             }
