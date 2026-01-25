@@ -27,6 +27,15 @@ const get = {
     inputValue: (id) => getInputValue(id)
 };
 
+function contourScaledB(min, max, n) {
+    let eMin = Math.max(Math.max(1, max*1e-2), min);
+    eMin = Math.log10(Math.max(eMin, 0.1));
+    let eMax = Math.log10(Math.max(eMin + 0.1, Math.max(max, 0.1)));
+    eMax = Math.max(eMin + 0.1, eMax);
+    const logStep = n == 0 ? 1 : Math.abs((eMax - eMin)) / n;
+    return [eMin, eMax, logStep];
+}
+
 // Export functions to get/set scale range for current view
 function getScaleRange() {
     return { min: zMin, max: zMax, view: currentView };
@@ -37,7 +46,31 @@ function setScaleRange(min, max) {
     zMax = max;
 
     const container = document.getElementById('sim_canvas');
-    if (container && container.data) {
+    if (!container || !container.data) return;
+
+    // For geometry view with contours, update contour properties
+    if (currentView === "geometry") {
+        // Find the contour trace (if it exists)
+        const contourTraceIdx = container.data.findIndex(trace =>
+            trace.type === 'contour' && trace.name === 'E-field contours'
+        );
+
+        if (contourTraceIdx !== -1) {
+            // Get number of contours from plotOptions
+            const plotOptions = getPlotOptions();
+            const n = plotOptions.contours;
+            const limits = contourScaledB(min, max, n);
+
+            if (n > 0) {
+                Plotly.restyle(container, {
+                    'contours.start': limits[0],
+                    'contours.end': limits[1],
+                    'contours.size': limits[2]
+                }, [contourTraceIdx]);
+            }
+        }
+    } else {
+        // For E-field and potential views, update heatmap/contour zmin/zmax
         Plotly.restyle(container, {
             zmin: min,
             zmax: max
@@ -267,7 +300,7 @@ function draw(resetZoom = false) {
         const { Ex, Ey } = getFields();
 
         let eMax = Math.max(...zData.flat());
-        let eMin = Math.max(Math.max(1, eMax*1e-3), Math.min(...zData.flat()));
+        let eMin = Math.min(...zData.flat());
 
         // Check if there's a user-defined scale override
         if (window.getStoredScale) {
@@ -279,7 +312,7 @@ function draw(resetZoom = false) {
         }
 
         const n = plotOptions.contours;
-        const logStep = (Math.log10(eMax) - Math.log10(eMin)) / n;
+        const limits = contourScaledB(eMin, eMax, n);
 
         // Add E-field contours if requested
         if (plotOptions.contours > 0) {
@@ -290,11 +323,11 @@ function draw(resetZoom = false) {
                 contours: {
                     showlines: true,
                     coloring: "none",
-                    start: Math.log10(Math.max(eMin, 0.1)),
-                    end: Math.log10(Math.max(eMin + 0.2, eMax)),
-                    size: logStep
+                    start: limits[0],
+                    end: limits[1],
+                    size: limits[2]
                 },
-                z: zData.map(row => row.map(v => Math.log10(Math.max(v, 1)))),
+                z: zData.map(row => row.map(v => Math.log10(Math.max(v, 1e-3)))),
                 line: {
                     smoothing: 1.3,
                     width: 1,
