@@ -5,6 +5,8 @@ const Plotly = window.Plotly;
 
 let showMesh = false;
 let currentView = "geometry";
+let zMin = null;
+let zMax = null;
 
 // Globals imported from app.js
 let getSolver = () => null;
@@ -24,6 +26,24 @@ const get = {
     frequencySweepResults: () => getFrequencySweepResults(),
     inputValue: (id) => getInputValue(id)
 };
+
+// Export functions to get/set scale range for current view
+function getScaleRange() {
+    return { min: zMin, max: zMax, view: currentView };
+}
+
+function setScaleRange(min, max) {
+    zMin = min;
+    zMax = max;
+
+    const container = document.getElementById('sim_canvas');
+    if (container && container.data) {
+        Plotly.restyle(container, {
+            zmin: min,
+            zmax: max
+        });
+    }
+}
 
 function draw(resetZoom = false) {
     const solver = get.solver();
@@ -133,6 +153,11 @@ function draw(resetZoom = false) {
                     zData.push(row);
                 }
             }
+            if (zData.length > 0) {
+                const flatZ = zData.flat();
+                zMin = Math.min(...flatZ);
+                zMax = Math.max(...flatZ);
+            }
         } else {
             // No solution - just axis scaling
             xMM = [0, solver.w * 2000];
@@ -173,6 +198,9 @@ function draw(resetZoom = false) {
                 zData.push(Array.from(V[i].slice(0, nx)));
             }
         }
+        const flatZ = zData.flat();
+        zMin = Math.min(...flatZ);
+        zMax = Math.max(...flatZ);
     }
 
     else if ((currentView === "efield" || currentView === "efield_odd" || currentView === "efield_even") && solver.solution_valid) {
@@ -214,6 +242,9 @@ function draw(resetZoom = false) {
                 zData.push(row);
             }
         }
+        const flatZ = zData.flat();
+        zMin = Math.min(...flatZ);
+        zMax = Math.max(...flatZ);
     }
 
     else {
@@ -235,11 +266,20 @@ function draw(resetZoom = false) {
     if (currentView === "geometry" && zData.length > 0) {
         const { Ex, Ey } = getFields();
 
-        const zMax = Math.max(...zData.flat());
-        const zMin = Math.max(Math.max(1, zMax*1e-3), Math.min(...zData.flat()));
+        let eMax = Math.max(...zData.flat());
+        let eMin = Math.max(Math.max(1, eMax*1e-3), Math.min(...zData.flat()));
+
+        // Check if there's a user-defined scale override
+        if (window.getStoredScale) {
+            const override = window.getStoredScale(currentView);
+            if (override) {
+                eMin = override.min;
+                eMax = override.max;
+            }
+        }
 
         const n = plotOptions.contours;
-        const logStep = (Math.log10(zMax) - Math.log10(zMin)) / n;
+        const logStep = (Math.log10(eMax) - Math.log10(eMin)) / n;
 
         // Add E-field contours if requested
         if (plotOptions.contours > 0) {
@@ -250,8 +290,8 @@ function draw(resetZoom = false) {
                 contours: {
                     showlines: true,
                     coloring: "none",
-                    start: Math.log10(zMin),
-                    end: Math.log10(zMax),
+                    start: Math.log10(Math.max(eMin, 0.1)),
+                    end: Math.log10(Math.max(eMin + 0.2, eMax)),
                     size: logStep
                 },
                 z: zData.map(row => row.map(v => Math.log10(Math.max(v, 1)))),
@@ -298,9 +338,14 @@ function draw(resetZoom = false) {
     } else if (zData.length > 0) {
         // Field views only. Use heatmap with optional contour lines
 
-        const flatZ = zData.flat();
-        const zMin = Math.min(...flatZ);
-        const zMax = Math.max(...flatZ);
+        // Check if there's a user-defined scale override
+        if (window.getStoredScale) {
+            const override = window.getStoredScale(currentView);
+            if (override) {
+                zMin = override.min;
+                zMax = override.max;
+            }
+        }
 
         const n = plotOptions.contours;
 
@@ -322,6 +367,8 @@ function draw(resetZoom = false) {
             x: xMM,
             y: yMM,
             z: zData,
+            zmin: zMin,
+            zmax: zMax,
             colorscale: colorscale,
             contours: contourSettings,
             line: {
@@ -484,11 +531,9 @@ function draw(resetZoom = false) {
                 }
             },
             {
-                name: "Auto Z Scale",
+                name: "Scale Range",
                 icon: Plotly.Icons.autoscale,
-                click: () => {
-                    Plotly.relayout(container, { "zaxis.autorange": true });
-                }
+                click: () => window.toggleScaleDialog && window.toggleScaleDialog()
             }
         ]
     };
@@ -988,6 +1033,10 @@ function getPlotOptions() {
 // Function to set current view
 function setCurrentView(view) {
     currentView = view;
+    // Notify app.js that view changed so it can restore the appropriate scale
+    if (window.onViewChanged) {
+        window.onViewChanged(view);
+    }
 }
 
-export { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView };
+export { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange };

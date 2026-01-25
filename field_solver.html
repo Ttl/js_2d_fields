@@ -356,6 +356,47 @@
     <div class="output-panel" id="console_out"></div>
 </div>
 
+<div id="scaleDialog" style="
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    background: #222;
+    color: #eee;
+    padding: 12px;
+    border-radius: 6px;
+    display: none;
+    z-index: 1000;
+    width: 180px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+    font-size: 13px;
+">
+    <div style="font-weight: bold; margin-bottom: 10px; font-size: 14px">
+        Field Scale
+    </div>
+
+    <label style="display: block; margin-bottom: 6px; font-size: 12px">
+        Min:
+        <input id="zMinInput" type="number" step="any" style="width: 100%; padding: 3px; margin-top: 2px; font-size: 11px">
+    </label>
+
+    <label style="display: block; margin-bottom: 8px; font-size: 11px">
+        <input id="zMinSlider" type="range" style="width: 100%; margin-top: 2px">
+    </label>
+
+    <label style="display: block; margin-bottom: 6px; font-size: 12px">
+        Max:
+        <input id="zMaxInput" type="number" step="any" style="width: 100%; padding: 3px; margin-top: 2px; font-size: 11px">
+    </label>
+
+    <label style="display: block; margin-bottom: 10px; font-size: 11px">
+        <input id="zMaxSlider" type="range" style="width: 100%; margin-top: 2px">
+    </label>
+
+    <div style="margin-top: 8px; text-align: right">
+        <button onclick="closeScaleDialog()" style="padding: 4px 12px; font-size: 12px">Close</button>
+    </div>
+</div>
+
 <!-- Help Modal -->
 <div id="helpModal" class="help-modal">
     <div class="help-modal-content">

@@ -3,7 +3,7 @@ import { CONSTANTS } from './field_solver.js';
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
-import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView } from './plot.js';
+import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange } from './plot.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 const Plotly = window.Plotly;
 
@@ -1215,8 +1215,168 @@ function bindEvents() {
     if (copyLinkBtn) {
         copyLinkBtn.addEventListener('click', copySettingsLink);
     }
+
+    // Scale dialog event listeners
+    setupScaleDialog();
 }
 
+// --- Scale Dialog Management ---
+
+// Store separate scales for each view type
+const scaleRanges = {
+    potential: { min: null, max: null },
+    efield: { min: null, max: null },
+    geometry: { min: null, max: null }
+};
+
+let scaleDialogOpen = false;
+
+function getViewType(view) {
+    if (view === 'potential') return 'potential';
+    if (view.startsWith('efield')) return 'efield';
+    return 'geometry';
+}
+
+function setupScaleDialog() {
+    const zMinInput = document.getElementById("zMinInput");
+    const zMaxInput = document.getElementById("zMaxInput");
+    const zMinSlider = document.getElementById("zMinSlider");
+    const zMaxSlider = document.getElementById("zMaxSlider");
+
+    if (zMinInput) {
+        zMinInput.addEventListener("input", () => {
+            const min = Number(zMinInput.value);
+            const max = Number(zMaxInput.value);
+            if (zMinSlider) zMinSlider.value = min;
+            updateScaleFromDialog();
+        });
+    }
+
+    if (zMaxInput) {
+        zMaxInput.addEventListener("input", () => {
+            const min = Number(zMinInput.value);
+            const max = Number(zMaxInput.value);
+            if (zMaxSlider) zMaxSlider.value = max;
+            updateScaleFromDialog();
+        });
+    }
+
+    if (zMinSlider) {
+        zMinSlider.addEventListener("input", (e) => {
+            zMinInput.value = e.target.value;
+            updateScaleFromDialog();
+        });
+    }
+
+    if (zMaxSlider) {
+        zMaxSlider.addEventListener("input", (e) => {
+            zMaxInput.value = e.target.value;
+            updateScaleFromDialog();
+        });
+    }
+}
+
+function updateScaleFromDialog() {
+    const min = Number(document.getElementById("zMinInput").value);
+    const max = Number(document.getElementById("zMaxInput").value);
+
+    // Save to current view's scale
+    const scaleInfo = getScaleRange();
+    const viewType = getViewType(scaleInfo.view);
+    scaleRanges[viewType].min = min;
+    scaleRanges[viewType].max = max;
+
+    // Apply to plot
+    setScaleRange(min, max);
+}
+
+function toggleScaleDialog() {
+    const dlg = document.getElementById("scaleDialog");
+    if (!dlg) return;
+
+    if (scaleDialogOpen) {
+        dlg.style.display = "none";
+        scaleDialogOpen = false;
+    } else {
+        openScaleDialog();
+    }
+}
+
+function openScaleDialog() {
+    const dlg = document.getElementById("scaleDialog");
+    if (!dlg) return;
+
+    const scaleInfo = getScaleRange();
+    const viewType = getViewType(scaleInfo.view);
+
+    // Get stored scale or use current computed scale
+    let minVal = scaleRanges[viewType].min;
+    let maxVal = scaleRanges[viewType].max;
+
+    // If no stored scale, use current computed values
+    if (minVal === null || maxVal === null) {
+        minVal = scaleInfo.min !== null ? scaleInfo.min : 0;
+        maxVal = scaleInfo.max !== null ? scaleInfo.max : 1;
+        scaleRanges[viewType].min = minVal;
+        scaleRanges[viewType].max = maxVal;
+    }
+
+    document.getElementById("zMinInput").value = minVal;
+    document.getElementById("zMaxInput").value = maxVal;
+
+    const minSlider = document.getElementById("zMinSlider");
+    const maxSlider = document.getElementById("zMaxSlider");
+
+    if (minSlider) {
+        minSlider.min = Math.min(minVal, 0);
+        minSlider.max = maxVal;
+        minSlider.step = (maxVal - minVal) / 200;
+        minSlider.value = minVal;
+    }
+
+    if (maxSlider) {
+        maxSlider.min = minVal;
+        maxSlider.max = Math.max(maxVal * 1.5, maxVal + 1);
+        maxSlider.step = (maxVal - minVal) / 200;
+        maxSlider.value = maxVal;
+    }
+
+    dlg.style.display = "block";
+    scaleDialogOpen = true;
+}
+
+function closeScaleDialog() {
+    const dlg = document.getElementById("scaleDialog");
+    if (dlg) {
+        dlg.style.display = "none";
+        scaleDialogOpen = false;
+    }
+}
+
+// Make functions globally accessible for HTML onclick handlers
+window.toggleScaleDialog = toggleScaleDialog;
+window.closeScaleDialog = closeScaleDialog;
+
+// Handle view changes to restore appropriate scale
+window.onViewChanged = function(view) {
+    const viewType = getViewType(view);
+    const stored = scaleRanges[viewType];
+
+    // If we have stored scale for this view, restore it
+    if (stored.min !== null && stored.max !== null) {
+        setScaleRange(stored.min, stored.max);
+    }
+};
+
+// Get stored scale override for current view (called by plot.js)
+window.getStoredScale = function(view) {
+    const viewType = getViewType(view);
+    const stored = scaleRanges[viewType];
+    if (stored.min !== null && stored.max !== null) {
+        return { min: stored.min, max: stored.max };
+    }
+    return null;
+};
 
 function init() {
     // Set up globals for plot.js
