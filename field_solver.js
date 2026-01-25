@@ -1216,8 +1216,19 @@ export class FieldSolver2D {
          * {
          *   modes: [{mode, Z0, eps_eff, C, C0, RLGC, Zc, alpha_c, alpha_d, alpha_total, V, Ex, Ey}, ...],
          *   Z_diff: (only for differential) 2 * Z_odd,
-         *   Z_common: (only for differential) Z_even / 2
+         *   Z_common: (only for differential) Z_even / 2,
+         *   RLGC_matrix: (only for differential) {
+         *     R: [[R11, R12], [R21, R22]],  // Resistance matrix (Ohm/m)
+         *     L: [[L11, L12], [L21, L22]],  // Inductance matrix (H/m)
+         *     G: [[G11, G12], [G21, G22]],  // Conductance matrix (S/m)
+         *     C: [[C11, C12], [C21, C22]]   // Capacitance matrix (F/m)
+         *   }
          * }
+         *
+         * Note: For differential pairs, RLGC_matrix represents the physical 2x2 per-unit-length
+         * parameter matrices relating the voltages and currents on the two traces. The diagonal
+         * elements (11, 22) are self-parameters, and off-diagonal elements (12, 21) are mutual
+         * coupling parameters. For L and C, coupling terms are negative.
          */
         // Ensure mesh is generated
         if (this.ensure_mesh) {
@@ -1227,7 +1238,7 @@ export class FieldSolver2D {
         const {
             max_iters = 10,
             refine_frac,
-            energy_tol = 0.02,
+            energy_tol = 0.01,
             param_tol = 0.1,
             max_nodes = 20000,
             min_converged_passes = 1,
@@ -1353,6 +1364,74 @@ export class FieldSolver2D {
         return this._build_results(modeResults);
     }
 
+    _modal_to_physical_rlgc(odd, even) {
+        /**
+         * Convert modal (odd/even) RLGC parameters to physical 2x2 RLGC matrices.
+         *
+         * For a differential pair with two traces (left and right), the physical
+         * RLGC matrices relate the voltages and currents on each trace:
+         *
+         *   V1 = Z11*I1 + Z12*I2  (per unit length)
+         *   V2 = Z21*I1 + Z22*I2
+         *
+         * The transformation from modal to physical domain is:
+         *   Self terms (diagonal):     X11 = X22 = (X_odd + X_even) / 2
+         *   Mutual terms (off-diag):   X12 = X21 = (X_even - X_odd) / 2
+         *
+         * where X represents R, L, G, or C.
+         *
+         * Physical interpretation:
+         * - Odd mode: traces driven with opposite polarity (differential excitation)
+         * - Even mode: traces driven with same polarity (common-mode excitation)
+         *
+         * Note: Coupling terms (off-diagonal) are NEGATIVE for L and C because:
+         * - L_even > L_odd (same-direction currents create more inductance)
+         * - C_even < C_odd (opposite charges reduce capacitance)
+         * Therefore: L12 = (L_even - L_odd)/2 > 0 (positive mutual inductance)
+         *           C12 = (C_even - C_odd)/2 < 0 (negative mutual capacitance)
+         *
+         * @param {object} odd - Odd mode results with RLGC
+         * @param {object} even - Even mode results with RLGC
+         * @returns {object} - Physical 2x2 matrices { R, L, G, C }
+         */
+        const R_odd = odd.RLGC.R;
+        const R_even = even.RLGC.R;
+        const L_odd = odd.RLGC.L;
+        const L_even = even.RLGC.L;
+        const G_odd = odd.RLGC.G;
+        const G_even = even.RLGC.G;
+        const C_odd = odd.RLGC.C;
+        const C_even = even.RLGC.C;
+
+        // Transform to physical domain
+        const R11 = (R_odd + R_even) / 2;
+        const R22 = R11;
+        const R12 = (R_even - R_odd) / 2;
+        const R21 = R12;
+
+        const L11 = (L_odd + L_even) / 2;
+        const L22 = L11;
+        const L12 = (L_even - L_odd) / 2;
+        const L21 = L12;
+
+        const G11 = (G_odd + G_even) / 2;
+        const G22 = G11;
+        const G12 = (G_even - G_odd) / 2;
+        const G21 = G12;
+
+        const C11 = (C_odd + C_even) / 2;
+        const C22 = C11;
+        const C12 = (C_even - C_odd) / 2;
+        const C21 = C12;
+
+        return {
+            R: [[R11, R12], [R21, R22]],
+            L: [[L11, L12], [L21, L22]],
+            G: [[G11, G12], [G21, G22]],
+            C: [[C11, C12], [C21, C22]]
+        };
+    }
+
     _build_results(modeResults) {
         /**
          * Build the unified result structure from mode results.
@@ -1364,6 +1443,9 @@ export class FieldSolver2D {
             const even = modeResults.find(m => m.mode === 'even');
             result.Z_diff = 2 * odd.Z0;
             result.Z_common = even.Z0 / 2;
+
+            // Add physical 2x2 RLGC matrix
+            result.RLGC_matrix = this._modal_to_physical_rlgc(odd, even);
         }
 
         return result;
@@ -1387,11 +1469,17 @@ export class FieldSolver2D {
      *       Z0: [...], Zc_re: [...], Zc_im: [...],
      *       eps_eff: [...],
      *       alpha_c: [...], alpha_d: [...], alpha_total: [...],
-     *       RLGC: { R: [...], L: [...], G: [...], C: [...] },
+     *       RLGC: { R: [...], L: [...], G: [...], C: [...] },  // modal parameters
      *       C: number, C0: number  // static values
      *     }, ...],
      *     Z_diff: [...],    // differential only
      *     Z_common: [...],  // differential only
+     *     RLGC_matrix: {    // differential only - physical 2x2 matrices
+     *       R: { R11: [...], R12: [...], R21: [...], R22: [...] },
+     *       L: { L11: [...], L12: [...], L21: [...], L22: [...] },
+     *       G: { G11: [...], G12: [...], G21: [...], G22: [...] },
+     *       C: { C11: [...], C12: [...], C21: [...], C22: [...] }
+     *     },
      *     mesh: { nx, ny }
      *   }
      */
@@ -1459,6 +1547,13 @@ export class FieldSolver2D {
         if (this.is_differential) {
             result.Z_diff = [];
             result.Z_common = [];
+            // Initialize RLGC_matrix arrays for 2x2 physical matrices
+            result.RLGC_matrix = {
+                R: { R11: [], R12: [], R21: [], R22: [] },
+                L: { L11: [], L12: [], L21: [], L22: [] },
+                G: { G11: [], G12: [], G21: [], G22: [] },
+                C: { C11: [], C12: [], C21: [], C22: [] }
+            };
         }
 
         // Compute at each frequency
@@ -1490,6 +1585,28 @@ export class FieldSolver2D {
             if (this.is_differential) {
                 result.Z_diff.push(freqResult.Z_diff);
                 result.Z_common.push(freqResult.Z_common);
+
+                // Add physical 2x2 RLGC matrix values
+                const rlgc_mat = freqResult.RLGC_matrix;
+                result.RLGC_matrix.R.R11.push(rlgc_mat.R[0][0]);
+                result.RLGC_matrix.R.R12.push(rlgc_mat.R[0][1]);
+                result.RLGC_matrix.R.R21.push(rlgc_mat.R[1][0]);
+                result.RLGC_matrix.R.R22.push(rlgc_mat.R[1][1]);
+
+                result.RLGC_matrix.L.L11.push(rlgc_mat.L[0][0]);
+                result.RLGC_matrix.L.L12.push(rlgc_mat.L[0][1]);
+                result.RLGC_matrix.L.L21.push(rlgc_mat.L[1][0]);
+                result.RLGC_matrix.L.L22.push(rlgc_mat.L[1][1]);
+
+                result.RLGC_matrix.G.G11.push(rlgc_mat.G[0][0]);
+                result.RLGC_matrix.G.G12.push(rlgc_mat.G[0][1]);
+                result.RLGC_matrix.G.G21.push(rlgc_mat.G[1][0]);
+                result.RLGC_matrix.G.G22.push(rlgc_mat.G[1][1]);
+
+                result.RLGC_matrix.C.C11.push(rlgc_mat.C[0][0]);
+                result.RLGC_matrix.C.C12.push(rlgc_mat.C[0][1]);
+                result.RLGC_matrix.C.C21.push(rlgc_mat.C[1][0]);
+                result.RLGC_matrix.C.C22.push(rlgc_mat.C[1][1]);
             }
         }
 

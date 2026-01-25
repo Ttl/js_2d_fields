@@ -135,6 +135,13 @@ function test_differential_solution(solver_results, reference, test_name = "Diff
         'alpha_d_even': MAX_LOSS_ERROR,
         'alpha_total_odd': MAX_LOSS_ERROR,
         'alpha_total_even': MAX_LOSS_ERROR,
+        // RLGC matrix thresholds
+        // Note: R has higher tolerance due to differences in conductor loss modeling
+        // (surface roughness, skin effect) between solvers
+        'R': 20.0,
+        'L': 10.0,
+        'G': 15.0,
+        'C': 10.0,
     };
 
     console.log(`\n${'='.repeat(80)}`);
@@ -153,6 +160,63 @@ function test_differential_solution(solver_results, reference, test_name = "Diff
 
         const solved_value = solver_results[param];
 
+        // Handle array values (for RLGC matrices)
+        if (Array.isArray(ref_value)) {
+            // Test each element of the array
+            for (let i = 0; i < ref_value.length; i++) {
+                const elem_ref = ref_value[i];
+                const elem_solved = solved_value[i];
+
+                // Calculate relative error
+                let rel_error;
+                if (elem_ref !== 0) {
+                    rel_error = Math.abs((elem_solved - elem_ref) / elem_ref) * 100;
+                } else {
+                    rel_error = Math.abs(elem_solved) * 100;
+                }
+
+                // Check against threshold
+                const threshold = error_thresholds[param] || 10.0;
+                const passed = rel_error <= threshold;
+                all_passed = all_passed && passed;
+
+                const status = passed ? "✓ PASS" : "✗ FAIL";
+
+                // Format values based on parameter type
+                let solved_str, ref_str, param_label;
+                const indices = ['11', '12', '21', '22'];
+                param_label = `${param}[${indices[i]}]`;
+
+                if (param === 'C') {
+                    solved_str = `${(elem_solved * 1e12).toFixed(2)} pF/m`;
+                    ref_str = `${(elem_ref * 1e12).toFixed(2)} pF/m`;
+                } else if (param === 'L') {
+                    solved_str = `${(elem_solved * 1e9).toFixed(2)} nH/m`;
+                    ref_str = `${(elem_ref * 1e9).toFixed(2)} nH/m`;
+                } else if (param === 'G') {
+                    solved_str = `${(elem_solved * 1e3).toFixed(2)} mS/m`;
+                    ref_str = `${(elem_ref * 1e3).toFixed(2)} mS/m`;
+                } else if (param === 'R') {
+                    solved_str = `${elem_solved.toFixed(2)} Ω/m`;
+                    ref_str = `${elem_ref.toFixed(2)} Ω/m`;
+                } else {
+                    solved_str = `${elem_solved.toFixed(3)}`;
+                    ref_str = `${elem_ref.toFixed(3)}`;
+                }
+
+                console.log(`${param_label.padEnd(20)} ${solved_str.padEnd(15)} ${ref_str.padEnd(15)} ${rel_error.toFixed(2).padEnd(12)} ${status.padEnd(10)}`);
+
+                test_results[param_label] = {
+                    'solved': elem_solved,
+                    'reference': elem_ref,
+                    'error': rel_error,
+                    'passed': passed
+                };
+            }
+            continue;
+        }
+
+        // Handle scalar values
         // Calculate relative error
         let rel_error;
         if (ref_value !== 0) {
@@ -582,6 +646,8 @@ async function solve_differential_stripline() {
         'alpha_total_odd': odd.alpha_total,
         'alpha_total_even': even.alpha_total
     };
+    console.log(odd.RLGC);
+    console.log(even.RLGC);
 
     const reference = {
         'Z_odd': 37.6,
@@ -590,6 +656,99 @@ async function solve_differential_stripline() {
         'eps_eff_odd': 4.195,
         'alpha_total_odd': 7.93,
         'alpha_total_even': 6.47,
+    };
+
+    // Test against reference
+    test_differential_solution(solver_results, reference, "Differential Stripline");
+
+    return results;
+}
+
+async function solve_differential_stripline_rlgc() {
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2e-3,
+        trace_width: 0.15e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 16e-6,
+        epsilon_r: 4.1,
+        epsilon_r_top: 4.1,
+        tan_delta: 0.02,
+        tan_delta_top: 0.02,
+        enclosure_height: 0.2e-3 + 35e-6,
+        enclosure_width: 3e-3,
+        sigma_cond: 5.8e7,
+        freq: 67e9,
+        nx: 10,
+        ny: 10,
+        trace_spacing: 0.1e-3,  // This enables differential mode
+        boundaries: ["gnd", "gnd", "gnd", "gnd"]
+    });
+    solver.use_causal_materials = false;
+
+    const results = await solver.solve_adaptive({energy_tol: 0.001});
+    const odd = results.modes.find(m => m.mode === 'odd');
+    const even = results.modes.find(m => m.mode === 'even');
+
+    // Map to flat structure for test function
+    const solver_results = {
+        'Z_odd': odd.Z0,
+        'Z_even': even.Z0,
+        'Z_diff': results.Z_diff,
+        'Z_common': results.Z_common,
+        'eps_eff_odd': odd.eps_eff,
+        'eps_eff_even': even.eps_eff,
+        'alpha_c_odd': odd.alpha_c,
+        'alpha_c_even': even.alpha_c,
+        'alpha_d_odd': odd.alpha_d,
+        'alpha_d_even': even.alpha_d,
+        'alpha_total_odd': odd.alpha_total,
+        'alpha_total_even': even.alpha_total
+    };
+
+    console.log("\nINTERMEDIATE VALUES:");
+    console.log(`R_odd from RLGC: ${odd.RLGC.R.toFixed(4)} Ω/m`);
+    console.log(`R_even from RLGC: ${even.RLGC.R.toFixed(4)} Ω/m`);
+    console.log(`R_odd from formula (2*Z*alpha_c/8.686): ${(2 * odd.Z0 * odd.alpha_c / 8.686).toFixed(4)} Ω/m`);
+    console.log(`R_even from formula (2*Z*alpha_c/8.686): ${(2 * even.Z0 * even.alpha_c / 8.686).toFixed(4)} Ω/m`);
+
+    // Add 2x2 RLGC matrix values (flattened for comparison)
+    if (results.RLGC_matrix) {
+        const m = results.RLGC_matrix;
+        solver_results.R = [m.R[0][0], m.R[0][1], m.R[1][0], m.R[1][1]];
+        solver_results.L = [m.L[0][0], m.L[0][1], m.L[1][0], m.L[1][1]];
+        solver_results.G = [m.G[0][0], m.G[0][1], m.G[1][0], m.G[1][1]];
+        solver_results.C = [m.C[0][0], m.C[0][1], m.C[1][0], m.C[1][1]];
+    }
+
+    console.log("\nMODAL RLGC:");
+    console.log("ODD MODE:", odd.RLGC);
+    console.log("EVEN MODE:", even.RLGC);
+
+    console.log("\nPHYSICAL 2x2 RLGC MATRIX:");
+    if (results.RLGC_matrix) {
+        console.log("R (Ohm/m):", results.RLGC_matrix.R);
+        console.log("L (H/m):", results.RLGC_matrix.L);
+        console.log("G (S/m):", results.RLGC_matrix.G);
+        console.log("C (F/m):", results.RLGC_matrix.C);
+    }
+
+    const reference = {
+        'Z_odd': 37.6,
+        'Z_even': 61.36,
+        'eps_eff_even': 4.162,
+        'eps_eff_odd': 4.195,
+        'alpha_total_odd': 278.5,
+        'alpha_total_even': 266.2,
+        // 2x2 RLGC matrix (left and right traces)
+        'R': [297.62, 13.56, 13.56, 297.62],
+        'L': [3.32e-7, 8e-8, 8e-8, 3.2e-7],
+        'C': [1.46e-10, -3.53e-11, -3.53e-11, 1.46e-10],
+        'G': [1.23, -0.297, -0.297, 1.23],
+        // Differential mode RLGC (common, coupling, coupling, differential)
+        'R_diff': [155.53, 0.126, 0.126, 567.85],
+        'L_diff': [2.06e-7, -1.8e-12, -1.8e-12, 5.04e-7],
+        'C_diff': [2.2e-10, -1.73e-17, -1.73e-17, 9.1e-11],
+        'G_diff': [1.87, -1.45e-7, -1.45e-7, 0.764]
     };
 
     // Test against reference
@@ -607,6 +766,7 @@ async function runTests() {
     await solve_stripline();
     await solve_rough_stripline();
     await solve_differential_stripline();
+    await solve_differential_stripline_rlgc();
     await solve_differential_microstrip();
     await test_s4p_generation_lossless();
     await test_s4p_generation();
