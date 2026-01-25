@@ -157,11 +157,13 @@ function restoreSettings(settings) {
         const setValueWithUnit = (id, value) => {
             const element = document.getElementById(id);
             if (!element || value === undefined || value === null || isNaN(value)) return;
+            // Format number to remove floating point artifacts
+            const formattedValue = parseFloat(value.toPrecision(12));
             const unit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
             if (unit && element.classList.contains('unit-input')) {
-                element.value = `${value} ${unit}`;
+                element.value = `${formattedValue} ${unit}`;
             } else {
-                element.value = value;
+                element.value = formattedValue;
             }
         };
 
