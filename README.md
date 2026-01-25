@@ -14,8 +14,8 @@ A browser-based quasi-static 2D field solver for transmission line analysis. Com
 
 ## Quick Start
 
-Build WASM sparse matrix solver with "make" in "src/wasm_solver".
-Open `src/field_solver.html` in a browser.
+1. Build the WASM sparse matrix solver (see [Build WASM Solver](#build-wasm-solver) below)
+2. Open `src/field_solver.html` in a browser
 
 ## Solution Flow
 
@@ -62,7 +62,47 @@ node tests/test_vs_hfss.js
 
 ### Build WASM Solver
 
+WebAssembly (WASM) module is used for high-performance sparse matrix solving. This module is built using Emscripten and the Eigen C++ library.
+
+#### Prerequisites
+
+**Emscripten Compiler (emcc)**
+
+Install the Emscripten SDK:
+
+```bash
+# Clone the emsdk repository
+git clone https://github.com/emscripten-core/emsdk.git
+cd emsdk
+
+# Install and activate the latest SDK
+./emsdk install latest
+./emsdk activate latest
+
+# Add to PATH (add this to your .bashrc or .zshrc for permanent use)
+source ./emsdk_env.sh
+```
+
+Verify installation:
+```bash
+emcc --version
+```
+
+**Eigen Library**
+
+The Eigen library is included as a git submodule. Initialize it:
+
+```bash
+git submodule update --init --recursive
+```
+
+#### Build Steps
+
 ```bash
 cd src/wasm_solver
 make
 ```
+
+This compiles `solver.cpp` using Emscripten and generates:
+- `solver.js` - JavaScript wrapper for the WASM module
+- `solver.wasm` - Compiled WebAssembly binary
