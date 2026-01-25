@@ -667,7 +667,10 @@ function drawResultsPlot() {
 
     const selector = document.getElementById('results-plot-selector').value;
     const solver = get.solver();
-    const isDifferential = solver && solver.is_differential;
+
+    // Check if results are differential (have 2 modes), not just if current solver is differential
+    const resultsAreDifferential = frequencySweepResults[0].result.modes.length === 2;
+    const useDiffMode = document.getElementById('results-diff').checked && resultsAreDifferential;
 
     const freqs = frequencySweepResults.map(r => r.freq / 1e9);
     const traces = [];
@@ -676,7 +679,7 @@ function drawResultsPlot() {
     const plotMode = freqs.length === 1 ? 'markers' : 'lines+markers';
 
     if (selector === 're_z0') {
-        if (isDifferential) {
+        if (resultsAreDifferential && !useDiffMode) {
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].Zc.re),
@@ -691,6 +694,22 @@ function drawResultsPlot() {
                 type: 'scatter',
                 mode: plotMode
             });
+        } else if (resultsAreDifferential && useDiffMode) {
+            // Z_diff = 2*Z_odd, Z_common = Z_even / 2
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => 2 * r.result.modes[0].Zc.re),
+                name: 'Differential mode',
+                type: 'scatter',
+                mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].Zc.re / 2),
+                name: 'Common mode',
+                type: 'scatter',
+                mode: plotMode
+            });
         } else {
             traces.push({
                 x: freqs,
@@ -701,7 +720,7 @@ function drawResultsPlot() {
             });
         }
     } else if (selector === 'im_z0') {
-        if (isDifferential) {
+        if (resultsAreDifferential && !useDiffMode) {
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
@@ -716,6 +735,22 @@ function drawResultsPlot() {
                 type: 'scatter',
                 mode: plotMode
             });
+        } else if (resultsAreDifferential && useDiffMode) {
+            // Z_diff = 2*Z_odd, Z_common = Z_even / 2
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => 2 * r.result.modes[0].Zc.im),
+                name: 'Differential mode',
+                type: 'scatter',
+                mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].Zc.im / 2),
+                name: 'Common mode',
+                type: 'scatter',
+                mode: plotMode
+            });
         } else {
             traces.push({
                 x: freqs,
@@ -726,7 +761,7 @@ function drawResultsPlot() {
             });
         }
     } else if (selector === 'eps_eff') {
-        if (isDifferential) {
+        if (resultsAreDifferential && !useDiffMode) {
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].eps_eff),
@@ -741,6 +776,21 @@ function drawResultsPlot() {
                 type: 'scatter',
                 mode: plotMode
             });
+        } else if (resultsAreDifferential && useDiffMode) {
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].eps_eff),
+                name: 'Differential mode',
+                type: 'scatter',
+                mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].eps_eff),
+                name: 'Common mode',
+                type: 'scatter',
+                mode: plotMode
+            });
         } else {
             traces.push({
                 x: freqs,
@@ -751,7 +801,7 @@ function drawResultsPlot() {
             });
         }
     } else if (selector === 'loss') {
-        if (isDifferential) {
+        if (resultsAreDifferential && !useDiffMode) {
             // Odd mode losses (solid lines)
             traces.push({
                 x: freqs,
@@ -800,6 +850,55 @@ function drawResultsPlot() {
                 mode: plotMode,
                 line: { width: 2, dash: 'dash' }
             });
+        } else if (resultsAreDifferential && useDiffMode) {
+            // Differential mode losses (solid lines)
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
+                name: 'Conductor (diff)',
+                type: 'scatter',
+                mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
+                name: 'Dielectric (diff)',
+                type: 'scatter',
+                mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
+                name: 'Total (diff)',
+                type: 'scatter',
+                mode: plotMode,
+                line: { width: 2 }
+            });
+            // Common mode losses (dashed lines)
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].alpha_c),
+                name: 'Conductor (common)',
+                type: 'scatter',
+                mode: plotMode,
+                line: { dash: 'dash' }
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].alpha_d),
+                name: 'Dielectric (common)',
+                type: 'scatter',
+                mode: plotMode,
+                line: { dash: 'dash' }
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => r.result.modes[1].alpha_total),
+                name: 'Total (common)',
+                type: 'scatter',
+                mode: plotMode,
+                line: { width: 2, dash: 'dash' }
+            });
         } else {
             traces.push({
                 x: freqs,
@@ -827,7 +926,7 @@ function drawResultsPlot() {
     } else {
         // RLGC parameters
         const paramKey = selector; // R, L, G, or C
-        if (isDifferential) {
+        if (resultsAreDifferential && !useDiffMode) {
             traces.push({
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
@@ -839,6 +938,22 @@ function drawResultsPlot() {
                 x: freqs,
                 y: frequencySweepResults.map(r => r.result.modes[1].RLGC[paramKey]),
                 name: `${paramKey} (even)`,
+                type: 'scatter',
+                mode: plotMode
+            });
+        } else if (resultsAreDifferential && useDiffMode) {
+            // X_dd = 2*X_odd, X_cc = 0.5*X_even
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => 2 * r.result.modes[0].RLGC[paramKey]),
+                name: `${paramKey}_dd`,
+                type: 'scatter',
+                mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: frequencySweepResults.map(r => 0.5 * r.result.modes[1].RLGC[paramKey]),
+                name: `${paramKey}_cc`,
                 type: 'scatter',
                 mode: plotMode
             });
@@ -893,7 +1008,8 @@ function drawSParamPlot() {
     }
 
     const solver = get.solver();
-    const isDifferential = solver && solver.is_differential;
+    // Check if results are differential (have 2 modes), not just if current solver is differential
+    const resultsAreDifferential = frequencySweepResults[0].result.modes.length === 2;
     const plotMode = document.getElementById('sparam-plot-mode').value; // 'magnitude' or 'phase'
 
     const freqs = frequencySweepResults.map(r => r.freq / 1e9);
@@ -907,7 +1023,7 @@ function drawSParamPlot() {
         return complexVal.arg() * 180 / Math.PI;
     };
 
-    if (!isDifferential) {
+    if (!resultsAreDifferential) {
         // 2-port S-parameters
         const S11_data = [];
         const S21_data = [];

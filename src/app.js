@@ -359,6 +359,8 @@ function updateResultNotices() {
     const sparamNotice = document.getElementById('sparam-notice');
     const sparamNoticeText = document.getElementById('sparam-notice-text');
     const exportBtn = document.getElementById('export-snp');
+    const resultsDiffCheckbox = document.getElementById('results-diff');
+    const sparamDiffCheckbox = document.getElementById('sparam-diff');
 
     if (!frequencySweepResults || frequencySweepResults.length === 0) {
         // No results exist
@@ -373,11 +375,27 @@ function updateResultNotices() {
         if (exportBtn) {
             exportBtn.disabled = true;
         }
+        // Disable differential-mode checkboxes when no results
+        if (resultsDiffCheckbox) {
+            resultsDiffCheckbox.disabled = true;
+        }
+        if (sparamDiffCheckbox) {
+            sparamDiffCheckbox.disabled = true;
+        }
     } else {
         const currentGeometry = getGeometryHash();
         const currentFrequency = getFrequencyHash();
         const geometryChanged = lastSolvedGeometry && currentGeometry !== lastSolvedGeometry;
         const frequencyChanged = lastSolvedFrequency && currentFrequency !== lastSolvedFrequency;
+
+        // Enable/disable differential-mode checkboxes based on whether results are differential
+        const resultsAreDifferential = frequencySweepResults[0].result.modes.length === 2;
+        if (resultsDiffCheckbox) {
+            resultsDiffCheckbox.disabled = !resultsAreDifferential;
+        }
+        if (sparamDiffCheckbox) {
+            sparamDiffCheckbox.disabled = !resultsAreDifferential;
+        }
 
         if (geometryChanged) {
             // Geometry changed - show notice but keep old results visible
@@ -793,7 +811,6 @@ function updateGeometry() {
             solver = new MicrostripSolver(options);
         }
 
-        document.getElementById('sparam-diff').disabled = !solver.is_differential;
         // Store causal materials option on solver
         if (solver) {
             solver.use_causal_materials = p.use_causal_materials;
@@ -1061,6 +1078,16 @@ function bindEvents() {
     const resultsLogX = document.getElementById('results-log-x');
     if (resultsLogX) {
         resultsLogX.addEventListener('change', () => {
+            if (frequencySweepResults) {
+                drawResultsPlot();
+            }
+        });
+    }
+
+    // Differential-mode checkbox for results plot
+    const resultsDiff = document.getElementById('results-diff');
+    if (resultsDiff) {
+        resultsDiff.addEventListener('change', () => {
             if (frequencySweepResults) {
                 drawResultsPlot();
             }
