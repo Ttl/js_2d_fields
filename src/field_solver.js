@@ -715,7 +715,7 @@ export class FieldSolver2D {
         }
 
         // No dielectric loss at DC
-        // TODO: If material conductivity is implemented this might not be true
+        // If material conductivity is implemented this is not true
         if (this.freq === 0) {
             return 0;
         }
@@ -1308,8 +1308,6 @@ export class FieldSolver2D {
                 prevEnergy[modeName] = energy;
                 prevZ0[modeName] = r.Z0;
             }
-
-            //console.log(`Pass ${it + 1}: Energy err=${max_energy_err.toExponential(3)}, Param err=${max_param_err.toExponential(3)}, Grid=${this.x.length}x${this.y.length}`);
 
             // Call progress callback
             if (onProgress) {

@@ -35,7 +35,7 @@ function contourScaledB(min, max, n) {
     eMin = Math.log10(Math.max(eMin, 0.1));
     let eMax = Math.log10(Math.max(eMin + 0.1, Math.max(max, 0.1)));
     eMax = Math.max(eMin + 0.1, eMax);
-    const logStep = n == 0 ? 1 : Math.abs((eMax - eMin)) / n;
+    const logStep = n === 0 ? 1 : Math.abs((eMax - eMin)) / n;
     return [eMin, eMax, logStep];
 }
 
@@ -1219,21 +1219,6 @@ function drawSParamPlot() {
     };
 
     Plotly.newPlot('sparam-plot', traces, layout, { responsive: true });
-}
-
-function viridis(t) {
-    // Simple heatmap approximation
-    t = Math.max(0, Math.min(1, t));
-    // R, G, B interpolation
-    const r = Math.floor(255 * Math.sin(t * 2));
-    const g = Math.floor(255 * Math.sin(t * 3));
-    const b = Math.floor(255 * Math.cos(t * 1.5));
-    // Better pseudocolor: (Blue -> Cyan -> Green -> Yellow -> Red)
-    // Manual standard mapping for clarity:
-    if(t < 0.25) return `rgb(0, ${Math.floor(t*4*255)}, 255)`;
-    if(t < 0.5) return `rgb(0, 255, ${Math.floor((0.5-t)*4*255)})`;
-    if(t < 0.75) return `rgb(${Math.floor((t-0.5)*4*255)}, 255, 0)`;
-    return `rgb(255, ${Math.floor((1-t)*4*255)}, 0)`;
 }
 
 // Helper function to check if solver is in differential mode
