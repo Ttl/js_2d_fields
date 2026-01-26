@@ -1079,6 +1079,7 @@ function bindEvents() {
         'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',
         'inp_gnd_cut_w', 'inp_gnd_cut_h',
         'inp_enclosure_width', 'inp_enclosure_height',
+        'inp_rq',
         'freq-start'
     ];
 

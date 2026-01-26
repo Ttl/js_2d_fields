@@ -114,7 +114,7 @@ function generateS2P(frequencySweepResults, length, Z_ref, params = {}) {
         const S22_mag = sp.S22.abs();
         const S22_ang = sp.S22.arg() * 180 / Math.PI;
 
-        lines.push(`${freq.toExponential(6)}  ${S11_mag.toFixed(6)}  ${S11_ang.toFixed(2)}  ${S21_mag.toFixed(6)}  ${S21_ang.toFixed(2)}  ${S12_mag.toFixed(6)}  ${S12_ang.toFixed(2)}  ${S22_mag.toFixed(6)}  ${S22_ang.toFixed(2)}`);
+        lines.push(`${freq.toExponential(6)}  ${S11_mag.toExponential(6)}  ${S11_ang.toFixed(2)}  ${S21_mag.toExponential(6)}  ${S21_ang.toFixed(2)}  ${S12_mag.toExponential(6)}  ${S12_ang.toFixed(2)}  ${S22_mag.toExponential(6)}  ${S22_ang.toFixed(2)}`);
     }
 
     return lines.join('\n');
@@ -166,7 +166,7 @@ function generateS4P(frequencySweepResults, length, Z_ref, params = {}) {
         for (let col = 0; col < 4; col++) {
             const mag = S[0][col].abs();
             const ang = S[0][col].arg() * 180 / Math.PI;
-            line += `  ${mag.toFixed(6)}  ${ang.toFixed(2)}`;
+            line += `  ${mag.toExponential(6)}  ${ang.toFixed(2)}`;
         }
         lines.push(line);
 
@@ -176,7 +176,7 @@ function generateS4P(frequencySweepResults, length, Z_ref, params = {}) {
             for (let col = 0; col < 4; col++) {
                 const mag = S[row][col].abs();
                 const ang = S[row][col].arg() * 180 / Math.PI;
-                line += `  ${mag.toFixed(6)}  ${ang.toFixed(2)}`;
+                line += `  ${mag.toExponential(6)}  ${ang.toFixed(2)}`;
             }
             lines.push(line);
         }
