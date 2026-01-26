@@ -790,6 +790,9 @@ async function runSimulation() {
                 continue;
             }
 
+            // Yield to event loop to allow UI updates
+            await new Promise(resolve => setTimeout(resolve, 0));
+
             if (stopRequested) {
                 log("Simulation stopped by user");
                 break;
