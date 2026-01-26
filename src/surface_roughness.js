@@ -1,11 +1,16 @@
 import { Complex } from "./complex.js";
 
-const MU0 = 1.25663706212e-6;
+const MU0 = 4 * Math.PI * 1e-7;
 const C0 = 299792458.0;
 
 /**
  * Computes complex surface impedance using the Gradient Model (Rational Approximation)
- * based on Grujić et al. (IEEE T-MTT 2022).
+ * Reference:
+ * D. N. Grujić, "Simple and Accurate Approximation of Rough Conductor Surface
+ * Impedance," IEEE Trans. Microwave Theory Tech., vol. 70, no. 4, pp.
+ * 2053-2059, April 2022.
+ * Implementation is based on:
+ * https://github.com/simonp0420/MetalSurfaceImpedance.jl.
  * @param {number} f - Frequency in Hz
  * @param {number} sigma - Bulk conductivity (S/m)
  * @param {number} Rq - RMS Surface roughness (m)
