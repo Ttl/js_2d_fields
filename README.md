@@ -14,8 +14,7 @@ A browser-based quasi-static 2D field solver for transmission line analysis. Com
 
 ## Quick Start
 
-1. Build the WASM sparse matrix solver (see [Build WASM Solver](#build-wasm-solver) below)
-2. Open `src/field_solver.html` in a browser
+1. Open `src/field_solver.html` in a browser
 
 ## Solution Flow
 
@@ -63,6 +62,8 @@ node tests/test_vs_hfss.js
 ### Build WASM Solver
 
 WebAssembly (WASM) module is used for high-performance sparse matrix solving. This module is built using Emscripten and the Eigen C++ library.
+Compiled js and wasm is already included. Compiling is only needed if changes to
+WASM module are necessary.
 
 #### Prerequisites
 
