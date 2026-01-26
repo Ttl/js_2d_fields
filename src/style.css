@@ -690,3 +690,28 @@ input[type=number]::-webkit-outer-spin-button {
 input[type=number] {
   -moz-appearance: textfield;
 }
+
+/* Plotly modebar button alignment fix for version 3.x */
+.js-plotly-plot .plotly .modebar {
+    position: absolute;
+    top: 0;
+    right: 0;
+}
+
+.js-plotly-plot .plotly .modebar-group {
+    display: flex;
+    align-items: center;
+    float: left;
+}
+
+.js-plotly-plot .plotly .modebar-btn {
+    position: relative;
+    font-size: 20px;
+    padding: 3px 5px;
+    cursor: pointer;
+}
+
+.js-plotly-plot .plotly .modebar-btn svg {
+    position: relative;
+    pointer-events: none;
+}
