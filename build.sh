@@ -6,7 +6,7 @@ rm -rf dist
 mkdir dist
 mkdir dist/wasm_solver
 
-make -C src/wasm_solver/
+#make -C src/wasm_solver/
 
 # JS
 npx esbuild src/app.js \
@@ -24,6 +24,6 @@ npx postcss src/style.css \
 
 # HTML
 cp src/field_solver.html dist/
-cp src/plotly-2.27.0.min.js.js dist/
+cp src/plotly-3.3.0.min.js dist/
 cp src/wasm_solver/solver.js dist/wasm_solver/solver.js
 cp src/wasm_solver/solver.wasm dist/solver.wasm
