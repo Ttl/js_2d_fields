@@ -58,7 +58,7 @@
                 <input type="number" id="inp_tand" value="0.02" inputmode="decimal" placeholder="0">
             </div>
             <div class="control-group">
-                <label>Conductivity (S/m)</label>
+                <label>Conductivity (S/m) <span class="help-icon" onclick="showHelpModal('conductivity')">?</span></label>
                 <input type="number" id="inp_sigma" value="5.8e7" inputmode="decimal">
             </div>
         </div>
@@ -648,6 +648,10 @@
         roughness: {
             title: 'Surface Roughness',
             body: '<p>Conductor loss is calculated using gradient model (<a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">https://ieeexplore.ieee.org/document/7932148</a>), both loss and inductance caused by the surface roughness is calculated. All conductors use this roughness on all sides. On PCB, typical RMS roughness is about 1 - 2 µm for normal copper foil and about 0.5 µm for special low profile foil.</p>'
+        },
+        conductivity: {
+            title: 'Conductivity',
+            body: '<p>Electrical conductivity of the conductor material.</p><p><strong>Common materials at room temperature:</strong></p><ul><li>Silver: 6.3×10<sup>7</sup> S/m</li><li>Copper: 5.8×10<sup>7</sup> S/m</li><li>Gold: 4.5×10<sup>7</sup> S/m</li><li>Aluminium: 3.5×10<sup>7</sup> S/m</li></ul></p>'
         },
         causal: {
             title: 'Causal Material Parameters',

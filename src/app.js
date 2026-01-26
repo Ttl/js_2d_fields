@@ -722,6 +722,11 @@ async function runSimulation() {
     log("Starting simulation...");
 
     try {
+
+        if (p.sigma < 1e4) {
+            throw new Error("Signal line conductivity is too low to be consider a conductor.");
+        }
+
         // Clear previous results
         frequencySweepResults = [];
 
