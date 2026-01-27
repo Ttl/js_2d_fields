@@ -2,7 +2,7 @@ import { MicrostripSolver } from '../src/microstrip.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential } from '../src/sparameters.js';
 import { Complex } from '../src/complex.js';
 import { readFileSync } from 'fs';
-import { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation } from './test_snp_export.js';
+import { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation, test_s2p_generation2 } from './test_snp_export.js';
 
 /**
  * Test microstrip solver results against reference values.
@@ -743,9 +743,10 @@ async function runTests() {
     await solve_differential_stripline();
     await solve_differential_stripline_rlgc();
     await solve_differential_microstrip();
+    await test_s2p_generation2();
+    await test_s2p_generation();
     await test_s4p_generation_lossless();
     await test_s4p_generation();
-    await test_s2p_generation();
 }
 
 runTests();

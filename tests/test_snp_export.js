@@ -624,14 +624,4 @@ async function test_s4p_generation_lossless() {
     }
 }
 
-// Run tests
-async function runTests() {
-    await test_s2p_generation2();
-    await test_s2p_generation();
-    await test_s4p_generation_lossless();
-    await test_s4p_generation();
-}
-
-runTests();
-
-export { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation };
+export { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation, test_s2p_generation2 };
