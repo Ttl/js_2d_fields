@@ -2,6 +2,8 @@
 
 A browser-based quasi-static 2D field solver for transmission line analysis. Computes characteristic impedance, effective permittivity, RLGC parameters, losses, and S-parameters.
 
+Try it online: https://hforsten.com/field_solver.html
+
 ## Features
 
 - Transmission Line Types: Microstrip, stripline, GCPW (single-ended and differential)
