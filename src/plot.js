@@ -183,14 +183,13 @@ function draw(resetZoom = false) {
             });
         }
 
-        // Draw conductors as rectangles (signal = orange, ground = dark gray)
         for (const cond of solver.conductors) {
             if (cond.y_min > maxY) continue;
 
             const yMax = Math.min(cond.y_max, maxY);
             const fillcolor = cond.is_signal ?
                 'rgba(217, 119, 6, 1.0)' :  // Orange for signal
-                'rgba(51, 51, 51, 1.0)';     // Dark gray for ground
+                'rgba(217, 119, 6, 1.0)' ;  // and ground too
 
             shapes.push({
                 type: 'rect',
