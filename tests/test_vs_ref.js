@@ -463,6 +463,50 @@ async function solve_microstrip_cut() {
     return solver_results;
 }
 
+async function solve_microstrip_20ghz() {
+    const solver = new MicrostripSolver({
+        substrate_height: 0.508e-3,
+        trace_width: 1.1e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 3.48,
+        tan_delta: 0.0037,
+        sigma_cond: 5.8e7,
+        freq: 20e9,
+        rq: 0,
+        nx: 10,
+        ny: 10,
+        use_sm: false,
+        boundaries: ["open", "open", "open", "gnd"]
+    });
+
+    const results = await solver.solve_adaptive();
+    const mode = results.modes[0];
+
+    const solver_results = {
+        'Z0': mode.Z0,
+        'eps_eff': mode.eps_eff,
+        'diel_loss': mode.alpha_d,
+        'cond_loss': mode.alpha_c,
+        'loss': mode.alpha_total,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
+    };
+
+    const reference = {
+        "Z0": 50.5,
+        "eps_eff": 2.7078,
+        "loss": 12.856
+    };
+
+    // Test against reference
+    test_microstrip_solution(solver_results, reference, "Microstrip 50Ω 20 GHz");
+
+    return solver_results;
+}
+
 async function solve_differential_microstrip() {
     const solver = new MicrostripSolver({
         substrate_height: 1.6e-3,
@@ -738,6 +782,7 @@ async function runTests() {
     await solve_microstrip_1khz();
     await solve_microstrip_embed();
     await solve_microstrip_cut();
+    await solve_microstrip_20ghz();
     await solve_stripline();
     await solve_rough_stripline();
     await solve_differential_stripline();
