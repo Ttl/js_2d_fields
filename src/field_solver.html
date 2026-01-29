@@ -225,7 +225,7 @@
         </div>
 
         <div class="control-group">
-            <label><input type="checkbox" id="chk_causal_materials"> Use Causal Material Parameters <span class="help-icon" onclick="showHelpModal('causal')">?</span></label>
+            <label><input type="checkbox" id="chk_causal_materials"> Use Causal Material Parameters <span class="help-icon" onclick="showHelpModal('causal', event)">?</span></label>
         </div>
         </div>
     </div>
@@ -691,7 +691,13 @@
         }
     };
 
-    function showHelpModal(topic) {
+    function showHelpModal(topic, event) {
+
+        if (event) {
+            event.stopPropagation();
+            event.preventDefault();
+        }
+
         const content = helpContent[topic];
         if (content) {
             document.getElementById('helpModalTitle').textContent = content.title;
