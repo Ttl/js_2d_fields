@@ -25,20 +25,46 @@
     <title>2D Transmission Line Field Solver</title>
     <script>
         // Load Plotly dynamically after page renders to avoid blocking
-        console.log('[DEBUG] Head parsing:', performance.now());
         window.plotlyLoadStart = performance.now();
 
         // Use requestIdleCallback or setTimeout to load after initial render
         function loadPlotly() {
-            console.log('[DEBUG] Starting Plotly load:', performance.now());
+            // Primary source (build.sh will replace this with CDN for production)
+            const PRIMARY_PLOTLY_SRC = 'plotly-3.3.0.min.js';
+            // Fallback is always local
+            const FALLBACK_PLOTLY_SRC = 'plotly-3.3.0.min.js';
+
             const script = document.createElement('script');
-            script.src = 'plotly-3.3.0.min.js';
+            script.src = PRIMARY_PLOTLY_SRC;
             script.charset = 'utf-8';
+
             script.onload = function() {
-                console.log('[DEBUG] Plotly loaded after', performance.now() - window.plotlyLoadStart, 'ms');
+                console.log('Plotly loaded after', performance.now() - window.plotlyLoadStart, 'ms');
                 document.querySelectorAll('.plotly-loading').forEach(el => el.remove());
                 window.dispatchEvent(new Event('plotly-loaded'));
             };
+
+            // Fallback to local file if CDN fails or is unreachable (e.g. firewall)
+            script.onerror = function() {
+                console.warn('Primary source failed, falling back to local plotly');
+                const fallbackScript = document.createElement('script');
+                fallbackScript.src = FALLBACK_PLOTLY_SRC;
+                fallbackScript.charset = 'utf-8';
+                fallbackScript.onload = function() {
+                    console.log('Plotly loaded from fallback after', performance.now() - window.plotlyLoadStart, 'ms');
+                    document.querySelectorAll('.plotly-loading').forEach(el => el.remove());
+                    window.dispatchEvent(new Event('plotly-loaded'));
+                };
+                fallbackScript.onerror = function() {
+                    console.error('[ERROR] Both primary and fallback plotly failed to load');
+                    // Show error message to user
+                    document.querySelectorAll('.plotly-loading').forEach(el => {
+                        el.innerHTML = '<div style="color: #f59e0b;">Failed to load Plotly library. Plotting unavailable.</div>';
+                    });
+                };
+                document.head.appendChild(fallbackScript);
+            };
+
             document.head.appendChild(script);
         }
 
@@ -52,7 +78,6 @@
     <link rel="stylesheet" href="solver-style.css">
 </head>
 <body>
-<script>console.log('[DEBUG] Body start rendering:', performance.now());</script>
 
 <style>
     @keyframes spin {

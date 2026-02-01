@@ -21,11 +21,21 @@ npx postcss src/solver-style.css \
   --use cssnano \
   -o dist/solver-style.css
 
-# HTML - swap local plotly for CDN
-cp src/field_solver.html dist/
-sed -i "s|script.src = 'plotly-3.3.0.min.js';|script.src = 'https://cdn.plot.ly/plotly-3.3.0.min.js';|g" dist/field_solver.html
+# HTML - swap to CDN first, then minify (order matters!)
+# Copy and swap CDN URL first
+cp src/field_solver.html dist/field_solver.html
+sed -i "s|const PRIMARY_PLOTLY_SRC = 'plotly-3.3.0.min.js';|const PRIMARY_PLOTLY_SRC = 'https://cdn.plot.ly/plotly-3.3.0.min.js';|g" dist/field_solver.html
 
-# Don't copy plotly to dist since we're using CDN in production
-# cp src/plotly-3.3.0.min.js dist/
+# Then minify (which will inline the CDN URL)
+npx html-minifier-terser \
+  --collapse-whitespace \
+  --remove-comments \
+  --minify-js true \
+  --minify-css true \
+  dist/field_solver.html \
+  -o dist/field_solver.html
+
+# Copy plotly as fallback in case CDN is unreachable
+cp src/plotly-3.3.0.min.js dist/
 
 cp src/wasm_solver/solver.wasm dist/solver.wasm
