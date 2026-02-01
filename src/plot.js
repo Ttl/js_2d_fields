@@ -1,7 +1,8 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 
-const Plotly = window.Plotly;
+// Lazy Plotly access - allows app to function while Plotly is loading
+const getPlotly = () => window.Plotly;
 
 let showMesh = false;
 let currentView = "geometry";
@@ -57,7 +58,8 @@ function setScaleRange(min, max) {
     zMax = max;
 
     const container = document.getElementById('sim_canvas');
-    if (!container || !container.data) return;
+    const Plotly = getPlotly();
+    if (!container || !container.data || !Plotly) return;
 
     // For geometry view with contours, update contour properties
     if (currentView === "geometry") {
@@ -108,7 +110,8 @@ function setScaleRange(min, max) {
 
 function draw(resetZoom = false) {
     const solver = get.solver();
-    if (!solver) return;
+    const Plotly = getPlotly();
+    if (!solver || !Plotly) return;
 
     const container = document.getElementById('sim_canvas');
     const plotOptions = getPlotOptions();
@@ -728,7 +731,8 @@ function getYAxisLabel(selector) {
 
 function drawResultsPlot() {
     const frequencySweepResults = get.frequencySweepResults();
-    if (!frequencySweepResults || frequencySweepResults.length === 0) return;
+    const Plotly = getPlotly();
+    if (!frequencySweepResults || frequencySweepResults.length === 0 || !Plotly) return;
 
     const selector = document.getElementById('results-plot-selector').value;
     const solver = get.solver();
@@ -1061,7 +1065,8 @@ function drawResultsPlot() {
 
 function drawSParamPlot() {
     const frequencySweepResults = get.frequencySweepResults();
-    if (!frequencySweepResults || frequencySweepResults.length === 0) return;
+    const Plotly = getPlotly();
+    if (!frequencySweepResults || frequencySweepResults.length === 0 || !Plotly) return;
 
     const length = get.inputValue('sparam-length');
     const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);

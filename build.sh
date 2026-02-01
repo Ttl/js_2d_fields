@@ -21,7 +21,11 @@ npx postcss src/solver-style.css \
   --use cssnano \
   -o dist/solver-style.css
 
-# HTML
+# HTML - swap local plotly for CDN
 cp src/field_solver.html dist/
-cp src/plotly-3.3.0.min.js dist/
+sed -i "s|script.src = 'plotly-3.3.0.min.js';|script.src = 'https://cdn.plot.ly/plotly-3.3.0.min.js';|g" dist/field_solver.html
+
+# Don't copy plotly to dist since we're using CDN in production
+# cp src/plotly-3.3.0.min.js dist/
+
 cp src/wasm_solver/solver.wasm dist/solver.wasm

@@ -692,26 +692,35 @@ input[type=number] {
 }
 
 /* Plotly modebar button alignment fix for version 3.x */
+/* !important needed because Plotly CSS loads dynamically after this file */
 .js-plotly-plot .plotly .modebar {
-    position: absolute;
-    top: 0;
-    right: 0;
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
 }
 
 .js-plotly-plot .plotly .modebar-group {
-    display: flex;
-    align-items: center;
-    float: left;
+    display: flex !important;
+    align-items: center !important;
+    float: left !important;
 }
 
 .js-plotly-plot .plotly .modebar-btn {
-    position: relative;
-    font-size: 20px;
-    padding: 3px 5px;
-    cursor: pointer;
+    position: relative !important;
+    font-size: 16px !important;
+    padding: 2px 4px !important;
+    cursor: pointer !important;
 }
 
 .js-plotly-plot .plotly .modebar-btn svg {
-    position: relative;
-    pointer-events: none;
+    position: relative !important;
+    pointer-events: none !important;
+}
+
+/* Make modebar buttons even smaller on mobile to prevent overlap */
+@media (max-width: 768px) {
+    .js-plotly-plot .plotly .modebar-btn {
+        font-size: 14px !important;
+        padding: 1px 3px !important;
+    }
 }

@@ -23,10 +23,60 @@
     <meta property="article:author" content="Henrik Forstén" />
     <meta property="og:image" content="https://hforsten.com/img/field-solver/header.png"/>
     <title>2D Transmission Line Field Solver</title>
-    <script src="plotly-3.3.0.min.js"></script>
+    <script>
+        // Load Plotly dynamically after page renders to avoid blocking
+        console.log('[DEBUG] Head parsing:', performance.now());
+        window.plotlyLoadStart = performance.now();
+
+        // Use requestIdleCallback or setTimeout to load after initial render
+        function loadPlotly() {
+            console.log('[DEBUG] Starting Plotly load:', performance.now());
+            const script = document.createElement('script');
+            script.src = 'plotly-3.3.0.min.js';
+            script.charset = 'utf-8';
+            script.onload = function() {
+                console.log('[DEBUG] Plotly loaded after', performance.now() - window.plotlyLoadStart, 'ms');
+                document.querySelectorAll('.plotly-loading').forEach(el => el.remove());
+                window.dispatchEvent(new Event('plotly-loaded'));
+            };
+            document.head.appendChild(script);
+        }
+
+        // Load after page is visible
+        if ('requestIdleCallback' in window) {
+            requestIdleCallback(loadPlotly);
+        } else {
+            setTimeout(loadPlotly, 1);
+        }
+    </script>
     <link rel="stylesheet" href="solver-style.css">
 </head>
 <body>
+<script>console.log('[DEBUG] Body start rendering:', performance.now());</script>
+
+<style>
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    .plotly-loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 400px;
+        color: #888;
+        font-size: 14px;
+    }
+    .plotly-loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid #333;
+        border-top: 3px solid #888;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin-right: 15px;
+    }
+</style>
 
 <button class="mobile-menu-toggle" id="mobileMenuToggle">☰ Menu</button>
 <div class="mobile-backdrop" id="mobileBackdrop"></div>
@@ -110,7 +160,7 @@
         <div class="section-content">
             <div class="control-group">
                 <label>Top Dielectric Height</label>
-                <input type="text" class="unit-input" id="inp_air_top" value="1.6 mm">
+                <input type="text" class="unit-input" id="inp_air_top" value="0.4 mm">
             </div>
             <div class="control-group">
                 <label>Top Permittivity (&epsilon;<sub>r,top</sub>)</label>
@@ -309,7 +359,12 @@
 
     <div id="tab-geometry" class="tab-content active">
         <div class="canvas-container">
-            <div id="sim_canvas"></div>
+            <div id="sim_canvas">
+                <div class="plotly-loading">
+                    <div class="plotly-loading-spinner"></div>
+                    <span>Loading Plotly library...</span>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -326,7 +381,12 @@
                 <option value="G">G (S/m)</option>
             </select>
         </div>
-        <div id="results-plot" class="plot-container"></div>
+        <div id="results-plot" class="plot-container">
+            <div class="plotly-loading">
+                <div class="plotly-loading-spinner"></div>
+                <span>Loading Plotly library...</span>
+            </div>
+        </div>
         <div class="results-controls bottom">
             <label class="checkbox-label"><input type="checkbox" id="results-log-x"> Log frequency axis</label>
             <button id="copy-link-btn">Copy link</button><span class="help-icon" onclick="showHelpModal('copylink')">?</span>
@@ -344,7 +404,12 @@
                 <option value="phase">Phase (degrees)</option>
             </select>
         </div>
-        <div id="sparam-plot" class="plot-container"></div>
+        <div id="sparam-plot" class="plot-container">
+            <div class="plotly-loading">
+                <div class="plotly-loading-spinner"></div>
+                <span>Loading Plotly library...</span>
+            </div>
+        </div>
         <div class="sparam-controls">
             <label class="checkbox-label"><input type="checkbox" id="sparam-log-x"> Log frequency axis</label>
             <label>Line Length: <input type="text" class="unit-input" id="sparam-length" value="10 mm" step="0.001"></label>

@@ -3,7 +3,8 @@ import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } fro
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange } from './plot.js';
 
-const Plotly = window.Plotly;
+// Lazy Plotly access - allows app to function while Plotly is loading
+const getPlotly = () => window.Plotly;
 
 let solver = null;
 let stopRequested = false;
@@ -889,7 +890,8 @@ async function runSimulation() {
 
 function resizeCanvas() {
     const container = document.getElementById('sim_canvas');
-    if (container) {
+    const Plotly = getPlotly();
+    if (container && Plotly) {
         Plotly.Plots.resize(container);
     }
 }
@@ -1392,3 +1394,14 @@ function init() {
 
 // Start when DOM is ready
 window.addEventListener('DOMContentLoaded', init);
+
+// Redraw plots when Plotly finishes loading (in case solver ran before Plotly loaded)
+window.addEventListener('plotly-loaded', () => {
+    if (solver) {
+        draw();
+    }
+    if (frequencySweepResults && frequencySweepResults.length > 0) {
+        drawResultsPlot();
+        drawSParamPlot();
+    }
+});
