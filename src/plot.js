@@ -7,6 +7,9 @@ let showMesh = false;
 let currentView = "geometry";
 let zMin = null;
 let zMax = null;
+// Store actual data range (before any user scaling)
+let actualDataMin = null;
+let actualDataMax = null;
 
 // Geometry view zoom constants
 const SIGNAL_CONDUCTOR_VIEW_FRACTION = 1/3;  // Signal conductors take up this fraction of X-axis view
@@ -44,6 +47,11 @@ function getScaleRange() {
     return { min: zMin, max: zMax, view: currentView };
 }
 
+// Get actual data range (before any user scaling)
+function getActualDataRange() {
+    return { min: actualDataMin, max: actualDataMax };
+}
+
 function setScaleRange(min, max) {
     zMin = min;
     zMax = max;
@@ -74,10 +82,27 @@ function setScaleRange(min, max) {
         }
     } else {
         // For E-field and potential views, update heatmap/contour zmin/zmax
-        Plotly.restyle(container, {
-            zmin: min,
-            zmax: max
-        });
+        // Also update contour properties if contours are enabled
+        const plotOptions = getPlotOptions();
+        const n = plotOptions.contours;
+
+        if (n > 0) {
+            // Contour plot - update both color scale and contour lines
+            const step = (max - min) / n;
+            Plotly.restyle(container, {
+                zmin: min,
+                zmax: max,
+                'contours.start': min,
+                'contours.end': max,
+                'contours.size': step
+            });
+        } else {
+            // Heatmap - just update color scale
+            Plotly.restyle(container, {
+                zmin: min,
+                zmax: max
+            });
+        }
     }
 }
 
@@ -233,6 +258,9 @@ function draw(resetZoom = false) {
                 const flatZ = zData.flat();
                 zMin = Math.min(...flatZ);
                 zMax = Math.max(...flatZ);
+                // Store actual data range for geometry view
+                actualDataMin = zMin;
+                actualDataMax = zMax;
             }
         } else {
             // No solution - just axis scaling
@@ -277,6 +305,9 @@ function draw(resetZoom = false) {
         const flatZ = zData.flat();
         zMin = Math.min(...flatZ);
         zMax = Math.max(...flatZ);
+        // Store actual data range for potential view
+        actualDataMin = zMin;
+        actualDataMax = zMax;
     }
 
     else if ((currentView === "efield" || currentView === "efield_odd" || currentView === "efield_even") && solver.solution_valid) {
@@ -321,6 +352,9 @@ function draw(resetZoom = false) {
         const flatZ = zData.flat();
         zMin = Math.min(...flatZ);
         zMax = Math.max(...flatZ);
+        // Store actual data range for efield view
+        actualDataMin = zMin;
+        actualDataMax = zMax;
     }
 
     else {
@@ -626,11 +660,11 @@ function draw(resetZoom = false) {
             if (event.menu.x < 0.2) {
                 // View selector clicked
                 if (event.menu.active === 0) {
-                    currentView = "geometry";
+                    setCurrentView("geometry");
                 } else if (event.menu.active === 1) {
-                    currentView = "potential";
+                    setCurrentView("potential");
                 } else if (event.menu.active === 2) {
-                    currentView = "efield";
+                    setCurrentView("efield");
                 }
             } else {
                 // Mode selector clicked (differential lines only)
@@ -638,10 +672,42 @@ function draw(resetZoom = false) {
                 if (plotModeEl) {
                     plotModeEl.value = event.menu.active === 0 ? 'odd' : 'even';
                 }
+                // Trigger view change notification for mode switch
+                if (window.onViewChanged) {
+                    window.onViewChanged(currentView);
+                }
             }
             draw();
         });
         container._viewListenerBound = true;
+    }
+
+    // Listen for autoscale events to reset color scale
+    if (!container._autoscaleListenerBound) {
+        let ignoreNextAutoscale = false;
+
+        // Track double-clicks to distinguish from autoscale button
+        container.on('plotly_doubleclick', () => {
+            ignoreNextAutoscale = true;
+            // Clear the flag after a short delay in case the autoscale event doesn't fire
+            setTimeout(() => {
+                ignoreNextAutoscale = false;
+            }, 200);
+        });
+
+        // Handle autoscale button click
+        container.on('plotly_relayout', (eventData) => {
+            // Check if this is an autoscale event (both axes autoscaling)
+            if (eventData && eventData['xaxis.autorange'] === true && eventData['yaxis.autorange'] === true) {
+                // Only reset color scale if this is from the autoscale button, not double-click
+                if (!ignoreNextAutoscale && window.resetColorScale) {
+                    window.resetColorScale();
+                }
+                ignoreNextAutoscale = false;
+            }
+        });
+
+        container._autoscaleListenerBound = true;
     }
 
 }
@@ -1293,4 +1359,4 @@ function setCurrentView(view) {
     }
 }
 
-export { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange };
+export { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange };

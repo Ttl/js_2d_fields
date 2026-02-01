@@ -1,7 +1,7 @@
 import { MicrostripSolver } from './microstrip.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
-import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange } from './plot.js';
+import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange } from './plot.js';
 
 const Plotly = window.Plotly;
 
@@ -1254,14 +1254,19 @@ function openScaleDialog() {
     const scaleInfo = getScaleRange();
     const viewType = getViewType(scaleInfo.view);
 
+    // Get actual data range (before any user scaling)
+    const actualDataRange = getActualDataRange();
+    let actualMin = actualDataRange.min !== null ? actualDataRange.min : 0;
+    let actualMax = actualDataRange.max !== null ? actualDataRange.max : 1;
+
     // Get stored scale or use current computed scale
     let minVal = scaleRanges[viewType].min;
     let maxVal = scaleRanges[viewType].max;
 
     // If no stored scale, use current computed values
     if (minVal === null || maxVal === null) {
-        minVal = scaleInfo.min !== null ? scaleInfo.min : 0;
-        maxVal = scaleInfo.max !== null ? scaleInfo.max : 1;
+        minVal = actualMin;
+        maxVal = actualMax;
         scaleRanges[viewType].min = minVal;
         scaleRanges[viewType].max = maxVal;
     }
@@ -1272,17 +1277,32 @@ function openScaleDialog() {
     const minSlider = document.getElementById("zMinSlider");
     const maxSlider = document.getElementById("zMaxSlider");
 
+    // Determine slider bounds based on view type and actual data
+    let sliderMinBound, sliderMaxBound;
+
+    if (viewType === 'potential') {
+        // Potential has theoretical bounds: [-1,1] for differential, [0,1] for single-ended
+        // Check if differential odd mode by looking at whether actualMin is negative
+        const isPotentialOddMode = actualMin < -0.1;
+        sliderMinBound = isPotentialOddMode ? -1.0 : 0.0;
+        sliderMaxBound = 1.0;
+    } else {
+        // For E-field and geometry, use 1.5x actual data range for margin
+        sliderMinBound = actualMin < -0.1 ? actualMin * 1.5 : 0.0;
+        sliderMaxBound = actualMax * 1.5;
+    }
+
     if (minSlider) {
-        minSlider.min = Math.min(minVal, 0);
+        minSlider.min = sliderMinBound;
         minSlider.max = maxVal;
-        minSlider.step = (maxVal - minVal) / 200;
+        minSlider.step = (minSlider.max - minSlider.min) / 200;
         minSlider.value = minVal;
     }
 
     if (maxSlider) {
         maxSlider.min = minVal;
-        maxSlider.max = Math.max(maxVal * 1.5, maxVal + 1);
-        maxSlider.step = (maxVal - minVal) / 200;
+        maxSlider.max = sliderMaxBound;
+        maxSlider.step = (maxSlider.max - maxSlider.min) / 200;
         maxSlider.value = maxVal;
     }
 
@@ -1298,18 +1318,29 @@ function closeScaleDialog() {
     }
 }
 
+// Reset color scale to actual data range (called when autoscale is triggered)
+function resetColorScale() {
+    // Clear stored scale for current view
+    const scaleInfo = getScaleRange();
+    const viewType = getViewType(scaleInfo.view);
+    scaleRanges[viewType].min = null;
+    scaleRanges[viewType].max = null;
+
+    // Redraw to apply actual data range
+    draw();
+}
+
 // Make functions globally accessible for HTML onclick handlers
 window.toggleScaleDialog = toggleScaleDialog;
 window.closeScaleDialog = closeScaleDialog;
+window.resetColorScale = resetColorScale;
 
 // Handle view changes to restore appropriate scale
 window.onViewChanged = function(view) {
-    const viewType = getViewType(view);
-    const stored = scaleRanges[viewType];
-
-    // If we have stored scale for this view, restore it
-    if (stored.min !== null && stored.max !== null) {
-        setScaleRange(stored.min, stored.max);
+    // Close scale dialog when switching views
+    // The user can reopen it to adjust the scale for the new view
+    if (scaleDialogOpen) {
+        closeScaleDialog();
     }
 };
 
