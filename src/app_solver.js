@@ -771,7 +771,25 @@ async function runSimulation() {
     try {
 
         if (p.sigma < 1e4) {
-            throw new Error("Signal line conductivity is too low to be consider a conductor.");
+            throw new Error("Signal line conductivity is too low to be considered a conductor.");
+        }
+
+        // Validate surface roughness
+        if (p.rq < 0) {
+            throw new Error("Surface roughness cannot be negative.");
+        }
+
+        // Validate plating parameters
+        if (p.use_plating) {
+            if (p.plating_sigma < 1e4) {
+                throw new Error("Plating conductivity is too low to be considered a conductor.");
+            }
+            if (p.plating_t < 0) {
+                throw new Error("Plating thickness must be non-negative.");
+            }
+            if (p.plating_rq < 0) {
+                throw new Error("Plating roughness cannot be negative.");
+            }
         }
 
         // Clear previous results
