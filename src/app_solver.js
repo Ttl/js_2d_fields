@@ -104,8 +104,8 @@ const DEFAULT_SETTINGS = {
     rq: 0,             // μm
     use_plating: 0,
     plating_sigma: 1e7,
-    plating_t: 0.5,    // μm
-    plating_rq: 0.3,   // μm
+    plating_t: 4,    // μm
+    plating_rq: 0,   // μm
     plating_top: 1,
     plating_sides: 1,
     plating_bottom: 0,
