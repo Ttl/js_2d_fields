@@ -57,6 +57,65 @@ function getInputValueUnitless(id) {
 // --- URL Parameter Serialization ---
 
 /**
+ * Default settings (in display units, matching what getUISettings returns)
+ * These are used to filter out default values from URL parameters.
+ * Doesn't need to match HTML defaults.
+ * DO NOT CHANGE OR ALL EXISTING LINKS WILL BREAK.
+ */
+const DEFAULT_SETTINGS = {
+    tl_type: 'microstrip',
+    w: 0.35,           // mm
+    h: 0.21,           // mm
+    t: 35,             // μm
+    er: 4.4,
+    tand: 0.02,
+    sigma: 5.8e7,
+    freq_start: 0.1,   // GHz
+    freq_stop: 10,     // GHz
+    freq_points: 10,
+    trace_spacing: 0.2, // mm
+    gap: 0.1,          // mm
+    top_gnd_w: 0.2,    // mm
+    via_gap: 0.1,      // mm
+    stripline_top_h: 0.4, // mm
+    er_top: 4.5,
+    tand_top: 0.02,
+    use_sm: 0,
+    sm_t_sub: 20,      // μm
+    sm_t_trace: 20,    // μm
+    sm_t_side: 20,     // μm
+    sm_er: 3.5,
+    sm_tand: 0.02,
+    use_top_diel: 0,
+    top_diel_h: 0.2,   // mm
+    top_diel_er: 4.5,
+    top_diel_tand: 0.02,
+    use_gnd_cut: 0,
+    gnd_cut_w: 0.5,    // mm
+    gnd_cut_h: 0.5,    // mm
+    use_enclosure: 0,
+    use_side_gnd: 0,
+    use_top_gnd: 0,
+    enclosure_width: NaN,  // auto
+    enclosure_height: NaN, // auto
+    max_iters: 10,
+    tolerance: 0.01,
+    max_nodes: 20,
+    rq: 0,             // μm
+    use_plating: 0,
+    plating_sigma: 1e7,
+    plating_t: 0.5,    // μm
+    plating_rq: 0.3,   // μm
+    plating_top: 1,
+    plating_sides: 1,
+    plating_bottom: 0,
+    plating_thick_corners: 0,
+    sparam_length: 10, // mm
+    sparam_z_ref: 50,
+    use_causal_materials: 0,
+};
+
+/**
  * Get current UI settings as a serializable object (in display units)
  */
 function getUISettings() {
@@ -133,9 +192,29 @@ function getUISettings() {
 
 /**
  * Serialize settings to URL-safe base64 string
+ * Only includes non-default parameters to keep URLs short
  */
 function settingsToURL(settings) {
-    const json = JSON.stringify(settings);
+    // Filter out default values
+    const nonDefaultSettings = {};
+    for (const key in settings) {
+        const value = settings[key];
+        const defaultValue = DEFAULT_SETTINGS[key];
+
+        // Include if value differs from default
+        // Handle NaN specially (NaN !== NaN is true, so we need special comparison)
+        const bothNaN = (typeof value === 'number' && isNaN(value)) &&
+                        (typeof defaultValue === 'number' && isNaN(defaultValue));
+
+        if (bothNaN) {
+            // Both NaN, skip (it's the default)
+            continue;
+        } else if (value !== defaultValue) {
+            nonDefaultSettings[key] = value;
+        }
+    }
+
+    const json = JSON.stringify(nonDefaultSettings);
     // Use base64 encoding for URL-safe serialization
     return btoa(encodeURIComponent(json));
 }
@@ -155,11 +234,16 @@ function settingsFromURL(encoded) {
 
 /**
  * Restore UI settings from a settings object
+ * Merges with defaults to explicitly set all values, preventing browser-remembered inputs
  */
 function restoreSettings(settings) {
     if (!settings) return false;
 
     try {
+        // Merge with defaults - URL settings override defaults
+        // We explicitly set ALL values to prevent browser-remembered inputs
+        const fullSettings = { ...DEFAULT_SETTINGS, ...settings };
+
         // Helper to restore value with unit
         const setValueWithUnit = (id, value) => {
             const element = document.getElementById(id);
@@ -174,67 +258,70 @@ function restoreSettings(settings) {
             }
         };
 
-        // Set input values
-        if (settings.tl_type) document.getElementById('tl_type').value = settings.tl_type;
-        setValueWithUnit('inp_w', settings.w);
-        setValueWithUnit('inp_h', settings.h);
-        setValueWithUnit('inp_t', settings.t);
-        if (settings.er !== undefined) document.getElementById('inp_er').value = settings.er;
-        if (settings.tand !== undefined) document.getElementById('inp_tand').value = settings.tand;
-        if (settings.sigma !== undefined) document.getElementById('inp_sigma').value = settings.sigma;
-        setValueWithUnit('freq-start', settings.freq_start);
-        setValueWithUnit('freq-stop', settings.freq_stop);
-        if (settings.freq_points !== undefined) document.getElementById('freq-points').value = settings.freq_points;
-        setValueWithUnit('inp_trace_spacing', settings.trace_spacing);
-        setValueWithUnit('inp_gap', settings.gap);
-        setValueWithUnit('inp_top_gnd_w', settings.top_gnd_w);
-        setValueWithUnit('inp_via_gap', settings.via_gap);
-        setValueWithUnit('inp_air_top', settings.stripline_top_h);
-        if (settings.er_top !== undefined) document.getElementById('inp_er_top').value = settings.er_top;
-        if (settings.tand_top !== undefined) document.getElementById('inp_tand_top').value = settings.tand_top;
+        // Set input values - now always from fullSettings to override browser memory
+        const tlTypeSelect = document.getElementById('tl_type');
+        tlTypeSelect.value = fullSettings.tl_type;
+        // Trigger change event to update UI visibility for the selected transmission line type
+        tlTypeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+
+        setValueWithUnit('inp_w', fullSettings.w);
+        setValueWithUnit('inp_h', fullSettings.h);
+        setValueWithUnit('inp_t', fullSettings.t);
+        document.getElementById('inp_er').value = fullSettings.er;
+        document.getElementById('inp_tand').value = fullSettings.tand;
+        document.getElementById('inp_sigma').value = fullSettings.sigma;
+        setValueWithUnit('freq-start', fullSettings.freq_start);
+        setValueWithUnit('freq-stop', fullSettings.freq_stop);
+        document.getElementById('freq-points').value = fullSettings.freq_points;
+        setValueWithUnit('inp_trace_spacing', fullSettings.trace_spacing);
+        setValueWithUnit('inp_gap', fullSettings.gap);
+        setValueWithUnit('inp_top_gnd_w', fullSettings.top_gnd_w);
+        setValueWithUnit('inp_via_gap', fullSettings.via_gap);
+        setValueWithUnit('inp_air_top', fullSettings.stripline_top_h);
+        document.getElementById('inp_er_top').value = fullSettings.er_top;
+        document.getElementById('inp_tand_top').value = fullSettings.tand_top;
 
         // Checkboxes
-        if (settings.use_sm !== undefined) document.getElementById('chk_solder_mask').checked = !!settings.use_sm;
-        setValueWithUnit('inp_sm_t_sub', settings.sm_t_sub);
-        setValueWithUnit('inp_sm_t_trace', settings.sm_t_trace);
-        setValueWithUnit('inp_sm_t_side', settings.sm_t_side);
-        if (settings.sm_er !== undefined) document.getElementById('inp_sm_er').value = settings.sm_er;
-        if (settings.sm_tand !== undefined) document.getElementById('inp_sm_tand').value = settings.sm_tand;
+        document.getElementById('chk_solder_mask').checked = !!fullSettings.use_sm;
+        setValueWithUnit('inp_sm_t_sub', fullSettings.sm_t_sub);
+        setValueWithUnit('inp_sm_t_trace', fullSettings.sm_t_trace);
+        setValueWithUnit('inp_sm_t_side', fullSettings.sm_t_side);
+        document.getElementById('inp_sm_er').value = fullSettings.sm_er;
+        document.getElementById('inp_sm_tand').value = fullSettings.sm_tand;
 
-        if (settings.use_top_diel !== undefined) document.getElementById('chk_top_diel').checked = !!settings.use_top_diel;
-        setValueWithUnit('inp_top_diel_h', settings.top_diel_h);
-        if (settings.top_diel_er !== undefined) document.getElementById('inp_top_diel_er').value = settings.top_diel_er;
-        if (settings.top_diel_tand !== undefined) document.getElementById('inp_top_diel_tand').value = settings.top_diel_tand;
+        document.getElementById('chk_top_diel').checked = !!fullSettings.use_top_diel;
+        setValueWithUnit('inp_top_diel_h', fullSettings.top_diel_h);
+        document.getElementById('inp_top_diel_er').value = fullSettings.top_diel_er;
+        document.getElementById('inp_top_diel_tand').value = fullSettings.top_diel_tand;
 
-        if (settings.use_gnd_cut !== undefined) document.getElementById('chk_gnd_cut').checked = !!settings.use_gnd_cut;
-        setValueWithUnit('inp_gnd_cut_w', settings.gnd_cut_w);
-        setValueWithUnit('inp_gnd_cut_h', settings.gnd_cut_h);
+        document.getElementById('chk_gnd_cut').checked = !!fullSettings.use_gnd_cut;
+        setValueWithUnit('inp_gnd_cut_w', fullSettings.gnd_cut_w);
+        setValueWithUnit('inp_gnd_cut_h', fullSettings.gnd_cut_h);
 
-        if (settings.use_enclosure !== undefined) document.getElementById('chk_enclosure').checked = !!settings.use_enclosure;
-        if (settings.use_side_gnd !== undefined) document.getElementById('chk_side_gnd').checked = !!settings.use_side_gnd;
-        if (settings.use_top_gnd !== undefined) document.getElementById('chk_top_gnd').checked = !!settings.use_top_gnd;
-        setValueWithUnit('inp_enclosure_width', settings.enclosure_width);
-        setValueWithUnit('inp_enclosure_height', settings.enclosure_height);
+        document.getElementById('chk_enclosure').checked = !!fullSettings.use_enclosure;
+        document.getElementById('chk_side_gnd').checked = !!fullSettings.use_side_gnd;
+        document.getElementById('chk_top_gnd').checked = !!fullSettings.use_top_gnd;
+        setValueWithUnit('inp_enclosure_width', fullSettings.enclosure_width);
+        setValueWithUnit('inp_enclosure_height', fullSettings.enclosure_height);
 
-        if (settings.max_iters !== undefined) document.getElementById('inp_max_iters').value = settings.max_iters;
-        if (settings.tolerance !== undefined) document.getElementById('inp_tolerance').value = settings.tolerance;
-        if (settings.max_nodes !== undefined) document.getElementById('inp_max_nodes').value = settings.max_nodes;
-        if (settings.min_converged_passes !== undefined) document.getElementById('inp_min_converged_passes').value = settings.min_converged_passes;
-        setValueWithUnit('inp_rq', settings.rq);
+        document.getElementById('inp_max_iters').value = fullSettings.max_iters;
+        document.getElementById('inp_tolerance').value = fullSettings.tolerance;
+        document.getElementById('inp_max_nodes').value = fullSettings.max_nodes;
+        setValueWithUnit('inp_rq', fullSettings.rq);
 
-        if (settings.use_plating !== undefined) document.getElementById('chk_plating').checked = !!settings.use_plating;
-        if (settings.plating_sigma !== undefined) document.getElementById('inp_plating_sigma').value = settings.plating_sigma;
-        setValueWithUnit('inp_plating_t', settings.plating_t);
-        setValueWithUnit('inp_plating_rq', settings.plating_rq);
-        if (settings.plating_top !== undefined) document.getElementById('chk_plating_top').checked = !!settings.plating_top;
-        if (settings.plating_sides !== undefined) document.getElementById('chk_plating_sides').checked = !!settings.plating_sides;
-        if (settings.plating_bottom !== undefined) document.getElementById('chk_plating_bottom').checked = !!settings.plating_bottom;
-        if (settings.plating_thick_corners !== undefined) document.getElementById('chk_plating_thick_corners').checked = !!settings.plating_thick_corners;
+        document.getElementById('chk_plating').checked = !!fullSettings.use_plating;
+        document.getElementById('inp_plating_sigma').value = fullSettings.plating_sigma;
+        setValueWithUnit('inp_plating_t', fullSettings.plating_t);
+        setValueWithUnit('inp_plating_rq', fullSettings.plating_rq);
+        document.getElementById('chk_plating_top').checked = !!fullSettings.plating_top;
+        document.getElementById('chk_plating_sides').checked = !!fullSettings.plating_sides;
+        document.getElementById('chk_plating_bottom').checked = !!fullSettings.plating_bottom;
+        document.getElementById('chk_plating_thick_corners').checked = !!fullSettings.plating_thick_corners;
 
-        if (settings.use_causal_materials !== undefined) document.getElementById('chk_causal_materials').checked = !!settings.use_causal_materials;
+        document.getElementById('chk_causal_materials').checked = !!fullSettings.use_causal_materials;
 
-        setValueWithUnit('sparam-length', settings.sparam_length);
-        if (settings.sparam_z_ref !== undefined) document.getElementById('sparam-z-ref').value = settings.sparam_z_ref;
+        setValueWithUnit('sparam-length', fullSettings.sparam_length);
+        document.getElementById('sparam-z-ref').value = fullSettings.sparam_z_ref;
 
         return true;
     } catch (e) {
