@@ -33,14 +33,22 @@ class Conductor {
      * @param {number} height - Height of the rectangle (can be negative for embedded conductors)
      * @param {boolean} is_signal - True for signal conductor, False for ground
      * @param {number} polarity - Signal polarity: +1 (positive), -1 (negative), 0 (ground)
+     * @param {object|null} plating - Plating layer config or null
+     * @param {number} plating.sigma - Plating conductivity (S/m)
+     * @param {number} plating.thickness - Plating thickness (m)
+     * @param {number} plating.rq - Plating RMS roughness (m), used for both plating and bulk
+     * @param {boolean} plating.top - Apply plating on top face
+     * @param {boolean} plating.sides - Apply plating on side faces
+     * @param {boolean} plating.bottom - Apply plating on bottom face
      */
-    constructor(x, y, width, height, is_signal = false, polarity = 0) {
+    constructor(x, y, width, height, is_signal = false, polarity = 0, plating = null) {
         this.x = x;
         this.y = y;
         this.width = width;
         this.height = height;
         this.is_signal = is_signal;
         this.polarity = is_signal ? (polarity || 1) : 0;
+        this.plating = plating;
     }
 
     get x_min() { return this.x; }

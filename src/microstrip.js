@@ -57,6 +57,9 @@ class MicrostripSolver extends FieldSolver2D {
         // Surface roughness parameter (RMS roughness in meters)
         this.rq = options.rq ?? 0;
 
+        // Surface plating (single layer on top of bulk)
+        this.plating = options.plating ?? null;
+
         // Domain sizing
         if (this.enclosure_width !== null) {
             // Use explicit enclosure width
@@ -499,21 +502,21 @@ class MicrostripSolver extends FieldSolver2D {
             conductors.push(new Conductor(
                 xl_left, this.y_trace_start,
                 this.w, this.t,
-                true, -1
+                true, -1, this.plating
             ));
             // Right trace (positive in odd mode, polarity = +1)
             const xl_right = this.trace_spacing / 2;
             conductors.push(new Conductor(
                 xl_right, this.y_trace_start,
                 this.w, this.t,
-                true, 1
+                true, 1, this.plating
             ));
         } else {
             // Single trace (polarity = +1)
             conductors.push(new Conductor(
                 xl, this.y_trace_start,
                 this.w, this.t,
-                true, 1
+                true, 1, this.plating
             ));
         }
 
@@ -525,14 +528,14 @@ class MicrostripSolver extends FieldSolver2D {
                 conductors.push(new Conductor(
                     x_min, this.y_trace_start,
                     this.x_gap_outer_l - x_min, this.t,
-                    false
+                    false, 0, this.plating
                 ));
 
                 // Right top ground (from outer gap edge to right edge)
                 conductors.push(new Conductor(
                     this.x_gap_outer_r, this.y_trace_start,
                     x_max - this.x_gap_outer_r, this.t,
-                    false
+                    false, 0, this.plating
                 ));
             } else {
                 // Single-ended: grounds on both sides of the trace
@@ -540,14 +543,14 @@ class MicrostripSolver extends FieldSolver2D {
                 conductors.push(new Conductor(
                     x_min, this.y_trace_start,
                     this.x_gap_l - x_min, this.t,
-                    false
+                    false, 0, this.plating
                 ));
 
                 // Right top ground (from gap edge to right edge)
                 conductors.push(new Conductor(
                     this.x_gap_r, this.y_trace_start,
                     x_max - this.x_gap_r, this.t,
-                    false
+                    false, 0, this.plating
                 ));
             }
         }
@@ -977,17 +980,19 @@ class MicrostripSolver extends FieldSolver2D {
             }
         }
 
-        // Apply conductors
-        for (const cond of this.conductors) {
+        // Apply conductors (also build conductor_id map for per-conductor loss calc)
+        this.conductor_id = Array(ny).fill().map(() => new Int16Array(nx).fill(-1));
+        for (let ci = 0; ci < this.conductors.length; ci++) {
+            const cond = this.conductors[ci];
             for (let i = 0; i < ny; i++) {
                 const yc = this.y[i];
                 if (yc >= cond.y_min - tol && yc <= cond.y_max + tol) {
                     for (let j = 0; j < nx; j++) {
                         const xc = this.x[j];
                         if (xc >= cond.x_min - tol && xc <= cond.x_max + tol) {
+                            this.conductor_id[i][j] = ci;
                             if (cond.is_signal) {
                                 this.signal_mask[i][j] = 1;
-                                // Use polarity to determine positive/negative trace
                                 if (this.is_differential) {
                                     if (cond.polarity > 0) {
                                         this.signal_p_mask[i][j] = 1;

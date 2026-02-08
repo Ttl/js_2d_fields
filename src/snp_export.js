@@ -66,6 +66,17 @@ function generateParamComments(params) {
     if (params.surfaceRoughness > 0) {
         lines.push(`!   Surface roughness RMS: ${(params.surfaceRoughness * 1e6).toFixed(2)} um`);
     }
+    if (params.plating) {
+        lines.push(`!   Surface plating: enabled`);
+        lines.push(`!     Conductivity: ${(params.plating.sigma * 1e-6).toFixed(1)} MS/m`);
+        lines.push(`!     Thickness: ${(params.plating.thickness * 1e6).toFixed(2)} um`);
+        lines.push(`!     Roughness RMS: ${(params.plating.rq * 1e6).toFixed(2)} um`);
+        const surfaces = [];
+        if (params.plating.top) surfaces.push('top');
+        if (params.plating.sides) surfaces.push('sides');
+        if (params.plating.bottom) surfaces.push('bottom');
+        lines.push(`!     Applied to: ${surfaces.join(', ')}`);
+    }
     lines.push('!');
     lines.push('! S-Parameter Settings:');
     lines.push(`!   Line length: ${(params.length * 1000).toFixed(3)} mm`);

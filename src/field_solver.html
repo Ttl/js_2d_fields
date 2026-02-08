@@ -300,6 +300,35 @@
         </div>
 
         <div class="control-group">
+            <label><input type="checkbox" id="chk_plating"> Enable Surface Plating <span class="help-icon" onclick="showHelpModal('plating', event)">?</span></label>
+        </div>
+        <div id="plating-params" class="nested-options" style="display: none;">
+            <div class="control-group">
+                <label>Applied Surfaces</label>
+                <div style="display: flex; gap: 12px; margin-top: 4px;">
+                    <label style="font-weight: normal;"><input type="checkbox" id="chk_plating_top" checked> Top</label>
+                    <label style="font-weight: normal;"><input type="checkbox" id="chk_plating_sides" checked> Sides</label>
+                    <label style="font-weight: normal;"><input type="checkbox" id="chk_plating_bottom"> Bottom</label>
+                </div>
+            </div>
+            <div class="control-group">
+                <label>Plating Conductivity (S/m)</label>
+                <input type="number" id="inp_plating_sigma" value="1e7" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Plating Thickness</label>
+                <input type="text" class="unit-input" id="inp_plating_t" value="0.5 μm">
+            </div>
+            <div class="control-group">
+                <label>Plating Roughness RMS</label>
+                <input type="text" class="unit-input" id="inp_plating_rq" value="0.3 μm">
+            </div>
+            <div class="control-group">
+                <label><input type="checkbox" id="chk_plating_thick_corners"> Model Thick Plating <span class="help-icon" onclick="showHelpModal('plating_thick_corners', event)">?</span></label>
+            </div>
+        </div>
+
+        <div class="control-group">
             <label><input type="checkbox" id="chk_causal_materials"> Use Causal Material Parameters <span class="help-icon" onclick="showHelpModal('causal', event)">?</span></label>
         </div>
         </div>
@@ -759,6 +788,14 @@
             title: 'Surface Roughness',
             body: '<p>Conductor loss is calculated using gradient model (<a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">https://ieeexplore.ieee.org/document/7932148</a>), both loss and inductance caused by the surface roughness is calculated. All conductors use this roughness on all sides. On PCB, typical RMS roughness is about 1 - 2 µm for normal copper foil and about 0.5 µm for special low profile foil.</p>'
         },
+        plating: {
+            title: 'Surface Plating',
+            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both the plating layer and the bulk metal underneath (since the plating conforms to the bulk surface).</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p>'
+        },
+        plating_thick_corners: {
+            title: 'Model Thick Plating',
+            body: '<p>When enabled, models thick side plating extending to bottom corners. At bottom corners where side plating thickness exceeds the distance to the edge, the plating material conductivity is used with the substrate roughness.</p><p>Only applies when side plating is enabled and bottom is disabled.</p>'
+        },
         conductivity: {
             title: 'Conductivity',
                 body: '<p>Electrical conductivity of the conductor material.</p><p><strong>Common materials at room temperature:</strong></p><ul><li>Silver: 6.3×10<sup>7</sup> S/m</li><li>Copper: 5.8×10<sup>7</sup> S/m</li><li>Gold: 4.5×10<sup>7</sup> S/m</li><li>Aluminium: 3.5×10<sup>7</sup> S/m</li><li>Nickel: 1.4×10<sup>7</sup> S/m</li></ul><p>At low frequencies Nickel has high magnetic permeability that increases conductor losses and is not yet supported.</p>'
@@ -1005,12 +1042,16 @@
         document.getElementById('chk_enclosure').addEventListener('change', () => {
             toggleCheckboxSection('chk_enclosure', 'enclosure-params');
         });
+        document.getElementById('chk_plating').addEventListener('change', () => {
+            toggleCheckboxSection('chk_plating', 'plating-params');
+        });
 
         // Initialize checkbox sections based on restored state (for browser auto-restore)
         toggleCheckboxSection('chk_solder_mask', 'solder-mask-params');
         toggleCheckboxSection('chk_top_diel', 'top-diel-params');
         toggleCheckboxSection('chk_gnd_cut', 'gnd-cut-params');
         toggleCheckboxSection('chk_enclosure', 'enclosure-params');
+        toggleCheckboxSection('chk_plating', 'plating-params');
 
         // Setup unit parsing for all unit-input fields
         document.querySelectorAll('.unit-input').forEach(input => {

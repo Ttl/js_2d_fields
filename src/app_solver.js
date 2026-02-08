@@ -117,6 +117,14 @@ function getUISettings() {
         tolerance: getInputValueUnitless('inp_tolerance'),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         rq: getDisplayValue('inp_rq'),
+        use_plating: document.getElementById('chk_plating').checked ? 1 : 0,
+        plating_sigma: getInputValueUnitless('inp_plating_sigma'),
+        plating_t: getDisplayValue('inp_plating_t'),
+        plating_rq: getDisplayValue('inp_plating_rq'),
+        plating_top: document.getElementById('chk_plating_top').checked ? 1 : 0,
+        plating_sides: document.getElementById('chk_plating_sides').checked ? 1 : 0,
+        plating_bottom: document.getElementById('chk_plating_bottom').checked ? 1 : 0,
+        plating_thick_corners: document.getElementById('chk_plating_thick_corners').checked ? 1 : 0,
         sparam_length: getDisplayValue('sparam-length'),
         sparam_z_ref: getInputValueUnitless('sparam-z-ref'),
         use_causal_materials: document.getElementById('chk_causal_materials').checked ? 1 : 0,
@@ -213,6 +221,15 @@ function restoreSettings(settings) {
         if (settings.max_nodes !== undefined) document.getElementById('inp_max_nodes').value = settings.max_nodes;
         if (settings.min_converged_passes !== undefined) document.getElementById('inp_min_converged_passes').value = settings.min_converged_passes;
         setValueWithUnit('inp_rq', settings.rq);
+
+        if (settings.use_plating !== undefined) document.getElementById('chk_plating').checked = !!settings.use_plating;
+        if (settings.plating_sigma !== undefined) document.getElementById('inp_plating_sigma').value = settings.plating_sigma;
+        setValueWithUnit('inp_plating_t', settings.plating_t);
+        setValueWithUnit('inp_plating_rq', settings.plating_rq);
+        if (settings.plating_top !== undefined) document.getElementById('chk_plating_top').checked = !!settings.plating_top;
+        if (settings.plating_sides !== undefined) document.getElementById('chk_plating_sides').checked = !!settings.plating_sides;
+        if (settings.plating_bottom !== undefined) document.getElementById('chk_plating_bottom').checked = !!settings.plating_bottom;
+        if (settings.plating_thick_corners !== undefined) document.getElementById('chk_plating_thick_corners').checked = !!settings.plating_thick_corners;
 
         if (settings.use_causal_materials !== undefined) document.getElementById('chk_causal_materials').checked = !!settings.use_causal_materials;
 
@@ -330,7 +347,14 @@ function getGeometryHash() {
         use_top_gnd: p.use_top_gnd,
         enclosure_width: p.enclosure_width,
         enclosure_height: p.enclosure_height,
-        rq: p.rq
+        rq: p.rq,
+        use_plating: p.use_plating,
+        plating_sigma: p.plating_sigma,
+        plating_t: p.plating_t,
+        plating_rq: p.plating_rq,
+        plating_top: p.plating_top,
+        plating_sides: p.plating_sides,
+        plating_bottom: p.plating_bottom
     });
 }
 
@@ -509,6 +533,15 @@ function getParams() {
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         // Surface roughness parameter
         rq: getInputValue('inp_rq'),
+        // Surface plating parameters
+        use_plating: document.getElementById('chk_plating').checked,
+        plating_sigma: getInputValueUnitless('inp_plating_sigma'),
+        plating_t: getInputValue('inp_plating_t'),
+        plating_rq: getInputValue('inp_plating_rq'),
+        plating_top: document.getElementById('chk_plating_top').checked,
+        plating_sides: document.getElementById('chk_plating_sides').checked,
+        plating_bottom: document.getElementById('chk_plating_bottom').checked,
+        plating_thick_corners: document.getElementById('chk_plating_thick_corners').checked,
         // Causal material parameters
         use_causal_materials: document.getElementById('chk_causal_materials').checked,
     };
@@ -549,6 +582,19 @@ function addCommonOptions(options, p) {
         const top_bc = p.use_top_gnd ? "gnd" : "open";
         const bottom_bc = options.boundaries ? options.boundaries[3] : "gnd";
         options.boundaries = [left_bc, right_bc, top_bc, bottom_bc];
+    }
+
+    // Surface plating
+    if (p.use_plating) {
+        options.plating = {
+            sigma: p.plating_sigma,
+            thickness: p.plating_t,
+            rq: p.plating_rq,
+            top: p.plating_top,
+            sides: p.plating_sides,
+            bottom: p.plating_bottom,
+            thick_corners: p.plating_thick_corners
+        };
     }
 }
 
@@ -1022,6 +1068,15 @@ function bindEvents() {
                 sigma: p.sigma,
                 traceSpacing: p.trace_spacing,
                 surfaceRoughness: p.rq,
+                plating: p.use_plating ? {
+                    sigma: p.plating_sigma,
+                    thickness: p.plating_t,
+                    rq: p.plating_rq,
+                    top: p.plating_top,
+                    sides: p.plating_sides,
+                    bottom: p.plating_bottom,
+                    thick_corners: p.plating_thick_corners
+                } : null,
                 freqStart: frequencySweepResults[0].freq,
                 freqStop: frequencySweepResults[frequencySweepResults.length - 1].freq,
                 numPoints: frequencySweepResults.length
@@ -1082,6 +1137,7 @@ function bindEvents() {
         'inp_gnd_cut_w', 'inp_gnd_cut_h',
         'inp_enclosure_width', 'inp_enclosure_height',
         'inp_rq',
+        'inp_plating_sigma', 'inp_plating_t', 'inp_plating_rq',
         'freq-start'
     ];
 
@@ -1098,7 +1154,8 @@ function bindEvents() {
 
     // Real-time updates for checkboxes
     const geometryCheckboxes = [
-        'chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_side_gnd', 'chk_top_gnd'
+        'chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_side_gnd', 'chk_top_gnd',
+        'chk_plating', 'chk_plating_top', 'chk_plating_sides', 'chk_plating_bottom', 'chk_plating_thick_corners'
     ];
 
     geometryCheckboxes.forEach(id => {
@@ -1374,7 +1431,7 @@ function init() {
         toggleParameterVisibility();
     }
     // Update checkbox sections
-    ['chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure'].forEach(id => {
+    ['chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_plating'].forEach(id => {
         const checkbox = document.getElementById(id);
         if (checkbox) {
             const sectionId = id.replace('chk_', '') + '-params';

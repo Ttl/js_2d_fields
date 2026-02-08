@@ -1,6 +1,6 @@
 import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
-import { calculate_Zrough } from './surface_roughness.js';
+import { calculate_Zrough, calculate_Zrough_layered } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 
 export const CONSTANTS = {
@@ -622,8 +622,172 @@ export class FieldSolver2D {
         // Use roughness from constructor
         const rq = this.rq || 0;
 
-        // Z_surf is Complex
-        const Z_surf = calculate_Zrough(this.freq, this.sigma_cond, rq);
+        // Default surface impedance (no plating)
+        const Z_surf_default = calculate_Zrough(this.freq, this.sigma_cond, rq);
+
+        // Cache for per-conductor surface impedances to avoid redundant layered solves
+        // Key: "ci_surface" e.g. "3_top", value: Complex Z_surf
+        const Z_cache = new Map();
+
+        // Helper: check if a point is at a conductor corner
+        // Returns corner type: 'bottom-left', 'bottom-right', or null
+        const getCornerType = (i, j, ci, direction) => {
+            if (!this.conductors || ci < 0 || !this.conductor_id) return null;
+            const cond = this.conductors[ci];
+            if (!cond) return null;
+
+            // Only check for bottom corners (direction 'u' = bottom face)
+            if (direction !== 'u') return null;
+
+            // Check if there's also a horizontal neighbor with the same conductor
+            const has_left = (j > 0) && this.conductor_id[i] && this.conductor_id[i][j-1] === ci;
+            const has_right = (j < this.x.length - 1) && this.conductor_id[i] && this.conductor_id[i][j+1] === ci;
+
+            if (has_left) return 'bottom-left';
+            if (has_right) return 'bottom-right';
+            return null;
+        };
+
+        // Helper: get surface impedance for a conductor boundary segment
+        // Now with corner detection and geometric coverage from thick side plating
+        const getZsurf = (ci, direction, i, j, dl) => {
+            if (!this.conductors || ci < 0) return Z_surf_default;
+            const cond = this.conductors[ci];
+            if (!cond || !cond.plating) return Z_surf_default;
+
+            // Map direction to surface face:
+            // 'u' = dielectric is below conductor neighbor = conductor's BOTTOM face
+            // 'd' = dielectric is above conductor neighbor = conductor's TOP face
+            // 'l','r' = SIDE faces
+            let surface;
+            if (direction === 'd') surface = 'top';
+            else if (direction === 'u') surface = 'bottom';
+            else surface = 'sides';
+
+            // Geometric coverage from TOP plating extending down the sides
+            // If only top plating (not sides), plating extends down from top edge
+            if ((direction === 'l' || direction === 'r') && cond.plating.top && !cond.plating.sides) {
+                // Find the conductor neighbor position
+                const neighbor_i = i;  // Vertical position of the neighbor
+                const y_pos = this.y[neighbor_i];
+
+                // Calculate distance from top edge
+                const dist_from_top = cond.y_max - y_pos;
+
+                // If distance from top < plating thickness, side is covered by top plating
+                if (dist_from_top < cond.plating.thickness && dist_from_top >= 0) {
+                    // On sides near top: use single-layer plating with plating.rq
+                    const key_top_side = `${ci}_top_side_plating`;
+                    if (Z_cache.has(key_top_side)) {
+                        return Z_cache.get(key_top_side);
+                    }
+                    const Z_top_side = calculate_Zrough(
+                        this.freq, cond.plating.sigma, cond.plating.rq
+                    );
+                    Z_cache.set(key_top_side, Z_top_side);
+                    return Z_top_side;
+                }
+            }
+
+            // Geometric coverage check for bottom surface:
+            // If side plating thickness > distance from edge, the bottom is covered by side plating
+            if (direction === 'u' && cond.plating.sides && !cond.plating.bottom && cond.plating.thick_corners) {
+                // Find the conductor neighbor position
+                const neighbor_j = j;  // Horizontal position of the neighbor
+                const x_pos = this.x[neighbor_j];
+
+                // Calculate distance to nearest edge
+                const dist_to_left = x_pos - cond.x_min;
+                const dist_to_right = cond.x_max - x_pos;
+                const min_dist_to_edge = Math.min(dist_to_left, dist_to_right);
+
+                // If plating thickness from sides exceeds distance to edge,
+                // the bottom surface is geometrically covered by side plating
+                if (cond.plating.thickness > min_dist_to_edge) {
+                    // At corners: use single-layer impedance with:
+                    // - plating.sigma (material is plating)
+                    // - bulk rq (surface roughness from bottom surface preparation)
+                    const key_corner = `${ci}_corner_plating`;
+                    if (Z_cache.has(key_corner)) {
+                        return Z_cache.get(key_corner);
+                    }
+                    const Z_corner = calculate_Zrough(
+                        this.freq, cond.plating.sigma, rq  // Use bulk rq, not plating.rq
+                    );
+                    Z_cache.set(key_corner, Z_corner);
+                    return Z_corner;
+                }
+            }
+
+            // Check for bottom corner
+            const cornerType = getCornerType(i, j, ci, direction);
+
+            // At bottom corners with side plating enabled, use single-layer plating impedance
+            // This models plating extending from sides to bottom at corners
+            if (cornerType && cond.plating.sides && cond.plating.thick_corners) {
+                // Determine corner size (characteristic dimension)
+                const corner_size = Math.min(cond.width, Math.abs(cond.height)) / 10;
+
+                // Get corner plating impedance (single-layer, no bulk)
+                const key_corner = `${ci}_corner_plating`;
+                let Z_corner;
+                if (Z_cache.has(key_corner)) {
+                    Z_corner = Z_cache.get(key_corner);
+                } else {
+                    // At corners: single-layer with plating sigma and bulk rq
+                    // - sigma: plating material (extends from sides)
+                    // - rq: bulk surface roughness (bottom surface preparation)
+                    Z_corner = calculate_Zrough(
+                        this.freq, cond.plating.sigma, rq  // Use bulk rq, not plating.rq
+                    );
+                    Z_cache.set(key_corner, Z_corner);
+                }
+
+                // If mesh cell is small (pure corner region), use pure corner plating impedance
+                if (dl < corner_size) {
+                    return Z_corner;
+                }
+
+                // If mesh cell is large and includes both corner and bulk,
+                // average based on corner_size fraction
+                const corner_fraction = corner_size / dl;
+
+                // Get bottom surface impedance
+                let Z_bottom;
+                if (cond.plating.bottom) {
+                    const key_bottom = `${ci}_bottom`;
+                    if (Z_cache.has(key_bottom)) {
+                        Z_bottom = Z_cache.get(key_bottom);
+                    } else {
+                        Z_bottom = calculate_Zrough_layered(
+                            this.freq, this.sigma_cond,
+                            cond.plating.rq, cond.plating.sigma, cond.plating.thickness
+                        );
+                        Z_cache.set(key_bottom, Z_bottom);
+                    }
+                } else {
+                    Z_bottom = Z_surf_default;
+                }
+
+                // Weighted average: corner region uses corner plating impedance, bulk uses bottom impedance
+                const Z_avg_re = corner_fraction * Z_corner.re + (1 - corner_fraction) * Z_bottom.re;
+                const Z_avg_im = corner_fraction * Z_corner.im + (1 - corner_fraction) * Z_bottom.im;
+                return new Complex(Z_avg_re, Z_avg_im);
+            }
+
+            // Standard surface impedance (no corner effects)
+            if (!cond.plating[surface]) return Z_surf_default;
+
+            const key = `${ci}_${surface}`;
+            if (Z_cache.has(key)) return Z_cache.get(key);
+
+            const Z = calculate_Zrough_layered(
+                this.freq, this.sigma_cond,
+                cond.plating.rq, cond.plating.sigma, cond.plating.thickness
+            );
+            Z_cache.set(key, Z);
+            return Z;
+        };
 
         const ny = this.y.length;
         const nx = this.x.length;
@@ -642,14 +806,8 @@ export class FieldSolver2D {
 
         for (let i = 1; i < ny - 1; i++) {
             for (let j = 1; j < nx - 1; j++) {
-                // We only care about the boundary inside the dielectric
-                // adjacent to a conductor.
-                // Current loop iterates all cells. Look for Dielectric cells
-                // that have a conductor neighbor.
+                if (isConductor(i, j)) continue;
 
-                if (isConductor(i, j)) continue; // Skip if we are inside metal
-
-                // Check neighbors to see if we are on a boundary
                 const neighbors = [
                     { ni: i, nj: j + 1, direction: 'r', dl_func: get_dy, idx: i },
                     { ni: i, nj: j - 1, direction: 'l', dl_func: get_dy, idx: i },
@@ -660,28 +818,25 @@ export class FieldSolver2D {
                 for (const { ni, nj, direction, dl_func, idx: dl_idx } of neighbors) {
                     if (ni < 0 || ni >= ny || nj < 0 || nj >= nx) continue;
 
-                    // If neighbor is a conductor, we are on the surface
                     if (isConductor(ni, nj)) {
-
-                        const eps_diel = this.epsilon_r[i][j]; // Use permittivity of current (dielectric) cell
+                        const eps_diel = this.epsilon_r[i][j];
                         const Ex_val = Ex[i][j];
                         const Ey_val = Ey[i][j];
-
-                        // Calculate tangential Magnetic Field H_tan
-                        // H_tan = (1/Z_wave) * E_norm
-                        // Z_wave = Z0 / sqrt(eps_r)
 
                         let E_norm = 0.0;
                         if (direction === 'r' || direction === 'l') E_norm = Math.abs(Ex_val);
                         else E_norm = Math.abs(Ey_val);
 
-                        const Z0_freespace = 376.73; // sqrt(mu0/eps0)
+                        const Z0_freespace = 376.73;
                         const H_tan = E_norm * Math.sqrt(eps_diel) / Z0_freespace;
 
                         const dl = dl_func(dl_idx);
                         const H2_dl = H_tan * H_tan * dl;
 
-                        // Accumulate for all conductors (signal and ground use same roughness)
+                        // Look up per-surface impedance (with plating if applicable)
+                        const ci = this.conductor_id ? this.conductor_id[ni][nj] : -1;
+                        const Z_surf = getZsurf(ci, direction, i, j, dl);
+
                         sum_H2_dl_R += Z_surf.re * H2_dl;
                         sum_H2_dl_L += Z_surf.im * H2_dl;
                     }

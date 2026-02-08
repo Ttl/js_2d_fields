@@ -229,6 +229,24 @@ function draw(resetZoom = false) {
                 line: { color: 'rgba(0, 0, 0, 0.5)', width: 1 },
                 layer: 'above'
             });
+
+            // Yellow lines on plated edges
+            if (cond.plating) {
+                const x0 = cond.x_min * 1000, x1 = cond.x_max * 1000;
+                const y0 = cond.y_min * 1000, y1 = yMax * 1000;
+                const plateLine = { color: 'rgba(255, 215, 0, 1.0)', width: 3 };
+
+                if (cond.plating.top) {
+                    shapes.push({ type: 'line', x0, y0: y1, x1, y1: y1, line: plateLine, layer: 'above' });
+                }
+                if (cond.plating.bottom) {
+                    shapes.push({ type: 'line', x0, y0: y0, x1, y1: y0, line: plateLine, layer: 'above' });
+                }
+                if (cond.plating.sides) {
+                    shapes.push({ type: 'line', x0: x0, y0: y0, x1: x0, y1: y1, line: plateLine, layer: 'above' });
+                    shapes.push({ type: 'line', x0: x1, y0: y0, x1: x1, y1: y1, line: plateLine, layer: 'above' });
+                }
+            }
         }
 
         // If solution available, overlay E-field contours
