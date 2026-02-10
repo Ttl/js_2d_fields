@@ -434,6 +434,8 @@
                 <option value="C">C (F/m)</option>
                 <option value="G">G (S/m)</option>
             </select>
+            <button id="freeze-results-btn" style="width:auto; padding:6px 12px; font-size:0.85em;">Freeze</button>
+            <span class="help-icon" onclick="showHelpModal('freeze')">?</span>
         </div>
         <div id="results-plot" class="plot-container">
             <div class="plotly-loading">
@@ -457,6 +459,8 @@
                 <option value="magnitude">Magnitude (dB)</option>
                 <option value="phase">Phase (degrees)</option>
             </select>
+            <button id="freeze-sparams-btn" style="width:auto; padding:6px 12px; font-size:0.85em;">Freeze</button>
+            <span class="help-icon" onclick="showHelpModal('freeze')">?</span>
         </div>
         <div id="sparam-plot" class="plot-container">
             <div class="plotly-loading">
@@ -817,6 +821,10 @@
         copylink: {
             title: 'Copy link',
             body: '<p>Copies URL to clip board with all transmission line parameters encoded in it. Opening it will load the same parameters.</p>'
+        },
+        freeze: {
+            title: 'Freeze Trace',
+            body: '<p>Saves the current plot data as a semi-transparent reference trace. The frozen trace persists when you change parameters and re-run the simulation, letting you visually compare results.</p><p>For S-Parameters, the frozen trace also preserves the line length and reference impedance from freeze time.</p><p>Click Unfreeze to remove the reference trace.</p>'
         }
     };
 

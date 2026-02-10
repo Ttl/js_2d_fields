@@ -229,6 +229,9 @@ button.stop-mode:hover {
     background: var(--input-bg);
     color: var(--text-color);
 }
+.results-controls button.freeze-active {
+    background-color: #d97706;
+}
 .plot-container {
     flex: 1;
     min-height: 400px;

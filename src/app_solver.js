@@ -1,7 +1,8 @@
 import { MicrostripSolver } from './microstrip.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
-import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange } from './plot.js';
+import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+    freeze, unfreeze, isFrozen } from './plot.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -1140,6 +1141,36 @@ function bindEvents() {
                 drawSParamPlot();
             }
         });
+    }
+
+    // Freeze buttons (linked — both tabs share the same frozen state)
+    const freezeResultsBtn = document.getElementById('freeze-results-btn');
+    const freezeSParamsBtn = document.getElementById('freeze-sparams-btn');
+    const freezeBtns = [freezeResultsBtn, freezeSParamsBtn].filter(Boolean);
+
+    function toggleFreeze() {
+        if (isFrozen()) {
+            unfreeze();
+            for (const btn of freezeBtns) {
+                btn.textContent = 'Freeze';
+                btn.classList.remove('freeze-active');
+            }
+        } else {
+            if (!frequencySweepResults || frequencySweepResults.length === 0) return;
+            freeze();
+            for (const btn of freezeBtns) {
+                btn.textContent = 'Unfreeze';
+                btn.classList.add('freeze-active');
+            }
+        }
+        if (frequencySweepResults) {
+            drawResultsPlot();
+            drawSParamPlot();
+        }
+    }
+
+    for (const btn of freezeBtns) {
+        btn.addEventListener('click', toggleFreeze);
     }
 
     // Export SnP button

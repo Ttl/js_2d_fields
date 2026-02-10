@@ -15,6 +15,16 @@ let actualDataMax = null;
 // Geometry view zoom constants
 const SIGNAL_CONDUCTOR_VIEW_FRACTION = 1/3;  // Signal conductors take up this fraction of X-axis view
 
+// Frozen trace state
+let frozenResultsData = null;   // Deep copy of frequencySweepResults
+let frozenSParamData = null;    // { results: deepCopy, length, zRef }
+
+// Plotly default color cycle (colorway)
+const PLOTLY_COLORS = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+];
+
 // Globals imported from app.js
 let getSolver = () => null;
 let getFrequencySweepResults = () => null;
@@ -747,313 +757,183 @@ function getYAxisLabel(selector) {
     return labels[selector] || selector;
 }
 
+function buildResultsTraces(sweepResults, selector, useDiffMode) {
+    const resultsAreDifferential = sweepResults[0].result.modes.length === 2;
+    const freqs = sweepResults.map(r => r.freq / 1e9);
+    const plotMode = freqs.length === 1 ? 'markers' : 'lines+markers';
+    const traces = [];
+
+    // Mode labels
+    const mode0 = useDiffMode ? 'Differential' : 'Odd';
+    const mode1 = useDiffMode ? 'Common' : 'Even';
+
+    if (selector === 're_z0' || selector === 'im_z0') {
+        const part = selector === 're_z0' ? 're' : 'im';
+        const scale0 = useDiffMode ? 2 : 1;
+        const scale1 = useDiffMode ? 0.5 : 1;
+        if (resultsAreDifferential) {
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => scale0 * r.result.modes[0].Zc[part]),
+                name: `${mode0} mode`, type: 'scatter', mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => scale1 * r.result.modes[1].Zc[part]),
+                name: `${mode1} mode`, type: 'scatter', mode: plotMode
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].Zc[part]),
+                name: selector === 're_z0' ? 'Re(Z0)' : 'Im(Z0)', type: 'scatter', mode: plotMode
+            });
+        }
+    } else if (selector === 'eps_eff') {
+        if (resultsAreDifferential) {
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].eps_eff),
+                name: `${mode0} mode`, type: 'scatter', mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[1].eps_eff),
+                name: `${mode1} mode`, type: 'scatter', mode: plotMode
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].eps_eff),
+                name: 'eps_eff', type: 'scatter', mode: plotMode
+            });
+        }
+    } else if (selector === 'loss') {
+        if (resultsAreDifferential) {
+            const suffix0 = useDiffMode ? 'diff' : 'odd';
+            const suffix1 = useDiffMode ? 'common' : 'even';
+            // Mode 0 losses (solid lines)
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].alpha_c),
+                name: `Conductor (${suffix0})`, type: 'scatter', mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].alpha_d),
+                name: `Dielectric (${suffix0})`, type: 'scatter', mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].alpha_total),
+                name: `Total (${suffix0})`, type: 'scatter', mode: plotMode,
+                line: { width: 2 }
+            });
+            // Mode 1 losses (dashed lines)
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[1].alpha_c),
+                name: `Conductor (${suffix1})`, type: 'scatter', mode: plotMode,
+                line: { dash: 'dash' }
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[1].alpha_d),
+                name: `Dielectric (${suffix1})`, type: 'scatter', mode: plotMode,
+                line: { dash: 'dash' }
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[1].alpha_total),
+                name: `Total (${suffix1})`, type: 'scatter', mode: plotMode,
+                line: { width: 2, dash: 'dash' }
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].alpha_c),
+                name: 'Conductor', type: 'scatter', mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].alpha_d),
+                name: 'Dielectric', type: 'scatter', mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].alpha_total),
+                name: 'Total', type: 'scatter', mode: plotMode,
+                line: { width: 2 }
+            });
+        }
+    } else {
+        // RLGC parameters
+        const paramKey = selector;
+        if (resultsAreDifferential) {
+            const scale0 = useDiffMode ? 2 : 1;
+            const scale1 = useDiffMode ? 0.5 : 1;
+            const suffix0 = useDiffMode ? '_dd' : ' (odd)';
+            const suffix1 = useDiffMode ? '_cc' : ' (even)';
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => scale0 * r.result.modes[0].RLGC[paramKey]),
+                name: `${paramKey}${suffix0}`, type: 'scatter', mode: plotMode
+            });
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => scale1 * r.result.modes[1].RLGC[paramKey]),
+                name: `${paramKey}${suffix1}`, type: 'scatter', mode: plotMode
+            });
+        } else {
+            traces.push({
+                x: freqs,
+                y: sweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
+                name: paramKey, type: 'scatter', mode: plotMode
+            });
+        }
+    }
+
+    return traces;
+}
+
 function drawResultsPlot() {
     const frequencySweepResults = get.frequencySweepResults();
     const Plotly = getPlotly();
     if (!frequencySweepResults || frequencySweepResults.length === 0 || !Plotly) return;
 
     const selector = document.getElementById('results-plot-selector').value;
-    const solver = get.solver();
-
-    // Check if results are differential (have 2 modes), not just if current solver is differential
     const resultsAreDifferential = frequencySweepResults[0].result.modes.length === 2;
     const useDiffMode = document.getElementById('results-diff').checked && resultsAreDifferential;
 
-    const freqs = frequencySweepResults.map(r => r.freq / 1e9);
-    const traces = [];
+    const activeTraces = buildResultsTraces(frequencySweepResults, selector, useDiffMode);
 
-    // Use lines+markers mode so single frequency points are visible
-    const plotMode = freqs.length === 1 ? 'markers' : 'lines+markers';
-
-    if (selector === 're_z0') {
-        if (resultsAreDifferential && !useDiffMode) {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].Zc.re),
-                name: 'Odd mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].Zc.re),
-                name: 'Even mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else if (resultsAreDifferential && useDiffMode) {
-            // Z_diff = 2*Z_odd, Z_common = Z_even / 2
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => 2 * r.result.modes[0].Zc.re),
-                name: 'Differential mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].Zc.re / 2),
-                name: 'Common mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].Zc.re),
-                name: 'Re(Z0)',
-                type: 'scatter',
-                mode: plotMode
-            });
-        }
-    } else if (selector === 'im_z0') {
-        if (resultsAreDifferential && !useDiffMode) {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
-                name: 'Odd mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].Zc.im),
-                name: 'Even mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else if (resultsAreDifferential && useDiffMode) {
-            // Z_diff = 2*Z_odd, Z_common = Z_even / 2
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => 2 * r.result.modes[0].Zc.im),
-                name: 'Differential mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].Zc.im / 2),
-                name: 'Common mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].Zc.im),
-                name: 'Im(Z0)',
-                type: 'scatter',
-                mode: plotMode
-            });
-        }
-    } else if (selector === 'eps_eff') {
-        if (resultsAreDifferential && !useDiffMode) {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].eps_eff),
-                name: 'Odd mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].eps_eff),
-                name: 'Even mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else if (resultsAreDifferential && useDiffMode) {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].eps_eff),
-                name: 'Differential mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].eps_eff),
-                name: 'Common mode',
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].eps_eff),
-                name: 'eps_eff',
-                type: 'scatter',
-                mode: plotMode
-            });
-        }
-    } else if (selector === 'loss') {
-        if (resultsAreDifferential && !useDiffMode) {
-            // Odd mode losses (solid lines)
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
-                name: 'Conductor (odd)',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
-                name: 'Dielectric (odd)',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
-                name: 'Total (odd)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { width: 2 }
-            });
-            // Even mode losses (dashed lines)
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].alpha_c),
-                name: 'Conductor (even)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { dash: 'dash' }
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].alpha_d),
-                name: 'Dielectric (even)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { dash: 'dash' }
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].alpha_total),
-                name: 'Total (even)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { width: 2, dash: 'dash' }
-            });
-        } else if (resultsAreDifferential && useDiffMode) {
-            // Differential mode losses (solid lines)
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
-                name: 'Conductor (diff)',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
-                name: 'Dielectric (diff)',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
-                name: 'Total (diff)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { width: 2 }
-            });
-            // Common mode losses (dashed lines)
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].alpha_c),
-                name: 'Conductor (common)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { dash: 'dash' }
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].alpha_d),
-                name: 'Dielectric (common)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { dash: 'dash' }
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].alpha_total),
-                name: 'Total (common)',
-                type: 'scatter',
-                mode: plotMode,
-                line: { width: 2, dash: 'dash' }
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_c),
-                name: 'Conductor',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_d),
-                name: 'Dielectric',
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].alpha_total),
-                name: 'Total',
-                type: 'scatter',
-                mode: plotMode,
-                line: { width: 2 }
-            });
-        }
-    } else {
-        // RLGC parameters
-        const paramKey = selector; // R, L, G, or C
-        if (resultsAreDifferential && !useDiffMode) {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
-                name: `${paramKey} (odd)`,
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[1].RLGC[paramKey]),
-                name: `${paramKey} (even)`,
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else if (resultsAreDifferential && useDiffMode) {
-            // X_dd = 2*X_odd, X_cc = 0.5*X_even
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => 2 * r.result.modes[0].RLGC[paramKey]),
-                name: `${paramKey}_dd`,
-                type: 'scatter',
-                mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => 0.5 * r.result.modes[1].RLGC[paramKey]),
-                name: `${paramKey}_cc`,
-                type: 'scatter',
-                mode: plotMode
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: frequencySweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
-                name: paramKey,
-                type: 'scatter',
-                mode: plotMode
-            });
-        }
+    // Assign explicit colors and legend groups so frozen traces don't shift the color cycle
+    for (let i = 0; i < activeTraces.length; i++) {
+        const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
+        activeTraces[i].line = { ...activeTraces[i].line, color };
+        activeTraces[i].marker = { color };
+        activeTraces[i].legendgroup = `group${i}`;
     }
+
+    const allTraces = [];
+
+    if (frozenResultsData) {
+        const frozenDiff = frozenResultsData[0].result.modes.length === 2;
+        const frozenUseDiff = document.getElementById('results-diff').checked && frozenDiff;
+        const frozen = buildResultsTraces(frozenResultsData, selector, frozenUseDiff);
+        for (let i = 0; i < frozen.length; i++) {
+            const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
+            frozen[i].line = { color };
+            frozen[i].opacity = 0.35;
+            frozen[i].showlegend = false;
+            frozen[i].hoverinfo = 'skip';
+            frozen[i].mode = 'lines';
+            frozen[i].legendgroup = `group${i}`;
+        }
+        allTraces.push(...frozen);
+    }
+
+    allTraces.push(...activeTraces);
 
     const useLogX = document.getElementById('results-log-x').checked;
     const layout = {
@@ -1078,45 +958,22 @@ function drawResultsPlot() {
         font: { color: '#fff' }
     };
 
-    Plotly.newPlot('results-plot', traces, layout, { responsive: true });
+    Plotly.newPlot('results-plot', allTraces, layout, { responsive: true });
 }
 
-function drawSParamPlot() {
-    const frequencySweepResults = get.frequencySweepResults();
-    const Plotly = getPlotly();
-    if (!frequencySweepResults || frequencySweepResults.length === 0 || !Plotly) return;
-
-    const length = get.inputValue('sparam-length');
-    const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
-    const useMixedMode = document.getElementById('sparam-diff').checked;
-
-    // Check for invalid inputs
-    if (isNaN(length) || length <= 0 || isNaN(Z_ref) || Z_ref <= 0) {
-        return;
-    }
-
-    const solver = get.solver();
-    // Check if results are differential (have 2 modes), not just if current solver is differential
-    const resultsAreDifferential = frequencySweepResults[0].result.modes.length === 2;
-    const plotMode = document.getElementById('sparam-plot-mode').value; // 'magnitude' or 'phase'
-
-    const freqs = frequencySweepResults.map(r => r.freq / 1e9);
+function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) {
+    const resultsAreDifferential = sweepResults[0].result.modes.length === 2;
+    const freqs = sweepResults.map(r => r.freq / 1e9);
+    const lineMode = freqs.length === 1 ? 'markers' : 'lines+markers';
     const traces = [];
 
-    // Use lines+markers mode so single frequency points are visible
-    const lineMode = freqs.length === 1 ? 'markers' : 'lines+markers';
-
-    // Helper to convert complex S-parameter to phase in degrees
-    const sParamToPhase = (complexVal) => {
-        return complexVal.arg() * 180 / Math.PI;
-    };
+    const sParamToPhase = (complexVal) => complexVal.arg() * 180 / Math.PI;
 
     if (!resultsAreDifferential) {
-        // 2-port S-parameters
         const S11_data = [];
         const S21_data = [];
 
-        for (const { freq, result } of frequencySweepResults) {
+        for (const { freq, result } of sweepResults) {
             const sp = computeSParamsSingleEnded(freq, result.modes[0].RLGC, length, Z_ref);
             if (plotMode === 'magnitude') {
                 S11_data.push(sParamTodB(sp.S11));
@@ -1128,159 +985,112 @@ function drawSParamPlot() {
         }
 
         const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
-        traces.push({
-            x: freqs,
-            y: S11_data,
-            name: `S11 ${label}`,
-            type: 'scatter',
-            mode: lineMode
-        });
-        traces.push({
-            x: freqs,
-            y: S21_data,
-            name: `S21 ${label}`,
-            type: 'scatter',
-            mode: lineMode
-        });
-    } else {
-        // 4-port S-parameters
+        traces.push({ x: freqs, y: S11_data, name: `S11 ${label}`, type: 'scatter', mode: lineMode });
+        traces.push({ x: freqs, y: S21_data, name: `S21 ${label}`, type: 'scatter', mode: lineMode });
+    } else if (useMixedMode) {
+        const SDD11_data = [], SDD21_data = [], SCC11_data = [], SCC21_data = [];
 
-        if (useMixedMode) {
-            // Mixed-mode S-parameters
-            const SDD11_data = [];
-            const SDD21_data = [];
-            const SCC11_data = [];
-            const SCC21_data = [];
+        for (const { freq, result } of sweepResults) {
+            const oddMode = result.modes.find(m => m.mode === 'odd');
+            const evenMode = result.modes.find(m => m.mode === 'even');
+            const sp = computeSParamsDifferential(freq, oddMode.RLGC, evenMode.RLGC, length, Z_ref);
 
-            for (const { freq, result } of frequencySweepResults) {
-                const oddMode = result.modes.find(m => m.mode === 'odd');
-                const evenMode = result.modes.find(m => m.mode === 'even');
-
-                const sp = computeSParamsDifferential(
-                    freq,
-                    oddMode.RLGC,
-                    evenMode.RLGC,
-                    length,
-                    Z_ref
-                );
-
-                if (plotMode === 'magnitude') {
-                    SDD11_data.push(sParamTodB(sp.SDD11));
-                    SDD21_data.push(sParamTodB(sp.SDD21));
-                    SCC11_data.push(sParamTodB(sp.SCC11));
-                    SCC21_data.push(sParamTodB(sp.SCC21));
-                } else {
-                    SDD11_data.push(sParamToPhase(sp.SDD11));
-                    SDD21_data.push(sParamToPhase(sp.SDD21));
-                    SCC11_data.push(sParamToPhase(sp.SCC11));
-                    SCC21_data.push(sParamToPhase(sp.SCC21));
-                }
+            if (plotMode === 'magnitude') {
+                SDD11_data.push(sParamTodB(sp.SDD11));
+                SDD21_data.push(sParamTodB(sp.SDD21));
+                SCC11_data.push(sParamTodB(sp.SCC11));
+                SCC21_data.push(sParamTodB(sp.SCC21));
+            } else {
+                SDD11_data.push(sParamToPhase(sp.SDD11));
+                SDD21_data.push(sParamToPhase(sp.SDD21));
+                SCC11_data.push(sParamToPhase(sp.SCC11));
+                SCC21_data.push(sParamToPhase(sp.SCC21));
             }
-
-            const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
-            traces.push({
-                x: freqs,
-                y: SDD11_data,
-                name: `SDD11 ${label}`,
-                type: 'scatter',
-                mode: lineMode
-            });
-            traces.push({
-                x: freqs,
-                y: SDD21_data,
-                name: `SDD21 ${label}`,
-                type: 'scatter',
-                mode: lineMode
-            });
-            traces.push({
-                x: freqs,
-                y: SCC11_data,
-                name: `SCC11 ${label}`,
-                type: 'scatter',
-                mode: lineMode,
-                line: { dash: 'dash' }
-            });
-            traces.push({
-                x: freqs,
-                y: SCC21_data,
-                name: `SCC21 ${label}`,
-                type: 'scatter',
-                mode: lineMode,
-                line: { dash: 'dash' }
-            });
-        } else {
-            // Single-ended 4-port S-parameters
-            // Port 1 = near end trace+, Port 2 = near end trace-
-            // Port 3 = far end trace+, Port 4 = far end trace-
-            const S11_data = [];  // Reflection at port 1
-            const S21_data = [];  // Near-end crosstalk (port 2 <- port 1)
-            const S31_data = [];  // Transmission (port 3 <- port 1)
-            const S41_data = [];  // Far-end crosstalk (port 4 <- port 1)
-
-            for (const { freq, result } of frequencySweepResults) {
-                const oddMode = result.modes.find(m => m.mode === 'odd');
-                const evenMode = result.modes.find(m => m.mode === 'even');
-
-                const sp = computeSParamsDifferential(
-                    freq,
-                    oddMode.RLGC,
-                    evenMode.RLGC,
-                    length,
-                    Z_ref
-                );
-
-                // Extract single-ended parameters from 4x4 S matrix
-                // S[row][col] where indices are 0-3 for ports 1-4
-                const S11 = sp.S[0][0];
-                const S21 = sp.S[1][0];
-                const S31 = sp.S[2][0];
-                const S41 = sp.S[3][0];
-
-                if (plotMode === 'magnitude') {
-                    S11_data.push(sParamTodB(S11));
-                    S21_data.push(sParamTodB(S21));
-                    S31_data.push(sParamTodB(S31));
-                    S41_data.push(sParamTodB(S41));
-                } else {
-                    S11_data.push(sParamToPhase(S11));
-                    S21_data.push(sParamToPhase(S21));
-                    S31_data.push(sParamToPhase(S31));
-                    S41_data.push(sParamToPhase(S41));
-                }
-            }
-
-            const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
-            traces.push({
-                x: freqs,
-                y: S11_data,
-                name: `S11 ${label}`,
-                type: 'scatter',
-                mode: lineMode
-            });
-            traces.push({
-                x: freqs,
-                y: S21_data,
-                name: `S21 ${label}`,
-                type: 'scatter',
-                mode: lineMode
-            });
-            traces.push({
-                x: freqs,
-                y: S31_data,
-                name: `S31 ${label}`,
-                type: 'scatter',
-                mode: lineMode
-            });
-            traces.push({
-                x: freqs,
-                y: S41_data,
-                name: `S41 ${label}`,
-                type: 'scatter',
-                mode: lineMode,
-                line: { dash: 'dash' }
-            });
         }
+
+        const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
+        traces.push({ x: freqs, y: SDD11_data, name: `SDD11 ${label}`, type: 'scatter', mode: lineMode });
+        traces.push({ x: freqs, y: SDD21_data, name: `SDD21 ${label}`, type: 'scatter', mode: lineMode });
+        traces.push({ x: freqs, y: SCC11_data, name: `SCC11 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
+        traces.push({ x: freqs, y: SCC21_data, name: `SCC21 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
+    } else {
+        const S11_data = [], S21_data = [], S31_data = [], S41_data = [];
+
+        for (const { freq, result } of sweepResults) {
+            const oddMode = result.modes.find(m => m.mode === 'odd');
+            const evenMode = result.modes.find(m => m.mode === 'even');
+            const sp = computeSParamsDifferential(freq, oddMode.RLGC, evenMode.RLGC, length, Z_ref);
+
+            const S11 = sp.S[0][0], S21 = sp.S[1][0], S31 = sp.S[2][0], S41 = sp.S[3][0];
+
+            if (plotMode === 'magnitude') {
+                S11_data.push(sParamTodB(S11));
+                S21_data.push(sParamTodB(S21));
+                S31_data.push(sParamTodB(S31));
+                S41_data.push(sParamTodB(S41));
+            } else {
+                S11_data.push(sParamToPhase(S11));
+                S21_data.push(sParamToPhase(S21));
+                S31_data.push(sParamToPhase(S31));
+                S41_data.push(sParamToPhase(S41));
+            }
+        }
+
+        const label = plotMode === 'magnitude' ? '(dB)' : '(deg)';
+        traces.push({ x: freqs, y: S11_data, name: `S11 ${label}`, type: 'scatter', mode: lineMode });
+        traces.push({ x: freqs, y: S21_data, name: `S21 ${label}`, type: 'scatter', mode: lineMode });
+        traces.push({ x: freqs, y: S31_data, name: `S31 ${label}`, type: 'scatter', mode: lineMode });
+        traces.push({ x: freqs, y: S41_data, name: `S41 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
     }
+
+    return traces;
+}
+
+function drawSParamPlot() {
+    const frequencySweepResults = get.frequencySweepResults();
+    const Plotly = getPlotly();
+    if (!frequencySweepResults || frequencySweepResults.length === 0 || !Plotly) return;
+
+    const length = get.inputValue('sparam-length');
+    const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
+    const useMixedMode = document.getElementById('sparam-diff').checked;
+
+    if (isNaN(length) || length <= 0 || isNaN(Z_ref) || Z_ref <= 0) {
+        return;
+    }
+
+    const plotMode = document.getElementById('sparam-plot-mode').value;
+
+    const activeTraces = buildSParamTraces(frequencySweepResults, length, Z_ref, plotMode, useMixedMode);
+
+    // Assign explicit colors and legend groups so frozen traces don't shift the color cycle
+    for (let i = 0; i < activeTraces.length; i++) {
+        const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
+        activeTraces[i].line = { ...activeTraces[i].line, color };
+        activeTraces[i].marker = { color };
+        activeTraces[i].legendgroup = `group${i}`;
+    }
+
+    const allTraces = [];
+
+    if (frozenSParamData) {
+        const frozen = buildSParamTraces(
+            frozenSParamData.results, frozenSParamData.length,
+            frozenSParamData.zRef, plotMode, useMixedMode
+        );
+        for (let i = 0; i < frozen.length; i++) {
+            const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
+            frozen[i].line = { color };
+            frozen[i].opacity = 0.35;
+            frozen[i].showlegend = false;
+            frozen[i].hoverinfo = 'skip';
+            frozen[i].mode = 'lines';
+            frozen[i].legendgroup = `group${i}`;
+        }
+        allTraces.push(...frozen);
+    }
+
+    allTraces.push(...activeTraces);
 
     const useLogX = document.getElementById('sparam-log-x').checked;
     const yTitle = plotMode === 'magnitude' ? 'Magnitude (dB)' : 'Phase (degrees)';
@@ -1306,7 +1116,7 @@ function drawSParamPlot() {
         font: { color: '#fff' }
     };
 
-    Plotly.newPlot('sparam-plot', traces, layout, { responsive: true });
+    Plotly.newPlot('sparam-plot', allTraces, layout, { responsive: true });
 }
 
 // Helper function to check if solver is in differential mode
@@ -1382,4 +1192,23 @@ function setCurrentView(view) {
     }
 }
 
-export { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange };
+// Unified freeze/unfreeze for both Results and S-Parameters tabs
+function freeze() {
+    const data = get.frequencySweepResults();
+    if (data && data.length > 0) {
+        frozenResultsData = JSON.parse(JSON.stringify(data));
+        frozenSParamData = {
+            results: JSON.parse(JSON.stringify(data)),
+            length: get.inputValue('sparam-length'),
+            zRef: parseFloat(document.getElementById('sparam-z-ref').value)
+        };
+    }
+}
+function unfreeze() {
+    frozenResultsData = null;
+    frozenSParamData = null;
+}
+function isFrozen() { return frozenResultsData !== null; }
+
+export { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+    freeze, unfreeze, isFrozen };
