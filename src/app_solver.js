@@ -110,7 +110,7 @@ const DEFAULT_SETTINGS = {
     plating_top: 1,
     plating_sides: 1,
     plating_bottom: 0,
-    plating_thick_corners: 0,
+    plating_thick_corners: 1,
     sparam_length: 10, // mm
     sparam_z_ref: 50,
     use_causal_materials: 0,
