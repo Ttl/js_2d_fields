@@ -663,11 +663,13 @@ function addCommonOptions(options, p) {
     // Enclosure
     if (p.use_enclosure) {
         options.enclosure_width = p.enclosure_width;
-        options.enclosure_height = p.enclosure_height;
+        if (options.enclosure_height === undefined) {
+            options.enclosure_height = p.enclosure_height;
+        }
 
         const left_bc = p.use_side_gnd ? "gnd" : "open";
         const right_bc = p.use_side_gnd ? "gnd" : "open";
-        const top_bc = p.use_top_gnd ? "gnd" : "open";
+        const top_bc = p.use_top_gnd ? "gnd" : (options.boundaries ? options.boundaries[2] : "open");
         const bottom_bc = options.boundaries ? options.boundaries[3] : "gnd";
         options.boundaries = [left_bc, right_bc, top_bc, bottom_bc];
     }
