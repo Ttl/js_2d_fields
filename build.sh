@@ -44,6 +44,10 @@ cp src/.htaccess dist/.htaccess
 # Cache-busting: append content hashes as query strings so browsers fetch
 # new versions when files change. The HTML must be served with no-cache headers
 # (e.g. Cache-Control: no-cache) so users always get the latest asset URLs.
+BUILD_DATE=$(date -u '+%Y-%m-%d')
+GIT_HASH=$(git rev-parse --short HEAD)
+sed -i "s|BUILD_VERSION|${BUILD_DATE} (${GIT_HASH})|g" dist/field_solver.html
+
 JS_HASH=$(sha256sum dist/app_solver.js | cut -c1-8)
 CSS_HASH=$(sha256sum dist/solver-style.css | cut -c1-8)
 WASM_HASH=$(sha256sum dist/solver.wasm | cut -c1-8)
