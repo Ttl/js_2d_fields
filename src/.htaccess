@@ -1,0 +1,12 @@
+# Cache-control for field solver assets
+
+# HTML: always revalidate so users get fresh asset URLs after a deployment
+<FilesMatch "\.html$">
+    Header set Cache-Control "no-cache"
+</FilesMatch>
+
+# JS, CSS, WASM: cache aggressively — cache-busting query strings ensure
+# browsers fetch new versions when files actually change
+<FilesMatch "\.(js|css|wasm)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+</FilesMatch>
