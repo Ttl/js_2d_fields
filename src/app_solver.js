@@ -9,6 +9,7 @@ const getPlotly = () => window.Plotly;
 
 let solver = null;
 let stopRequested = false;
+let isSimulating = false;
 let frequencySweepResults = null;  // Array of {freq, result} objects
 let currentTab = 'geometry';
 let geometryChanged = false;  // Track if geometry has changed since last solve
@@ -504,7 +505,7 @@ function updateResultNotices() {
             sparamDiffCheckbox.disabled = !resultsAreDifferential;
         }
 
-        if (geometryChanged) {
+        if (!isSimulating && geometryChanged) {
             // Geometry changed - show notice but keep old results visible
             if (resultsNotice) {
                 resultsNoticeText.textContent = 'Geometry changed. Solve to update results.';
@@ -518,7 +519,7 @@ function updateResultNotices() {
                 exportBtn.disabled = true;
                 exportBtn.title = 'Cannot export - geometry or frequency changed';
             }
-        } else if (frequencyChanged) {
+        } else if (!isSimulating && frequencyChanged) {
             // Only frequency changed
             if (resultsNotice) {
                 resultsNoticeText.textContent = 'Frequency changed. Solve to update results.';
@@ -854,6 +855,8 @@ async function runSimulation() {
     btn.textContent = 'Stop';
     btn.classList.add('stop-mode');
     stopRequested = false;
+    isSimulating = true;
+    updateResultNotices();
     pbar.style.width = '0%';
     if (ptext) ptext.style.display = 'block';
     log("Starting simulation...");
@@ -936,6 +939,8 @@ async function runSimulation() {
 
         // Redraw to show E-field overlay on geometry
         draw();
+        drawResultsPlot();
+        drawSParamPlot();
 
         // Now run frequency sweep with cached fields (fast path)
         // The potential distribution and electric fields don't change with frequency,
@@ -969,9 +974,12 @@ async function runSimulation() {
             pbar.style.width = (progress * 100) + "%";
             if (ptext) ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
 
-            // Yield to event loop periodically to prevent UI freeze
+            // Yield to event loop periodically and update plots in real time
             if (i % 10 === 0) {
                 await new Promise(resolve => setTimeout(resolve, 0));
+                frequencySweepResults.sort((a, b) => a.freq - b.freq);
+                drawResultsPlot();
+                drawSParamPlot();
             }
         }
 
@@ -1039,6 +1047,7 @@ async function runSimulation() {
         pbar.style.width = '100%';
         if (ptext) ptext.style.display = 'none';
         stopRequested = false;
+        isSimulating = false;
     }
 }
 
