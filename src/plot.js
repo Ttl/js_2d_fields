@@ -958,7 +958,7 @@ function drawResultsPlot() {
         font: { color: '#fff' }
     };
 
-    Plotly.react('results-plot', allTraces, layout, { responsive: true });
+    Plotly.newPlot('results-plot', allTraces, layout, { responsive: true });
 }
 
 function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) {
@@ -1116,7 +1116,7 @@ function drawSParamPlot() {
         font: { color: '#fff' }
     };
 
-    Plotly.react('sparam-plot', allTraces, layout, { responsive: true });
+    Plotly.newPlot('sparam-plot', allTraces, layout, { responsive: true });
 }
 
 // Helper function to check if solver is in differential mode
