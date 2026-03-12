@@ -1,7 +1,11 @@
 # Cache-control for field solver assets
 
 # HTML: always revalidate so users get fresh asset URLs after a deployment
-<FilesMatch "\.html$">
+<FilesMatch "field_solver.html">
+    Header set Cache-Control "no-cache"
+</FilesMatch>
+
+<FilesMatch "index.html">
     Header set Cache-Control "no-cache"
 </FilesMatch>
 
