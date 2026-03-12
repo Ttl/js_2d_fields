@@ -1224,6 +1224,68 @@ function bindEvents() {
         });
     }
 
+    // Export CSV button
+    const exportCsvBtn = document.getElementById('export-csv-btn');
+    if (exportCsvBtn) {
+        exportCsvBtn.addEventListener('click', () => {
+            if (!frequencySweepResults || frequencySweepResults.length === 0) {
+                log('No results to export. Run simulation first.');
+                return;
+            }
+            const isDifferential = frequencySweepResults[0].result.modes.length === 2;
+            const rows = [];
+            if (isDifferential) {
+                rows.push([
+                    'Freq_Hz',
+                    'Re_Z0_odd_Ohm', 'Im_Z0_odd_Ohm', 'eps_eff_odd',
+                    'conductor_loss_odd_dBpm', 'dielectric_loss_odd_dBpm', 'total_loss_odd_dBpm',
+                    'R_odd_Ohmpm', 'L_odd_Hpm', 'G_odd_Spm', 'C_odd_Fpm',
+                    'Re_Z0_even_Ohm', 'Im_Z0_even_Ohm', 'eps_eff_even',
+                    'conductor_loss_even_dBpm', 'dielectric_loss_even_dBpm', 'total_loss_even_dBpm',
+                    'R_even_Ohmpm', 'L_even_Hpm', 'G_even_Spm', 'C_even_Fpm'
+                ]);
+                for (const { freq, result } of frequencySweepResults) {
+                    const m0 = result.modes[0];
+                    const m1 = result.modes[1];
+                    rows.push([
+                        freq,
+                        m0.Zc.re, m0.Zc.im, m0.eps_eff,
+                        m0.alpha_c, m0.alpha_d, m0.alpha_total,
+                        m0.RLGC.R, m0.RLGC.L, m0.RLGC.G, m0.RLGC.C,
+                        m1.Zc.re, m1.Zc.im, m1.eps_eff,
+                        m1.alpha_c, m1.alpha_d, m1.alpha_total,
+                        m1.RLGC.R, m1.RLGC.L, m1.RLGC.G, m1.RLGC.C
+                    ]);
+                }
+            } else {
+                rows.push([
+                    'Freq_Hz',
+                    'Re_Z0_Ohm', 'Im_Z0_Ohm', 'eps_eff',
+                    'conductor_loss_dBpm', 'dielectric_loss_dBpm', 'total_loss_dBpm',
+                    'R_Ohmpm', 'L_Hpm', 'G_Spm', 'C_Fpm'
+                ]);
+                for (const { freq, result } of frequencySweepResults) {
+                    const m = result.modes[0];
+                    rows.push([
+                        freq,
+                        m.Zc.re, m.Zc.im, m.eps_eff,
+                        m.alpha_c, m.alpha_d, m.alpha_total,
+                        m.RLGC.R, m.RLGC.L, m.RLGC.G, m.RLGC.C
+                    ]);
+                }
+            }
+            const csv = rows.map(r => r.join(',')).join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'results.csv';
+            a.click();
+            URL.revokeObjectURL(url);
+            log('Exported results.csv');
+        });
+    }
+
     // Frequency points validation. Default to 1 when empty
     const freqPointsEl = document.getElementById('freq-points');
     if (freqPointsEl) {
