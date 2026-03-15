@@ -3,6 +3,7 @@ import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } fro
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen } from './plot.js';
+import { InterpolatingSweep } from './interpolating_sweep.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -115,6 +116,8 @@ const DEFAULT_SETTINGS = {
     sparam_length: 10, // mm
     sparam_z_ref: 50,
     use_causal_materials: 0,
+    interp_sweep: 1,
+    interp_tolerance: 0.5,
 };
 
 /**
@@ -189,6 +192,8 @@ function getUISettings() {
         sparam_length: getDisplayValue('sparam-length'),
         sparam_z_ref: getInputValueUnitless('sparam-z-ref'),
         use_causal_materials: document.getElementById('chk_causal_materials').checked ? 1 : 0,
+        interp_sweep: document.getElementById('chk_interp_sweep').checked ? 1 : 0,
+        interp_tolerance: parseFloat(document.getElementById('interp_tolerance').value),
     };
 }
 
@@ -321,6 +326,9 @@ function restoreSettings(settings) {
         document.getElementById('chk_plating_thick_corners').checked = !!fullSettings.plating_thick_corners;
 
         document.getElementById('chk_causal_materials').checked = !!fullSettings.use_causal_materials;
+
+        document.getElementById('chk_interp_sweep').checked = !!fullSettings.interp_sweep;
+        document.getElementById('interp_tolerance').value = fullSettings.interp_tolerance;
 
         setValueWithUnit('sparam-length', fullSettings.sparam_length);
         document.getElementById('sparam-z-ref').value = fullSettings.sparam_z_ref;
@@ -942,44 +950,102 @@ async function runSimulation() {
         drawResultsPlot();
         drawSParamPlot();
 
-        // Now run frequency sweep with cached fields (fast path)
-        // The potential distribution and electric fields don't change with frequency,
-        // only the losses depend on frequency, so we can reuse the cached results.
-        log(`Calculating frequency sweep (${frequencies.length} points)...`);
+        // Check if interpolating sweep is enabled
+        const fMax = Math.max(...frequencies);
+        const nonZeroFreqs = frequencies.filter(f => f > 0);
+        const fMinNonZero = nonZeroFreqs.length > 0 ? Math.min(...nonZeroFreqs) : 0;
+        const useInterpolation = document.getElementById('chk_interp_sweep')?.checked
+            && nonZeroFreqs.length > 1
+            && fMax > fMinNonZero;
 
-        for (let i = 0; i < frequencies.length; i++) {
-            const freq = frequencies[i];
+        if (useInterpolation) {
+            // Interpolating sweep: adaptively sample RLGC, then interpolate
+            const tolPercent = parseFloat(document.getElementById('interp_tolerance')?.value);
+            if (isNaN(tolPercent) || tolPercent <= 0) {
+                throw new Error("Interpolation tolerance must be a positive number.");
+            }
+            const tolerance = tolPercent / 100;
 
-            // Skip if this is the max frequency (already calculated above)
-            if (freq === maxFreq) {
-                continue;
+            // Handle DC point separately (can't use log-frequency axis)
+            const hasDC = frequencies.includes(0);
+            if (hasDC) {
+                const dcResult = await solver.computeAtFrequency(0, cachedResults);
+                frequencySweepResults.push({ freq: 0, result: dcResult });
             }
 
-            // Yield to event loop to allow UI updates
-            await new Promise(resolve => setTimeout(resolve, 0));
+            log(`Interpolating sweep (tolerance ${tolPercent}%)...`);
 
-            if (stopRequested) {
-                log("Simulation stopped by user");
-                break;
+            const sweep = new InterpolatingSweep(solver, cachedResults, { tolerance });
+            const nSamples = await sweep.run(fMinNonZero, fMax, {
+                onProgress: (info) => {
+                    const progress = 0.5 + 0.5 * Math.min(info.iteration / 4, 0.9);
+                    pbar.style.width = (progress * 100) + "%";
+                    if (ptext) ptext.textContent = `Interpolating sweep: ${info.totalSamples} samples, ` +
+                        `error=${(info.maxError * 100).toFixed(3)}%`;
+
+                    // Update plots in real-time from current interpolation
+                    if (info.iteration > 0) {
+                        frequencySweepResults = hasDC
+                            ? [{ freq: 0, result: frequencySweepResults.find(r => r.freq === 0).result },
+                               ...sweep.buildResults(nonZeroFreqs)]
+                            : sweep.buildResults(nonZeroFreqs);
+                        frequencySweepResults.sort((a, b) => a.freq - b.freq);
+                        drawResultsPlot();
+                        drawSParamPlot();
+                    }
+                },
+                shouldStop: () => stopRequested
+            });
+
+            if (!stopRequested) {
+                // Build final results from converged interpolation
+                const interpResults = sweep.buildResults(nonZeroFreqs);
+                if (hasDC) {
+                    const dcEntry = frequencySweepResults.find(r => r.freq === 0);
+                    frequencySweepResults = [dcEntry, ...interpResults];
+                } else {
+                    frequencySweepResults = interpResults;
+                }
+                log(`Interpolating sweep: ${nSamples + (hasDC ? 1 : 0)} exact solves for ${frequencies.length} output points`);
             }
+        } else {
+            // Discrete sweep: compute at every frequency point
+            log(`Calculating frequency sweep (${frequencies.length} points)...`);
 
-            // Use optimized frequency sweep - only recalculates frequency-dependent losses
-            // (or full solve if causal materials are enabled)
-            const result = await solver.computeAtFrequency(freq, cachedResults);
+            for (let i = 0; i < frequencies.length; i++) {
+                const freq = frequencies[i];
 
-            frequencySweepResults.push({ freq, result });
+                // Skip if this is the max frequency (already calculated above)
+                if (freq === maxFreq) {
+                    continue;
+                }
 
-            // Update progress (second half is for frequency sweep)
-            const progress = 0.5 + (i + 1) / frequencies.length * 0.5;
-            pbar.style.width = (progress * 100) + "%";
-            if (ptext) ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
-
-            // Yield to event loop periodically and update plots in real time
-            if (i % 10 === 0) {
+                // Yield to event loop to allow UI updates
                 await new Promise(resolve => setTimeout(resolve, 0));
-                frequencySweepResults.sort((a, b) => a.freq - b.freq);
-                drawResultsPlot();
-                drawSParamPlot();
+
+                if (stopRequested) {
+                    log("Simulation stopped by user");
+                    break;
+                }
+
+                // Use optimized frequency sweep - only recalculates frequency-dependent losses
+                // (or full solve if causal materials are enabled)
+                const result = await solver.computeAtFrequency(freq, cachedResults);
+
+                frequencySweepResults.push({ freq, result });
+
+                // Update progress (second half is for frequency sweep)
+                const progress = 0.5 + (i + 1) / frequencies.length * 0.5;
+                pbar.style.width = (progress * 100) + "%";
+                if (ptext) ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
+
+                // Yield to event loop periodically and update plots in real time
+                if (i % 10 === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    frequencySweepResults.sort((a, b) => a.freq - b.freq);
+                    drawResultsPlot();
+                    drawSParamPlot();
+                }
             }
         }
 
@@ -1188,6 +1254,10 @@ function bindEvents() {
     const exportSnpBtn = document.getElementById('export-snp');
     if (exportSnpBtn) {
         exportSnpBtn.addEventListener('click', () => {
+            if (isSimulating) {
+                log('Cannot export while simulation is running.');
+                return;
+            }
             if (!frequencySweepResults || frequencySweepResults.length === 0) {
                 log('No results to export. Run simulation first.');
                 return;
@@ -1237,6 +1307,10 @@ function bindEvents() {
     const exportCsvBtn = document.getElementById('export-csv-btn');
     if (exportCsvBtn) {
         exportCsvBtn.addEventListener('click', () => {
+            if (isSimulating) {
+                log('Cannot export while simulation is running.');
+                return;
+            }
             if (!frequencySweepResults || frequencySweepResults.length === 0) {
                 log('No results to export. Run simulation first.');
                 return;
@@ -1650,6 +1724,17 @@ function init() {
             }
         }
     });
+
+    // Interpolating sweep toggle
+    const interpChk = document.getElementById('chk_interp_sweep');
+    const interpTolGroup = document.getElementById('interp-tolerance-group');
+    if (interpChk && interpTolGroup) {
+        const updateInterpVisibility = () => {
+            interpTolGroup.style.display = interpChk.checked ? '' : 'none';
+        };
+        interpChk.addEventListener('change', updateInterpVisibility);
+        updateInterpVisibility();
+    }
 
     updateGeometry();
     draw();

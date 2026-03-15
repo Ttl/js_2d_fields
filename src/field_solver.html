@@ -349,7 +349,14 @@
             </div>
             <div class="control-group">
                 <label>Points</label>
-                <input type="number" id="freq-points" value="10" min="1" max="201" step="1">
+                <input type="number" id="freq-points" value="200" step="1">
+            </div>
+            <div class="control-group">
+                <label><input type="checkbox" id="chk_interp_sweep" checked> Interpolating sweep <span class="help-icon" onclick="showHelpModal('interp_sweep', event)">?</span></label>
+            </div>
+            <div class="control-group" id="interp-tolerance-group" style="display:none;">
+                <label>Interpolation tolerance (%)</label>
+                <input type="number" id="interp_tolerance" value="0.5" min="0.01" max="5" step="0.1">
             </div>
         </div>
     </div>
@@ -827,6 +834,10 @@
         freeze: {
             title: 'Freeze Trace',
             body: '<p>Saves the current plot data as a semi-transparent reference trace. The frozen trace persists when you change parameters and re-run the simulation, letting you visually compare results.</p><p>For S-Parameters, the frozen trace also preserves the line length and reference impedance from freeze time.</p><p>Click Unfreeze to remove the reference trace.</p>'
+        },
+        interp_sweep: {
+            title: 'Interpolating Sweep',
+            body: '<p>Computes exact RLGC at a small number of adaptively chosen frequencies, then uses cubic spline interpolation to produce results at all output points. This is much faster than computing at every frequency, especially with causal materials enabled.</p><p>The algorithm adaptively refines until the interpolation error is below the specified tolerance.</p><p>S-parameters are computed analytically from interpolated RLGC, so they remain accurate even for long lines.</p>'
         }
     };
 
