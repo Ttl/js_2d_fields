@@ -415,6 +415,7 @@
         <button class="tab-button active" data-tab="geometry">Geometry</button>
         <button class="tab-button" data-tab="results">Results</button>
         <button class="tab-button" data-tab="sparams">S-Parameters</button>
+        <button class="tab-button" data-tab="sweep">Parameter Sweep</button>
         <button class="tab-button" data-tab="about">About</button>
     </div>
 
@@ -486,6 +487,40 @@
                 <strong>⚠</strong> <span id="sparam-notice-text"></span>
             </div>
         </div>
+    </div>
+
+    <div id="tab-sweep" class="tab-content">
+        <div class="results-controls">
+            <label style="color:var(--text-muted); font-size:0.9em;">Output:
+                <select id="sweep-y-selector">
+                    <option value="re_z0">Re(Z0)</option>
+                    <option value="im_z0">Im(Z0)</option>
+                    <option value="eps_eff">Effective permittivity</option>
+                    <option value="loss">Loss (dB/m)</option>
+                    <option value="R">R (Ohm/m)</option>
+                    <option value="L">L (H/m)</option>
+                    <option value="C">C (F/m)</option>
+                    <option value="G">G (S/m)</option>
+                </select>
+            </label>
+            <label style="color:var(--text-muted); font-size:0.9em;">Parameter:
+                <select id="sweep-x-selector"></select>
+            </label>
+        </div>
+        <div class="results-controls">
+            <label style="color:var(--text-muted); font-size:0.9em;">Min: <input type="text" class="unit-input" id="sweep-x-min" style="width:90px;"></label>
+            <label style="color:var(--text-muted); font-size:0.9em;">Max: <input type="text" class="unit-input" id="sweep-x-max" style="width:90px;"></label>
+            <label style="color:var(--text-muted); font-size:0.9em;">Points: <input type="number" id="sweep-points" value="10" min="2" max="200" style="width:60px;"></label>
+            <label style="color:var(--text-muted); font-size:0.9em;">Frequency: <input type="text" class="unit-input" id="sweep-freq" value="1 GHz" style="width:90px;"></label>
+            <label class="checkbox-label"><input type="checkbox" id="sweep-diff" disabled> Differential mode</label>
+            <button id="btn-run-sweep" style="width:auto; padding:8px 18px;">Run Sweep</button>
+            <button id="btn-stop-sweep" style="width:auto; padding:8px 18px; display:none; background:#f44336;">Stop</button>
+            <span id="sweep-progress-text" style="color:var(--text-muted); font-size:0.85em;"></span>
+            <div id="sweep-notice" style="display: none; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; color: #fbbf24;">
+                <strong>⚠</strong> <span id="sweep-notice-text"></span>
+            </div>
+        </div>
+        <div id="sweep-plot" class="plot-container"></div>
     </div>
 
     <div id="tab-about" class="tab-content">
@@ -741,6 +776,9 @@
 
             // S-param length - mm
             'sparam-length': 'mm',
+
+            // Parameter sweep frequency - GHz
+            'sweep-freq': 'GHz',
         };
 
         return unitMap[inputId] || '';

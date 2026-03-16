@@ -757,6 +757,20 @@ function getYAxisLabel(selector) {
     return labels[selector] || selector;
 }
 
+/**
+ * Extract a single value from a mode result for a given selector and scaling.
+ * Used by both frequency sweep results and parameter sweep plots.
+ */
+function extractModeValue(mode, selector, scale) {
+    switch (selector) {
+        case 're_z0':   return scale * mode.Zc.re;
+        case 'im_z0':   return scale * mode.Zc.im;
+        case 'eps_eff': return mode.eps_eff;
+        case 'loss':    return mode.alpha_total;
+        default:        return scale * mode.RLGC[selector];
+    }
+}
+
 function buildResultsTraces(sweepResults, selector, useDiffMode) {
     const resultsAreDifferential = sweepResults[0].result.modes.length === 2;
     const freqs = sweepResults.map(r => r.freq / 1e9);
@@ -767,48 +781,7 @@ function buildResultsTraces(sweepResults, selector, useDiffMode) {
     const mode0 = useDiffMode ? 'Differential' : 'Odd';
     const mode1 = useDiffMode ? 'Common' : 'Even';
 
-    if (selector === 're_z0' || selector === 'im_z0') {
-        const part = selector === 're_z0' ? 're' : 'im';
-        const scale0 = useDiffMode ? 2 : 1;
-        const scale1 = useDiffMode ? 0.5 : 1;
-        if (resultsAreDifferential) {
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => scale0 * r.result.modes[0].Zc[part]),
-                name: `${mode0} mode`, type: 'scatter', mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => scale1 * r.result.modes[1].Zc[part]),
-                name: `${mode1} mode`, type: 'scatter', mode: plotMode
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].Zc[part]),
-                name: selector === 're_z0' ? 'Re(Z0)' : 'Im(Z0)', type: 'scatter', mode: plotMode
-            });
-        }
-    } else if (selector === 'eps_eff') {
-        if (resultsAreDifferential) {
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].eps_eff),
-                name: `${mode0} mode`, type: 'scatter', mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[1].eps_eff),
-                name: `${mode1} mode`, type: 'scatter', mode: plotMode
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].eps_eff),
-                name: 'eps_eff', type: 'scatter', mode: plotMode
-            });
-        }
-    } else if (selector === 'loss') {
+    if (selector === 'loss') {
         if (resultsAreDifferential) {
             const suffix0 = useDiffMode ? 'diff' : 'odd';
             const suffix1 = useDiffMode ? 'common' : 'even';
@@ -867,28 +840,25 @@ function buildResultsTraces(sweepResults, selector, useDiffMode) {
             });
         }
     } else {
-        // RLGC parameters
-        const paramKey = selector;
+        // Z0, eps_eff, RLGC parameters
+        const scale0 = useDiffMode ? 2 : 1;
+        const scale1 = useDiffMode ? 0.5 : 1;
         if (resultsAreDifferential) {
-            const scale0 = useDiffMode ? 2 : 1;
-            const scale1 = useDiffMode ? 0.5 : 1;
-            const suffix0 = useDiffMode ? '_dd' : ' (odd)';
-            const suffix1 = useDiffMode ? '_cc' : ' (even)';
             traces.push({
                 x: freqs,
-                y: sweepResults.map(r => scale0 * r.result.modes[0].RLGC[paramKey]),
-                name: `${paramKey}${suffix0}`, type: 'scatter', mode: plotMode
+                y: sweepResults.map(r => extractModeValue(r.result.modes[0], selector, scale0)),
+                name: `${mode0} mode`, type: 'scatter', mode: plotMode
             });
             traces.push({
                 x: freqs,
-                y: sweepResults.map(r => scale1 * r.result.modes[1].RLGC[paramKey]),
-                name: `${paramKey}${suffix1}`, type: 'scatter', mode: plotMode
+                y: sweepResults.map(r => extractModeValue(r.result.modes[1], selector, scale1)),
+                name: `${mode1} mode`, type: 'scatter', mode: plotMode
             });
         } else {
             traces.push({
                 x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].RLGC[paramKey]),
-                name: paramKey, type: 'scatter', mode: plotMode
+                y: sweepResults.map(r => extractModeValue(r.result.modes[0], selector, 1)),
+                name: getYAxisLabel(selector), type: 'scatter', mode: plotMode
             });
         }
     }
@@ -1119,6 +1089,38 @@ function drawSParamPlot() {
     Plotly.newPlot('sparam-plot', allTraces, layout, { responsive: true });
 }
 
+function drawParameterSweepPlot(sweepData, xLabel, ySelector, useDiffMode) {
+    const Plotly = getPlotly();
+    if (!sweepData || sweepData.length === 0 || !Plotly) return;
+    const xVals = sweepData.map(d => d.paramValue);
+    const isDiff = sweepData[0].result.modes.length === 2;
+    const plotMode = xVals.length === 1 ? 'markers' : 'lines+markers';
+
+    const name0 = !isDiff ? getYAxisLabel(ySelector) : (useDiffMode ? 'Differential' : 'Odd');
+    const name1 = useDiffMode ? 'Common' : 'Even';
+    const scale0 = isDiff && useDiffMode ? 2 : 1;
+    const scale1 = isDiff && useDiffMode ? 0.5 : 1;
+
+    const traces = [];
+    traces.push({ x: xVals, y: sweepData.map(d => extractModeValue(d.result.modes[0], ySelector, scale0)),
+        name: name0, type: 'scatter', mode: plotMode,
+        line: { color: PLOTLY_COLORS[0] }, marker: { color: PLOTLY_COLORS[0] } });
+    if (isDiff) {
+        traces.push({ x: xVals, y: sweepData.map(d => extractModeValue(d.result.modes[1], ySelector, scale1)),
+            name: name1, type: 'scatter', mode: plotMode,
+            line: { color: PLOTLY_COLORS[1] }, marker: { color: PLOTLY_COLORS[1] } });
+    }
+    const layout = {
+        xaxis: { title: { text: xLabel, font: { color: '#aaa' } }, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        yaxis: { title: { text: getYAxisLabel(ySelector), font: { color: '#aaa' } }, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        margin: { l: 80, r: 40, t: 40, b: 60 },
+        showlegend: isDiff,
+        legend: { x: 0.02, y: 0.98, font: { color: '#fff' } },
+        paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' }
+    };
+    Plotly.newPlot('sweep-plot', traces, layout, { responsive: true });
+}
+
 // Helper function to check if solver is in differential mode
 function isDifferentialMode() {
     const solver = get.solver();
@@ -1210,5 +1212,5 @@ function unfreeze() {
 }
 function isFrozen() { return frozenResultsData !== null; }
 
-export { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+export { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen };

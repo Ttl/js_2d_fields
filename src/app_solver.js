@@ -1,7 +1,7 @@
 import { MicrostripSolver } from './microstrip.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
-import { draw, drawResultsPlot, drawSParamPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen } from './plot.js';
 import { InterpolatingSweep } from './interpolating_sweep.js';
 
@@ -16,6 +16,55 @@ let currentTab = 'geometry';
 let geometryChanged = false;  // Track if geometry has changed since last solve
 let lastSolvedGeometry = null;  // Hash of geometry params from last solve
 let lastSolvedFrequency = null;  // Frequency params from last solve
+let sweepStopRequested = false;
+let isSweeping = false;
+let parameterSweepResults = null;
+let lastSweepGeometry = null;  // Geometry hash at sweep time (excluding swept param)
+let lastSweepParam = null;     // Which parameter was swept
+let lastSweepDisplayUnit = null; // Display unit used during last sweep
+
+// Full parameter config table. Each entry drives input writing + axis labeling.
+// fixedUnit: cosmetic axis label for plain-number inputs (sigma). Absent = derive from geometry input.
+const SWEEP_PARAM_CONFIG = {
+    // Always available
+    w:                  { label: 'Trace Width',          inputId: 'inp_w',             group: 'always' },
+    h:                  { label: 'Substrate Height',     inputId: 'inp_h',             group: 'always' },
+    t:                  { label: 'Trace Thickness',      inputId: 'inp_t',             group: 'always' },
+    er:                 { label: 'Permittivity',         inputId: 'inp_er',            group: 'always' },
+    tand:               { label: 'Loss Tangent',         inputId: 'inp_tand',          group: 'always' },
+    sigma:              { label: 'Conductivity',         inputId: 'inp_sigma',         fixedUnit: 'S/m', group: 'always' },
+    rq:                 { label: 'Surface Roughness',    inputId: 'inp_rq',            group: 'always' },
+    // Differential types only
+    trace_spacing:      { label: 'Trace Spacing',        inputId: 'inp_trace_spacing', group: 'diff' },
+    // GCPW types only
+    gap:                { label: 'GCPW Gap',              inputId: 'inp_gap',           group: 'gcpw' },
+    via_gap:            { label: 'Via Gap',               inputId: 'inp_via_gap',       group: 'gcpw' },
+    top_gnd_w:          { label: 'Top Ground Width',      inputId: 'inp_top_gnd_w',     group: 'gcpw' },
+    // Stripline types only
+    stripline_top_h:    { label: 'Top Dielectric Height (stripline)', inputId: 'inp_air_top',    group: 'stripline' },
+    er_top:             { label: 'Top Permittivity (stripline)',       inputId: 'inp_er_top',     group: 'stripline' },
+    tand_top:           { label: 'Top Loss Tangent (stripline)',       inputId: 'inp_tand_top',   group: 'stripline' },
+    // Solder mask (if enabled)
+    sm_t_sub:           { label: 'Solder Mask Thickness (substrate side)', inputId: 'inp_sm_t_sub',  group: 'sm' },
+    sm_t_trace:         { label: 'Solder Mask Thickness (trace top)',       inputId: 'inp_sm_t_trace', group: 'sm' },
+    sm_t_side:          { label: 'Solder Mask Thickness (trace side)',      inputId: 'inp_sm_t_side', group: 'sm' },
+    sm_er:              { label: 'Solder Mask Permittivity',            inputId: 'inp_sm_er',     group: 'sm' },
+    sm_tand:            { label: 'Solder Mask Loss Tangent',            inputId: 'inp_sm_tand',   group: 'sm' },
+    // Top dielectric (if enabled)
+    top_diel_h:         { label: 'Top Dielectric Height',   inputId: 'inp_top_diel_h',  group: 'top_diel' },
+    top_diel_er:        { label: 'Top Dielectric Permittivity', inputId: 'inp_top_diel_er', group: 'top_diel' },
+    top_diel_tand:      { label: 'Top Dielectric Loss Tangent', inputId: 'inp_top_diel_tand', group: 'top_diel' },
+    // Ground cutout (if enabled)
+    gnd_cut_w:          { label: 'Ground Cutout Width',  inputId: 'inp_gnd_cut_w',    group: 'gnd_cut' },
+    gnd_cut_h:          { label: 'Ground Cutout Height', inputId: 'inp_gnd_cut_h',    group: 'gnd_cut' },
+    // Enclosure (if enabled)
+    enclosure_width:    { label: 'Enclosure Width',  inputId: 'inp_enclosure_width',  group: 'enclosure' },
+    enclosure_height:   { label: 'Enclosure Height', inputId: 'inp_enclosure_height', group: 'enclosure' },
+    // Plating (if enabled)
+    plating_t:          { label: 'Plating Thickness',    inputId: 'inp_plating_t',   group: 'plating' },
+    plating_sigma:      { label: 'Plating Conductivity', inputId: 'inp_plating_sigma', fixedUnit: 'S/m', group: 'plating' },
+    plating_rq:         { label: 'Plating Roughness',    inputId: 'inp_plating_rq',  group: 'plating' },
+};
 
 // --- Unit Parsing Helper ---
 
@@ -574,6 +623,11 @@ function switchTab(tabName) {
         if (frequencySweepResults) {
             drawSParamPlot();
         }
+    } else if (tabName === 'sweep') {
+        updateSweepParamList();
+        updateSweepDiffCheckbox();
+        updateSweepNotice();
+        redrawSweepPlot();
     } else if (tabName === 'geometry') {
         // Refresh the geometry plot when switching back
         draw();
@@ -1117,6 +1171,260 @@ async function runSimulation() {
     }
 }
 
+function getSweepDiffMode() {
+    const cb = document.getElementById('sweep-diff');
+    return cb ? cb.checked : false;
+}
+
+function updateSweepDiffCheckbox() {
+    const cb = document.getElementById('sweep-diff');
+    if (!cb) return;
+    const hasResults = parameterSweepResults && parameterSweepResults.length > 0;
+    const isDiff = hasResults && parameterSweepResults[0].result.modes.length === 2;
+    cb.disabled = !isDiff;
+}
+
+function redrawSweepPlot() {
+    if (!parameterSweepResults || parameterSweepResults.length === 0 || !lastSweepParam) return;
+    const ySel = document.getElementById('sweep-y-selector').value;
+    const cfg = SWEEP_PARAM_CONFIG[lastSweepParam];
+    const xLabel = cfg ? cfg.label + (lastSweepDisplayUnit ? ` (${lastSweepDisplayUnit})` : '') : lastSweepParam;
+    drawParameterSweepPlot(parameterSweepResults, xLabel, ySel, getSweepDiffMode());
+}
+
+function getGeometryHashExcluding(paramKey) {
+    const hash = JSON.parse(getGeometryHash());
+    delete hash[paramKey];
+    return JSON.stringify(hash);
+}
+
+function updateSweepNotice() {
+    const notice = document.getElementById('sweep-notice');
+    const noticeText = document.getElementById('sweep-notice-text');
+    if (!notice) return;
+
+    if (!parameterSweepResults || parameterSweepResults.length === 0) {
+        notice.style.display = 'none';
+        return;
+    }
+
+    if (!isSweeping && lastSweepGeometry) {
+        const currentHash = getGeometryHashExcluding(lastSweepParam);
+        if (currentHash !== lastSweepGeometry) {
+            noticeText.textContent = 'Geometry changed. Run sweep to update results.';
+            notice.style.display = 'block';
+            return;
+        }
+    }
+    notice.style.display = 'none';
+}
+
+function updateSweepParamList() {
+    const tlType = document.getElementById('tl_type').value;
+    const isDiff = tlType.startsWith('diff_');
+    const isGcpw = tlType.includes('gcpw');
+    const isStripline = tlType.includes('stripline');
+    const useSm       = document.getElementById('chk_solder_mask').checked;
+    const useTopDiel  = document.getElementById('chk_top_diel').checked;
+    const useGndCut   = document.getElementById('chk_gnd_cut').checked;
+    const useEnclosure= document.getElementById('chk_enclosure').checked;
+    const usePlating  = document.getElementById('chk_plating').checked;
+
+    const groupEnabled = {
+        always: true,
+        diff: isDiff,
+        gcpw: isGcpw,
+        stripline: isStripline,
+        sm: useSm,
+        top_diel: useTopDiel,
+        gnd_cut: useGndCut,
+        enclosure: useEnclosure,
+        plating: usePlating,
+    };
+
+    const sel = document.getElementById('sweep-x-selector');
+    const previousValue = sel.value;
+    sel.innerHTML = '';
+    for (const [key, cfg] of Object.entries(SWEEP_PARAM_CONFIG)) {
+        if (!groupEnabled[cfg.group]) continue;
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = cfg.label;
+        sel.appendChild(opt);
+    }
+    // Restore previous selection if still available
+    if ([...sel.options].some(o => o.value === previousValue)) sel.value = previousValue;
+}
+
+function getZeroDefaultMax(displayUnit) {
+    // Return a sensible max in display units for zero-valued params
+    const maxInMeters = 2e-6; // 2 μm as reference
+    if (!displayUnit) return 1; // unitless
+    return +(convertToDisplayUnit(maxInMeters, displayUnit)).toPrecision(4);
+}
+
+function autoFillSweepRange() {
+    const xSel = document.getElementById('sweep-x-selector').value;
+    const cfg = SWEEP_PARAM_CONFIG[xSel];
+    if (!cfg) return;
+    const inputEl = document.getElementById(cfg.inputId);
+    if (!inputEl) return;
+    const displayUnit = getSweepDisplayUnit(cfg);
+    const isUnitless = !displayUnit || cfg.fixedUnit;
+    const currentVal = isUnitless ? parseFloat(inputEl.value) : getInputValue(cfg.inputId);
+    if (isNaN(currentVal) || currentVal < 0) return;
+    const minInput = document.getElementById('sweep-x-min');
+    const maxInput = document.getElementById('sweep-x-max');
+    let minNum, maxNum;
+    if (currentVal === 0) {
+        // For zero-valued params (e.g. roughness), use a sensible default range
+        minNum = 0;
+        maxNum = getZeroDefaultMax(isUnitless ? '' : displayUnit);
+    } else {
+        const displayVal = isUnitless ? currentVal : convertToDisplayUnit(currentVal, displayUnit);
+        minNum = +(displayVal * 0.5).toPrecision(4);
+        maxNum = +(displayVal * 2.0).toPrecision(4);
+    }
+    if (isUnitless) {
+        minInput.value = minNum;
+        maxInput.value = maxNum;
+    } else {
+        minInput.value = `${minNum} ${displayUnit}`;
+        maxInput.value = `${maxNum} ${displayUnit}`;
+    }
+}
+
+/**
+ * Extract the unit suffix the user typed into a geometry input field.
+ * Falls back to getDefaultUnit() when the field has no explicit unit.
+ */
+function extractUnitFromInput(inputId) {
+    const el = document.getElementById(inputId);
+    if (!el) return '';
+    const raw = (el.value || '').trim();
+    const match = raw.match(/[+-]?(?:\d+\.?\d*|\.\d+)(?:[e][+-]?\d+)?\s*([a-zμµ]+)$/i);
+    if (match && match[1]) return match[1];
+    return window.getDefaultUnit ? window.getDefaultUnit(inputId) : '';
+}
+
+/**
+ * Determine the display unit for a sweep parameter.
+ * fixedUnit params (sigma) use their fixed label; others derive from geometry input.
+ * Returns '' for unitless params (er, tand).
+ */
+function getSweepDisplayUnit(cfg) {
+    if (cfg.fixedUnit) return cfg.fixedUnit;
+    const unit = extractUnitFromInput(cfg.inputId);
+    return unit || '';
+}
+
+function convertToDisplayUnit(valueSI, unit) {
+    const factors = {
+        'mm': 1e3, 'μm': 1e6, 'um': 1e6, 'nm': 1e9,
+        'cm': 1e2, 'm': 1,
+        'mil': 1 / 25.4e-6, 'mils': 1 / 25.4e-6,
+        'in': 1 / 25.4e-3, 'inch': 1 / 25.4e-3, 'inches': 1 / 25.4e-3,
+        'ft': 1 / 0.3048, 'foot': 1 / 0.3048, 'feet': 1 / 0.3048,
+        'GHz': 1e-9, 'MHz': 1e-6,
+        'S/m': 1,
+    };
+    return valueSI * (factors[unit] || 1);
+}
+
+async function runParameterSweep() {
+    const xSel = document.getElementById('sweep-x-selector').value;
+    const ySel = document.getElementById('sweep-y-selector').value;
+    const cfg = SWEEP_PARAM_CONFIG[xSel];
+    const displayUnit = getSweepDisplayUnit(cfg);
+    const isUnitless = !displayUnit || cfg.fixedUnit;
+    const parseVal = (str) => {
+        if (isUnitless) return parseFloat(str);
+        return window.parseValueWithUnit ? window.parseValueWithUnit(str, displayUnit) : parseFloat(str);
+    };
+    const minSI = parseVal(document.getElementById('sweep-x-min').value);
+    const maxSI = parseVal(document.getElementById('sweep-x-max').value);
+    // For unitless/fixedUnit params, min/maxSI are already display values
+    const minDisplay = isUnitless ? minSI : convertToDisplayUnit(minSI, displayUnit);
+    const maxDisplay = isUnitless ? maxSI : convertToDisplayUnit(maxSI, displayUnit);
+    const nPoints = parseInt(document.getElementById('sweep-points').value, 10);
+    const freqHz = getInputValue('sweep-freq');
+
+    if (isNaN(minDisplay) || isNaN(maxDisplay) || minDisplay >= maxDisplay) { log('ERROR: Invalid sweep range.'); return; }
+    if (isNaN(nPoints) || nPoints < 2)                       { log('ERROR: Points must be >= 2.'); return; }
+    if (isNaN(freqHz) || freqHz < 0)                         { log('ERROR: Invalid frequency.'); return; }
+
+    const runBtn = document.getElementById('btn-run-sweep');
+    const stopBtn = document.getElementById('btn-stop-sweep');
+    const solveBtn = document.getElementById('btn_solve');
+    const progressText = document.getElementById('sweep-progress-text');
+    runBtn.style.display = 'none';
+    stopBtn.style.display = '';
+    solveBtn.disabled = true;
+    sweepStopRequested = false;
+    isSweeping = true;
+    parameterSweepResults = [];
+
+    const inputEl = document.getElementById(cfg.inputId);
+    const originalValue = inputEl.value;
+    const p = getParams();
+
+    // Save geometry hash excluding the swept parameter
+    lastSweepParam = xSel;
+    lastSweepDisplayUnit = displayUnit;
+    lastSweepGeometry = getGeometryHashExcluding(xSel);
+    updateSweepNotice();
+
+    log(`Parameter sweep: ${cfg.label} ${minDisplay}–${maxDisplay}${displayUnit ? ' ' + displayUnit : ''} (${nPoints} pts) @ ${(freqHz/1e9).toFixed(3)} GHz`);
+
+    try {
+        for (let i = 0; i < nPoints; i++) {
+            if (sweepStopRequested) { log('Sweep stopped.'); break; }
+
+            const displayVal = minDisplay + (maxDisplay - minDisplay) * i / (nPoints - 1);
+            // Temporarily set value for updateGeometry to read, then restore
+            inputEl.value = isUnitless ? displayVal : `${displayVal} ${displayUnit}`;
+            updateGeometry();
+            inputEl.value = originalValue;
+
+            if (!solver) { log(`Point ${i+1}: solver init failed, skipping.`); continue; }
+
+            solver.ensure_mesh();
+            const cachedResults = await solver.solve_adaptive({
+                max_iters: p.max_iters,
+                energy_tol: p.tolerance,
+                param_tol: 0.05,
+                max_nodes: p.max_nodes * 1000,
+                min_converged_passes: p.min_converged_passes,
+                onProgress: () => {},
+                shouldStop: () => sweepStopRequested
+            });
+
+            if (sweepStopRequested) { log('Sweep stopped.'); break; }
+
+            const result = await solver.computeAtFrequency(freqHz, cachedResults);
+            parameterSweepResults.push({ paramValue: displayVal, result });
+            progressText.textContent = `${i + 1}/${nPoints}`;
+            if (i === 0) updateSweepDiffCheckbox();
+
+            redrawSweepPlot();
+            await new Promise(r => setTimeout(r, 0)); // yield to UI
+        }
+        log(`Sweep complete: ${parameterSweepResults.length} points.`);
+    } catch(e) {
+        console.error(e);
+        log('Sweep error: ' + e.message);
+    } finally {
+        inputEl.value = originalValue;
+        updateGeometry();
+        runBtn.style.display = '';
+        stopBtn.style.display = 'none';
+        solveBtn.disabled = false;
+        isSweeping = false;
+        sweepStopRequested = false;
+        progressText.textContent = '';
+    }
+}
+
 function resizeCanvas() {
     const container = document.getElementById('sim_canvas');
     const Plotly = getPlotly();
@@ -1145,6 +1453,28 @@ function bindEvents() {
             switchTab(btn.dataset.tab);
         });
     });
+
+    // Parameter sweep events
+    document.getElementById('btn-run-sweep').addEventListener('click', () => {
+        if (isSweeping || isSimulating) { log('Cannot sweep while simulation is running.'); return; }
+        runParameterSweep();
+    });
+    document.getElementById('btn-stop-sweep').addEventListener('click', () => {
+        sweepStopRequested = true;
+        log('Sweep stop requested...');
+    });
+
+    document.getElementById('sweep-diff').addEventListener('change', redrawSweepPlot);
+    document.getElementById('sweep-y-selector').addEventListener('change', redrawSweepPlot);
+
+    document.getElementById('sweep-x-selector').addEventListener('change', autoFillSweepRange);
+
+    document.getElementById('tl_type').addEventListener('change', updateSweepParamList);
+    ['chk_solder_mask','chk_top_diel','chk_gnd_cut','chk_enclosure','chk_plating']
+        .forEach(id => document.getElementById(id).addEventListener('change', updateSweepParamList));
+
+    updateSweepParamList();
+    autoFillSweepRange();
 
     // Results plot selector change
     const resultsSelector = document.getElementById('results-plot-selector');
@@ -1431,6 +1761,7 @@ function bindEvents() {
                 updateGeometry();
                 draw();
                 updateResultNotices();
+                updateSweepNotice();
             });
         }
     });
@@ -1448,6 +1779,7 @@ function bindEvents() {
                 updateGeometry();
                 draw();
                 updateResultNotices();
+                updateSweepNotice();
             });
         }
     });
@@ -1457,6 +1789,7 @@ function bindEvents() {
         updateGeometry();
         draw(true);  // Reset zoom/pan for new geometry
         updateResultNotices();
+        updateSweepNotice();
     });
 
     // Frequency inputs - update notices when changed
