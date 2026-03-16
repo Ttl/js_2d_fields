@@ -666,56 +666,71 @@ export class FieldSolver2D {
 
             // Geometric coverage from TOP plating extending down the sides
             // If only top plating (not sides), plating extends down from top edge
+            // Uses fractional coverage for smooth parameter sweeps
             if ((direction === 'l' || direction === 'r') && cond.plating.top && !cond.plating.sides) {
-                // Find the conductor neighbor position
-                const neighbor_i = i;  // Vertical position of the neighbor
-                const y_pos = this.y[neighbor_i];
+                const t = cond.plating.thickness;
+                // Cell spans [y[i], y[i] + dl] in y-direction
+                const y_start = this.y[i];
+                const y_end = y_start + dl;
+                // Top plating covers [y_max - t, y_max]
+                const overlap = Math.max(0, Math.min(cond.y_max, y_end) - Math.max(cond.y_max - t, y_start));
+                const fraction = dl > 0 ? Math.min(overlap / dl, 1.0) : 0;
 
-                // Calculate distance from top edge
-                const dist_from_top = cond.y_max - y_pos;
-
-                // If distance from top < plating thickness, side is covered by top plating
-                if (dist_from_top < cond.plating.thickness && dist_from_top >= 0) {
-                    // On sides near top: use single-layer plating with plating.rq
+                if (fraction > 0) {
                     const key_top_side = `${ci}_top_side_plating`;
+                    let Z_plating;
                     if (Z_cache.has(key_top_side)) {
-                        return Z_cache.get(key_top_side);
+                        Z_plating = Z_cache.get(key_top_side);
+                    } else {
+                        Z_plating = calculate_Zrough(
+                            this.freq, cond.plating.sigma, cond.plating.rq
+                        );
+                        Z_cache.set(key_top_side, Z_plating);
                     }
-                    const Z_top_side = calculate_Zrough(
-                        this.freq, cond.plating.sigma, cond.plating.rq
+
+                    if (fraction >= 1.0) return Z_plating;
+
+                    // Weighted average with bulk side impedance for uncovered part
+                    return new Complex(
+                        fraction * Z_plating.re + (1 - fraction) * Z_surf_default.re,
+                        fraction * Z_plating.im + (1 - fraction) * Z_surf_default.im
                     );
-                    Z_cache.set(key_top_side, Z_top_side);
-                    return Z_top_side;
                 }
             }
 
-            // Geometric coverage check for bottom surface:
-            // If side plating thickness > distance from edge, the bottom is covered by side plating
+            // Geometric coverage of bottom surface by thick side plating
+            // Uses fractional coverage for smooth parameter sweeps
             if (direction === 'u' && cond.plating.sides && !cond.plating.bottom && cond.plating.thick_corners) {
-                // Find the conductor neighbor position
-                const neighbor_j = j;  // Horizontal position of the neighbor
-                const x_pos = this.x[neighbor_j];
+                const t = cond.plating.thickness;
+                // Cell spans [x[j], x[j] + dl] in x-direction
+                const x_start = this.x[j];
+                const x_end = x_start + dl;
+                // Left side plating covers [x_min, x_min + t]
+                const left_overlap = Math.max(0, Math.min(cond.x_min + t, x_end) - Math.max(cond.x_min, x_start));
+                // Right side plating covers [x_max - t, x_max]
+                const right_overlap = Math.max(0, Math.min(cond.x_max, x_end) - Math.max(cond.x_max - t, x_start));
+                const fraction = dl > 0 ? Math.min((left_overlap + right_overlap) / dl, 1.0) : 0;
 
-                // Calculate distance to nearest edge
-                const dist_to_left = x_pos - cond.x_min;
-                const dist_to_right = cond.x_max - x_pos;
-                const min_dist_to_edge = Math.min(dist_to_left, dist_to_right);
-
-                // If plating thickness from sides exceeds distance to edge,
-                // the bottom surface is geometrically covered by side plating
-                if (cond.plating.thickness > min_dist_to_edge) {
-                    // At corners: use single-layer impedance with:
-                    // - plating.sigma (material is plating)
-                    // - bulk rq (surface roughness from bottom surface preparation)
+                if (fraction > 0) {
                     const key_corner = `${ci}_corner_plating`;
+                    let Z_plating;
                     if (Z_cache.has(key_corner)) {
-                        return Z_cache.get(key_corner);
+                        Z_plating = Z_cache.get(key_corner);
+                    } else {
+                        // Side plating material with bulk surface roughness
+                        Z_plating = calculate_Zrough(
+                            this.freq, cond.plating.sigma, rq
+                        );
+                        Z_cache.set(key_corner, Z_plating);
                     }
-                    const Z_corner = calculate_Zrough(
-                        this.freq, cond.plating.sigma, rq  // Use bulk rq, not plating.rq
+
+                    if (fraction >= 1.0) return Z_plating;
+
+                    // Weighted average: covered part uses plating, rest uses bulk
+                    return new Complex(
+                        fraction * Z_plating.re + (1 - fraction) * Z_surf_default.re,
+                        fraction * Z_plating.im + (1 - fraction) * Z_surf_default.im
                     );
-                    Z_cache.set(key_corner, Z_corner);
-                    return Z_corner;
                 }
             }
 
