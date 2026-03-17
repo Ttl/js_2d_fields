@@ -1094,26 +1094,73 @@ function drawParameterSweepPlot(sweepData, xLabel, ySelector, useDiffMode) {
     if (!sweepData || sweepData.length === 0 || !Plotly) return;
     const xVals = sweepData.map(d => d.paramValue);
     const isDiff = sweepData[0].result.modes.length === 2;
-    const plotMode = xVals.length === 1 ? 'markers' : 'lines+markers';
 
     const name0 = !isDiff ? getYAxisLabel(ySelector) : (useDiffMode ? 'Differential' : 'Odd');
     const name1 = useDiffMode ? 'Common' : 'Even';
     const scale0 = isDiff && useDiffMode ? 2 : 1;
     const scale1 = isDiff && useDiffMode ? 0.5 : 1;
 
+    const yVals0 = sweepData.map(d => extractModeValue(d.result.modes[0], ySelector, scale0));
+    const yVals1 = isDiff ? sweepData.map(d => extractModeValue(d.result.modes[1], ySelector, scale1)) : null;
+
     const traces = [];
-    traces.push({ x: xVals, y: sweepData.map(d => extractModeValue(d.result.modes[0], ySelector, scale0)),
-        name: name0, type: 'scatter', mode: plotMode,
-        line: { color: PLOTLY_COLORS[0] }, marker: { color: PLOTLY_COLORS[0] } });
-    if (isDiff) {
-        traces.push({ x: xVals, y: sweepData.map(d => extractModeValue(d.result.modes[1], ySelector, scale1)),
-            name: name1, type: 'scatter', mode: plotMode,
-            line: { color: PLOTLY_COLORS[1] }, marker: { color: PLOTLY_COLORS[1] } });
+
+    if (xVals.length >= 2) {
+        // Dense interpolated traces for hover-anywhere-on-line capability
+        const interpPts = 500;
+        const addInterpTrace = (xArr, yArr, name, color) => {
+            const xInterp = [];
+            const yInterp = [];
+            for (let i = 0; i < xArr.length - 1; i++) {
+                const nSeg = Math.max(2, Math.round(interpPts / (xArr.length - 1)));
+                for (let j = 0; j < nSeg; j++) {
+                    const t = j / nSeg;
+                    xInterp.push(xArr[i] + t * (xArr[i + 1] - xArr[i]));
+                    yInterp.push(yArr[i] + t * (yArr[i + 1] - yArr[i]));
+                }
+            }
+            // Add final point
+            xInterp.push(xArr[xArr.length - 1]);
+            yInterp.push(yArr[yArr.length - 1]);
+
+            // Interpolated line trace (hoverable, no visible markers)
+            traces.push({
+                x: xInterp, y: yInterp,
+                name, type: 'scatter', mode: 'lines',
+                line: { color, width: 2 },
+                hoverinfo: 'x+y+name',
+                showlegend: false
+            });
+            // Markers at actual computed points
+            traces.push({
+                x: xArr, y: yArr,
+                name, type: 'scatter', mode: 'markers',
+                marker: { color, size: 7 },
+                hoverinfo: 'x+y+name',
+                legendgroup: name,
+                showlegend: true
+            });
+        };
+
+        addInterpTrace(xVals, yVals0, name0, PLOTLY_COLORS[0]);
+        if (isDiff) addInterpTrace(xVals, yVals1, name1, PLOTLY_COLORS[1]);
+    } else {
+        // Single point - just markers
+        traces.push({ x: xVals, y: yVals0,
+            name: name0, type: 'scatter', mode: 'markers',
+            marker: { color: PLOTLY_COLORS[0] } });
+        if (isDiff) {
+            traces.push({ x: xVals, y: yVals1,
+                name: name1, type: 'scatter', mode: 'markers',
+                marker: { color: PLOTLY_COLORS[1] } });
+        }
     }
+
     const layout = {
         xaxis: { title: { text: xLabel, font: { color: '#aaa' } }, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
         yaxis: { title: { text: getYAxisLabel(ySelector), font: { color: '#aaa' } }, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
         margin: { l: 80, r: 40, t: 40, b: 60 },
+        hovermode: 'closest',
         showlegend: isDiff,
         legend: { x: 0.02, y: 0.98, font: { color: '#fff' } },
         paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' }
