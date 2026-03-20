@@ -184,7 +184,7 @@
         </div>
         <div class="section-content">
             <div class="control-group">
-                <label>Top Dielectric Height</label>
+                <label>Top Dielectric Height <span class="help-icon" onclick="showHelpModal('top_diel_height', event)">?</span></label>
                 <input type="text" class="unit-input" id="inp_air_top" value="0.4 mm">
             </div>
             <div class="control-group">
@@ -876,6 +876,10 @@
         interp_sweep: {
             title: 'Interpolating Sweep',
             body: '<p>Computes exact RLGC at a small number of adaptively chosen frequencies, then uses cubic spline interpolation to produce results at all output points. This is much faster than computing at every frequency, especially with causal materials enabled.</p><p>The algorithm adaptively refines until the interpolation error is below the specified tolerance.</p><p>S-parameters are computed analytically from interpolated RLGC, so they remain accurate even for long lines.</p>'
+        },
+        top_diel_height: {
+            title: 'Top Dielectric Height',
+            body: '<p>Distance from the substrate surface (trace bottom) to the top ground plane. The trace extends upward into this region.</p><p>Total ground-to-ground spacing = substrate height + top dielectric height. Trace thickness does not add to the ground-to-ground spacing.</p>'
         }
     };
 
