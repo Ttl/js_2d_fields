@@ -123,6 +123,7 @@
             <option value="diff_stripline">Differential Stripline</option>
             <option value="gcpw">GCPW</option>
             <option value="diff_gcpw">Differential GCPW</option>
+            <option value="broadside_stripline">Broadside Coupled Stripline</option>
         </select>
     </div>
 
@@ -206,6 +207,66 @@
             <div class="control-group">
                 <label>Trace Spacing</label>
                 <input type="text" class="unit-input" id="inp_trace_spacing" value="0.2 mm">
+            </div>
+        </div>
+    </div>
+
+    <div id="broadside-params" style="display: none;">
+        <div class="section-header" onclick="toggleSection(this)">
+            <h3>Broadside Coupled Stripline</h3>
+        </div>
+        <div class="section-content">
+            <div class="control-group">
+                <label>Trace Width</label>
+                <input type="text" class="unit-input" id="inp_bs_w" value="0.2 mm">
+            </div>
+            <div class="control-group">
+                <label>Trace Thickness</label>
+                <input type="text" class="unit-input" id="inp_bs_t" value="35 μm">
+            </div>
+            <div class="control-group">
+                <label>X Offset (upper trace)</label>
+                <input type="text" class="unit-input" id="inp_bs_x_offset" value="0 mm">
+            </div>
+            <div class="control-group">
+                <label>Conductivity (S/m)</label>
+                <input type="number" id="inp_bs_sigma" value="5.8e7" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Bottom Substrate Height <span class="help-icon" onclick="showHelpModal('bs_h_bottom', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_bs_h_bottom" value="0.2 mm">
+            </div>
+            <div class="control-group">
+                <label>Bottom Permittivity</label>
+                <input type="number" id="inp_bs_er_bottom" value="4.4" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Bottom Loss Tangent</label>
+                <input type="number" id="inp_bs_tand_bottom" value="0.02" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Middle Substrate Height <span class="help-icon" onclick="showHelpModal('bs_h_middle', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_bs_h_middle" value="0.2 mm">
+            </div>
+            <div class="control-group">
+                <label>Middle Permittivity</label>
+                <input type="number" id="inp_bs_er_middle" value="4.4" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Middle Loss Tangent</label>
+                <input type="number" id="inp_bs_tand_middle" value="0.02" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Top Substrate Height <span class="help-icon" onclick="showHelpModal('bs_h_top', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_bs_h_top" value="0.2 mm">
+            </div>
+            <div class="control-group">
+                <label>Top Permittivity</label>
+                <input type="number" id="inp_bs_er_top" value="4.4" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Top Loss Tangent</label>
+                <input type="number" id="inp_bs_tand_top" value="0.02" inputmode="decimal">
             </div>
         </div>
     </div>
@@ -880,6 +941,18 @@
         top_diel_height: {
             title: 'Top Dielectric Height',
             body: '<p>Distance from the substrate surface (trace bottom) to the top ground plane. The trace extends upward into this region.</p><p>Total ground-to-ground spacing = substrate height + top dielectric height. Trace thickness does not add to the ground-to-ground spacing.</p>'
+        },
+        bs_h_bottom: {
+            title: 'Bottom Substrate Height',
+            body: '<p>Distance from the top surface of the bottom ground plane to the bottom reference of the lower conductor (i.e. the bottom of the lower conductor when trace thickness is positive).</p>'
+        },
+        bs_h_middle: {
+            title: 'Middle Substrate Height',
+            body: '<p>Distance from the bottom of the lower conductor to the top of the upper conductor. Spans both trace thicknesses plus the dielectric gap between them. For positive trace thickness, the minimum allowed value is 2 × Trace Thickness.</p><p>Dielectric gap between traces = Middle Substrate Height − 2 × Trace Thickness.</p><p>Ground-to-ground spacing = Bottom + Middle + Top substrate heights (trace thickness is not counted separately).</p>'
+        },
+        bs_h_top: {
+            title: 'Top Substrate Height',
+            body: '<p>Distance from the top of the upper conductor to the bottom surface of the top ground plane.</p><p>Ground-to-ground spacing = Bottom + Middle + Top substrate heights (trace thickness is not counted separately).</p>'
         }
     };
 
@@ -916,6 +989,7 @@
         const diffParams = document.getElementById('diff-params');
         const gcpwParams = document.getElementById('gcpw-params');
         const striplineParams = document.getElementById('stripline-params');
+        const broadsideParams = document.getElementById('broadside-params');
         const advancedParams = document.getElementById('advanced-params');
         const solderMaskGroup = advancedParams.querySelector('.control-group:has(#chk_solder_mask)');
         const solderMaskParams = document.getElementById('solder-mask-params');
@@ -932,9 +1006,10 @@
         diffParams.style.display = 'none';
         gcpwParams.style.display = 'none';
         striplineParams.style.display = 'none';
+        broadsideParams.style.display = 'none';
 
-        // Common params always visible
-        microstripParams.style.display = 'block';
+        // Common params visible by default (hidden for broadside which has its own block)
+        microstripParams.style.display = (tlType === 'broadside_stripline') ? 'none' : 'block';
 
         // Always show advanced params
         advancedParams.style.display = 'block';
@@ -1053,6 +1128,32 @@
             if (chkSolderMask) chkSolderMask.disabled = false;
             if (chkTopDiel) chkTopDiel.disabled = false;
             if (chkGndCut) chkGndCut.disabled = false;
+            if (chkEnclosure) chkEnclosure.disabled = false;
+        } else if (tlType === 'broadside_stripline') {
+            broadsideParams.style.display = 'block';
+            // Only enclosure + plating apply; hide solder mask, top dielectric, ground cutout.
+            if (solderMaskGroup) solderMaskGroup.style.display = 'none';
+            if (topDielGroup) topDielGroup.style.display = 'none';
+            if (gndCutGroup) gndCutGroup.style.display = 'none';
+            if (enclosureGroup) enclosureGroup.style.display = 'block';
+            // Top/bottom grounds are intrinsic; only side ground via enclosure makes sense.
+            if (topGndGroup) topGndGroup.style.display = 'none';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
+            if (chkSolderMask) {
+                chkSolderMask.disabled = true;
+                chkSolderMask.checked = false;
+                solderMaskParams.style.display = 'none';
+            }
+            if (chkTopDiel) {
+                chkTopDiel.disabled = true;
+                chkTopDiel.checked = false;
+                topDielParams.style.display = 'none';
+            }
+            if (chkGndCut) {
+                chkGndCut.disabled = true;
+                chkGndCut.checked = false;
+                gndCutParams.style.display = 'none';
+            }
             if (chkEnclosure) chkEnclosure.disabled = false;
         }
     }

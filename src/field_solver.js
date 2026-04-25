@@ -1253,6 +1253,35 @@ export class FieldSolver2D {
         this.Ey = null;
     }
 
+    refine_mesh_multi(modes, frac = 0.15) {
+        /**
+         * Mesh refinement using combined metrics from multiple modes.
+         * Each mode's metrics are normalized to equal total weight before summing
+         * so that a mode with weaker absolute fields (e.g. even mode) still gets
+         * equal refinement budget relative to the dominant odd mode.
+         */
+        const nx_intervals = this.x.length - 1;
+        const ny_intervals = this.y.length - 1;
+        const x_combined = new Float64Array(nx_intervals);
+        const y_combined = new Float64Array(ny_intervals);
+
+        for (const { V, Ex, Ey } of modes) {
+            const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey);
+            const total = x_metrics.reduce((s, v) => s + v, 0) +
+                          y_metrics.reduce((s, v) => s + v, 0);
+            const scale = total > 0 ? 1 / total : 1;
+            for (let j = 0; j < nx_intervals; j++) x_combined[j] += x_metrics[j] * scale;
+            for (let i = 0; i < ny_intervals; i++) y_combined[i] += y_metrics[i] * scale;
+        }
+
+        const { selected_x, selected_y } = this._select_lines_to_refine(x_combined, y_combined, frac);
+        this._refine_selected_lines(selected_x, selected_y);
+
+        this.solution_valid = false;
+        this.Ex = null;
+        this.Ey = null;
+    }
+
     _compute_energy_error(Ex, Ey, prev_energy) {
         /**
          * Compute relative change in stored electromagnetic energy.
@@ -1521,10 +1550,15 @@ export class FieldSolver2D {
                 break;
             }
 
-            // Refine mesh using first mode's fields (odd for differential, single for single-ended)
+            // Refine mesh using combined fields from all modes so that regions
+            // important for any mode (e.g. even mode near ground planes) get refined.
             if (it !== max_iters - 1) {
-                const refineMode = modeResults[0];
-                this.refine_mesh(refineMode.V, refineMode.Ex, refineMode.Ey, refineFrac);
+                if (modeResults.length > 1) {
+                    this.refine_mesh_multi(modeResults, refineFrac);
+                } else {
+                    const refineMode = modeResults[0];
+                    this.refine_mesh(refineMode.V, refineMode.Ex, refineMode.Ey, refineFrac);
+                }
                 this._setup_geometry();
             }
         }

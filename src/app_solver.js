@@ -1,4 +1,5 @@
 import { MicrostripSolver } from './microstrip.js';
+import { BroadsideStriplineSolver } from './broadside_stripline.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
@@ -167,6 +168,20 @@ const DEFAULT_SETTINGS = {
     use_causal_materials: 0,
     interp_sweep: 1,
     interp_tolerance: 0.5,
+    // Broadside coupled stripline (display units: mm, μm)
+    bs_w: 0.2,           // mm
+    bs_t: 35,            // μm
+    bs_x_offset: 0,      // mm
+    bs_sigma: 5.8e7,
+    bs_h_bottom: 0.2,    // mm
+    bs_er_bottom: 4.4,
+    bs_tand_bottom: 0.02,
+    bs_h_middle: 0.2,    // mm
+    bs_er_middle: 4.4,
+    bs_tand_middle: 0.02,
+    bs_h_top: 0.2,       // mm
+    bs_er_top: 4.4,
+    bs_tand_top: 0.02,
 };
 
 /**
@@ -243,6 +258,19 @@ function getUISettings() {
         use_causal_materials: document.getElementById('chk_causal_materials').checked ? 1 : 0,
         interp_sweep: document.getElementById('chk_interp_sweep').checked ? 1 : 0,
         interp_tolerance: parseFloat(document.getElementById('interp_tolerance').value),
+        bs_w: getDisplayValue('inp_bs_w'),
+        bs_t: getDisplayValue('inp_bs_t'),
+        bs_x_offset: getDisplayValue('inp_bs_x_offset'),
+        bs_sigma: getInputValueUnitless('inp_bs_sigma'),
+        bs_h_bottom: getDisplayValue('inp_bs_h_bottom'),
+        bs_er_bottom: getInputValueUnitless('inp_bs_er_bottom'),
+        bs_tand_bottom: getInputValueUnitless('inp_bs_tand_bottom'),
+        bs_h_middle: getDisplayValue('inp_bs_h_middle'),
+        bs_er_middle: getInputValueUnitless('inp_bs_er_middle'),
+        bs_tand_middle: getInputValueUnitless('inp_bs_tand_middle'),
+        bs_h_top: getDisplayValue('inp_bs_h_top'),
+        bs_er_top: getInputValueUnitless('inp_bs_er_top'),
+        bs_tand_top: getInputValueUnitless('inp_bs_tand_top'),
     };
 }
 
@@ -251,6 +279,39 @@ function getUISettings() {
  * Only includes non-default parameters to keep URLs short
  */
 function settingsToURL(settings) {
+    // Broadside coupled stripline uses an allowlist. Only its own fields plus
+    // shared frequency/sparam/enclosure/plating fields are written into the link.
+    if (settings.tl_type === 'broadside_stripline') {
+        const allow = new Set([
+            'tl_type',
+            'bs_w', 'bs_t', 'bs_x_offset', 'bs_sigma',
+            'bs_h_bottom', 'bs_er_bottom', 'bs_tand_bottom',
+            'bs_h_middle', 'bs_er_middle', 'bs_tand_middle',
+            'bs_h_top', 'bs_er_top', 'bs_tand_top',
+            'freq_start', 'freq_stop', 'freq_points',
+            'sparam_length', 'sparam_z_ref',
+            'use_enclosure', 'use_side_gnd', 'enclosure_width',
+            'use_plating', 'plating_sigma', 'plating_t', 'plating_rq',
+            'plating_top', 'plating_sides', 'plating_bottom', 'plating_thick_corners',
+            'use_causal_materials', 'interp_sweep', 'interp_tolerance',
+            'max_iters', 'tolerance', 'max_nodes',
+        ]);
+        const out = {};
+        for (const key in settings) {
+            if (!allow.has(key)) continue;
+            const value = settings[key];
+            const defaultValue = DEFAULT_SETTINGS[key];
+            const bothNaN = (typeof value === 'number' && isNaN(value)) &&
+                            (typeof defaultValue === 'number' && isNaN(defaultValue));
+            if (bothNaN) continue;
+            if (value !== defaultValue) out[key] = value;
+        }
+        // Always include tl_type so the link round-trips.
+        out.tl_type = 'broadside_stripline';
+        const json = JSON.stringify(out);
+        return btoa(encodeURIComponent(json));
+    }
+
     // Filter out default values
     const nonDefaultSettings = {};
     for (const key in settings) {
@@ -382,6 +443,21 @@ function restoreSettings(settings) {
         setValueWithUnit('sparam-length', fullSettings.sparam_length);
         document.getElementById('sparam-z-ref').value = fullSettings.sparam_z_ref;
 
+        // Broadside coupled stripline
+        setValueWithUnit('inp_bs_w', fullSettings.bs_w);
+        setValueWithUnit('inp_bs_t', fullSettings.bs_t);
+        setValueWithUnit('inp_bs_x_offset', fullSettings.bs_x_offset);
+        document.getElementById('inp_bs_sigma').value = fullSettings.bs_sigma;
+        setValueWithUnit('inp_bs_h_bottom', fullSettings.bs_h_bottom);
+        document.getElementById('inp_bs_er_bottom').value = fullSettings.bs_er_bottom;
+        document.getElementById('inp_bs_tand_bottom').value = fullSettings.bs_tand_bottom;
+        setValueWithUnit('inp_bs_h_middle', fullSettings.bs_h_middle);
+        document.getElementById('inp_bs_er_middle').value = fullSettings.bs_er_middle;
+        document.getElementById('inp_bs_tand_middle').value = fullSettings.bs_tand_middle;
+        setValueWithUnit('inp_bs_h_top', fullSettings.bs_h_top);
+        document.getElementById('inp_bs_er_top').value = fullSettings.bs_er_top;
+        document.getElementById('inp_bs_tand_top').value = fullSettings.bs_tand_top;
+
         return true;
     } catch (e) {
         console.error('Failed to restore settings:', e);
@@ -500,7 +576,20 @@ function getGeometryHash() {
         plating_rq: p.plating_rq,
         plating_top: p.plating_top,
         plating_sides: p.plating_sides,
-        plating_bottom: p.plating_bottom
+        plating_bottom: p.plating_bottom,
+        bs_w: p.bs_w,
+        bs_t: p.bs_t,
+        bs_x_offset: p.bs_x_offset,
+        bs_sigma: p.bs_sigma,
+        bs_h_bottom: p.bs_h_bottom,
+        bs_er_bottom: p.bs_er_bottom,
+        bs_tand_bottom: p.bs_tand_bottom,
+        bs_h_middle: p.bs_h_middle,
+        bs_er_middle: p.bs_er_middle,
+        bs_tand_middle: p.bs_tand_middle,
+        bs_h_top: p.bs_h_top,
+        bs_er_top: p.bs_er_top,
+        bs_tand_top: p.bs_tand_top
     });
 }
 
@@ -695,6 +784,20 @@ function getParams() {
         plating_thick_corners: document.getElementById('chk_plating_thick_corners').checked,
         // Causal material parameters
         use_causal_materials: document.getElementById('chk_causal_materials').checked,
+        // Broadside coupled stripline parameters
+        bs_w: getInputValue('inp_bs_w'),
+        bs_t: getInputValue('inp_bs_t'),
+        bs_x_offset: getInputValue('inp_bs_x_offset'),
+        bs_sigma: getInputValueUnitless('inp_bs_sigma'),
+        bs_h_bottom: getInputValue('inp_bs_h_bottom'),
+        bs_er_bottom: getInputValueUnitless('inp_bs_er_bottom'),
+        bs_tand_bottom: getInputValueUnitless('inp_bs_tand_bottom'),
+        bs_h_middle: getInputValue('inp_bs_h_middle'),
+        bs_er_middle: getInputValueUnitless('inp_bs_er_middle'),
+        bs_tand_middle: getInputValueUnitless('inp_bs_tand_middle'),
+        bs_h_top: getInputValue('inp_bs_h_top'),
+        bs_er_top: getInputValueUnitless('inp_bs_er_top'),
+        bs_tand_top: getInputValueUnitless('inp_bs_tand_top'),
     };
 }
 
@@ -847,6 +950,47 @@ function updateGeometry() {
             };
             addCommonOptions(options, p);
             solver = new MicrostripSolver(options);
+        } else if (p.tl_type === 'broadside_stripline') {
+            const options = {
+                trace_width: p.bs_w,
+                trace_thickness: p.bs_t,
+                x_offset: p.bs_x_offset,
+                sigma_cond: p.bs_sigma,
+                h_bottom: p.bs_h_bottom,
+                er_bottom: p.bs_er_bottom,
+                tand_bottom: p.bs_tand_bottom,
+                h_middle: p.bs_h_middle,
+                er_middle: p.bs_er_middle,
+                tand_middle: p.bs_tand_middle,
+                h_top: p.bs_h_top,
+                er_top: p.bs_er_top,
+                tand_top: p.bs_tand_top,
+                freq: p.freq,
+                nx: p.nx,
+                ny: p.ny,
+                rq: p.rq,
+                boundaries: ["open", "open", "gnd", "gnd"],
+            };
+            // Enclosure: only side ground walls apply (top/bottom are intrinsic).
+            if (p.use_enclosure) {
+                options.enclosure_width = p.enclosure_width;
+                if (p.use_side_gnd) {
+                    options.boundaries = ["gnd", "gnd", "gnd", "gnd"];
+                }
+            }
+            // Plating
+            if (p.use_plating) {
+                options.plating = {
+                    sigma: p.plating_sigma,
+                    thickness: p.plating_t,
+                    rq: p.plating_rq,
+                    top: p.plating_top,
+                    sides: p.plating_sides,
+                    bottom: p.plating_bottom,
+                    thick_corners: p.plating_thick_corners
+                };
+            }
+            solver = new BroadsideStriplineSolver(options);
         } else if (p.tl_type === 'diff_stripline') {
             const options = {
                 trace_width: p.w,
@@ -1751,6 +1895,10 @@ function bindEvents() {
         'inp_enclosure_width', 'inp_enclosure_height',
         'inp_rq',
         'inp_plating_sigma', 'inp_plating_t', 'inp_plating_rq',
+        'inp_bs_w', 'inp_bs_t', 'inp_bs_x_offset', 'inp_bs_sigma',
+        'inp_bs_h_bottom', 'inp_bs_er_bottom', 'inp_bs_tand_bottom',
+        'inp_bs_h_middle', 'inp_bs_er_middle', 'inp_bs_tand_middle',
+        'inp_bs_h_top', 'inp_bs_er_top', 'inp_bs_tand_top',
         'freq-start'
     ];
 

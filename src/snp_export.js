@@ -8,7 +8,8 @@ const TL_TYPE_SHORT_NAMES = {
     'stripline': 'sl',
     'diff_stripline': 'diff_sl',
     'gcpw': 'gcpw',
-    'diff_gcpw': 'diff_gcpw'
+    'diff_gcpw': 'diff_gcpw',
+    'broadside_stripline': 'bs_sl'
 };
 
 /**
