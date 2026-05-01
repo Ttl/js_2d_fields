@@ -18,7 +18,7 @@ Try it online: https://hforsten.com/field_solver.html
 
 ## Quick Start
 
-1. Open `src/field_solver.html` in a browser
+1. Host src folder on a web server (for example `python -m http.server 8000`). Open `src/field_solver.html` in a browser.
 
 ## Solution Flow
 
@@ -50,17 +50,10 @@ Try it online: https://hforsten.com/field_solver.html
 
 ## Common Tasks
 
-### Run the Web App
-
-```bash
-# Open in browser
-open src/field_solver.html
-```
-
 ### Run Tests
 
 ```bash
-node tests/test_vs_hfss.js
+node tests/test_vs_ref.js
 ```
 
 ### Build WASM Solver
