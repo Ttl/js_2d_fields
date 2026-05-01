@@ -28,7 +28,6 @@ export class GroundedCPWSolver2D extends MicrostripSolver {
             // Coplanar-specific (enable by default for GCPW)
             use_coplanar_gnd: true,
             gap: options.gap,
-            top_gnd_width: options.top_gnd_width,
             via_gap: options.via_gap,
             use_vias: true,
             // Solder mask

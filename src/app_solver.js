@@ -40,7 +40,6 @@ const SWEEP_PARAM_CONFIG = {
     // GCPW types only
     gap:                { label: 'GCPW Gap',              inputId: 'inp_gap',           group: 'gcpw' },
     via_gap:            { label: 'Via Gap',               inputId: 'inp_via_gap',       group: 'gcpw' },
-    top_gnd_w:          { label: 'Top Ground Width',      inputId: 'inp_top_gnd_w',     group: 'gcpw' },
     // Stripline types only
     stripline_top_h:    { label: 'Top Dielectric Height (stripline)', inputId: 'inp_air_top',    group: 'stripline' },
     er_top:             { label: 'Top Permittivity (stripline)',       inputId: 'inp_er_top',     group: 'stripline' },
@@ -128,7 +127,6 @@ const DEFAULT_SETTINGS = {
     freq_points: 10,
     trace_spacing: 0.2, // mm
     gap: 0.1,          // mm
-    top_gnd_w: 0.2,    // mm
     via_gap: 0.1,      // mm
     stripline_top_h: 0.4, // mm
     er_top: 4.5,
@@ -218,7 +216,6 @@ function getUISettings() {
         freq_points: parseInt(document.getElementById('freq-points').value),
         trace_spacing: getDisplayValue('inp_trace_spacing'),
         gap: getDisplayValue('inp_gap'),
-        top_gnd_w: getDisplayValue('inp_top_gnd_w'),
         via_gap: getDisplayValue('inp_via_gap'),
         stripline_top_h: getDisplayValue('inp_air_top'),
         er_top: getInputValueUnitless('inp_er_top'),
@@ -392,7 +389,6 @@ function restoreSettings(settings) {
         document.getElementById('freq-points').value = fullSettings.freq_points;
         setValueWithUnit('inp_trace_spacing', fullSettings.trace_spacing);
         setValueWithUnit('inp_gap', fullSettings.gap);
-        setValueWithUnit('inp_top_gnd_w', fullSettings.top_gnd_w);
         setValueWithUnit('inp_via_gap', fullSettings.via_gap);
         setValueWithUnit('inp_air_top', fullSettings.stripline_top_h);
         document.getElementById('inp_er_top').value = fullSettings.er_top;
@@ -546,7 +542,6 @@ function getGeometryHash() {
         sigma: p.sigma,
         trace_spacing: p.trace_spacing,
         gap: p.gap,
-        top_gnd_w: p.top_gnd_w,
         via_gap: p.via_gap,
         stripline_top_h: p.stripline_top_h,
         er_top: p.er_top,
@@ -739,7 +734,6 @@ function getParams() {
         trace_spacing: getInputValue('inp_trace_spacing'),
         // GCPW specific parameters
         gap: getInputValue('inp_gap'),
-        top_gnd_w: getInputValue('inp_top_gnd_w'),
         via_gap: getInputValue('inp_via_gap'),
         // Stripline parameters
         stripline_top_h: getInputValue('inp_air_top'),
@@ -878,7 +872,6 @@ function updateGeometry() {
                 // Coplanar-specific
                 use_coplanar_gnd: true,
                 gap: p.gap,
-                top_gnd_width: p.top_gnd_w,
                 via_gap: p.via_gap,
                 use_vias: true,
                 // Surface roughness
@@ -903,7 +896,6 @@ function updateGeometry() {
                 // Coplanar-specific
                 use_coplanar_gnd: true,
                 gap: p.gap,
-                top_gnd_width: p.top_gnd_w,
                 via_gap: p.via_gap,
                 use_vias: true,
                 // Surface roughness
@@ -1887,7 +1879,7 @@ function bindEvents() {
     const geometryInputs = [
         'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma',
         'inp_trace_spacing',
-        'inp_gap', 'inp_top_gnd_w', 'inp_via_gap',
+        'inp_gap', 'inp_via_gap',
         'inp_air_top', 'inp_er_top', 'inp_tand_top',
         'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',
         'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',

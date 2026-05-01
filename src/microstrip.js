@@ -32,7 +32,6 @@ class MicrostripSolver extends FieldSolver2D {
         // Coplanar ground options (from GCPW)
         this.use_coplanar_gnd = options.use_coplanar_gnd ?? false;
         this.gap = options.gap ?? 0; // Gap from signal to top ground
-        this.top_gnd_width = options.top_gnd_width ?? 0; // Width of top ground planes
         this.via_gap = options.via_gap ?? 0; // Gap from ground edge to via
         this.use_vias = options.use_vias ?? false; // Enable via generation
 
@@ -77,7 +76,7 @@ class MicrostripSolver extends FieldSolver2D {
             const trace_span = 2 * this.w + this.trace_spacing;
             if (this.use_coplanar_gnd) {
                 // Coplanar: active width includes gaps, top grounds, vias
-                const active_width = trace_span + 2 * (this.gap + Math.max(this.top_gnd_width, this.via_gap));
+                const active_width = trace_span + 2 * (this.gap + this.via_gap + this.w / 2);
                 this.domain_width = Math.max(active_width * 1.5, this.h * 10);
             } else {
                 this.domain_width = 2 * Math.max(trace_span * 4, this.h * 15);
@@ -86,7 +85,7 @@ class MicrostripSolver extends FieldSolver2D {
             // Single-ended
             if (this.use_coplanar_gnd) {
                 // Coplanar: active width includes gaps, top grounds, vias
-                const active_width = this.w + 2 * (this.gap + Math.max(this.top_gnd_width, this.via_gap));
+                const active_width = this.w + 2 * (this.gap + this.via_gap + this.w / 2);
                 this.domain_width = Math.max(active_width * 1.5, this.h * 10);
             } else {
                 this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
@@ -181,7 +180,6 @@ class MicrostripSolver extends FieldSolver2D {
         checkNonNegative(options.top_diel_h, 'top_diel_h');
         checkNonNegative(options.top_diel_tand, 'top_diel_tand');
         checkNonNegative(options.gap, 'gap');
-        checkNonNegative(options.top_gnd_width, 'top_gnd_width');
         checkNonNegative(options.via_gap, 'via_gap');
         checkNonNegative(options.rq, 'rq');
 
@@ -245,18 +243,16 @@ class MicrostripSolver extends FieldSolver2D {
                 const trace_span = 2 * w + trace_spacing;
                 if (options.use_coplanar_gnd) {
                     const gap = options.gap || 0;
-                    const top_gnd_width = options.top_gnd_width || 0;
                     const via_gap = options.via_gap || 0;
-                    active_width = trace_span + 2 * (gap + Math.max(top_gnd_width, via_gap));
+                    active_width = trace_span + 2 * (gap + via_gap);
                 } else {
                     active_width = trace_span;
                 }
             } else {
                 if (options.use_coplanar_gnd) {
                     const gap = options.gap || 0;
-                    const top_gnd_width = options.top_gnd_width || 0;
                     const via_gap = options.via_gap || 0;
-                    active_width = w + 2 * (gap + Math.max(top_gnd_width, via_gap));
+                    active_width = w + 2 * (gap + via_gap);
                 } else {
                     active_width = w;
                 }
