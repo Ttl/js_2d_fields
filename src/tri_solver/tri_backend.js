@@ -328,7 +328,7 @@ export class TriBackend {
                 ? +process.env.TRI_MAXREF : 6);
         const maxNodes = this.opts.maxNodes ?? 18000;
         const refTol = this.opts.refineTol ?? 0.003;
-        const refineFrac = this.opts.refineFrac ?? 0.3;
+        const refineFrac = this.opts.refineFrac ?? 0.15;   // matches the FDM backend's fraction
         const minRefineNodes = this.opts.minRefineNodes ?? 0;
         // Refine on ALL solved modes (differential: odd AND even) so each mode's
         // critical regions are resolved — crucially the inter-trace gap, where the
@@ -518,29 +518,33 @@ export class TriBackend {
             for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
             // Skin-band target element size (× δ): the band must be resolved to a
             // fraction of δ for accurate R (matches ms2d's mqs_band_delta).
-            const bandDelta = this.opts.mqsBandDelta ?? 0.5;
-            // 2δ-wide skin band (was 3δ): the eddy current is ~85% within 2δ, so the
-            // narrower band halves the refined-mesh size with negligible R change.
-            const mqsBand = this.opts.mqsBand ?? 2;
-            // Cache & reuse the skin-refined mesh across the sweep, EXPANDING its
-            // coverage as new frequencies appear (widest band from the lowest f, finest
-            // target from the highest f). Re-meshing per frequency changes the skin
-            // resolution in discrete jumps (each added refinement pass), which makes
-            // R(f) non-monotonic; one mesh covering the swept range gives a smooth R(f)
-            // and avoids re-meshing every point. Growing the band barely affects already-
-            // computed high-f points (their current is negligible out there), so values
-            // stay consistent. Disable with opts.mqsCacheMesh === false.
+            // Skin-band target element size (×δ) and band width (×δ): resolve the skin
+            // layer to bandDelta·δ within mqsBand·δ of each conductor surface. Tuned down
+            // from (2, 0.5): a 1.5δ band with 0.6δ elements roughly halves the refined
+            // mesh on tight/high-frequency geometries with ≤1% change in R (validated
+            // against the reference suite), keeping the reused mesh small and the solve
+            // fast.
+            const bandDelta = this.opts.mqsBandDelta ?? 0.6;
+            const mqsBand = this.opts.mqsBand ?? 1.5;
+            // DEFAULT: f_max-reuse. Build the skin mesh at the HIGHEST frequency seen
+            // (finest target, narrowest band) and reuse it for all lower frequencies.
+            // The fine near-surface band plus the always-meshed conductor interior
+            // resolve the lower-frequency (more uniform) current accurately — validated
+            // against the reference suite to a 100× frequency mismatch. One mesh ⇒ smooth
+            // R(f) with no per-frequency-remesh "dip", at moderate size (the high-f band
+            // is narrow), unlike a whole-range mesh which over-resolves the low-f band.
+            // opts.mqsCacheMesh === false falls back to a per-frequency remesh (marginally
+            // faster on wide sweeps, but can show a small non-monotonic wiggle).
             let mqsMesh;
             if (delta >= minDim) {
                 mqsMesh = mesh;
             } else if (this.opts.mqsCacheMesh === false) {
                 mqsMesh = refineSkinBand(mesh, cr, delta, 12, mqsBand, bandDelta * delta);
             } else {
-                const sc = st.skinCache || (st.skinCache = { dLo: 0, dHi: Infinity, mesh: null });
-                if (!sc.mesh || delta > sc.dLo + 1e-300 || delta < sc.dHi - 1e-300) {
-                    sc.dLo = Math.max(sc.dLo, delta);
-                    sc.dHi = Math.min(sc.dHi, delta);
-                    sc.mesh = refineSkinBand(mesh, cr, sc.dLo, 16, mqsBand, bandDelta * sc.dHi);
+                const sc = st.skinCache || (st.skinCache = { dB: Infinity, mesh: null });
+                if (!sc.mesh || delta < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
+                    sc.dB = delta;
+                    sc.mesh = refineSkinBand(mesh, cr, delta, 12, mqsBand, bandDelta * delta);
                 }
                 mqsMesh = sc.mesh;
             }

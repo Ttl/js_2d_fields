@@ -1421,11 +1421,13 @@ export class FieldSolver2D {
     // Lazily create the triangular FEM backend (and build its mesh + cached
     // static solve). The import is dynamic so the gmsh/eigen WASM is only loaded
     // when the user selects the triangular backend. Persists across the sweep.
-    async _ensureTriBackend(onProgress = null) {
+    async _ensureTriBackend(onProgress = null, extraOpts = null) {
         if (this._triBackend) return this._triBackend;
         const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
         const ctx = await initTriBackend();
-        this._triBackend = new TriBackend(ctx, this, this.tri_opts || {});
+        // Merge the solver-mode opts (lossMethod) with the UI adaptive controls.
+        const opts = { ...(this.tri_opts || {}), ...(extraOpts || {}) };
+        this._triBackend = new TriBackend(ctx, this, opts);
         await this._triBackend.buildMesh(onProgress);   // emits real adaptive-refinement passes (live)
         return this._triBackend;
     }
@@ -1462,8 +1464,14 @@ export class FieldSolver2D {
         // full-wave eigenmode + loss) to TriBackend, lazily loaded so the gmsh
         // WASM is only fetched when this backend is selected.
         if (this.mesh_backend === 'triangular') {
-            // buildMesh (first call) reports each adaptive-refinement pass via onProgress.
-            const tri = await this._ensureTriBackend(options.onProgress);
+            // Wire the UI adaptive controls (max iterations, tolerance, max nodes) into
+            // the triangular backend's refinement loop; buildMesh reports each pass via
+            // onProgress. Undefined values fall back to the backend defaults.
+            const tri = await this._ensureTriBackend(options.onProgress, {
+                maxRefineIters: options.max_iters,
+                refineTol: options.energy_tol,
+                maxNodes: options.max_nodes,
+            });
             return tri.solveAt(this.freq);
         }
 
