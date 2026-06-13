@@ -1151,6 +1151,14 @@ async function runSimulation() {
             shouldStop: () => stopRequested
         });
 
+        // Mesh quality warning (triangular backend): a high worst-case Q means a sliver
+        // triangle that can ill-condition the FEM solve and degrade accuracy.
+        if (solver.meshQuality && solver.meshQuality.maxQ > 100) {
+            log(`⚠ Mesh quality warning: worst triangle Q=${solver.meshQuality.maxQ.toFixed(0)} ` +
+                `results may be inaccurate. ` +
+                `Try adjusting geometry or enclosure size.`);
+        }
+
         if (stopRequested) {
             log("Simulation stopped by user");
             pbar.style.width = "0%";

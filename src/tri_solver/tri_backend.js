@@ -30,6 +30,7 @@ import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric } from './conductor_loss.js';
 import { mqsConductorLoss, refineSkinBand } from './mqs_loss.js';
 import { analyzeTriMode } from './tri_ms_solver.js';
+import { checkMeshQuality } from './tri_mesh.js';
 
 // Below this frequency the full-wave eigensolve degenerates near DC; use the
 // static (variational) solve instead. Above it, use the full-wave eigenmode for
@@ -407,6 +408,14 @@ export class TriBackend {
         }
 
         this.mesh = mesh;
+        // Mesh quality of the final (post-refinement) mesh. Q = circumradius/(2·inradius),
+        // ideal 1; a very high Qmax means a sliver that ill-conditions the FEM solve.
+        // Surfaced to the UI as a warning (empty constraint args → quality metrics only).
+        try {
+            const mq = checkMeshQuality(mesh, [], []);
+            this.meshQuality = mq.metrics;
+            if (this.solver) this.solver.meshQuality = mq.metrics;
+        } catch { this.meshQuality = null; }
         this._prepareStatic();
         return mesh;
     }
