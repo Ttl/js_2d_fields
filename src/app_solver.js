@@ -1120,10 +1120,12 @@ async function runSimulation() {
             onProgress: (info) => {
                 const progress = info.iteration / p.max_iters * 0.5;  // First half is for mesh refinement
                 pbar.style.width = (progress * 100) + "%";
+                // Triangular backend reports a triangle count (n_tris); the rectilinear
+                // backend reports a structured node grid (nodes_x × nodes_y).
+                const meshStr = info.n_tris != null ? `Tris=${info.n_tris}` : `Grid=${info.nodes_x}x${info.nodes_y}`;
                 if (ptext) ptext.textContent = `Mesh refinement ${info.iteration}/${p.max_iters}: ` +
-                                   `Energy err=${info.energy_error.toExponential(2)}, ` +
-                                   `Grid=${info.nodes_x}x${info.nodes_y}`;
-                log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, Grid=${info.nodes_x}x${info.nodes_y}`);
+                                   `Energy err=${info.energy_error.toExponential(2)}, ${meshStr}`;
+                log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, ${meshStr}`);
             },
             shouldStop: () => stopRequested
         });

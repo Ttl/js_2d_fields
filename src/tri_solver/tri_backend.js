@@ -223,7 +223,10 @@ export class TriBackend {
 
     // Build mesh (with symmetry + adaptive refinement), then solve & cache the
     // (frequency-independent) static problem per mode and resample fields.
-    buildMesh() {
+    // onProgress({iteration, max_iterations, energy_error, param_error, nodes_x,
+    // nodes_y}) is called once per adaptive refinement pass (same shape the
+    // rectilinear backend reports, so the UI shows real passes for both).
+    async buildMesh(onProgress = null) {
         const s = this.solver;
         const dom = { x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
                       y_min: -s.t_gnd, y_max: s.domain_height };
@@ -281,18 +284,20 @@ export class TriBackend {
         // odd mode's field concentrates and the mutual resistance R[12] comes from.
         const refModes = this.modeNames;
         const fRef = Math.max(s.freq || 1e9, 1e9);               // full-wave freq for ZZ
-        let prev = null;
+        let prev = null, prevEnergy = null;
         for (let it = 0; it <= maxIters; it++) {
             let metric = null;
             const conv = [];   // convergence quantities (eps + loss surface integral per mode)
+            const energy = []; // total field energy per mode (for the reported energy error)
             for (const rm of refModes) {
                 const { abc } = modeConfig(rm, s.is_differential, this.symmetry);
                 const pot = drivePotentials(this.condRect, rm, this.symmetry);
                 const fm = buildTriFreedomMap(mesh, this.condRect, abc);
                 const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot);
                 const phiAir = solveTriStatic(mesh, fm, null, pot);
-                const eps_static = computeTriEnergy(phiEps, mesh, mesh.epsMap) /
-                                   computeTriEnergy(phiAir, mesh, null);
+                const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
+                const eps_static = W_eps / computeTriEnergy(phiAir, mesh, null);
+                energy.push(W_eps);
                 const fw = fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static);
                 conv.push(fw ? fw.eps : eps_static);
                 const metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
@@ -307,12 +312,29 @@ export class TriBackend {
                 }
             }
             // converged only when ALL quantities (eps + loss integrals) are stable
-            let maxRel = Infinity;
+            let maxRel = Infinity, energyRel = Infinity;
             if (prev && prev.length === conv.length) {
                 maxRel = 0;
                 for (let i = 0; i < conv.length; i++) maxRel = Math.max(maxRel, Math.abs(conv[i] - prev[i]) / Math.max(Math.abs(prev[i]), 1e-300));
             }
-            prev = conv;
+            if (prevEnergy && prevEnergy.length === energy.length) {
+                energyRel = 0;
+                for (let i = 0; i < energy.length; i++) energyRel = Math.max(energyRel, Math.abs(energy[i] - prevEnergy[i]) / Math.max(Math.abs(prevEnergy[i]), 1e-300));
+            }
+            prev = conv; prevEnergy = energy;
+            // Report this pass (real triangle count + convergence) so the UI shows
+            // the adaptive progress just like the rectilinear backend. When a progress
+            // sink is present, yield to the event loop so the browser can paint each
+            // pass live instead of all at once when buildMesh returns.
+            if (onProgress) {
+                onProgress({
+                    iteration: it + 1, max_iterations: maxIters + 1,
+                    energy_error: isFinite(energyRel) ? energyRel : 1,
+                    param_error: isFinite(maxRel) ? maxRel : 1,
+                    n_tris: mesh.nTris, nodes_x: mesh.nNodes, nodes_y: 0,
+                });
+                await new Promise(r => setTimeout(r, 0));
+            }
             // The mutual resistance R[12] of a coupled pair converges slower than
             // eps (it needs the inter-trace gap resolved), so for differential pairs
             // keep refining past eps-convergence until a node floor is reached.

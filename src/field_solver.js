@@ -1421,12 +1421,12 @@ export class FieldSolver2D {
     // Lazily create the triangular FEM backend (and build its mesh + cached
     // static solve). The import is dynamic so the gmsh/eigen WASM is only loaded
     // when the user selects the triangular backend. Persists across the sweep.
-    async _ensureTriBackend() {
+    async _ensureTriBackend(onProgress = null) {
         if (this._triBackend) return this._triBackend;
         const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
         const ctx = await initTriBackend();
         this._triBackend = new TriBackend(ctx, this, this.tri_opts || {});
-        this._triBackend.buildMesh();
+        await this._triBackend.buildMesh(onProgress);   // emits real adaptive-refinement passes (live)
         return this._triBackend;
     }
 
@@ -1462,11 +1462,8 @@ export class FieldSolver2D {
         // full-wave eigenmode + loss) to TriBackend, lazily loaded so the gmsh
         // WASM is only fetched when this backend is selected.
         if (this.mesh_backend === 'triangular') {
-            const tri = await this._ensureTriBackend();
-            if (options.onProgress) options.onProgress({
-                iteration: 1, max_iterations: 1, energy_error: 0, param_error: 0,
-                nodes_x: tri.mesh.nNodes, nodes_y: 0
-            });
+            // buildMesh (first call) reports each adaptive-refinement pass via onProgress.
+            const tri = await this._ensureTriBackend(options.onProgress);
             return tri.solveAt(this.freq);
         }
 
