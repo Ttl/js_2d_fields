@@ -378,7 +378,14 @@ export function buildGmshMeshFromGeometry(G, opts) {
         if (r.ymin > Y0 + tol && r.ymin < Y1 - tol) bandYset.push(r.ymin);
         if (r.ymax > Y0 + tol && r.ymax < Y1 - tol) bandYset.push(r.ymax);
     }
-    const bandYs = _uniqSorted(bandYset, tol);
+    // Merge dielectric interface levels that fall unmeshably close together (≪ hFine).
+    // Two interfaces a fraction of an element apart (e.g. a solder-mask layer whose top
+    // nearly coincides with the trace top when SM thickness ≈ trace thickness) would
+    // otherwise leave a thin full-width strip that gmsh fills with degenerate slivers.
+    // Real layers are ≳ hFine thick and survive; the merge only collapses sub-element
+    // strips, with negligible (sub-hFine) geometric distortion.
+    const bandMergeTol = Math.max(tol, 0.25 * hFine);
+    const bandYs = _uniqSorted(bandYset, bandMergeTol);
 
     for (let bi = 0; bi < bandYs.length - 1; bi++) {
         const ya = bandYs[bi], yb = bandYs[bi + 1];

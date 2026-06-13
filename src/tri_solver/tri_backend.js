@@ -238,14 +238,28 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     };
 }
 
-// Per-mode solve config: boundary condition at the symmetry plane and the
-// energy→capacitance factor kC.
+// Per-mode solve config: wall boundary conditions + energy→capacitance factor kC.
 //   full domain : single kC=2, diff kC=1 (even=[1,1], odd=[1,-1] drives)
 //   half domain : single kC=4, diff kC=2 (even/odd via abc.left; signal=1)
-function modeConfig(mode, isDiff, symmetry) {
+//
+// Wall BCs are driven by the wall types so the triangular backend matches the
+// rectilinear quasi-static solver: 'gnd' walls are PEC (Dirichlet V=0), 'open' walls
+// are natural/Neumann (the FDM sets zero off-domain flux there). buildTriFreedomMap
+// makes a wall PEC unless abc.{left,right,top,bottom} is truthy; 'pmc' selects the
+// natural BC WITHOUT the full-wave radiation Robin term (which only fires on === true).
+// Far 'open' walls give the same answer either way (the field has decayed), but a
+// close wall (small enclosure) needs the matching natural BC.  wallPEC.X === true ⇒ gnd.
+function modeConfig(mode, isDiff, symmetry, wallPEC) {
     const kC = (isDiff ? 1 : 2) * (symmetry ? 2 : 1);
-    let abc = {};
-    if (symmetry && mode !== 'odd') abc = { left: 'pmc' };  // even/single: PMC at x=0
+    const abc = {};
+    if (wallPEC) {
+        if (!wallPEC.right) abc.right = 'pmc';
+        if (!wallPEC.top) abc.top = 'pmc';
+        if (!wallPEC.bottom) abc.bottom = 'pmc';
+        if (!wallPEC.left) abc.left = 'pmc';
+    }
+    // Symmetry plane at x=0 overrides the left wall: PMC (even/single) or PEC (odd).
+    if (symmetry) { if (mode === 'odd') delete abc.left; else abc.left = 'pmc'; }
     return { abc, kC };
 }
 
@@ -347,7 +361,7 @@ export class TriBackend {
             const conv = [];   // convergence quantities (eps + loss surface integral per mode)
             const energy = []; // total field energy per mode (for the reported energy error)
             for (const rm of refModes) {
-                const { abc } = modeConfig(rm, s.is_differential, this.symmetry);
+                const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
                 const pot = drivePotentials(this.condRect, rm, this.symmetry);
                 const fm = buildTriFreedomMap(mesh, this.condRect, abc);
                 const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot);
@@ -436,7 +450,7 @@ export class TriBackend {
             }
         } catch { grid = null; }
         for (const mode of this.modeNames) {
-            const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry);
+            const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry, this.condRect.wallPEC);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
             const pot = drivePotentials(this.condRect, mode, this.symmetry);
             const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot);
