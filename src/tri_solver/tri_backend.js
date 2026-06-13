@@ -522,7 +522,28 @@ export class TriBackend {
             // 2δ-wide skin band (was 3δ): the eddy current is ~85% within 2δ, so the
             // narrower band halves the refined-mesh size with negligible R change.
             const mqsBand = this.opts.mqsBand ?? 2;
-            const mqsMesh = (delta < minDim) ? refineSkinBand(mesh, cr, delta, 12, mqsBand, bandDelta * delta) : mesh;
+            // Cache & reuse the skin-refined mesh across the sweep, EXPANDING its
+            // coverage as new frequencies appear (widest band from the lowest f, finest
+            // target from the highest f). Re-meshing per frequency changes the skin
+            // resolution in discrete jumps (each added refinement pass), which makes
+            // R(f) non-monotonic; one mesh covering the swept range gives a smooth R(f)
+            // and avoids re-meshing every point. Growing the band barely affects already-
+            // computed high-f points (their current is negligible out there), so values
+            // stay consistent. Disable with opts.mqsCacheMesh === false.
+            let mqsMesh;
+            if (delta >= minDim) {
+                mqsMesh = mesh;
+            } else if (this.opts.mqsCacheMesh === false) {
+                mqsMesh = refineSkinBand(mesh, cr, delta, 12, mqsBand, bandDelta * delta);
+            } else {
+                const sc = st.skinCache || (st.skinCache = { dLo: 0, dHi: Infinity, mesh: null });
+                if (!sc.mesh || delta > sc.dLo + 1e-300 || delta < sc.dHi - 1e-300) {
+                    sc.dLo = Math.max(sc.dLo, delta);
+                    sc.dHi = Math.min(sc.dHi, delta);
+                    sc.mesh = refineSkinBand(mesh, cr, sc.dLo, 16, mqsBand, bandDelta * sc.dHi);
+                }
+                mqsMesh = sc.mesh;
+            }
             let mqs = null;
             try {
                 mqs = mqsConductorLoss(mqsMesh, cr, f, sigma, this.ctx.helpers.solveSparseMulti, 0,
