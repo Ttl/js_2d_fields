@@ -157,7 +157,10 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     catch { return null; }
     const N = fem.N;
     const seed = staticToEdgeDofs(phiEps, mesh, fm);
-    const nev = 8, ncv = Math.min(2 * nev + 1, N - 1);
+    // 4 eigenpairs is ample: shift-invert is centered on the quasi-TEM eigenvalue
+    // (-k2·eps_static), so the target mode converges first. (Was 8 — halving the
+    // Krylov subspace markedly speeds the eigensolve with no change in the picked mode.)
+    const nev = 4, ncv = Math.min(2 * nev + 1, N - 1);
     let res;
     try { res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed); }
     catch { return null; }
@@ -239,8 +242,16 @@ export class TriBackend {
         const tAbs = Math.max(Math.abs(s.t ?? 35e-6), 1e-9);
         const wRef = Math.max(s.w ?? (dom.x_max - dom.x_min) / 10, 1e-9);
         // Start coarse; adaptive refinement adds resolution where the field needs it.
-        const hFine = this.opts.hFine ?? Math.min(tAbs, wRef / 4) / 2;
-        const hCoarse = this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 8;
+        // GRADED (fine at conductors, coarse in the bulk), not uniform: the MQS volume
+        // eddy-current loss needs the conductor region resolved, so a uniform ultra-coarse
+        // start (as the SIBC reference viewer used) starves it and gives garbage R. With
+        // the graded start, hFine can be ~3× coarser than the original here with no
+        // accuracy loss — the conductor SURFACE is re-resolved by refineSkinBand for the
+        // loss solve anyway, and eps/Z0 converge at a few hundred triangles. The
+        // rough-stripline roughness loss is the binding constraint (it sits ~7% high vs
+        // ref on any mesh); coarsening further than this eats its margin.
+        const hFine = this.opts.hFine ?? Math.min(tAbs, wRef / 4) * 1.5;
+        const hCoarse = this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5;
         let mesh = buildGmshMeshFromGeometry(this.ctx.G, {
             conductors: s.conductors, dielectrics: s.dielectrics,
             domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
@@ -395,7 +406,10 @@ export class TriBackend {
             // Skin-band target element size (× δ): the band must be resolved to a
             // fraction of δ for accurate R (matches ms2d's mqs_band_delta).
             const bandDelta = this.opts.mqsBandDelta ?? 0.5;
-            const mqsMesh = (delta < minDim) ? refineSkinBand(mesh, cr, delta, 12, 3, bandDelta * delta) : mesh;
+            // 2δ-wide skin band (was 3δ): the eddy current is ~85% within 2δ, so the
+            // narrower band halves the refined-mesh size with negligible R change.
+            const mqsBand = this.opts.mqsBand ?? 2;
+            const mqsMesh = (delta < minDim) ? refineSkinBand(mesh, cr, delta, 12, mqsBand, bandDelta * delta) : mesh;
             let mqs = null;
             try {
                 mqs = mqsConductorLoss(mqsMesh, cr, f, sigma, this.ctx.helpers.solveSparseMulti, 0,
