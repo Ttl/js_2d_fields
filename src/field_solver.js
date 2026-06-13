@@ -1347,11 +1347,18 @@ export class FieldSolver2D {
             V = await this.solve_laplace(V, true);
 
             if (this.is_differential) {
-                // Use only positive trace for charge calculation
-                const orig_signal_mask = this.signal_mask.map(row => row.slice());
-                this.signal_mask = this.signal_p_mask.map(row => row.slice());
-                C0 = this.calculate_capacitance(V, true);
+                // Average the charge over both traces. For an asymmetric pair
+                // (e.g.  broadside stripline with unequal top/bottom dielectric
+                // heights) the two traces carry different charge.  For
+                // a symmetric pair the two are equal, so the average is
+                // unchanged.
+                const orig_signal_mask = this.signal_mask;
+                this.signal_mask = this.signal_p_mask;
+                const Cp = this.calculate_capacitance(V, true);
+                this.signal_mask = this.signal_n_mask;
+                const Cn = this.calculate_capacitance(V, true);
                 this.signal_mask = orig_signal_mask;
+                C0 = 0.5 * (Cp + Cn);
             } else {
                 C0 = this.calculate_capacitance(V, true);
             }
@@ -1363,11 +1370,15 @@ export class FieldSolver2D {
 
         let C;
         if (this.is_differential) {
-            // Use only positive trace for charge calculation
-            const orig_signal_mask = this.signal_mask.map(row => row.slice());
-            this.signal_mask = this.signal_p_mask.map(row => row.slice());
-            C = this.calculate_capacitance(V, false);
+            // Average the charge over both traces (see C0 above) — correct for asymmetric
+            // differential pairs, unchanged for symmetric ones.
+            const orig_signal_mask = this.signal_mask;
+            this.signal_mask = this.signal_p_mask;
+            const Cp = this.calculate_capacitance(V, false);
+            this.signal_mask = this.signal_n_mask;
+            const Cn = this.calculate_capacitance(V, false);
             this.signal_mask = orig_signal_mask;
+            C = 0.5 * (Cp + Cn);
         } else {
             C = this.calculate_capacitance(V, false);
         }
