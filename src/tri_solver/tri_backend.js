@@ -150,13 +150,63 @@ function perElementEnergy(phi, mesh, epsMap) {
 // selection: among physical modes (γ²<0) with decent overlap to the static drive,
 // pick the one whose eps_mode is closest to eps_static (the quasi-TEM mode).
 // Returns { eps, vRe, vIm, g2Re, g2Im } for the chosen mode, or null.
-function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static) {
+// k²-decomposition cache. The FEM matrices A(k²), B(k²) are exactly affine in k²
+// (Lee–Jin form; the only √k² term, the radiating Robin ABC, is absent here — the walls
+// are PEC/PMC), with fixed sparsity across frequency. Assemble at the first two distinct
+// frequencies, store A0/A1 and B0/B1, then rebuild any frequency's CSR with a cheap
+// a0+k²·a1 combine — skipping the per-frequency element re-assembly, which profiling
+// showed costs MORE than the eigensolve itself. Exact to machine precision; falls back
+// to per-frequency assembly if the two sparsity patterns ever differ.
+function buildFemK2Cache(femA, kA, femB, kB) {
+    const samePat = (x, y) => {
+        if (x.colIdx.length !== y.colIdx.length || x.rowPtr.length !== y.rowPtr.length) return false;
+        for (let i = 0; i < x.colIdx.length; i++) if (x.colIdx[i] !== y.colIdx[i]) return false;
+        for (let i = 0; i < x.rowPtr.length; i++) if (x.rowPtr[i] !== y.rowPtr[i]) return false;
+        return true;
+    };
+    if (!samePat(femA.csrA, femB.csrA) || !samePat(femA.csrB, femB.csrB)) return null;
+    const inv = 1 / (kB - kA);
+    const mk = (ca, cb) => {
+        const n = ca.valRe.length, a0 = new Float64Array(n), a1 = new Float64Array(n);
+        for (let i = 0; i < n; i++) { a1[i] = (cb.valRe[i] - ca.valRe[i]) * inv; a0[i] = ca.valRe[i] - kA * a1[i]; }
+        return { rowPtr: ca.rowPtr, colIdx: ca.colIdx, a0, a1, zeros: new Float64Array(n) };
+    };
+    return { N: femA.N, A: mk(femA.csrA, femB.csrA), B: mk(femA.csrB, femB.csrB) };
+}
+function femFromK2Cache(cache, k2) {
+    const build = (m) => {
+        const n = m.a0.length, v = new Float64Array(n);
+        for (let i = 0; i < n; i++) v[i] = m.a0[i] + k2 * m.a1[i];
+        return { rowPtr: m.rowPtr, colIdx: m.colIdx, valRe: v, valIm: m.zeros };
+    };
+    return { csrA: build(cache.A), csrB: build(cache.B), N: cache.N };
+}
+
+function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static, seedVec = null, cacheBox = null) {
     const k2 = (2 * Math.PI * f / 299792458) ** 2;
     let fem;
-    try { fem = assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, null); }
-    catch { return null; }
+    if (cacheBox && cacheBox.ready) {
+        fem = femFromK2Cache(cacheBox.ready, k2);   // O(nnz) rebuild, no re-assembly
+    } else {
+        try { fem = assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, null); }
+        catch { return null; }
+        if (cacheBox) {   // lazily build the cache from the first two distinct frequencies
+            if (cacheBox.prev && Math.abs(cacheBox.prev.k2 - k2) > 0) {
+                cacheBox.ready = buildFemK2Cache(cacheBox.prev.fem, cacheBox.prev.k2, fem, k2);
+                cacheBox.prev = null;
+            } else if (!cacheBox.prev) {
+                cacheBox.prev = { k2, fem };
+            }
+        }
+    }
+    if (!fem) return null;
     const N = fem.N;
-    const seed = staticToEdgeDofs(phiEps, mesh, fm);
+    // Warm start the Arnoldi from the previous frequency's eigenvector when available
+    // (same mesh → same N); falls back to the static-field projection. A near-converged
+    // start cuts the iterations across a sweep. The quasi-TEM mode-pick below always
+    // overlaps against the static drive (staticSeed), independent of the warm start.
+    const staticSeed = staticToEdgeDofs(phiEps, mesh, fm);
+    const seed = (seedVec && seedVec.length === N) ? seedVec : staticSeed;
     // 4 eigenpairs is ample: shift-invert is centered on the quasi-TEM eigenvalue
     // (-k2·eps_static), so the target mode converges first. (Was 8 — halving the
     // Krylov subspace markedly speeds the eigensolve with no change in the picked mode.)
@@ -170,7 +220,7 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         if (res.evalsRe[i] >= 0) continue;                 // physical: γ² < 0
         const vR = res.evecsRe.subarray(i * N, (i + 1) * N);
         let dot = 0, nS = 0, nV = 0;
-        for (let k = 0; k < fm.nFreeTransverse; k++) { dot += seed[k] * vR[k]; nS += seed[k] ** 2; nV += vR[k] ** 2; }
+        for (let k = 0; k < fm.nFreeTransverse; k++) { dot += staticSeed[k] * vR[k]; nS += staticSeed[k] ** 2; nV += vR[k] ** 2; }
         const ovl = nS > 0 && nV > 0 ? Math.abs(dot) / Math.sqrt(nS * nV) : 0;
         if (ovl < 0.3) continue;                           // quasi-TEM overlaps the static drive
         const epsMode = -res.evalsRe[i] / k2;
@@ -283,6 +333,12 @@ export class TriBackend {
         // critical regions are resolved — crucially the inter-trace gap, where the
         // odd mode's field concentrates and the mutual resistance R[12] comes from.
         const refModes = this.modeNames;
+        // Drive mesh refinement with the cheaper static field-energy metric (default):
+        // it refines the same critical regions as the full-wave H-field ZZ estimator
+        // (verified identical Z0/eps/loss across the test suite) while skipping the
+        // per-iteration eigensolve, roughly halving buildMesh time. Set true to restore
+        // the full-wave ZZ-driven refinement.
+        const refineFullwave = this.opts.refineFullwave ?? false;
         const fRef = Math.max(s.freq || 1e9, 1e9);               // full-wave freq for ZZ
         let prev = null, prevEnergy = null;
         for (let it = 0; it <= maxIters; it++) {
@@ -298,7 +354,9 @@ export class TriBackend {
                 const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
                 const eps_static = W_eps / computeTriEnergy(phiAir, mesh, null);
                 energy.push(W_eps);
-                const fw = fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static);
+                const fw = refineFullwave
+                    ? fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static)
+                    : null;
                 conv.push(fw ? fw.eps : eps_static);
                 const metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
                 let zz = null;
@@ -414,7 +472,10 @@ export class TriBackend {
         const lossMethod = this.opts.lossMethod ?? 'auto';
         let eps_d = eps_eff_static, fw = null;
         if (f >= F_STATIC_MAX) {
-            fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static);
+            if (!st.femCacheBox) st.femCacheBox = { ready: null, prev: null };
+            fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
+                st.eigSeed || null, st.femCacheBox);
+            if (fw) st.eigSeed = fw.vRe;   // warm-start the next frequency from this eigenvector
             if (fw && fw.eps > 0) eps_d = fw.eps;
         }
         // Dielectric dispersion is a capacitance effect: C = eps_d·C0 (geometric
