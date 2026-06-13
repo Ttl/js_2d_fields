@@ -403,6 +403,15 @@ export class TriBackend {
 
         // Full-wave eigenmode above 100 MHz (dispersive eps + the mode field used
         // for the perturbation conductor loss); static solve near DC.
+        // Conductor-loss method (UI "Solver" dropdown for the full-wave backend):
+        //   'auto'         — MQS volume eddy-current where applicable (symmetric, no
+        //                    ground rect), else the blended perturbation. Most
+        //                    accurate; default ("Full-wave (MQS)").
+        //   'perturbation' — blended perturbation (static-field in the skin transition,
+        //                    SIBC eigenmode at deep skin); much cheaper than MQS per
+        //                    point, smooth across frequency. ("Full-wave (perturbation)").
+        //   'static'       — static-field perturbation only (no SIBC blend).
+        const lossMethod = this.opts.lossMethod ?? 'auto';
         let eps_d = eps_eff_static, fw = null;
         if (f >= F_STATIC_MAX) {
             fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static);
@@ -431,7 +440,8 @@ export class TriBackend {
         // MQS (reference) applies when grounds are wall-absorbed (signal-only rects)
         // and the domain is symmetric (mode set by the BC). Else H-field perturbation.
         const hasGroundRect = cr.rectRoles.some(r => !r.is_signal);
-        const useMQS = this.symmetry && !hasGroundRect && cr.rects.length > 0;
+        const useMQS = (lossMethod === 'mqs')
+            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
         let R_total = 0, L_internal = 0;
         if (f > 0 && useMQS) {
             let minDim = Infinity;
@@ -454,22 +464,43 @@ export class TriBackend {
                 L_internal = Math.max(0, Math.min(mqs.L_loop - L_external, 3 * L_external));
             }
         }
-        if (f > 0 && R_total === 0 && fw) {   // perturbation (full domain, or MQS fallback)
-            const k2 = (omega / c0) ** 2;
-            const an = analyzeTriMode(fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, mesh, fm, k2, f, mesh.epsMap, cr);
-            if (an && Math.abs(an.P) > 1e-30) {
-                const loss = solveConductorLoss(cr.rects, f, sigma, mesh, fm, fw.vRe, fw.vIm,
-                    fw.g2Re, fw.g2Im, Math.abs(an.P), Z0, mesh.epsMap, buildLossEdges(mesh, fm, cr), null, null, this.ctx.wasmSolver);
-                const R_ac = loss.R_ac * fR;
-                R_total = Math.sqrt(loss.R_dc * loss.R_dc + R_ac * R_ac);
-                L_internal = Math.max(0, Math.min(loss.L_int * fL, 3 * L_external));
+        // Perturbation conductor loss (used for the 'perturbation' option and as the
+        // 'auto' fallback when MQS doesn't apply). Two estimators are blended by the
+        // skin-depth / conductor-thickness ratio:
+        //   • static-field perturbation — smooth and robust across the skin transition
+        //     (δ ≳ thickness), where it matches MQS; used at low frequency.
+        //   • SIBC eigenmode perturbation — more accurate at deep skin (δ ≪ thickness,
+        //     e.g. rough conductors at high f), but its corner-singularity model is
+        //     non-monotonic for δ ≳ thickness (a spurious jump/flat band). Used at high
+        //     frequency only.
+        // The crossover (δ/t ≈ 0.08–0.15) is where the two agree, so the blend is
+        // continuous — fixing the old discontinuity at F_STATIC_MAX. 'static' forces
+        // the static estimator everywhere.
+        if (f > 0 && R_total === 0) {
+            const edges = buildLossEdges(mesh, fm, cr);
+            const lossS = staticConductorLoss(cr.rects, f, sigma, mesh, fm, phiEps,
+                Z0, eps_eff_static, eps_d, null, edges);
+            let R_ac = lossS.R_ac * fR;
+            if (fw && lossMethod !== 'static') {
+                let minDim = Infinity;
+                for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
+                const k2 = (omega / c0) ** 2;
+                const an = analyzeTriMode(fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, mesh, fm, k2, f, mesh.epsMap, cr);
+                if (an && Math.abs(an.P) > 1e-30 && minDim > 0) {
+                    const lossW = solveConductorLoss(cr.rects, f, sigma, mesh, fm, fw.vRe, fw.vIm,
+                        fw.g2Re, fw.g2Im, Math.abs(an.P), Z0, mesh.epsMap, edges, null, null, this.ctx.wasmSolver);
+                    const w = Math.max(0, Math.min(1, (0.15 - delta / minDim) / (0.15 - 0.08)));
+                    R_ac = (1 - w) * R_ac + w * (lossW.R_ac * fR);
+                }
             }
-        }
-        if (f > 0 && R_total === 0) {   // static-field fallback (near DC / eigensolve failed)
-            const loss = staticConductorLoss(cr.rects, f, sigma, mesh, fm, phiEps,
-                Z0, eps_eff_static, eps_d, null, buildLossEdges(mesh, fm, cr));
-            const R_ac = loss.R_ac * fR;
-            R_total = Math.sqrt(loss.R_dc * loss.R_dc + R_ac * R_ac);
+            R_total = Math.sqrt(lossS.R_dc * lossS.R_dc + R_ac * R_ac);
+            // Internal (skin) inductance: in the skin regime Zs = Rs(1+j), so the
+            // internal reactance equals the AC resistance → L_int ≈ R_ac/ω. Neither the
+            // static-field nor the SIBC routine returns a reliable L_int across the
+            // transition; this closed form keeps eps_eff (= c²·L·C) and Re(Zc) consistent
+            // with the MQS/FDM backends, which include the internal inductance. The √f
+            // rolloff (R_ac∝√f) makes it vanish at high f and the cap bounds it near DC.
+            L_internal = (omega > 0) ? Math.max(0, Math.min(R_ac / omega, 0.5 * L_external)) : 0;
         }
 
         // assemble RLGC + Zc

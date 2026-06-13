@@ -4,12 +4,14 @@ import { BroadsideStriplineSolver as _BroadsideStriplineSolver } from '../src/br
 // Backend selection: `MESH_BACKEND=triangular node tests/test_vs_ref.js` runs the
 // whole suite on the triangular FEM backend; default is the rectilinear FDM solver.
 const MESH_BACKEND = process.env.MESH_BACKEND || 'rectilinear';
-console.log(`\n### Running test_vs_ref.js with mesh_backend = "${MESH_BACKEND}" ###`);
+const TRI_LOSS = process.env.TRI_LOSS || null;   // 'auto'|'perturbation'|'static' (triangular only)
+console.log(`\n### Running test_vs_ref.js with mesh_backend = "${MESH_BACKEND}"${TRI_LOSS ? ` lossMethod="${TRI_LOSS}"` : ''} ###`);
+const _triOpts = TRI_LOSS ? { lossMethod: TRI_LOSS } : null;
 class MicrostripSolver extends _MicrostripSolver {
-    constructor(o) { super({ ...o, mesh_backend: o.mesh_backend ?? MESH_BACKEND }); }
+    constructor(o) { super({ ...o, mesh_backend: o.mesh_backend ?? MESH_BACKEND }); if (_triOpts) this.tri_opts = _triOpts; }
 }
 class BroadsideStriplineSolver extends _BroadsideStriplineSolver {
-    constructor(o) { super({ ...o, mesh_backend: o.mesh_backend ?? MESH_BACKEND }); }
+    constructor(o) { super({ ...o, mesh_backend: o.mesh_backend ?? MESH_BACKEND }); if (_triOpts) this.tri_opts = _triOpts; }
 }
 import { computeSParamsSingleEnded, computeSParamsDifferential } from '../src/sparameters.js';
 import { Complex } from '../src/complex.js';

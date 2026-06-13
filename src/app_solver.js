@@ -381,7 +381,9 @@ function restoreSettings(settings) {
 
         const meshBackendSelect = document.getElementById('mesh_backend');
         if (meshBackendSelect && fullSettings.mesh_backend) {
-            meshBackendSelect.value = fullSettings.mesh_backend;
+            // Map the legacy 'triangular' value onto the new full-wave (MQS) option.
+            const v = fullSettings.mesh_backend === 'triangular' ? 'fullwave_mqs' : fullSettings.mesh_backend;
+            meshBackendSelect.value = v;
         }
 
         setValueWithUnit('inp_w', fullSettings.w);
@@ -724,6 +726,20 @@ function switchTab(tabName) {
     }
 }
 
+// Translate the "Solver" dropdown value into the backend + triangular loss options.
+// Accepts the legacy 'triangular' value (maps to the accurate MQS full-wave mode).
+function solverModeConfig(mode) {
+    switch (mode) {
+        case 'fullwave_pert':
+            return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'perturbation' } };
+        case 'fullwave_mqs':
+        case 'triangular':   // legacy saved value
+            return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'auto' } };
+        default:             // 'rectilinear'
+            return { mesh_backend: 'rectilinear', tri_opts: null };
+    }
+}
+
 function getParams() {
     return {
         tl_type: document.getElementById('tl_type').value,
@@ -1034,8 +1050,13 @@ function updateGeometry() {
         // Store causal materials option on solver
         if (solver) {
             solver.use_causal_materials = p.use_causal_materials;
-            // Numerical backend (rectilinear FDM vs triangular FEM)
-            solver.mesh_backend = p.mesh_backend;
+            // Solver mode → numerical backend + triangular loss method:
+            //   'rectilinear'   = quasi-static FDM (fastest)
+            //   'fullwave_pert' = triangular full-wave, perturbation loss (~2× faster)
+            //   'fullwave_mqs'  = triangular full-wave, MQS volume loss (most accurate)
+            const cfg = solverModeConfig(p.mesh_backend);
+            solver.mesh_backend = cfg.mesh_backend;
+            solver.tri_opts = cfg.tri_opts;
         }
     } catch (error) {
         // Log validation errors to the console
