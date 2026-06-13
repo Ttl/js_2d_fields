@@ -18,6 +18,8 @@ class MicrostripSolver extends FieldSolver2D {
         this.tand_top = options.tan_delta_top ?? 0;
         this.tan_delta = options.tan_delta ?? 0.02;
         this.sigma_cond = options.sigma_cond ?? 5.8e7;
+        // Numerical backend: 'rectilinear' (FDM, default) or 'triangular' (FEM).
+        this.mesh_backend = options.mesh_backend ?? 'rectilinear';
 
         // Differential mode parameters
         this.trace_spacing = options.trace_spacing ?? null;
@@ -920,6 +922,8 @@ class MicrostripSolver extends FieldSolver2D {
     }
 
     ensure_mesh() {
+        // Triangular backend builds & owns its own mesh in TriBackend.
+        if (this.mesh_backend === 'triangular') return;
         if (this.mesh_generated) {
             return;
         }

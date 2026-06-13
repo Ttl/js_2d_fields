@@ -1418,6 +1418,18 @@ export class FieldSolver2D {
         };
     }
 
+    // Lazily create the triangular FEM backend (and build its mesh + cached
+    // static solve). The import is dynamic so the gmsh/eigen WASM is only loaded
+    // when the user selects the triangular backend. Persists across the sweep.
+    async _ensureTriBackend() {
+        if (this._triBackend) return this._triBackend;
+        const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
+        const ctx = await initTriBackend();
+        this._triBackend = new TriBackend(ctx, this, this.tri_opts || {});
+        this._triBackend.buildMesh();
+        return this._triBackend;
+    }
+
     async solve_adaptive(options = {}) {
         /**
          * Adaptive mesh solve with robust convergence criteria.
@@ -1446,6 +1458,18 @@ export class FieldSolver2D {
          * elements (11, 22) are self-parameters, and off-diagonal elements (12, 21) are mutual
          * coupling parameters. For L and C, coupling terms are negative.
          */
+        // Triangular FEM backend: delegate the whole solve (mesh + static +
+        // full-wave eigenmode + loss) to TriBackend, lazily loaded so the gmsh
+        // WASM is only fetched when this backend is selected.
+        if (this.mesh_backend === 'triangular') {
+            const tri = await this._ensureTriBackend();
+            if (options.onProgress) options.onProgress({
+                iteration: 1, max_iterations: 1, energy_error: 0, param_error: 0,
+                nodes_x: tri.mesh.nNodes, nodes_y: 0
+            });
+            return tri.solveAt(this.freq);
+        }
+
         // Ensure mesh is generated
         if (this.ensure_mesh) {
             this.ensure_mesh();
@@ -1844,6 +1868,13 @@ export class FieldSolver2D {
     async computeAtFrequency(freq, cachedResults) {
         // Update frequency
         this.freq = freq;
+
+        // Triangular FEM backend: re-run the per-frequency solve (eigenmode +
+        // loss) on the cached mesh/static solution.
+        if (this.mesh_backend === 'triangular') {
+            const tri = await this._ensureTriBackend();
+            return tri.solveAt(freq);
+        }
 
         // If causal materials are enabled, we must re-solve the Laplace equation
         // because epsilon_r changes with frequency, which changes the field distribution

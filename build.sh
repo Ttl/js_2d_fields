@@ -8,12 +8,18 @@ mkdir dist
 #make -C src/wasm_solver/
 
 # JS
+# tri_solver/ is kept external (not bundled): it contains emscripten modules that
+# load their .wasm via import.meta.url and a computed dynamic import() for gmsh,
+# neither of which survive bundling into a single outfile. It is lazy-imported
+# from app_solver.js only when the triangular backend is selected, and shipped as
+# a verbatim tree (copied below).
 npx esbuild src/app_solver.js \
   --bundle \
   --minify \
   --format=esm \
   --sourcemap \
   --platform=node \
+  --external:./tri_solver/* \
   --outfile=dist/app_solver.js
 
 # CSS
@@ -40,6 +46,13 @@ cp src/plotly-3.3.0.min.js dist/
 
 cp src/wasm_solver/solver.wasm dist/solver.wasm
 cp src/.htaccess dist/.htaccess
+
+# Triangular FEM backend: ship the self-contained tree verbatim (JS modules +
+# eigen_solver.wasm + gmsh/build-wasm/gmsh.wasm). The emscripten modules locate
+# their .wasm relative to themselves, so the directory layout must be preserved.
+# Drop the dev-only smoke test from the shipped copy.
+cp -r src/tri_solver dist/tri_solver
+rm -f dist/tri_solver/_smoke_test.mjs
 
 # Cache-busting: append content hashes as query strings so browsers fetch
 # new versions when files change. The HTML must be served with no-cache headers

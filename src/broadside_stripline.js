@@ -65,6 +65,8 @@ class BroadsideStriplineSolver extends FieldSolver2D {
         // Sides default open; enclosure makes them ground.
         this.boundaries = options.boundaries ?? ["open", "open", "gnd", "gnd"];
         this.has_side_gnd = (this.boundaries[0] === "gnd" || this.boundaries[1] === "gnd");
+        // Numerical backend: 'rectilinear' (FDM, default) or 'triangular' (FEM).
+        this.mesh_backend = options.mesh_backend ?? 'rectilinear';
 
         // Domain width
         const total_substrate_h = this.h_bottom + this.h_middle + this.h_top;
@@ -262,6 +264,8 @@ class BroadsideStriplineSolver extends FieldSolver2D {
     }
 
     ensure_mesh() {
+        // Triangular backend builds & owns its own mesh in TriBackend.
+        if (this.mesh_backend === 'triangular') return;
         if (this.mesh_generated) return;
 
         [this.x, this.y] = this.mesher.generate_mesh();

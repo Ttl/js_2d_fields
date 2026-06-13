@@ -127,6 +127,14 @@
         </select>
     </div>
 
+    <div class="control-group">
+        <label for="mesh_backend">Solver</label>
+        <select id="mesh_backend">
+            <option value="rectilinear">Rectilinear FDM (quasi-static)</option>
+            <option value="triangular">Triangular FEM (full-wave)</option>
+        </select>
+    </div>
+
     <div id="microstrip-params">
         <div class="section-header" onclick="toggleSection(this)">
             <h3>Geometry</h3>

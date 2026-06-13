@@ -528,7 +528,30 @@ function draw(resetZoom = false) {
     }
 
     // Mesh overlay
-    if (showMesh && solver.solution_valid) {
+    if (showMesh && solver.solution_valid && solver.triMesh) {
+        // Triangular backend: draw triangle edges (deduped) as one batched trace.
+        const { nodes, tris, nTris } = solver.triMesh;
+        const seen = new Set();
+        const ex = [], ey = [];
+        const nNodesTri = nodes.length / 2;
+        const addEdge = (a, b) => {
+            const n0 = a < b ? a : b, n1 = a < b ? b : a;
+            const key = n0 * (nNodesTri + 1) + n1;
+            if (seen.has(key)) return;
+            seen.add(key);
+            ex.push(nodes[2 * n0] * 1000, nodes[2 * n1] * 1000, null);
+            ey.push(nodes[2 * n0 + 1] * 1000, nodes[2 * n1 + 1] * 1000, null);
+        };
+        for (let t = 0; t < nTris; t++) {
+            const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
+            addEdge(v0, v1); addEdge(v1, v2); addEdge(v2, v0);
+        }
+        traces.push({
+            type: "scattergl", x: ex, y: ey, mode: "lines",
+            line: { width: 0.3, color: "rgba(0,0,0,0.5)" },
+            showlegend: false, hoverinfo: "skip"
+        });
+    } else if (showMesh && solver.solution_valid) {
         const stepX = 1;
         const stepY = 1;
 
