@@ -357,6 +357,17 @@ export class TriBackend {
         const { mesh } = this;
         const s = this.solver;
         this._static = {};
+        // Resample fields onto the FDM mesher's graded grid (fine near conductors and
+        // the ground surface) so contour plots match the rectilinear backend. A uniform
+        // grid aliases sub-grid-thickness traces/grounds into spurious contour bands and
+        // a step line above the ground. Fall back to a uniform grid if no mesher exists.
+        let grid = null;
+        try {
+            if (s.mesher && typeof s.mesher.generate_mesh === 'function') {
+                const [gx, gy] = s.mesher.generate_mesh();
+                if (gx && gy && gx.length && gy.length) grid = { x: gx, y: gy };
+            }
+        } catch { grid = null; }
         for (const mode of this.modeNames) {
             const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
@@ -370,7 +381,7 @@ export class TriBackend {
             const eps_eff_static = W_eps / W_air;
             const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
             const fields = resampleStatic(mesh, phiEps, this.domain,
-                { resolution: this.opts.resolution, parity });
+                { resolution: this.opts.resolution, parity, grid });
             this._static[mode] = {
                 fm, abc, kC, phiEps, C0, W_loss, eps_eff_static,
                 Z_static: 1 / (c0 * Math.sqrt(C0 * eps_eff_static * C0)),
@@ -509,6 +520,11 @@ export class TriBackend {
         this.solver.Ey = modes.map(m => m.Ey);
         this.solver.triMesh = { nodes: this.mesh.nodes, tris: this.mesh.tris, nTris: this.mesh.nTris };
         this.solver.solution_valid = true;
+        // The resampled grid (solver.x/y/Ex/Ey) is now valid — mark the mesh ready so
+        // plotting paths gated on mesh_generated (e.g. the geometry-view E-field contour
+        // overlay) render. ensure_mesh() is a no-op for the triangular backend, so this
+        // flag would otherwise stay false.
+        this.solver.mesh_generated = true;
         return result;
     }
 }
