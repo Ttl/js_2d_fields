@@ -39,6 +39,7 @@ const F_STATIC_MAX = 100e6;
 import { calculateZrough } from './surface_roughness.js';
 import { resampleStatic } from './resample.js';
 import { Complex } from '../complex.js';
+import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
 
 const c0 = 299792458;
 const eps0 = 8.854187817e-12;
@@ -502,9 +503,12 @@ export class TriBackend {
         const lossMethod = this.opts.lossMethod ?? 'auto';
         let eps_d = eps_eff_static, fw = null;
         if (f >= F_STATIC_MAX) {
-            if (!st.femCacheBox) st.femCacheBox = { ready: null, prev: null };
+            // Causal materials change epsMap per frequency, so the k2-interpolation cache
+            // (which assumes a constant epsMap) must be bypassed — re-assemble each freq.
+            let cacheBox = null;
+            if (!s.use_causal_materials) cacheBox = st.femCacheBox ??= { ready: null, prev: null };
             fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                st.eigSeed || null, st.femCacheBox);
+                st.eigSeed || null, cacheBox);
             if (fw) st.eigSeed = fw.vRe;   // warm-start the next frequency from this eigenvector
             if (fw && fw.eps > 0) eps_d = fw.eps;
         }
@@ -647,8 +651,37 @@ export class TriBackend {
 
     // Public: solve at one frequency, return the unified result object and write
     // grid fields + triangle mesh back onto the solver for plotting/export.
+    // Apply the Djordjevic–Sarkar causal dielectric model at frequency f: rebuild the
+    // per-triangle eps/loss maps from the frequency-dependent permittivity and re-solve
+    // the static field so eps_eff (below F_STATIC_MAX), the full-wave eigensolve (which
+    // reads mesh.epsMap), C, and the dielectric-loss energy W_loss all track the causal
+    // model. The k2 eigensolve cache is bypassed separately in _modeAtFreq.
+    _applyCausal(f) {
+        const s = this.solver;
+        const fref = this.opts.causalFref ?? 1e9;
+        const causalDiel = s.dielectrics.map(d => {
+            const er = d.epsilon_r, td = d.tan_delta || 0;
+            const rect = { x_min: d.x_min, x_max: d.x_max, y_min: d.y_min, y_max: d.y_max };
+            if (Math.abs(er - 1) < 1e-6 || Math.abs(td) < 1e-10) return { ...rect, epsilon_r: er, tan_delta: td };
+            const { eps_real, tand_actual } = djordjevic_sarkar(f, er, td, fref);
+            return { ...rect, epsilon_r: eps_real, tan_delta: tand_actual };
+        });
+        const { epsMap, lossMap } = tagMaterials(this.mesh, causalDiel);
+        this.mesh.epsMap = epsMap; this.mesh.lossMap = lossMap;
+        for (const mode of this.modeNames) {
+            const st = this._static[mode];
+            const pot = drivePotentials(this.condRect, mode, this.symmetry);
+            const phiEps = solveTriStatic(this.mesh, st.fm, epsMap, pot);
+            const W_air = st.C0 / (st.kC * eps0);   // geometric, eps-independent
+            st.phiEps = phiEps;
+            st.eps_eff_static = computeTriEnergy(phiEps, this.mesh, epsMap) / W_air;
+            st.W_loss = computeTriEnergy(phiEps, this.mesh, lossMap);
+        }
+    }
+
     solveAt(f) {
         if (!this.mesh) this.buildMesh();
+        if (this.solver.use_causal_materials) this._applyCausal(f);
         const modes = this.modeNames.map(m => this._modeAtFreq(m, f));
         const result = { modes };
         if (this.solver.is_differential) {
