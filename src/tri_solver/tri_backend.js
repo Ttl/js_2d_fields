@@ -367,12 +367,19 @@ export class TriBackend {
                 const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot);
                 const phiAir = solveTriStatic(mesh, fm, null, pot);
                 const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
-                const eps_static = W_eps / computeTriEnergy(phiAir, mesh, null);
+                const W_air = computeTriEnergy(phiAir, mesh, null);
+                const eps_static = W_eps / W_air;
                 energy.push(W_eps);
                 const fw = refineFullwave
                     ? fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static)
                     : null;
-                conv.push(fw ? fw.eps : eps_static);
+                // Drive convergence on the static characteristic impedance Z = sqrt(L/C)
+                // ∝ 1/sqrt(W_eps·W_air) (constant factors cancel in the relative change),
+                // matching the reference adaptive driver. Z keeps refining the conductor /
+                // inter-trace-gap regions (which set L) past the point where eps — a pure
+                // C-ratio — has already stabilised, so the adaptive does meaningful work and
+                // the loss / mutual-R cases gain margin.
+                conv.push(1 / Math.sqrt(Math.max(W_eps * W_air, 1e-300)));
                 const metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
                 let zz = null;
                 if (fw) { try { zz = computeHtZZMetric(mesh, fm, fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, fRef, this.condRect.rects, null, null, this.ctx.wasmSolver); } catch { zz = null; } }
