@@ -20,7 +20,7 @@
 // Mesh + freedom maps are built once and reused across a frequency sweep; only
 // the eigen-assembly (k²-dependent) and loss are recomputed per frequency.
 
-import createModule from './eigen_solver.js';
+import createModule from '../wasm_solver/eigen_solver.js';
 import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, tagMaterials } from './occ_to_mesh.js';

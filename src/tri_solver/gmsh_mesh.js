@@ -38,7 +38,7 @@ function _readIntArray(G, ptrPtr, nPtr) {
 // Load and initialize the gmsh WASM module. Call once; pass the returned G
 // to generateGmshMesh for every mesh.
 export async function initGmsh() {
-    const gmshUrl = new URL('./gmsh/build-wasm/gmsh.js', import.meta.url).href;
+    const gmshUrl = new URL('../wasm_solver/gmsh.js', import.meta.url).href;
     const G = await (await import(gmshUrl)).default();
     const stack = G.stackSave();
     const ierr  = G.stackAlloc(4);

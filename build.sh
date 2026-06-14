@@ -47,12 +47,18 @@ cp src/plotly-3.3.0.min.js dist/
 cp src/wasm_solver/solver.wasm dist/solver.wasm
 cp src/.htaccess dist/.htaccess
 
-# Triangular FEM backend: ship the self-contained tree verbatim (JS modules +
-# eigen_solver.wasm + gmsh/build-wasm/gmsh.wasm). The emscripten modules locate
-# their .wasm relative to themselves, so the directory layout must be preserved.
+# Triangular FEM backend: ship the self-contained tree verbatim (JS modules).
 # Drop the dev-only smoke test from the shipped copy.
 cp -r src/tri_solver dist/tri_solver
 rm -f dist/tri_solver/_smoke_test.mjs
+
+# Full-wave WASM runtime: tri_solver loads these from ../wasm_solver via
+# import.meta.url, and each emscripten module locates its .wasm relative to its
+# own .js, so eigen_solver.js/.wasm and gmsh.js/.wasm must sit together in
+# dist/wasm_solver/ (mirroring src/). Sources/submodules are NOT shipped.
+mkdir -p dist/wasm_solver
+cp src/wasm_solver/eigen_solver.js src/wasm_solver/eigen_solver.wasm dist/wasm_solver/
+cp src/wasm_solver/gmsh.js src/wasm_solver/gmsh.wasm dist/wasm_solver/
 
 # Cache-busting: append content hashes as query strings so browsers fetch
 # new versions when files change. The HTML must be served with no-cache headers

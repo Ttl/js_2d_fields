@@ -1,6 +1,6 @@
 // Phase 3 prototype: full-wave eigenmode solve on the generalized mesh.
 // static (Z0, eps_eff_static) + eigensolve (eps_eff_mode dispersion) + analyzeTriMode.
-import createModule from '../eigen_solver.js';
+import createModule from '../../wasm_solver/eigen_solver.js';
 import { createWasmHelpers } from '../fem_core.js';
 import { MicrostripSolver } from '../../microstrip.js';
 import { initGmsh } from '../gmsh_mesh.js';

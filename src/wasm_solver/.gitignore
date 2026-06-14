@@ -1,0 +1,12 @@
+# Emscripten build outputs — intentionally NOT tracked (large binaries bloat the
+# git history). Rebuild with `make` (see README.md) or copy the prebuilt files
+# from a machine that has them. gmsh.{js,wasm} in particular needs OpenCASCADE
+# cross-compiled to WASM, so it is distributed out-of-band rather than via git.
+#
+# Anchored to this directory so submodule build artifacts are unaffected.
+/solver.js
+/solver.wasm
+/eigen_solver.js
+/eigen_solver.wasm
+/gmsh.js
+/gmsh.wasm

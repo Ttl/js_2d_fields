@@ -18,7 +18,8 @@ Try it online: https://hforsten.com/field_solver.html
 
 ## Quick Start
 
-1. Host src folder on a web server (for example `python -m http.server 8000`). Open `src/field_solver.html` in a browser.
+1. Build (or obtain) the WASM solver binaries (see below). They are not checked into git.
+2. Host src folder on a web server (for example `python -m http.server 8000`). Open `src/field_solver.html` in a browser.
 
 ### Validity
 
@@ -37,11 +38,16 @@ Try it online: https://hforsten.com/field_solver.html
 node tests/test_vs_ref.js
 ```
 
-### Build WASM Solver
+### Build WASM Solvers
 
-WebAssembly (WASM) module is used for high-performance sparse matrix solving. This module is built using Emscripten and the Eigen C++ library.
-Compiled js and wasm is already included. Compiling is only needed if changes to
-WASM module are necessary.
+The solver numerics run as WebAssembly (WASM) modules built with Emscripten. All
+of them live in `src/wasm_solver/`:
+
+| Output                   | Source             | Used by                  |
+| ------------------------ | ------------------ | ------------------------ |
+| `solver.{js,wasm}`       | `solver.cpp`       | quasi-static FDM backend |
+| `eigen_solver.{js,wasm}` | `eigen_solver.cpp` | full-wave backend        |
+| `gmsh.{js,wasm}`         | `gmsh/` submodule  | full-wave mesh generation |
 
 #### Prerequisites
 
@@ -67,29 +73,24 @@ Verify installation:
 emcc --version
 ```
 
-**Eigen Library**
+**Submodules (Eigen, Spectra, gmsh)**
 
-The Eigen library is included as a git submodule. Initialize it:
+Third-party sources are git submodules under `src/wasm_solver/`. Initialize them:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-**gmsh**
-
-Needed for full-wave solver mesh generation.
-
-**Spectra**
-
-Needed for full-wave solver mesh generation.
-
 #### Build Steps
 
 ```bash
 cd src/wasm_solver
-make
+make all          # builds solver.{js,wasm} and eigen_solver.{js,wasm}
 ```
 
-This compiles `solver.cpp` using Emscripten and generates:
-- `solver.js` - JavaScript wrapper for the WASM module
-- `solver.wasm` - Compiled WebAssembly binary
+Building gmsh is heavier: it additionally needs OpenCASCADE cross-compiled to
+WASM. See `src/wasm_solver/README.md` for the OCCT prerequisite, then:
+
+```bash
+OCCT_WASM=/path/to/occt-wasm-install make gmsh   # builds gmsh.{js,wasm}
+```
