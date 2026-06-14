@@ -481,6 +481,7 @@
         <button class="tab-button" data-tab="results">Results</button>
         <button class="tab-button" data-tab="sparams">S-Parameters</button>
         <button class="tab-button" data-tab="sweep">Parameter Sweep</button>
+        <button class="tab-button" data-tab="modes">Modes</button>
         <button class="tab-button" data-tab="about">About</button>
     </div>
 
@@ -586,6 +587,29 @@
             </div>
         </div>
         <div id="sweep-plot" class="plot-container"></div>
+    </div>
+
+    <div id="tab-modes" class="tab-content">
+        <div class="results-controls">
+            <label style="color:var(--text-muted); font-size:0.9em;">Frequency:
+                <input type="text" class="unit-input" id="modes-freq" value="10 GHz" style="width:90px;"></label>
+            <label style="color:var(--text-muted); font-size:0.9em;">Number of modes:
+                <input type="number" id="modes-nev" value="6" min="1" max="30" style="width:60px;"></label>
+            <button id="btn-solve-modes" style="width:auto; padding:8px 18px;">Solve Modes</button>
+            <span id="modes-status" style="color:var(--text-muted); font-size:0.85em;"></span>
+            <span class="help-icon" onclick="showHelpModal('modes', event)">?</span>
+        </div>
+        <div class="modes-body">
+            <div id="modes-list" class="modes-list">
+                <p style="color:var(--text-muted); font-size:0.85em; padding:8px;">Click <b>Solve Modes</b> to compute the eigenmodes of the current geometry. Found modes are listed here; click one to plot its field.</p>
+            </div>
+            <div id="modes-plot" class="plot-container">
+                <div class="plotly-loading">
+                    <div class="plotly-loading-spinner"></div>
+                    <span>Loading Plotly library...</span>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div id="tab-about" class="tab-content">
@@ -843,6 +867,9 @@
 
             // Parameter sweep frequency - GHz
             'sweep-freq': 'GHz',
+
+            // Modes tab frequency - GHz
+            'modes-freq': 'GHz',
         };
 
         return unitMap[inputId] || '';
@@ -960,6 +987,10 @@
         bs_h_top: {
             title: 'Top Substrate Height',
             body: '<p>Distance from the top of the upper conductor to the bottom surface of the top ground plane.</p><p>Ground-to-ground spacing = Bottom + Middle + Top substrate heights (trace thickness is not counted separately).</p>'
+        },
+        modes: {
+            title: 'Modes',
+            body: '<p>Solves the full-wave eigenmodes of the current geometry (uses full-wave solver independent of the Solver dropdown).</p><p>Each mode is classified by its squared propagation constant &gamma;&sup2;:</p><ul><li><b>PROP</b>: propagating (&gamma;&sup2; &lt; 0), effective permittivity &epsilon;<sub>eff</sub> = &minus;&gamma;&sup2;/k&sup2;. Includes the quasi-TEM mode and propagating higher-order modes.</li><li><b>evan</b>: evanescent / below cutoff (&gamma;&sup2; &gt; 0).</li><li><b>spurious</b> / <b>null</b>: non-physical eigenvalues (&epsilon;<sub>eff</sub> &gt; &epsilon;<sub>r</sub>, the discrete null space).</li></ul><p><b>overlap</b> measures how closely a mode\'s transverse field matches the static (quasi-TEM) field distribution, normalized from 0 to 1. The fundamental quasi-TEM mode has an overlap near 1 (marked with <b>*</b> when above 0.5). Higher-order, radiation, and spurious modes have overlaps near 0.</p><p>Click any mode to plot its transverse E-field. Increase "Number of modes" to find more higher-order modes.</p>'
         }
     };
 

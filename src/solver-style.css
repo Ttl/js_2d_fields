@@ -237,6 +237,48 @@ button.stop-mode:hover {
     min-height: 400px;
 }
 
+/* Modes Tab */
+.modes-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+.modes-list {
+    flex: 0 0 380px;
+    overflow: auto;
+    border-right: 1px solid var(--border-color);
+    padding: 8px;
+}
+.modes-list table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.78em;
+}
+.modes-list th, .modes-list td {
+    border: 1px solid var(--border-color);
+    padding: 3px 6px;
+    text-align: right;
+    white-space: nowrap;
+}
+.modes-list th {
+    background: #333;
+    color: var(--text-muted);
+    position: sticky;
+    top: 0;
+}
+.modes-list tbody tr { cursor: pointer; }
+.modes-list tbody tr:hover { background: #2c2c3a; }
+.modes-list tr.selected { background: #2f3b5e; }
+.modes-list tr.propagating td.status { color: #6f6; }
+.modes-list tr.evanescent td.status { color: #fc6; }
+.modes-list tr.near_cutoff { opacity: 0.7; }
+.modes-list tr.near_cutoff td.status { color: #fc6; }
+.modes-list tr.spurious { opacity: 0.45; }
+.modes-list tr.spurious td.status { color: #f66; }
+.modes-list tr.nullspace { opacity: 0.45; }
+.modes-list tr.nullspace td.status { color: #888; }
+.modes-body .plot-container { flex: 1; min-height: 400px; }
+
 /* S-Parameters Tab */
 .sparam-controls {
     display: flex;

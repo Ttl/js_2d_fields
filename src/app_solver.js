@@ -24,6 +24,11 @@ let lastSweepGeometry = null;  // Geometry hash at sweep time (excluding swept p
 let lastSweepParam = null;     // Which parameter was swept
 let lastSweepDisplayUnit = null; // Display unit used during last sweep
 
+// Modes tab state
+let isSolvingModes = false;
+let modesResult = null;          // last solveModes() summary { modes, nconv, ... }
+let modesSelectedIdx = -1;       // index into modesResult.modes of the plotted mode
+
 // Full parameter config table. Each entry drives input writing + axis labeling.
 // fixedUnit: cosmetic axis label for plain-number inputs (sigma). Absent = derive from geometry input.
 const SWEEP_PARAM_CONFIG = {
@@ -723,7 +728,290 @@ function switchTab(tabName) {
     } else if (tabName === 'geometry') {
         // Refresh the geometry plot when switching back
         draw();
+    } else if (tabName === 'modes') {
+        const Plotly = getPlotly();
+        const c = document.getElementById('modes-plot');
+        if (Plotly && c) {
+            if (c.data) {
+                // Resize the (possibly hidden-at-render) mode plot to the now-visible tab.
+                Plotly.Plots.resize(c);
+            } else {
+                // First visit, nothing solved yet: show a geometry preview of the structure.
+                if (!solver) updateGeometry();
+                plotModesGeometry();
+            }
+        }
     }
+}
+
+// ===================== Modes Tab =====================
+// Full-wave eigenmode viewer: solve the cross-section's modes at a chosen frequency,
+// list them, and plot the selected mode's transverse E-field. Always uses the
+// triangular full-wave backend (independent of the sidebar Solver dropdown).
+
+async function runModesSolve() {
+    if (isSolvingModes) return;
+    if (isSimulating || isSweeping) { setModesStatus('Cannot solve modes while a simulation is running.'); return; }
+
+    const freq = getInputValue('modes-freq');
+    let nev = parseInt(document.getElementById('modes-nev').value);
+    if (!isFinite(freq) || freq <= 0) { setModesStatus('Enter a valid frequency.'); return; }
+    if (!isFinite(nev) || nev < 1) { nev = 1; document.getElementById('modes-nev').value = '1'; }
+    nev = Math.min(nev, 30);
+
+    // Rebuild the solver from the current sidebar geometry parameters.
+    updateGeometry();
+    if (!solver) { setModesStatus('Geometry is invalid — check parameters.'); return; }
+
+    const btn = document.getElementById('btn-solve-modes');
+    isSolvingModes = true;
+    btn.disabled = true;
+    modesResult = null; modesSelectedIdx = -1;
+    setModesStatus('Meshing…');
+    log(`Solving ${nev} modes at ${formatValueWithUnit(freq, 'GHz')}…`);
+
+    // Drive the adaptive mesh refinement with the sidebar Solver Settings, same as the
+    // main solve (Max Nodes is entered in thousands).
+    const p = getParams();
+    const refineOpts = {
+        maxRefineIters: p.max_iters,
+        refineTol: p.tolerance,
+        maxNodes: p.max_nodes * 1000,
+        minConvergedPasses: p.min_converged_passes,
+    };
+
+    try {
+        const onProgress = (pp) => {
+            setModesStatus(`Refinement pass ${pp.iteration}/${pp.max_iterations}: ` +
+                `param err=${(isFinite(pp.param_error) ? pp.param_error : 1).toExponential(2)}, ${pp.n_tris || 0} triangles…`);
+            log(`Modes pass ${pp.iteration}: param error=${(isFinite(pp.param_error) ? pp.param_error : 1).toExponential(3)}, Tris=${pp.n_tris || 0}`);
+        };
+        // Yield once so the "Meshing…" status paints before the synchronous eigensolve.
+        await new Promise(r => setTimeout(r, 0));
+        const result = await solver.solveModes(freq, nev, onProgress, refineOpts);
+        modesResult = result;
+        if (result.error) {
+            setModesStatus('Solve failed: ' + result.error);
+            log('Modes solve error: ' + result.error);
+        } else if (!result.modes || result.modes.length === 0) {
+            setModesStatus('No modes converged. Try increasing the number of modes.');
+        } else {
+            const nProp = result.modes.filter(m => m.status === 'propagating').length;
+            setModesStatus(`${result.modes.length} converged, ${nProp} propagating (N=${result.N}, ${result.nTris} triangles).`);
+            log(`Found ${result.modes.length} modes (${nProp} propagating).`);
+        }
+        renderModesTable();
+        // Auto-select the quasi-TEM mode (highest overlap with the static drive).
+        if (modesResult && modesResult.modes && modesResult.modes.length) {
+            let best = 0, bestOvl = -1;
+            modesResult.modes.forEach((m, i) => { if (m.overlap > bestOvl) { bestOvl = m.overlap; best = i; } });
+            selectMode(best, true);   // fresh solve → focus the view on the structure
+        }
+    } catch (e) {
+        setModesStatus('Solve failed: ' + (e.message || e));
+        log('Modes solve exception: ' + (e.message || e));
+        console.error(e);
+    } finally {
+        isSolvingModes = false;
+        btn.disabled = false;
+    }
+}
+
+function setModesStatus(msg) {
+    const el = document.getElementById('modes-status');
+    if (el) el.textContent = msg;
+}
+
+function formatG2(re) {
+    const a = Math.abs(re);
+    if (a !== 0 && (a >= 1e5 || a < 1e-2)) return re.toExponential(2);
+    return re.toFixed(2);
+}
+
+function renderModesTable() {
+    const container = document.getElementById('modes-list');
+    if (!container) return;
+    if (!modesResult || !modesResult.modes || !modesResult.modes.length) {
+        container.innerHTML = '<p style="color:var(--text-muted); font-size:0.85em; padding:8px;">No modes to display.</p>';
+        return;
+    }
+    const STATUS_LABEL = { propagating: 'PROP', near_cutoff: 'evan?', evanescent: 'evan', spurious: 'spurious', nullspace: 'null' };
+    let html = '<table><thead><tr><th>#</th><th>status</th><th>&epsilon;<sub>eff</sub></th><th>&gamma;&sup2;</th><th>overlap</th></tr></thead><tbody>';
+    modesResult.modes.forEach((m, i) => {
+        const eeff = m.eps_eff != null ? m.eps_eff.toFixed(4) : '–';
+        const star = m.overlap > 0.5 ? ' *' : '';
+        // "#" = position in the energy-sorted list (sequential), matching the plot title;
+        // the raw eigensolve index (m.idx) is not meaningful to the user.
+        html += `<tr class="${m.status}" data-idx="${i}">` +
+            `<td>${i}</td><td class="status">${STATUS_LABEL[m.status] || m.status}${star}</td>` +
+            `<td>${eeff}</td><td>${formatG2(m.g2Re)}</td><td>${m.overlap.toFixed(3)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+    container.querySelectorAll('tr[data-idx]').forEach(tr =>
+        tr.addEventListener('click', () => selectMode(parseInt(tr.dataset.idx))));
+    highlightSelectedMode();
+}
+
+function highlightSelectedMode() {
+    document.querySelectorAll('#modes-list tr[data-idx]').forEach(tr =>
+        tr.classList.toggle('selected', parseInt(tr.dataset.idx) === modesSelectedIdx));
+}
+
+// resetView=true recomputes the focused view (used right after a fresh solve); when
+// switching between modes we keep the user's current zoom/pan so the plot doesn't jump.
+function selectMode(idx, resetView = false) {
+    if (!modesResult || !modesResult.modes || !modesResult.modes[idx]) return;
+    modesSelectedIdx = idx;
+    highlightSelectedMode();
+    const grid = solver.getModeField(idx);
+    plotModesField(grid, modesResult.modes[idx], idx, resetView);
+}
+
+function plotModesField(grid, mode, idx, resetView = false) {
+    const Plotly = getPlotly();
+    const container = document.getElementById('modes-plot');
+    if (!Plotly || !container || !solver) return;
+    if (!grid) {
+        Plotly.purge(container);
+        container.innerHTML = '<p style="color:var(--text-muted); padding:12px;">No field available for this mode.</p>';
+        return;
+    }
+
+    const maxY = Math.max(
+        solver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
+        solver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
+
+    const yArr = Array.from(grid.y);
+    const maxYIdx = yArr.findIndex(y => y > maxY);
+    const nyDisp = maxYIdx > 0 ? maxYIdx : yArr.length;
+    const xMM = Array.from(grid.x, v => v * 1000);
+    const yMM = yArr.slice(0, nyDisp).map(v => v * 1000);
+    // A mode's eigenvector has an arbitrary scale, so absolute |E| is meaningless — show
+    // the field normalized to its own maximum (0–1). This also keeps the colorbar tick
+    // labels a constant width across modes, so switching modes never resizes the plot
+    // area (and thus never shifts the equal-aspect x-range).
+    let zmax = 0;
+    for (const row of grid.E) for (const v of row) if (v > zmax) zmax = v;
+    const inv = zmax > 0 ? 1 / zmax : 1;
+    const z = grid.E.slice(0, nyDisp).map(row => Array.from(row, v => v * inv));
+
+    const eeff = mode.eps_eff != null ? `, ε_eff=${mode.eps_eff.toFixed(3)}` : '';
+    const STATUS_LABEL = { propagating: 'propagating', near_cutoff: 'near cutoff (evan?)', evanescent: 'evanescent', spurious: 'spurious', nullspace: 'null-space' };
+    const title = `Mode ${idx} — transverse |E| (${STATUS_LABEL[mode.status] || mode.status}${eeff})`;
+
+    // Switching modes (a plot already exists, no view reset): update only the field data
+    // and title in place — leaving the axes untouched preserves the current zoom/pan
+    // exactly. (Re-issuing the layout would re-run the equal-aspect scaleanchor solver and
+    // drift the x-range a little each time.) The colorbar auto-rescales to the new field.
+    if (!resetView && container.data && container.data.length) {
+        Plotly.restyle(container, { z: [z], x: [xMM], y: [yMM] }, [0]);
+        Plotly.relayout(container, { 'title.text': title });
+        return;
+    }
+
+    // Fresh plot (first render or after a new solve): full render at the focused view.
+    const shapes = buildGeometryShapes(maxY);
+    const view = computeModesView(maxY);
+
+    const traces = [{
+        type: 'heatmap', x: xMM, y: yMM, z,
+        colorscale: 'Viridis', zsmooth: 'best',
+        zmin: 0, zmax: 1,
+        colorbar: { title: { text: '|E_t| / max', font: { color: '#aaa' } }, tickfont: { color: '#aaa' } },
+        hoverinfo: 'skip',
+    }];
+
+    const layout = {
+        title: { text: title, font: { color: '#fff' } },
+        xaxis: { title: { text: 'Width (mm)', font: { color: '#aaa' } }, scaleanchor: 'y', scaleratio: 1, range: view.xRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        yaxis: { title: { text: 'Height (mm)', font: { color: '#aaa' } }, range: view.yRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        margin: { l: 70, r: 90, t: 50, b: 60 },
+        showlegend: false, hovermode: 'closest', dragmode: 'pan',
+        paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' },
+        shapes,
+    };
+
+    Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+}
+
+// Draw a geometry-only preview into the mode plot (before any solve), so the tab shows
+// the structure like the reference viewer does.
+function plotModesGeometry() {
+    const Plotly = getPlotly();
+    const container = document.getElementById('modes-plot');
+    if (!Plotly || !container || !solver || !solver.conductors) return;
+    const maxY = Math.max(
+        solver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
+        solver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
+    const view = computeModesView(maxY);
+    // Invisible scatter spanning the view so the axes (and shapes) scale correctly.
+    const traces = [{ type: 'scatter', x: [view.xRange[0], view.xRange[1]], y: [view.yRange[0], view.yRange[1]],
+        mode: 'markers', marker: { size: 0, opacity: 0 }, hoverinfo: 'skip', showlegend: false }];
+    const layout = {
+        title: { text: 'Geometry — click Solve Modes to compute fields', font: { color: '#fff' } },
+        xaxis: { title: { text: 'Width (mm)', font: { color: '#aaa' } }, scaleanchor: 'y', scaleratio: 1, range: view.xRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        yaxis: { title: { text: 'Height (mm)', font: { color: '#aaa' } }, range: view.yRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        margin: { l: 70, r: 90, t: 50, b: 60 },
+        showlegend: false, hovermode: 'closest', dragmode: 'pan',
+        paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' },
+        shapes: buildGeometryShapes(maxY),
+    };
+    Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+}
+
+// Focused view (mm) around the signal conductors, mirroring the geometry tab's zoom
+// (signal conductors fill SIGNAL_CONDUCTOR_VIEW_FRACTION of the x-axis) so the field
+// isn't lost in the wide simulation domain.
+const MODES_VIEW_FRACTION = 1 / 3;
+function computeModesView(maxY) {
+    const signal = solver.conductors.filter(c => c.is_signal);
+    const grounds = solver.conductors.filter(c => !c.is_signal);
+    if (!signal.length) {
+        return { xRange: [-solver.domain_width * 500, solver.domain_width * 500], yRange: [0, maxY * 1000] };
+    }
+    const xl = Math.min(...signal.map(c => c.x_min));
+    const xr = Math.max(...signal.map(c => c.x_max));
+    const center = (xl + xr) / 2;
+    const viewWidth = (xr - xl) / MODES_VIEW_FRACTION;
+    const xRange = [(center - viewWidth / 2) * 1000, (center + viewWidth / 2) * 1000];
+
+    const bottomY = grounds.length ? Math.min(...grounds.map(g => g.y_min)) : 0;
+    const hasTopGround = grounds.some(c => c.y_max >= maxY * 0.9);
+    let yRange;
+    if (hasTopGround) {
+        yRange = [bottomY * 1000, maxY * 1000];
+    } else {
+        const topOfConductors = Math.max(...solver.conductors.map(c => c.y_max));
+        const viewHeight = (topOfConductors - bottomY) / MODES_VIEW_FRACTION;
+        yRange = [bottomY * 1000, (bottomY + viewHeight) * 1000];
+    }
+    return { xRange, yRange };
+}
+
+// Plotly rectangle shapes for the geometry (dielectrics faint, conductors solid),
+// drawn above the heatmap so the mode field is shown over the structure.
+function buildGeometryShapes(maxY) {
+    const shapes = [];
+    for (const diel of solver.dielectrics) {
+        if (diel.y_min > maxY) continue;
+        const yMax = Math.min(diel.y_max, maxY);
+        const er = diel.epsilon_r;
+        let fillcolor = 'rgba(255,255,255,0.0)';
+        if (er > 1.01) {
+            const intensity = Math.min(255, 100 + (er - 1) * 30);
+            fillcolor = `rgba(100, ${intensity}, 100, 0.12)`;
+        }
+        shapes.push({ type: 'rect', x0: diel.x_min * 1000, y0: diel.y_min * 1000, x1: diel.x_max * 1000, y1: yMax * 1000,
+            fillcolor, line: { color: 'rgba(160,160,160,0.25)', width: 0.5 }, layer: 'above' });
+    }
+    for (const cond of solver.conductors) {
+        if (cond.y_min > maxY) continue;
+        const yMax = Math.min(cond.y_max, maxY);
+        shapes.push({ type: 'rect', x0: cond.x_min * 1000, y0: cond.y_min * 1000, x1: cond.x_max * 1000, y1: yMax * 1000,
+            fillcolor: 'rgba(217,119,6,1.0)', line: { color: 'rgba(0,0,0,0.6)', width: 1 }, layer: 'above' });
+    }
+    return shapes;
 }
 
 // Translate the "Solver" dropdown value into the backend + triangular loss options.
@@ -1606,10 +1894,11 @@ async function runParameterSweep() {
 }
 
 function resizeCanvas() {
-    const container = document.getElementById('sim_canvas');
     const Plotly = getPlotly();
-    if (container && Plotly) {
-        Plotly.Plots.resize(container);
+    if (!Plotly) return;
+    for (const id of ['sim_canvas', 'modes-plot']) {
+        const container = document.getElementById(id);
+        if (container && container.data) Plotly.Plots.resize(container);
     }
 }
 
@@ -1633,6 +1922,10 @@ function bindEvents() {
             switchTab(btn.dataset.tab);
         });
     });
+
+    // Modes tab events
+    const btnSolveModes = document.getElementById('btn-solve-modes');
+    if (btnSolveModes) btnSolveModes.addEventListener('click', runModesSolve);
 
     // Parameter sweep events
     document.getElementById('btn-run-sweep').addEventListener('click', () => {

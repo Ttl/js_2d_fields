@@ -18,9 +18,9 @@ page.on('response', r => { if (r.status() === 404 && !/favicon/.test(r.url())) e
 await page.goto(URL, { waitUntil: 'networkidle' });
 console.log('page loaded');
 
-// Select triangular backend
-await page.selectOption('#mesh_backend', 'triangular');
-console.log('selected triangular backend:', await page.inputValue('#mesh_backend'));
+// Select the full-wave (triangular) backend
+await page.selectOption('#mesh_backend', 'fullwave_mqs');
+console.log('selected full-wave backend:', await page.inputValue('#mesh_backend'));
 
 // Isolate: discrete sweep, few points, to measure per-frequency solve cost.
 await page.evaluate(() => {

@@ -1432,6 +1432,36 @@ export class FieldSolver2D {
         return this._triBackend;
     }
 
+    // ---- Mode viewer ----------------------------------------------------------
+    // Solve the full-wave eigenproblem for the lowest `nev` modes at `freq` and return
+    // a classified list (see TriBackend.solveModes). Always uses the triangular full-wave
+    // backend on the FULL domain (symmetry off) so symmetric AND antisymmetric higher-order
+    // modes both appear. A dedicated backend instance is cached on `_modesBackend` so it
+    // does not disturb the main (possibly half-domain) solve in `_triBackend`.
+    // refineOpts wires the sidebar adaptive-mesh controls (maxRefineIters ← Max
+    // Iterations, refineTol ← Tolerance, maxNodes ← Max Nodes) into buildMesh's
+    // refinement loop, exactly like solve_adaptive does for the main solve.
+    async solveModes(freq, nev = 4, onProgress = null, refineOpts = {}) {
+        const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
+        const ctx = await initTriBackend();
+        // modesFreq lets buildMesh size the bulk to the wavelength at this frequency, so
+        // high-frequency cavity/higher-order modes are resolved (and not mis-flagged as
+        // spurious by the mesh-convergence test).
+        // Mesh.Algorithm 1 (MeshAdapt) gives the cleanest eigenmode spectrum for the mode
+        // viewer (fewer spurious low-ε_eff artifacts than the default frontal-Delaunay).
+        const opts = { ...(this.tri_opts || {}), symmetry: false, modesFreq: freq,
+            gmshOptions: { 'Mesh.Algorithm': 1 }, ...refineOpts };
+        const tri = new TriBackend(ctx, this, opts);
+        await tri.buildMesh(onProgress);   // adaptive refinement passes, emitted via onProgress
+        this._modesBackend = tri;
+        return tri.solveModes(freq, nev);
+    }
+
+    // Resample the sortedIdx-th mode's field from the last solveModes() for plotting.
+    getModeField(sortedIdx) {
+        return this._modesBackend ? this._modesBackend.getModeField(sortedIdx) : null;
+    }
+
     async solve_adaptive(options = {}) {
         /**
          * Adaptive mesh solve with robust convergence criteria.
@@ -1471,6 +1501,7 @@ export class FieldSolver2D {
                 maxRefineIters: options.max_iters,
                 refineTol: options.energy_tol,
                 maxNodes: options.max_nodes,
+                minConvergedPasses: options.min_converged_passes,
             });
             return tri.solveAt(this.freq);
         }

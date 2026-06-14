@@ -37,7 +37,7 @@ import { checkMeshQuality } from './tri_mesh.js';
 // the dispersive effective permittivity.
 const F_STATIC_MAX = 100e6;
 import { calculateZrough } from './surface_roughness.js';
-import { resampleStatic } from './resample.js';
+import { resampleStatic, resampleModeField } from './resample.js';
 import { Complex } from '../complex.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
 
@@ -88,6 +88,26 @@ function buildLossEdges(mesh, fm, condRect) {
         if (onWall(x0, y0) && onWall(x1, y1)) isLoss[e] = 1;
     }
     return isLoss;
+}
+
+// Complex permittivity map for the mode-viewer EIGENSOLVE. The reference viewer folds the
+// dielectric loss into ε (im = −ε_r·tanδ), and that small imaginary part DAMPS the discrete
+// vector-FEM spurious modes — pushing them off the real-γ² propagating axis — so they no
+// longer masquerade as physical propagating modes. tagMaterials stores ε real (im=0) with the
+// loss kept separately (for the energy-based G), so reconstruct the complex map here. This is
+// THE reason the OCC backend saw spurious modes the reference's (lossy) eigensolve did not —
+// it was never the mesh.
+function lossyEpsMap(mesh, tandFloor = 0.002) {
+    const { epsMap, lossMap } = mesh;
+    const out = new Array(epsMap.length);
+    for (let t = 0; t < epsMap.length; t++) {
+        const er = epsMap[t].re;
+        // Floor a tiny loss so the spurious-mode damping still works for (near-)lossless
+        // dielectrics; negligible vs a real tanδ and it barely moves ε_eff=−Re(γ²)/k².
+        const loss = Math.max(lossMap ? lossMap[t].re : 0, er * tandFloor);
+        out[t] = { re: er, im: -loss };
+    }
+    return out;
 }
 
 // Effective conductor surface impedance σ/Rq: plating coats the current-carrying
@@ -287,6 +307,19 @@ export class TriBackend {
 
     get modeNames() { return this.solver.is_differential ? ['odd', 'even'] : ['single']; }
 
+    // Cap a bulk element size to a fraction of the shortest in-medium wavelength at the
+    // mode-viewer frequency (opts.modesFreq), so high-frequency cavity / higher-order modes
+    // are actually resolved. Without this, a genuine high-f mode is under-resolved on the
+    // geometry-scale mesh, drifts between the fine and coarse solves, and the mesh-convergence
+    // test mis-flags it as spurious. No effect in the quasi-TEM regime (λ/12 ≫ geometry hCoarse).
+    _wavelengthCap(h) {
+        const f = this.opts.modesFreq;
+        if (!f) return h;
+        const epsMax = Math.max(1, ...this.solver.dielectrics.map(d => d.epsilon_r || 1));
+        const lamMin = c0 / (f * Math.sqrt(epsMax));
+        return Math.min(h, lamMin / 12);
+    }
+
     // Build mesh (with symmetry + adaptive refinement), then solve & cache the
     // (frequency-independent) static problem per mode and resample fields.
     // onProgress({iteration, max_iterations, energy_error, param_error, nodes_x,
@@ -320,11 +353,12 @@ export class TriBackend {
         // rough-stripline roughness loss is the binding constraint (it sits ~7% high vs
         // ref on any mesh); coarsening further than this eats its margin.
         const hFine = this.opts.hFine ?? Math.min(tAbs, wRef / 4) * 1.5;
-        const hCoarse = this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5;
+        const hCoarse = this._wavelengthCap(this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5);
         let mesh = buildOccMeshFromGeometry(this.ctx.G, {
             conductors: s.conductors, dielectrics: s.dielectrics,
             domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
             meshConductorInterior: true,   // conductor interiors meshed for the MQS loss solve
+            gmshOptions: this.opts.gmshOptions,
         });
         this.condRect = mesh.condRect;
 
@@ -345,6 +379,11 @@ export class TriBackend {
         const refTol = this.opts.refineTol ?? 0.003;
         const refineFrac = this.opts.refineFrac ?? 0.15;   // matches the FDM backend's fraction
         const minRefineNodes = this.opts.minRefineNodes ?? 0;
+        // Require the convergence test to hold for this many CONSECUTIVE passes before
+        // stopping (matches the FDM backend's min_converged_passes / UI "Min Converged
+        // Passes"): guards against a premature stop on a single lucky pass.
+        const minConvergedPasses = Math.max(1, this.opts.minConvergedPasses ?? 1);
+        let convergedCount = 0;
         // Refine on ALL solved modes (differential: odd AND even) so each mode's
         // critical regions are resolved — crucially the inter-trace gap, where the
         // odd mode's field concentrates and the mutual resistance R[12] comes from.
@@ -420,7 +459,10 @@ export class TriBackend {
             // eps (it needs the inter-trace gap resolved), so for differential pairs
             // keep refining past eps-convergence until a node floor is reached.
             const enoughNodes = mesh.nNodes >= minRefineNodes;
-            if (it === maxIters || (maxRel < refTol && enoughNodes) || mesh.nNodes > maxNodes) break;
+            // Count consecutive converged passes; only stop once minConvergedPasses in a
+            // row meet the tolerance (reset the streak on any non-converged pass).
+            if (maxRel < refTol && enoughNodes) convergedCount++; else convergedCount = 0;
+            if (it === maxIters || convergedCount >= minConvergedPasses || mesh.nNodes > maxNodes) break;
             const marked = markTrianglesForRefinement(metric, refineFrac);
             const refined = refineTriMesh(mesh, marked);
             refined.condRect = this.condRect;
@@ -707,6 +749,121 @@ export class TriBackend {
         this.solver.mesh_generated = true;
         return result;
     }
+
+    // ---- Mode viewer ----------------------------------------------------------
+    // Solve the full-wave eigenproblem at frequency f for the lowest `nev` modes and
+    // return a classified list (propagating / evanescent / spurious / null-space), the
+    // same way microstrip_viewer_gmsh.html does. Unlike solveAt (which picks only the
+    // single quasi-TEM mode), this exposes EVERY converged mode so the UI can list them
+    // and plot each one's field. Uses the full domain (the modes backend is built with
+    // symmetry:false) and the natural wall BCs — no differential drive, since the
+    // eigenmodes are a property of the geometry, not the excitation.
+    // Returns { modes:[{idx, g2Re, g2Im, eps_eff|null, overlap, status}], nconv, N, nTris }.
+    // Per-mode eigenvectors are cached for getModeField(); eps_eff is -γ²/k² for
+    // propagating modes (γ²<0), null otherwise.
+    solveModes(f, nev = 4) {
+        if (!this.mesh) this.buildMesh();
+        if (this.solver.use_causal_materials) this._applyCausal(f);
+        const s = this.solver, cr = this.condRect, mesh = this.mesh;
+        const st = this._static[this.modeNames[0]];   // any cached static solve seeds the shift
+        const { fm, phiEps, eps_eff_static } = st;
+        const k2 = (2 * Math.PI * f / c0) ** 2;
+        // Radiating first-order ABC on the OPEN walls (=== true → the Robin radiation term
+        // in assembleTriFEM), exactly like the reference viewer (microstrip_viewer_gmsh.html:
+        // abc={top,left,right:true}). This absorbs outgoing waves so the open structure's
+        // bound quasi-TEM mode is found ONCE and cleanly, instead of the spurious
+        // near-degenerate duplicates a closed PMC box produces. 'gnd' walls stay PEC. The
+        // freedom map (built with 'pmc', same truthiness → same free DOFs) is reused as-is;
+        // only the assembled matrices differ (ABC adds an imaginary boundary term).
+        const w = cr.wallPEC || {};
+        const abc = {};
+        if (!w.left) abc.left = true;
+        if (!w.right) abc.right = true;
+        if (!w.top) abc.top = true;
+        if (!w.bottom) abc.bottom = true;
+        let fem;
+        try { fem = assembleTriFEM(mesh, fm, k2, lossyEpsMap(mesh), abc, cr, null); }
+        catch (e) { return { modes: [], nconv: 0, error: String(e && e.message || e) }; }
+        const N = fem.N;
+        // Static-field "drive" seeds for every physical conductor excitation (single-ended:
+        // one; differential: even AND odd). A genuine quasi-TEM mode matches ONE of these
+        // (high overlap); a spurious discrete gradient mode matches none. All modes share
+        // this fm (symmetry off), so each drive's phiEps projects into the same DOF space.
+        const seeds = this.modeNames.map(m => staticToEdgeDofs(this._static[m].phiEps, mesh, fm));
+        const seed = seeds[0];
+        // Shift-invert centered on the quasi-TEM eigenvalue (-k²·eps_static) converges the
+        // fundamental and the nearby higher-order modes first. Widen the Krylov subspace so
+        // several modes resolve at once.
+        const ncv = Math.min(Math.max(2 * nev + 1, 20), N - 1);
+        let res;
+        try { res = this.ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_eff_static, 0], nev, ncv, seed); }
+        catch (e) { return { modes: [], nconv: 0, error: String(e && e.message || e) }; }
+        if (!res || !res.nconv) return { modes: [], nconv: 0 };
+
+        const epsMax = Math.max(1, ...s.dielectrics.map(d => d.epsilon_r || 1));
+        const nullThresh = k2 * 1e-6;
+        // Classification — the reference viewer's rule, which now works because the lossy
+        // eigensolve (lossyEpsMap) damps the discrete vector-FEM spurious modes out of the
+        // propagating range, so what remains in 0 < ε_eff < ε_r are the genuine quasi-TEM +
+        // cavity/higher-order modes (verified to match the reference at 10/50/100 GHz):
+        //   • ε_eff > ε_r           → spurious (non-physical, faster-than-the-densest-medium)
+        //   • |γ²| ≈ 0              → null space
+        //   • γ² < 0                → propagating (ε_eff = −γ²/k²)
+        //   • γ² > 0                → evanescent / below cutoff
+        // Plus: an OPEN domain (any radiating ABC wall) has no bound modes below the light
+        // line — ε_eff < 1 there is the radiation continuum of the truncated domain, not a
+        // guided mode — so flag those spurious. An enclosed (all-PEC) box does have them
+        // (cavity modes above their cutoff), so they stay propagating.
+        const isEnclosed = !(abc.left || abc.right || abc.top || abc.bottom);
+        const list = [];
+        for (let i = 0; i < res.nconv; i++) {
+            const g2Re = res.evalsRe[i], g2Im = res.evalsIm[i];
+            const vRe = res.evecsRe.slice(i * N, (i + 1) * N);
+            const vIm = res.evecsIm.slice(i * N, (i + 1) * N);
+            // overlap of the transverse part with the BEST-matching conductor drive (for
+            // display + auto-selecting the quasi-TEM mode; no longer used for classification).
+            let overlap = 0;
+            for (const sd of seeds) {
+                let dot = 0, nS = 0, nV = 0;
+                for (let k = 0; k < fm.nFreeTransverse; k++) { dot += sd[k] * vRe[k]; nS += sd[k] ** 2; nV += vRe[k] ** 2; }
+                const o = nS > 0 && nV > 0 ? Math.abs(dot) / Math.sqrt(nS * nV) : 0;
+                if (o > overlap) overlap = o;
+            }
+            let status, eps_eff = null;
+            if (g2Re < -k2 * epsMax * 1.01) status = 'spurious';
+            else if (Math.abs(g2Re) < nullThresh) status = 'nullspace';
+            else if (g2Re < 0) {
+                eps_eff = -g2Re / k2;
+                status = (!isEnclosed && eps_eff < 1.0) ? 'spurious' : 'propagating';
+            } else status = 'evanescent';
+            list.push({ idx: i, g2Re, g2Im, eps_eff, overlap, status, vRe, vIm });
+        }
+        list.sort((a, b) => a.g2Re - b.g2Re);
+        this._modesState = { fm, list, f, k2 };
+        return {
+            modes: list.map(({ vRe, vIm, ...m }) => m),   // strip eigenvectors from the summary
+            nconv: res.nconv, N, nTris: mesh.nTris,
+        };
+    }
+
+    // Resample the transverse E-field of the sortedIdx-th mode from the last solveModes()
+    // onto a grid for plotting. Returns { x, y, E, Ex, Ey } (see resampleModeField) or null.
+    getModeField(sortedIdx) {
+        const ms = this._modesState;
+        if (!ms || !ms.list[sortedIdx]) return null;
+        const m = ms.list[sortedIdx];
+        let grid = null;
+        try {
+            const mr = this.solver.mesher;
+            if (mr && typeof mr.generate_mesh === 'function') {
+                const [gx, gy] = mr.generate_mesh();
+                if (gx && gy && gx.length && gy.length) grid = { x: gx, y: gy };
+            }
+        } catch { grid = null; }
+        return resampleModeField(this.mesh, ms.fm, m.vRe, m.vIm, this.domain,
+            { resolution: this.opts.resolution, grid });
+    }
+
 }
 
 // even/odd modal -> physical 2x2 (matches field_solver._modal_to_physical_rlgc)
