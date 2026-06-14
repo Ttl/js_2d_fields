@@ -617,7 +617,7 @@
             <h2>2D Transmission Line Field Solver</h2>
             <p>by <a href="https://hforsten.com" target="_blank">Henrik Forstén</a> | <a href="https://github.com/Ttl/js_2d_fields" target="_blank">Source code & issues</a></p>
             <p style="color: #888; font-size: 0.85em;">Version: BUILD_VERSION</p>
-            <p>A quasi-static 2D field solver for transmission line analysis using the finite difference method with adaptive mesh refinement.</p>
+            <p>A quasi-static and full-wave 2D field solver for transmission line analysis with adaptive mesh refinement.</p>
 
             <h3>Validity</h3>
             <ul>
@@ -628,25 +628,21 @@
                 <li>Suitable for impedance control, loss estimation, and S-parameter generation in the vast majority of PCB transmission line applications.</li>
             </ul>
 
-            <h3>Limitations</h3>
-            <ul>
-                <li>Higher-order modes, dispersion, and cutoff behavior are not modeled. Structures that support non-TEM modes (e.g., waveguides) are outside the solver's validity range.</li>
-                <li>Current is modeled at the surface for AC and DC resistance is blended smoothly at low frequencies. Full 2D/3D current density inside conductors is not solved, which can reduce accuracy at frequencies where skin depth is comparable to conductor thickness.</li>
-                <li>At DC and low frequencies (~&lt;1 MHz), return current spreads over the ground plane. Since the solver infers inductance from capacitance, partial inductance and finite ground width effects may be inaccurate.</li>
-                <li>Results apply to uniform, infinitely long transmission lines.</li>
-                <li>Radiation is not modeled</li>
-            </ul>
-
             <h3>Methodology</h3>
-            <p>The solver computes the characteristic impedance and propagation parameters of transmission lines by solving Laplace's equation for the electric potential distribution in the cross-section:</p>
-            <p style="text-align: center; font-family: serif; font-size: 1.1em;">&nabla;&sup2;V = 0</p>
-            <p>From the potential solution, the capacitance per unit length is calculated by integrating the electric field around the conductor. The inductance is determined by solving the same problem with air dielectric to find C<sub>0</sub>, then using:</p>
-            <p style="text-align: center; font-family: serif; font-size: 1.1em;">L = 1 / (c&sup2; &middot; C<sub>0</sub>)</p>
-            <p>where c is the speed of light.</p>
+            <p><b>Quasi-static solver</b> computes the characteristic impedance
+            and propagation parameters of transmission lines by solving
+            Laplace's equation for the electric potential distribution in the
+            cross-section.</p>
 
-            <h3>Loss Calculations</h3>
-            <p><strong>Conductor loss</strong> is computed with perturbation method that calculates losses only on conductor boundaries. DC bulk resistance is blended at low frequencies for better loss at frequencies where skin depth is of similar scale as conductor dimensions. The surface roughness model implements <a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">Gradient model</a>.</p>
-            <p><strong>Dielectric loss</strong> is calculated from the loss tangent of each dielectric region, weighted by the field energy distribution.</p>
+            <p><b>Full-wave solver</b> solves Maxwell's equations for the guided
+            mode as an eigenvalue problem (using Nédélec elements) capturing
+            dispersion effects that quasi-static solver misses.
+
+            Conductor loss uses a magneto-quasi-static (MQS) solve: instead of
+            treating the metal as a surface impedance, it meshes the conductor
+            interior at finite conductivity and solves for the eddy currents the
+            mode drives inside it, resolving skin and proximity effects directly
+            to give resistive loss and the internal inductance.</p>
 
             <h3>S-Parameters</h3>
             <p>S-parameters are computed from the RLGC transmission line model using standard ABCD matrix formulation. For differential lines, modal decomposition separates odd and even modes, which are then combined into 4-port S-parameters.</p>
@@ -930,7 +926,7 @@
     const helpContent = {
         solver: {
             title: 'Solver',
-            body: '<p><strong>Quasi-static:</strong> Fast finite-difference solver. Computes RLGC from the static field, so it is quick but does not model dispersion (the frequency dependence of effective permittivity and phase velocity). Good for a fast first estimate.</p><p><strong>Full-wave:</strong> Triangular finite-element eigenmode solver with a magneto-quasi-static conductor-loss solve. Models dielectric dispersion and gives much more accurate impedance and loss across frequency, but is slower.</p>'
+            body: '<p><strong>Quasi-static:</strong> Fast finite-difference solver. Computes RLGC from the static field, so it is quick but does not model dispersion. Good for a fast first estimate.</p><p><strong>Full-wave:</strong> Triangular finite-element eigenmode solver with a magneto-quasi-static conductor-loss solve. Models dielectric dispersion and gives much more accurate impedance and loss across frequency, but is much slower.</p>'
         },
         roughness: {
             title: 'Surface Roughness',
