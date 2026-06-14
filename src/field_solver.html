@@ -128,11 +128,10 @@
     </div>
 
     <div class="control-group">
-        <label for="mesh_backend">Solver</label>
+        <label for="mesh_backend">Solver <span class="help-icon" onclick="showHelpModal('solver', event)">?</span></label>
         <select id="mesh_backend">
-            <option value="rectilinear">Quasi-static (FDM)</option>
-            <option value="fullwave_pert">Full-wave (perturbation)</option>
-            <option value="fullwave_mqs">Full-wave (MQS)</option>
+            <option value="rectilinear">Quasi-static</option>
+            <option value="fullwave_mqs">Full-wave</option>
         </select>
     </div>
 
@@ -902,6 +901,10 @@
 
     // Help Modal Functions
     const helpContent = {
+        solver: {
+            title: 'Solver',
+            body: '<p><strong>Quasi-static:</strong> Fast finite-difference solver. Computes RLGC from the static field, so it is quick but does not model dispersion (the frequency dependence of effective permittivity and phase velocity). Good for a fast first estimate.</p><p><strong>Full-wave:</strong> Triangular finite-element eigenmode solver with a magneto-quasi-static conductor-loss solve. Models dielectric dispersion and gives much more accurate impedance and loss across frequency, but is slower.</p>'
+        },
         roughness: {
             title: 'Surface Roughness',
             body: '<p>Conductor loss is calculated using gradient model (<a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">https://ieeexplore.ieee.org/document/7932148</a>), both loss and inductance caused by the surface roughness is calculated. All conductors use this roughness on all sides. On PCB, typical RMS roughness is about 1 - 2 µm for normal copper foil and about 0.5 µm for special low profile foil.</p>'
