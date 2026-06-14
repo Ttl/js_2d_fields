@@ -125,35 +125,33 @@ function effectiveSurface(solver) {
     return { sigma, rq };
 }
 
-// Per-face plating: classify every loss edge to a conductor face (top / bottom /
-// sides) and look up that face's plating. Plated faces use the layered
-// (plating-over-bulk) gradient surface impedance — matching the FDM backend's
-// per-face model; bare faces and grounded walls use the base metal. Edges with an
-// identical surface impedance are collected into one group so the conductor-loss
-// surface integral can be evaluated per group and summed (the loss is linear in
-// the per-edge surface resistance). NOTE: thick-corner plating (geometric wrap of
-// side/top plating around corners) is NOT modeled here — disabled in the UI for
-// the full-wave solver.
+// Per-face plating model. Each conductor face (top / bottom / sides) gets its own
+// surface impedance: plated faces use the layered (plating-over-bulk) gradient
+// impedance — matching the FDM backend's per-face model; bare faces and grounded
+// walls use the base metal. NOTE: thick-corner plating (geometric wrap of
+// side/top plating around corners) is NOT modeled — disabled in the UI for the
+// full-wave solver.
 //
-// Returns { uniform, groups } where `uniform` is true when a single group covers
-// every loss edge (no plating, or the same impedance everywhere) — the plain
-// single-pass loss path then applies, including the MQS volume solve. When
-// `uniform` is false the caller sums the per-group perturbation loss (the MQS
-// volume solve assumes a single bulk conductivity and cannot represent per-face
-// plating, so it is bypassed).
-function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
-    const { nodes, edges, nEdges } = mesh;
-    const rects = condRect.rects || [];
+// Two consumers, sharing makePlatingZs:
+//   • buildSurfaceGroups (PERTURBATION path) groups loss edges by surface
+//     impedance so the surface integral is summed per group (loss is linear in
+//     the per-edge surface resistance). `uniform` true ⇒ a single impedance
+//     everywhere ⇒ the plain single-pass path.
+//   • buildFaceZs (MQS path) returns Zs at a face midpoint, so the MQS volume
+//     solve can weight each face's smooth current by its own plating impedance.
+// Shared surface-impedance model: the bare-metal Zs plus a (rectIndex, face) → Zs
+// resolver. Plated faces use the layered (plating-over-bulk) gradient impedance
+// (cached per distinct plating); bare faces use the base metal. Used by both the
+// edge-based grouping (perturbation path) and the point-based lookup (MQS path).
+function makePlatingZs(solver, condRect, freq) {
     const roles = condRect.rectRoles || [];
     const sigmaBase = solver.sigma_cond ?? 5.8e7;
     const rqBase = solver.rq ?? 0;
-    const diag = Math.hypot((condRect.xmax_domain ?? condRect.xmax) - (condRect.xmin_domain ?? condRect.xmin),
-                            (condRect.ymax_domain ?? condRect.ymax) - (condRect.ymin_domain ?? condRect.ymin));
-    const tol = (diag > 0 ? diag : 1) * 1e-6;
-
     const Zbare = calculate_Zrough(freq, sigmaBase, rqBase);    // Complex (.re/.im)
     const layeredCache = new Map();
-    const zLayered = (pl) => {
+    const zForFace = (ri, face) => {
+        const pl = roles[ri] && roles[ri].plating;
+        if (!(pl && pl[face] && pl.sigma > 0)) return Zbare;
         const key = `${pl.sigma}|${pl.rq}|${pl.thickness}`;
         let z = layeredCache.get(key);
         if (!z) {
@@ -162,6 +160,46 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
         }
         return z;
     };
+    return { Zbare, zForFace };
+}
+
+function platingTol(condRect) {
+    const diag = Math.hypot((condRect.xmax_domain ?? condRect.xmax) - (condRect.xmin_domain ?? condRect.xmin),
+                            (condRect.ymax_domain ?? condRect.ymax) - (condRect.ymin_domain ?? condRect.ymin));
+    return (diag > 0 ? diag : 1) * 1e-6;
+}
+
+// Point-based per-face surface impedance: Zs at a face midpoint (x, y) with edge
+// orientation 'h' (top/bottom face) or 'v' (side face). Mesh-independent — used by
+// the MQS loss to weight each face's smooth current by its plating impedance.
+// Returns bare metal off any conductor face (e.g. grounded walls).
+function buildFaceZs(solver, condRect, freq) {
+    const rects = condRect.rects || [];
+    const tol = platingTol(condRect);
+    const { Zbare, zForFace } = makePlatingZs(solver, condRect, freq);
+    return (x, y, orient) => {
+        for (let ri = 0; ri < rects.length; ri++) {
+            const r = rects[ri];
+            if (x < r.xmin - tol || x > r.xmax + tol || y < r.ymin - tol || y > r.ymax + tol) continue;
+            let face = null;
+            if (orient === 'h') {
+                if (Math.abs(y - r.ymax) < tol) face = 'top';
+                else if (Math.abs(y - r.ymin) < tol) face = 'bottom';
+            } else if (Math.abs(x - r.xmin) < tol || Math.abs(x - r.xmax) < tol) {
+                face = 'sides';
+            }
+            if (!face) continue;
+            return zForFace(ri, face);
+        }
+        return Zbare;
+    };
+}
+
+function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
+    const { nodes, edges, nEdges } = mesh;
+    const rects = condRect.rects || [];
+    const tol = platingTol(condRect);
+    const { Zbare, zForFace } = makePlatingZs(solver, condRect, freq);
 
     // Surface impedance for one loss edge. Conductor edges resolve to the face of
     // the conductor rect they lie on; everything else (grounded walls) is bare.
@@ -180,9 +218,7 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
             else if ((Math.abs(x0 - r.xmin) < tol && Math.abs(x1 - r.xmin) < tol) ||
                      (Math.abs(x0 - r.xmax) < tol && Math.abs(x1 - r.xmax) < tol)) face = 'sides';
             if (!face) continue;
-            const pl = roles[ri] && roles[ri].plating;
-            if (pl && pl[face] && pl.sigma > 0) return zLayered(pl);
-            return Zbare;
+            return zForFace(ri, face);
         }
         return Zbare;
     };
@@ -251,8 +287,9 @@ function perElementEnergy(phi, mesh, epsMap) {
 }
 
 // Full-wave eigenmode at frequency f via the Lee-Jin eigensolve. Robust mode
-// selection: among physical modes (γ²<0) with decent overlap to the static drive,
-// pick the one whose eps_mode is closest to eps_static (the quasi-TEM mode).
+// selection: among physical modes (γ²<0, eps not near cutoff), pick the one with
+// the HIGHEST overlap to the static drive (the static field is the quasi-TEM shape) —
+// reliable even when several modes cluster at eps ≈ ε_r (homogeneous/stripline fills).
 // Returns { eps, vRe, vIm, g2Re, g2Im } for the chosen mode, or null.
 // k²-decomposition cache. The FEM matrices A(k²), B(k²) are exactly affine in k²
 // (Lee–Jin form; the only √k² term, the radiating Robin ABC, is absent here — the walls
@@ -319,18 +356,24 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     try { res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed); }
     catch { return null; }
     if (!res || !res.nconv) return null;
-    let bestIdx = -1, bestD = Infinity;
+    // Pick the quasi-TEM mode by MAXIMUM overlap with the static drive (the static
+    // field IS the quasi-TEM shape). This is robust where several eigenmodes cluster
+    // at eps ≈ ε_r — e.g. a homogeneous (stripline) fill in an open/parallel-plate
+    // domain, where the odd quasi-TEM is near-degenerate with lateral resonances:
+    // a "closest-eps to eps_static" pick then jumps between them across frequency,
+    // producing the loss/eps_eff dips. A loose eps gate drops near-cutoff / continuum
+    // modes (eps ≪ eps_static) that can otherwise score a deceptively high overlap.
+    let bestIdx = -1, bestOvl = 0.3;                       // require overlap > 0.3
     for (let i = 0; i < res.nconv; i++) {
         if (res.evalsRe[i] >= 0) continue;                 // physical: γ² < 0
+        const epsMode = -res.evalsRe[i] / k2;
+        if (epsMode < 0.5 * eps_static) continue;          // drop near-cutoff / lateral-continuum modes
         const vR = res.evecsRe.subarray(i * N, (i + 1) * N);
         let dot = 0, nS = 0, nV = 0;
         for (let k = 0; k < fm.nFreeTransverse; k++) { dot += staticSeed[k] * vR[k]; nS += staticSeed[k] ** 2; nV += vR[k] ** 2; }
         const ovl = nS > 0 && nV > 0 ? Math.abs(dot) / Math.sqrt(nS * nV) : 0;
-        if (ovl < 0.3) continue;                           // quasi-TEM overlaps the static drive
-        const epsMode = -res.evalsRe[i] / k2;
         globalThis.__TRI_DEBUG__ && console.log(`    cand ${i}: eps=${epsMode.toFixed(4)} ovl=${ovl.toFixed(3)} (target ${eps_static.toFixed(4)})`);
-        const d = Math.abs(epsMode - eps_static);
-        if (d < bestD) { bestD = d; bestIdx = i; }
+        if (ovl > bestOvl) { bestOvl = ovl; bestIdx = i; }
     }
     if (bestIdx < 0) return null;
     return {
@@ -631,9 +674,16 @@ export class TriBackend {
             // (which assumes a constant epsMap) must be bypassed — re-assemble each freq.
             let cacheBox = null;
             if (!s.use_causal_materials) cacheBox = st.femCacheBox ??= { ready: null, prev: null };
+            // Seed the eigensolve with the STATIC field (frequency-deterministic), NOT a
+            // cross-frequency eigenvector warm-start. The static seed is the quasi-TEM
+            // shape (a good initial guess) AND it makes the picked eigenvector independent
+            // of evaluation ORDER. With a cross-frequency warm-start, a near-degenerate
+            // cluster (e.g. the open homogeneous stripline odd mode + lateral resonances)
+            // converges to a different in-subspace mixture depending on which frequency
+            // ran last — so the out-of-order interpolating sweep produced order-dependent
+            // conductor loss → ripple + non-convergent interpolant (excess solves).
             fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                st.eigSeed || null, cacheBox);
-            if (fw) st.eigSeed = fw.vRe;   // warm-start the next frequency from this eigenvector
+                null, cacheBox);
             if (fw && fw.eps > 0) eps_d = fw.eps;
         }
         // Dielectric dispersion is a capacitance effect: C = eps_d·C0 (geometric
@@ -658,20 +708,33 @@ export class TriBackend {
         const fR = Rs_smooth > 0 ? Zr.re / Rs_smooth : 1, fL = Rs_smooth > 0 ? Zr.im / Rs_smooth : 1;
 
         // Per-face plating: split the loss surface into surface-impedance groups.
-        // The mask is reused by the perturbation path below. More than one group
-        // (e.g. top/sides plated, bottom bare) ⇒ evaluate loss per group and sum,
-        // and force the perturbation path (MQS cannot represent per-face plating).
+        // Used by the perturbation path below (when MQS doesn't apply) to evaluate
+        // and sum the loss per group; >1 group (e.g. top/sides plated, bottom bare)
+        // means a face-dependent impedance. (MQS handles per-face plating itself via
+        // surfaceZs, so plating no longer forces the perturbation path.)
         const lossEdgeMask = f > 0 ? buildLossEdges(mesh, fm, cr) : null;
         const surf = lossEdgeMask ? buildSurfaceGroups(s, mesh, fm, cr, lossEdgeMask, f) : { uniform: true, groups: [] };
         const platingPerSide = !surf.uniform;
 
         // MQS (reference) applies when grounds are wall-absorbed (signal-only rects)
         // and the domain is symmetric (mode set by the BC). Else H-field perturbation.
+        // Per-face plating is handled INSIDE MQS (surfaceZs weights each face's smooth
+        // current by its own impedance), so plating no longer forces perturbation;
+        // when MQS doesn't apply, the perturbation path handles plating per-group.
         const hasGroundRect = cr.rectRoles.some(r => !r.is_signal);
-        const useMQS = !platingPerSide && ((lossMethod === 'mqs')
-            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0));
+        const anyPlating = cr.rectRoles.some(r => r.plating && r.plating.sigma > 0
+            && (r.plating.top || r.plating.sides || r.plating.bottom));
+        const useMQS = (lossMethod === 'mqs')
+            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
         let R_total = 0, L_internal = 0;
         if (f > 0 && useMQS) {
+            // The volume eddy solve runs the conductor BODY at the bulk metal σ;
+            // plating is a SURFACE effect applied only through surfaceZs (relative to
+            // the bulk Rs). So with plating, use the bulk σ here — NOT effectiveSurface's
+            // plating σ (which would bake plating into the body and make surfaceZs a
+            // no-op). The skin band is sized by the matching bulk skin depth.
+            const mqsSigma = anyPlating ? (s.sigma_cond ?? 5.8e7) : sigma;
+            const mqsDelta = anyPlating ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
             let minDim = Infinity;
             for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
             // Skin-band target element size (× δ): the band must be resolved to a
@@ -694,22 +757,26 @@ export class TriBackend {
             // opts.mqsCacheMesh === false falls back to a per-frequency remesh (marginally
             // faster on wide sweeps, but can show a small non-monotonic wiggle).
             let mqsMesh;
-            if (delta >= minDim) {
+            if (mqsDelta >= minDim) {
                 mqsMesh = mesh;
             } else if (this.opts.mqsCacheMesh === false) {
-                mqsMesh = refineSkinBand(mesh, cr, delta, 12, mqsBand, bandDelta * delta);
+                mqsMesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta);
             } else {
                 const sc = st.skinCache || (st.skinCache = { dB: Infinity, mesh: null });
-                if (!sc.mesh || delta < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
-                    sc.dB = delta;
-                    sc.mesh = refineSkinBand(mesh, cr, delta, 12, mqsBand, bandDelta * delta);
+                if (!sc.mesh || mqsDelta < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
+                    sc.dB = mqsDelta;
+                    sc.mesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta);
                 }
                 mqsMesh = sc.mesh;
             }
+            // Per-face plating ⇒ weight each face's smooth current by its own surface
+            // impedance (surfaceZs); otherwise the uniform roughness factor (Rq).
+            const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: mode === 'odd' };
+            if (anyPlating) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
+            else mqsOpts.Rq = rq;
             let mqs = null;
             try {
-                mqs = mqsConductorLoss(mqsMesh, cr, f, sigma, this.ctx.helpers.solveSparseMulti, 0,
-                    { topGround: !!(cr.wallPEC && cr.wallPEC.top), Rq: rq, oddSymmetry: mode === 'odd' });
+                mqs = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveSparseMulti, 0, mqsOpts);
             } catch { mqs = null; }
             // Accept MQS only if physically sane.
             if (mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop) && mqs.L_loop > 0) {

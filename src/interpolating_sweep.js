@@ -276,6 +276,10 @@ class InterpolatingSweep {
 
             for (const tMid of midpointsToCompute) {
                 if (shouldStop && shouldStop()) return this.samplePoints.size;
+                // Enforce the safety cap DURING the loop, not just between iterations:
+                // an iteration starting below the cap can otherwise queue hundreds of
+                // midpoints and blow past maxPoints (e.g. 293 solves for a 200 cap).
+                if (this.samplePoints.size >= this.maxPoints) break;
 
                 // Evaluate interpolated value BEFORE computing exact (using current spline)
                 const interpolated = this._evaluateSplines(tMid);

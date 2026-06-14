@@ -110,6 +110,13 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   R(f)/L(f) causal. With a single Rq the per-surface factor is uniform, so
 //   scaling the smooth-σ solution is exact in the skin regime (t ≫ δ) and
 //   degrades gracefully to the correct DC limit (Ψ → 1 as δ grows).
+//   opts.surfaceZs(x, y, orient) — OPTIONAL per-face surface impedance {re,im} at a
+//   face midpoint (orient 'h' = top/bottom, 'v' = side), for per-side plating. The
+//   smooth trace (and ground) loss is scaled by the |K|²-weighted average of
+//   Re(Zs_face)/Rs over the faces — generalizing the uniform Ψ_R. The weights come
+//   from the MQS smooth current distribution (corner-regularized, unlike a
+//   perturbation surface integral). Reduces exactly to the uniform factor when
+//   every face shares one Zs. Takes precedence over Rq when provided.
 // Returns { R_trace, R_gnd, R_total, L_loop, alpha_c, alpha_c_dBm, delta, nDofs }
 // L_loop is the series inductance from Im(Z_pul) = ωL — includes trace internal
 // inductance and ground-current spreading (ground itself is PEC here).
@@ -262,6 +269,9 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         for (let k = 0; k < 3; k++)
             if (edgeToTri[triEdges[3*t+k]] === -1) edgeToTri[triEdges[3*t+k]] = t;
     let Pgnd = 0;
+    // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
+    // conductor surfaces, used below to scale the smooth loss per face.
+    let gndS = 0, gndZreS = 0, gndZimS = 0;
     const GL3p = [0.11270, 0.5, 0.88730], GL3w = [0.27778, 0.44444, 0.27778];
     function isGroundY(y) {
         if (Math.abs(y) < 1e-9) return true;
@@ -280,6 +290,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         const x0 = nodes[2*n0], x1 = nodes[2*n1];
         const yWall = nodes[2*n0+1];
         const L = Math.abs(x1 - x0);
+        // Ground is bare metal (never plated); evaluate Zs once at the edge midpoint.
+        const Zg = opts.surfaceZs ? opts.surfaceZs((x0 + x1) / 2, yWall, 'h') : null;
         for (let q = 0; q < 3; q++) {
             const xq = x0 + GL3p[q] * (x1 - x0);
             let gyR = 0, gyI = 0;
@@ -290,6 +302,68 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
             }
             const K2 = Cmag2 * (gyR*gyR + gyI*gyI) / (MU0*MU0);
             Pgnd += 0.5 * Rs * K2 * GL3w[q] * L;
+            if (Zg) {
+                const Sseg = (gyR*gyR + gyI*gyI) * GL3w[q] * L;   // ∝ |K|² (global factors cancel in the ratio)
+                gndS += Sseg; gndZreS += Zg.re * Sseg; gndZimS += Zg.im * Sseg;
+            }
+        }
+    }
+
+    // Conductor-surface weights: the trace loss is a volume integral, so to apply a
+    // per-face impedance we weight each face by its surface current ∮|K|²dl, taken
+    // on the EXTERIOR (dielectric) side of the face — like the ground above. K is
+    // the tangential H: ∂A/∂y for a horizontal (top/bottom) face, ∂A/∂x for a side.
+    let trS = 0, trZreS = 0, trZimS = 0;
+    if (opts.surfaceZs) {
+        const eA = new Int32Array(2 * nEdges).fill(-1);
+        for (let t = 0; t < nTris; t++) for (let k = 0; k < 3; k++) {
+            const e = triEdges[3*t+k];
+            if (eA[2*e] < 0) eA[2*e] = t; else eA[2*e+1] = t;
+        }
+        const lge = new Int32Array(6);
+        for (let e = 0; e < nEdges; e++) {
+            const ta = eA[2*e], tb = eA[2*e+1];
+            if (ta < 0 || tb < 0) continue;          // boundary edge, not a cond/dielectric interface
+            if (isCondTri[ta] === isCondTri[tb]) continue;   // both in or both out → not a surface
+            const ext = isCondTri[ta] ? tb : ta;     // exterior (dielectric) triangle
+            const cnd = isCondTri[ta] ? ta : tb;      // conductor-interior triangle
+            const n0 = edges[2*e], n1 = edges[2*e+1];
+            const x0 = nodes[2*n0], y0 = nodes[2*n0+1], x1 = nodes[2*n1], y1 = nodes[2*n1+1];
+            if (Math.abs(x0 - xmin_d) < 1e-9 && Math.abs(x1 - xmin_d) < 1e-9) continue;  // symmetry-plane cut
+            const horiz = Math.abs(y1 - y0) < Math.abs(x1 - x0);
+            // Classify against the conductor this edge borders, then SNAP the query
+            // point onto that face. The skin-band refinement makes the centroid-based
+            // interface wander ~an element size off the nominal face, so a raw midpoint
+            // can miss the face's exact-coordinate test (esp. the short side faces) and
+            // be mis-read as bare. Snapping uses the conductor-side triangle's rect.
+            let qx = (x0 + x1) / 2, qy = (y0 + y1) / 2;
+            const ccx = (nodes[2*tris[3*cnd]] + nodes[2*tris[3*cnd+1]] + nodes[2*tris[3*cnd+2]]) / 3;
+            const ccy = (nodes[2*tris[3*cnd]+1] + nodes[2*tris[3*cnd+1]+1] + nodes[2*tris[3*cnd+2]+1]) / 3;
+            for (const r of rects) {
+                if (ccx <= r.xmin - TOL || ccx >= r.xmax + TOL || ccy <= r.ymin - TOL || ccy >= r.ymax + TOL) continue;
+                if (horiz) qy = Math.abs(qy - r.ymax) < Math.abs(qy - r.ymin) ? r.ymax : r.ymin;
+                else qx = Math.abs(qx - r.xmax) < Math.abs(qx - r.xmin) ? r.xmax : r.xmin;
+                break;
+            }
+            const Zs = opts.surfaceZs(qx, qy, horiz ? 'h' : 'v');
+            const v0 = tris[3*ext], v1 = tris[3*ext+1], v2 = tris[3*ext+2];
+            const { coeff } = triCoefficients(nodes, v0, v1, v2);
+            lge[0] = dofOf[v0]; lge[1] = dofOf[v1]; lge[2] = dofOf[v2];
+            for (let k = 0; k < 3; k++) lge[3+k] = dofOf[nNodes + triEdges[3*ext+k]];
+            const L = Math.hypot(x1 - x0, y1 - y0);
+            let Sseg = 0;
+            for (let q = 0; q < 3; q++) {
+                const xq = x0 + GL3p[q]*(x1-x0), yq = y0 + GL3p[q]*(y1-y0);
+                let gR = 0, gI = 0;
+                for (let k = 0; k < 6; k++) {
+                    const g = lge[k]; if (g < 0) continue;
+                    const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
+                    const comp = horiz ? gr[1] : gr[0];   // tangential-H-producing gradient component
+                    gR += comp * sol[g]; gI += comp * sol[nF + g];
+                }
+                Sseg += (gR*gR + gI*gI) * GL3w[q] * L;
+            }
+            trS += Sseg; trZreS += Zs.re * Sseg; trZimS += Zs.im * Sseg;
         }
     }
 
@@ -303,10 +377,27 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     let R_gnd = 2 * sym * Pgnd;
     let L_loop = Ci / omega;  // Z_pul = C/I = R + jωL (trace internal L included)
 
-    // Surface roughness (gradient model, single Rq on all surfaces)
-    const Rq = opts.Rq || 0;
+    // Surface roughness / plating post-processing. Scale the smooth-σ loss by the
+    // effective surface impedance and add the matching surface-reactance increment
+    // to L_loop (keeping R(f)/L(f) causal). Either:
+    //   • per-face (opts.surfaceZs): the |K|²-weighted Re/Im(Zs)/Rs over each face's
+    //     surface current — trace and ground weighted independently; or
+    //   • uniform (opts.Rq): a single Ψ_R = Re(Z_rough)/Rs for the whole surface.
     let PsiR = 1;
-    if (Rq > 0) {
+    const Rq = opts.Rq || 0;
+    if (opts.surfaceZs) {
+        if (trS > 0) {
+            const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
+            L_loop += R_trace * (psiX - 1) / omega;
+            R_trace *= psiR;
+            PsiR = psiR;
+        }
+        if (gndS > 0) {
+            const psiR = gndZreS / (Rs * gndS), psiX = gndZimS / (Rs * gndS);
+            L_loop += R_gnd * (psiX - 1) / omega;
+            R_gnd *= psiR;
+        }
+    } else if (Rq > 0) {
         const Zs = calculate_Zrough(freq, sigma, Rq);
         PsiR = Zs.re / Rs;
         const R_smooth = R_trace + R_gnd;
