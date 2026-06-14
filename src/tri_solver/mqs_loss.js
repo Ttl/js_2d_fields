@@ -18,16 +18,11 @@
 // current equals I. The complex system is solved as the REAL SYMMETRIC indefinite
 // block [[S, −βM],[−βM, −S]]·[Ar; Ai] = [μ₀σFc; 0] — symmetry is required because
 // the WASM solver's LDLT fast path assumes a symmetric matrix.
-//
-// Validated (see PROGRESS.md):
-//   - DC limit: R_trace = 1.4078 vs 1.408 Ω/m analytic (0.01%)
-//   - OpenParEM ms_fr4 (t=50µm): α_c = 1.67 vs 1.63 dB/m implied (2.5%)
-//   - mesh convergence: 1.779 → 1.774 dB/m from 10k to 55k DOFs (viewer geometry)
 
 import { tripletsToCSR } from './fem_core.js';
 import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
          refineTriMesh } from './tri_fem.js';
-import { calculateZrough } from './surface_roughness.js';
+import { calculate_Zrough } from '../surface_roughness.js';
 
 const MU0 = 4 * Math.PI * 1e-7;
 const edgeVerts = [[0,1],[1,2],[2,0]];
@@ -312,7 +307,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     const Rq = opts.Rq || 0;
     let PsiR = 1;
     if (Rq > 0) {
-        const Zs = calculateZrough(freq, sigma, Rq);
+        const Zs = calculate_Zrough(freq, sigma, Rq);
         PsiR = Zs.re / Rs;
         const R_smooth = R_trace + R_gnd;
         L_loop += R_smooth * (Zs.im / Rs - 1) / omega;

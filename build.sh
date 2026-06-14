@@ -47,10 +47,17 @@ cp src/plotly-3.3.0.min.js dist/
 cp src/wasm_solver/solver.wasm dist/solver.wasm
 cp src/.htaccess dist/.htaccess
 
-# Triangular FEM backend: ship the self-contained tree verbatim (JS modules).
+# Triangular FEM backend: ship the tree verbatim (JS modules).
 # Drop the dev-only smoke test from the shipped copy.
 cp -r src/tri_solver dist/tri_solver
 rm -f dist/tri_solver/_smoke_test.mjs
+
+# The tri_solver tree is NOT bundled, so its `../` imports of shared src modules
+# must exist alongside dist/ at runtime (dist/tri_solver/foo.js → dist/bar.js).
+# These modules are also inlined into the app_solver bundle, but the external tree
+# needs its own standalone copies. Keep this list in sync with the `../*.js`
+# imports in src/tri_solver/*.js (complex, surface_roughness, djordjevic_sarkar).
+cp src/complex.js src/surface_roughness.js src/djordjevic_sarkar.js dist/
 
 # Full-wave WASM runtime: tri_solver loads these from ../wasm_solver via
 # import.meta.url, and each emscripten module locates its .wasm relative to its

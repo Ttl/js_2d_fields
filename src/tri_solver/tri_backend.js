@@ -14,7 +14,7 @@
 //   - dielectric loss G from the lossy-permittivity energy integral
 //   - conductor loss via the validated perturbation method (corner-corrected),
 //     with surface roughness AND plating applied as a surface-impedance scaling
-//     (gradient model, calculateZrough): plating = "roughness with a different
+//     (gradient model, calculate_Zrough): plating = "roughness with a different
 //     conductivity" on the plated conductor surfaces.
 //
 // Mesh + freedom maps are built once and reused across a frequency sweep; only
@@ -36,7 +36,7 @@ import { checkMeshQuality } from './tri_mesh.js';
 // static (variational) solve instead. Above it, use the full-wave eigenmode for
 // the dispersive effective permittivity.
 const F_STATIC_MAX = 100e6;
-import { calculateZrough, calculateZroughLayered } from './surface_roughness.js';
+import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField } from './resample.js';
 import { Complex } from '../complex.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
@@ -151,13 +151,13 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
                             (condRect.ymax_domain ?? condRect.ymax) - (condRect.ymin_domain ?? condRect.ymin));
     const tol = (diag > 0 ? diag : 1) * 1e-6;
 
-    const Zbare = calculateZrough(freq, sigmaBase, rqBase);     // {re, im}
+    const Zbare = calculate_Zrough(freq, sigmaBase, rqBase);    // Complex (.re/.im)
     const layeredCache = new Map();
     const zLayered = (pl) => {
         const key = `${pl.sigma}|${pl.rq}|${pl.thickness}`;
         let z = layeredCache.get(key);
         if (!z) {
-            z = calculateZroughLayered(freq, sigmaBase, pl.rq ?? 0, pl.sigma, pl.thickness ?? 0);
+            z = calculate_Zrough_layered(freq, sigmaBase, pl.rq ?? 0, pl.sigma, pl.thickness ?? 0);
             layeredCache.set(key, z);
         }
         return z;
@@ -654,7 +654,7 @@ export class TriBackend {
         const omu = omega * MU0;
         const delta = f > 0 ? Math.sqrt(2 / (omu * sigma)) : Infinity;
         const Rs_smooth = 1 / (sigma * Math.min(delta, 1e30));
-        const Zr = calculateZrough(f > 0 ? f : 1, sigma, rq);
+        const Zr = calculate_Zrough(f > 0 ? f : 1, sigma, rq);
         const fR = Rs_smooth > 0 ? Zr.re / Rs_smooth : 1, fL = Rs_smooth > 0 ? Zr.im / Rs_smooth : 1;
 
         // Per-face plating: split the loss surface into surface-impedance groups.
