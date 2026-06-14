@@ -36,7 +36,7 @@ import { checkMeshQuality } from './tri_mesh.js';
 // static (variational) solve instead. Above it, use the full-wave eigenmode for
 // the dispersive effective permittivity.
 const F_STATIC_MAX = 100e6;
-import { calculateZrough } from './surface_roughness.js';
+import { calculateZrough, calculateZroughLayered } from './surface_roughness.js';
 import { resampleStatic, resampleModeField } from './resample.js';
 import { Complex } from '../complex.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
@@ -123,6 +123,88 @@ function effectiveSurface(solver) {
         }
     }
     return { sigma, rq };
+}
+
+// Per-face plating: classify every loss edge to a conductor face (top / bottom /
+// sides) and look up that face's plating. Plated faces use the layered
+// (plating-over-bulk) gradient surface impedance — matching the FDM backend's
+// per-face model; bare faces and grounded walls use the base metal. Edges with an
+// identical surface impedance are collected into one group so the conductor-loss
+// surface integral can be evaluated per group and summed (the loss is linear in
+// the per-edge surface resistance). NOTE: thick-corner plating (geometric wrap of
+// side/top plating around corners) is NOT modeled here — disabled in the UI for
+// the full-wave solver.
+//
+// Returns { uniform, groups } where `uniform` is true when a single group covers
+// every loss edge (no plating, or the same impedance everywhere) — the plain
+// single-pass loss path then applies, including the MQS volume solve. When
+// `uniform` is false the caller sums the per-group perturbation loss (the MQS
+// volume solve assumes a single bulk conductivity and cannot represent per-face
+// plating, so it is bypassed).
+function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
+    const { nodes, edges, nEdges } = mesh;
+    const rects = condRect.rects || [];
+    const roles = condRect.rectRoles || [];
+    const sigmaBase = solver.sigma_cond ?? 5.8e7;
+    const rqBase = solver.rq ?? 0;
+    const diag = Math.hypot((condRect.xmax_domain ?? condRect.xmax) - (condRect.xmin_domain ?? condRect.xmin),
+                            (condRect.ymax_domain ?? condRect.ymax) - (condRect.ymin_domain ?? condRect.ymin));
+    const tol = (diag > 0 ? diag : 1) * 1e-6;
+
+    const Zbare = calculateZrough(freq, sigmaBase, rqBase);     // {re, im}
+    const layeredCache = new Map();
+    const zLayered = (pl) => {
+        const key = `${pl.sigma}|${pl.rq}|${pl.thickness}`;
+        let z = layeredCache.get(key);
+        if (!z) {
+            z = calculateZroughLayered(freq, sigmaBase, pl.rq ?? 0, pl.sigma, pl.thickness ?? 0);
+            layeredCache.set(key, z);
+        }
+        return z;
+    };
+
+    // Surface impedance for one loss edge. Conductor edges resolve to the face of
+    // the conductor rect they lie on; everything else (grounded walls) is bare.
+    const zOfEdge = (e) => {
+        if (!(fm.isCondEdge && fm.isCondEdge[e])) return Zbare;
+        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1];
+        const x1 = nodes[2 * n1], y1 = nodes[2 * n1 + 1];
+        for (let ri = 0; ri < rects.length; ri++) {
+            const r = rects[ri];
+            if (x0 < r.xmin - tol || x0 > r.xmax + tol || x1 < r.xmin - tol || x1 > r.xmax + tol) continue;
+            if (y0 < r.ymin - tol || y0 > r.ymax + tol || y1 < r.ymin - tol || y1 > r.ymax + tol) continue;
+            let face = null;
+            if (Math.abs(y0 - r.ymax) < tol && Math.abs(y1 - r.ymax) < tol) face = 'top';
+            else if (Math.abs(y0 - r.ymin) < tol && Math.abs(y1 - r.ymin) < tol) face = 'bottom';
+            else if ((Math.abs(x0 - r.xmin) < tol && Math.abs(x1 - r.xmin) < tol) ||
+                     (Math.abs(x0 - r.xmax) < tol && Math.abs(x1 - r.xmax) < tol)) face = 'sides';
+            if (!face) continue;
+            const pl = roles[ri] && roles[ri].plating;
+            if (pl && pl[face] && pl.sigma > 0) return zLayered(pl);
+            return Zbare;
+        }
+        return Zbare;
+    };
+
+    const keyOf = (z) => `${z.re.toExponential(6)}|${z.im.toExponential(6)}`;
+    const groupIdx = new Map();
+    const groupZ = [];
+    const edgeGroup = new Int32Array(nEdges).fill(-1);
+    for (let e = 0; e < nEdges; e++) {
+        if (!baseMask[e]) continue;
+        const z = zOfEdge(e);
+        const k = keyOf(z);
+        let gi = groupIdx.get(k);
+        if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); }
+        edgeGroup[e] = gi;
+    }
+    const groups = groupZ.map((z, gi) => {
+        const mask = new Uint8Array(nEdges);
+        for (let e = 0; e < nEdges; e++) if (edgeGroup[e] === gi) mask[e] = 1;
+        return { Zs: z, mask };
+    });
+    return { uniform: groups.length <= 1, groups };
 }
 
 // Is the geometry mirror-symmetric about x=0? (lets us mesh only the right half.)
@@ -574,11 +656,20 @@ export class TriBackend {
         const Rs_smooth = 1 / (sigma * Math.min(delta, 1e30));
         const Zr = calculateZrough(f > 0 ? f : 1, sigma, rq);
         const fR = Rs_smooth > 0 ? Zr.re / Rs_smooth : 1, fL = Rs_smooth > 0 ? Zr.im / Rs_smooth : 1;
+
+        // Per-face plating: split the loss surface into surface-impedance groups.
+        // The mask is reused by the perturbation path below. More than one group
+        // (e.g. top/sides plated, bottom bare) ⇒ evaluate loss per group and sum,
+        // and force the perturbation path (MQS cannot represent per-face plating).
+        const lossEdgeMask = f > 0 ? buildLossEdges(mesh, fm, cr) : null;
+        const surf = lossEdgeMask ? buildSurfaceGroups(s, mesh, fm, cr, lossEdgeMask, f) : { uniform: true, groups: [] };
+        const platingPerSide = !surf.uniform;
+
         // MQS (reference) applies when grounds are wall-absorbed (signal-only rects)
         // and the domain is symmetric (mode set by the BC). Else H-field perturbation.
         const hasGroundRect = cr.rectRoles.some(r => !r.is_signal);
-        const useMQS = (lossMethod === 'mqs')
-            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
+        const useMQS = !platingPerSide && ((lossMethod === 'mqs')
+            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0));
         let R_total = 0, L_internal = 0;
         if (f > 0 && useMQS) {
             let minDim = Infinity;
@@ -639,23 +730,46 @@ export class TriBackend {
         // continuous — fixing the old discontinuity at F_STATIC_MAX. 'static' forces
         // the static estimator everywhere.
         if (f > 0 && R_total === 0) {
-            const edges = buildLossEdges(mesh, fm, cr);
-            const lossS = staticConductorLoss(cr.rects, f, sigma, mesh, fm, phiEps,
-                Z0, eps_eff_static, eps_d, null, edges);
-            let R_ac = lossS.R_ac * fR;
-            if (fw && lossMethod !== 'static') {
-                let minDim = Infinity;
-                for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
+            const edges = lossEdgeMask;
+            // Per-edge surface groups (one group = one surface impedance). Without
+            // per-face plating there is a single group whose Zs equals the effective
+            // surface impedance — identical to the original single-pass behaviour.
+            // The static/SIBC loss routines return R_ac ∝ Rs(sigmaRef); scaling each
+            // group by Zs_group.re/Rs(sigmaRef) recovers the per-face surface
+            // resistance, and the groups sum (the loss is linear over edges).
+            const groups = platingPerSide
+                ? surf.groups
+                : [{ Zs: { re: Zr.re, im: Zr.im }, mask: edges }];
+            const sigmaRef = platingPerSide ? (s.sigma_cond ?? 5.8e7) : sigma;
+            const deltaRef = Math.sqrt(2 / (omu * sigmaRef));
+            const RsRef = 1 / (sigmaRef * Math.min(deltaRef, 1e30));
+
+            let minDim = Infinity;
+            for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
+            const useFW = !!fw && lossMethod !== 'static';
+            let an = null;
+            if (useFW) {
                 const k2 = (omega / c0) ** 2;
-                const an = analyzeTriMode(fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, mesh, fm, k2, f, mesh.epsMap, cr);
-                if (an && Math.abs(an.P) > 1e-30 && minDim > 0) {
-                    const lossW = solveConductorLoss(cr.rects, f, sigma, mesh, fm, fw.vRe, fw.vIm,
-                        fw.g2Re, fw.g2Im, Math.abs(an.P), Z0, mesh.epsMap, edges, null, null, this.ctx.wasmSolver);
-                    const w = Math.max(0, Math.min(1, (0.15 - delta / minDim) / (0.15 - 0.08)));
-                    R_ac = (1 - w) * R_ac + w * (lossW.R_ac * fR);
-                }
+                an = analyzeTriMode(fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, mesh, fm, k2, f, mesh.epsMap, cr);
             }
-            R_total = Math.sqrt(lossS.R_dc * lossS.R_dc + R_ac * R_ac);
+            const haveFW = useFW && an && Math.abs(an.P) > 1e-30 && minDim > 0;
+            const wFW = haveFW ? Math.max(0, Math.min(1, (0.15 - deltaRef / minDim) / (0.15 - 0.08))) : 0;
+
+            let R_ac = 0, R_dc = 0;
+            for (const g of groups) {
+                const fRg = RsRef > 0 ? g.Zs.re / RsRef : 1;
+                const lossS = staticConductorLoss(cr.rects, f, sigmaRef, mesh, fm, phiEps,
+                    Z0, eps_eff_static, eps_d, null, g.mask);
+                R_dc = lossS.R_dc;   // mask-independent (full cross-section at sigmaRef)
+                let racg = lossS.R_ac * fRg;
+                if (haveFW && wFW > 0) {
+                    const lossW = solveConductorLoss(cr.rects, f, sigmaRef, mesh, fm, fw.vRe, fw.vIm,
+                        fw.g2Re, fw.g2Im, Math.abs(an.P), Z0, mesh.epsMap, g.mask, null, null, this.ctx.wasmSolver);
+                    racg = (1 - wFW) * racg + wFW * (lossW.R_ac * fRg);
+                }
+                R_ac += racg;
+            }
+            R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
             // Internal (skin) inductance: in the skin regime Zs = Rs(1+j), so the
             // internal reactance equals the AC resistance → L_int ≈ R_ac/ω. Neither the
             // static-field nor the SIBC routine returns a reliable L_int across the

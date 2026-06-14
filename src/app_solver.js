@@ -389,6 +389,8 @@ function restoreSettings(settings) {
             // Map the legacy 'triangular' value onto the new full-wave (MQS) option.
             const v = fullSettings.mesh_backend === 'triangular' ? 'fullwave_mqs' : fullSettings.mesh_backend;
             meshBackendSelect.value = v;
+            // Fire change so dependent UI (e.g. thick-plating availability) updates.
+            meshBackendSelect.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
         setValueWithUnit('inp_w', fullSettings.w);
