@@ -323,6 +323,17 @@ export function buildGmshMeshFromGeometry(G, opts) {
         const dy = Math.max(r.ymin - y, 0, y - r.ymax);
         return Math.hypot(dx, dy);
     };
+    // Dielectric band y-levels (shared by element sizing below and band construction
+    // later). Interfaces closer than ~hFine are merged: a sub-element-thin strip (e.g. a
+    // solder-mask layer whose top nearly coincides with the trace top when SM thickness
+    // ≈ trace thickness) would otherwise be unmeshable. Real layers (≳hFine) survive.
+    const bandYset = [Y0, Y1];
+    for (const d of dielectrics) {
+        const r = _rectOf(d);
+        if (r.ymin > Y0 + tol && r.ymin < Y1 - tol) bandYset.push(r.ymin);
+        if (r.ymax > Y0 + tol && r.ymax < Y1 - tol) bandYset.push(r.ymax);
+    }
+    const bandYs = _uniqSorted(bandYset, Math.max(tol, 0.25 * hFine));
     const localSize = (x, y) => {
         if (onConductor(x, y)) return hFine;
         let h = hCoarse;
@@ -336,6 +347,12 @@ export function buildGmshMeshFromGeometry(G, opts) {
                 h = Math.min(h, sizeFactor * Math.min(r.xmax - r.xmin, r.ymax - r.ymin));
             }
         }
+        // cap by the local band spacing — resolves thin SUB-bands of a large region
+        // (e.g. air slivers left by full-width solder-mask interface splits), which the
+        // per-rect cap above misses because their containing rect (air) is huge.
+        let bi = 0;
+        while (bi < bandYs.length - 1 && bandYs[bi + 1] < y - tol) bi++;
+        if (bi < bandYs.length - 1) h = Math.min(h, sizeFactor * (bandYs[bi + 1] - bandYs[bi]));
         return Math.max(hFine, Math.min(hCoarse, h));
     };
     // Coordinate-keyed point + line caches (shared across bands → conforming interfaces).
@@ -372,20 +389,7 @@ export function buildGmshMeshFromGeometry(G, opts) {
     // ---- Build dielectric bands (split only at dielectric interface y-values) ----
     // Conductors become HOLES (interior) or boundary notches (wall-touching), so
     // conductor edges never create thin full-width strips → no sliver triangles.
-    const bandYset = [Y0, Y1];
-    for (const d of dielectrics) {
-        const r = _rectOf(d);
-        if (r.ymin > Y0 + tol && r.ymin < Y1 - tol) bandYset.push(r.ymin);
-        if (r.ymax > Y0 + tol && r.ymax < Y1 - tol) bandYset.push(r.ymax);
-    }
-    // Merge dielectric interface levels that fall unmeshably close together (≪ hFine).
-    // Two interfaces a fraction of an element apart (e.g. a solder-mask layer whose top
-    // nearly coincides with the trace top when SM thickness ≈ trace thickness) would
-    // otherwise leave a thin full-width strip that gmsh fills with degenerate slivers.
-    // Real layers are ≳ hFine thick and survive; the merge only collapses sub-element
-    // strips, with negligible (sub-hFine) geometric distortion.
-    const bandMergeTol = Math.max(tol, 0.25 * hFine);
-    const bandYs = _uniqSorted(bandYset, bandMergeTol);
+    // bandYs is computed above (shared with localSize).
 
     for (let bi = 0; bi < bandYs.length - 1; bi++) {
         const ya = bandYs[bi], yb = bandYs[bi + 1];

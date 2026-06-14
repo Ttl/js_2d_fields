@@ -208,8 +208,14 @@ async function main() {
             console.log(`[${i}] ✗ BAD MESH (Qmax=${fw.maxQ?.toFixed(0)} degen=${fw.degenerate} nan=${fw.nan})\n      ${fmtSpec(spec)}`);
         }
 
+        // Flag on the field-driven quantities Z0 and C only. eps_eff is reported with
+        // DIFFERENT conventions by the two backends — the full-wave includes the
+        // conductor internal inductance (eps_eff = c²·L·C), the quasi-static reports the
+        // pure C/C0 — so it differs by the (loss-dependent) L_internal even when the
+        // electrostatic field agrees. That's the loss-modeling difference the fuzzer is
+        // meant to exclude; eps is still printed for context.
         const dZ = relDiff(qs.Z0, fw.Z0), dE = relDiff(qs.eps_eff, fw.eps_eff), dC = relDiff(qs.C, fw.C);
-        const dMax = Math.max(dZ, dE, dC);
+        const dMax = Math.max(dZ, dC);
         if (dMax > THRESH) {
             flagged.discrepancy.push({ spec, dZ, dE, dC });
             console.log(`[${i}] ✗ DISCREPANCY ${(dMax * 100).toFixed(0)}% (Z0 ${(dZ * 100).toFixed(0)}% eps ${(dE * 100).toFixed(0)}% C ${(dC * 100).toFixed(0)}%)\n` +
