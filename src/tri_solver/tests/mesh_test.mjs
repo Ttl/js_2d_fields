@@ -1,7 +1,7 @@
 // Phase 2 test: drive the generalized mesher from real app geometry.
 import { MicrostripSolver } from '../../microstrip.js';
 import { initGmsh } from '../gmsh_mesh.js';
-import { buildGmshMeshFromGeometry } from '../geom_to_mesh.js';
+import { buildOccMeshFromGeometry } from '../occ_to_mesh.js';
 
 const G = await initGmsh();
 
@@ -12,7 +12,7 @@ function domainOf(s) {
 function testCase(name, solver) {
     const dom = domainOf(solver);
     const h = solver.h;
-    const mesh = buildGmshMeshFromGeometry(G, {
+    const mesh = buildOccMeshFromGeometry(G, {
         conductors: solver.conductors,
         dielectrics: solver.dielectrics,
         domain: dom,

@@ -1,7 +1,7 @@
 // Phase 2 acceptance: cross-check tri static FEM vs the production FDM solver.
 import { MicrostripSolver } from '../../microstrip.js';
 import { initGmsh } from '../gmsh_mesh.js';
-import { buildGmshMeshFromGeometry } from '../geom_to_mesh.js';
+import { buildOccMeshFromGeometry } from '../occ_to_mesh.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy } from '../tri_fem.js';
 
 const G = await initGmsh();
@@ -10,7 +10,7 @@ const c0 = 299792458, eps0 = 8.854187817e-12;
 function triStatic(solver, condPotentials) {
     const dom = { x_min: -solver.domain_width / 2, x_max: solver.domain_width / 2,
                   y_min: -solver.t_gnd, y_max: solver.domain_height };
-    const mesh = buildGmshMeshFromGeometry(G, {
+    const mesh = buildOccMeshFromGeometry(G, {
         conductors: solver.conductors, dielectrics: solver.dielectrics,
         domain: dom, boundaries: solver.boundaries,
         hFine: Math.min(solver.t, solver.w / 4) / 3,

@@ -2,7 +2,7 @@
 import { MicrostripSolver } from '../../microstrip.js';
 import { BroadsideStriplineSolver } from '../../broadside_stripline.js';
 import { initGmsh } from '../gmsh_mesh.js';
-import { buildGmshMeshFromGeometry } from '../geom_to_mesh.js';
+import { buildOccMeshFromGeometry } from '../occ_to_mesh.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy } from '../tri_fem.js';
 
 const G = await initGmsh();
@@ -11,7 +11,7 @@ const c0 = 299792458, eps0 = 8.854187817e-12;
 function meshOf(solver) {
     const dom = { x_min: -solver.domain_width / 2, x_max: solver.domain_width / 2,
                   y_min: -solver.t_gnd, y_max: solver.domain_height };
-    return buildGmshMeshFromGeometry(G, {
+    return buildOccMeshFromGeometry(G, {
         conductors: solver.conductors, dielectrics: solver.dielectrics,
         domain: dom, boundaries: solver.boundaries,
         hFine: Math.min(Math.abs(solver.t || 35e-6), (solver.w || 0.3e-3) / 4) / 2.5,

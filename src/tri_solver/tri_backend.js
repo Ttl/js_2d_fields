@@ -23,7 +23,7 @@
 import createModule from './eigen_solver.js';
 import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
-import { buildGmshMeshFromGeometry, tagMaterials } from './geom_to_mesh.js';
+import { buildOccMeshFromGeometry, tagMaterials } from './occ_to_mesh.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
          staticToEdgeDofs, assembleTriFEM } from './tri_fem.js';
@@ -320,7 +320,7 @@ export class TriBackend {
         // ref on any mesh); coarsening further than this eats its margin.
         const hFine = this.opts.hFine ?? Math.min(tAbs, wRef / 4) * 1.5;
         const hCoarse = this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5;
-        let mesh = buildGmshMeshFromGeometry(this.ctx.G, {
+        let mesh = buildOccMeshFromGeometry(this.ctx.G, {
             conductors: s.conductors, dielectrics: s.dielectrics,
             domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
             meshConductorInterior: true,   // conductor interiors meshed for the MQS loss solve
@@ -331,7 +331,7 @@ export class TriBackend {
         this.condRect.rects.forEach(r => { r.symmetry = this.condRect.symmetry; });
 
         // ---- Adaptive mesh refinement ----
-        // The band+hole mesher produces high-quality triangles (Q≈1), so error-driven
+        // The OCC field-graded mesh produces high-quality triangles (Q≈2), so error-driven
         // refinement converges rather than degrading the Nedelec eigensolve. Metric:
         // the Zienkiewicz–Zhu estimator on the projected H-field (refines the
         // conductor surfaces / corners that dominate conductor loss), blended with the

@@ -733,7 +733,8 @@ function solverModeConfig(mode) {
         case 'fullwave_pert':
             return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'perturbation' } };
         case 'fullwave_mqs':
-        case 'triangular':   // legacy saved value
+        case 'fullwave_occ':   // legacy saved value (the triangular backend now always uses OCC)
+        case 'triangular':     // legacy saved value
             return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'auto' } };
         default:             // 'rectilinear'
             return { mesh_backend: 'rectilinear', tri_opts: null };

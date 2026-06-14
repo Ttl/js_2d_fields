@@ -4,7 +4,7 @@ import createModule from '../eigen_solver.js';
 import { createWasmHelpers } from '../fem_core.js';
 import { MicrostripSolver } from '../../microstrip.js';
 import { initGmsh } from '../gmsh_mesh.js';
-import { buildGmshMeshFromGeometry } from '../geom_to_mesh.js';
+import { buildOccMeshFromGeometry } from '../occ_to_mesh.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, staticToEdgeDofs, assembleTriFEM } from '../tri_fem.js';
 import { analyzeTriMode } from '../tri_ms_solver.js';
 
@@ -16,7 +16,7 @@ const c0 = 299792458, eps0 = 8.854187817e-12;
 function meshOf(solver) {
     const dom = { x_min: -solver.domain_width / 2, x_max: solver.domain_width / 2,
                   y_min: -solver.t_gnd, y_max: solver.domain_height };
-    return buildGmshMeshFromGeometry(G, {
+    return buildOccMeshFromGeometry(G, {
         conductors: solver.conductors, dielectrics: solver.dielectrics,
         domain: dom, boundaries: solver.boundaries,
         hFine: Math.min(Math.abs(solver.t), solver.w / 4) / 3,

@@ -31,7 +31,7 @@ const THRESH = (parseFloat(process.argv[4]) || 15) / 100;
 const BAD_Q  = 100;
 
 // --- Seeded PRNG (deterministic, reproducible) ---
-function createRng(seed) {
+export function createRng(seed) {
     let s = (seed | 0) || 1;
     const next = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
     return {
@@ -46,7 +46,7 @@ const TL_TYPES = ['microstrip', 'diff_microstrip', 'stripline', 'diff_stripline'
                   'gcpw', 'diff_gcpw', 'broadside_stripline'];
 
 // --- Random spec generator (geometry + which features are enabled) ---
-function randomSpec(rng) {
+export function randomSpec(rng) {
     const tl = rng.pick(TL_TYPES);
     const spec = { tl, freq: rng.logf(0.5e9, 12e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 1e-6) : 0 };
 
@@ -112,7 +112,7 @@ function addCommon(o, spec) {
     if (spec.use_plating) o.plating = { sigma: 1e7, thickness: 4e-6, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
 }
 
-function buildSolver(spec, backend) {
+export function buildSolver(spec, backend) {
     if (spec.tl === 'broadside_stripline') {
         const o = {
             trace_width: spec.bs_w, trace_thickness: spec.bs_t, x_offset: spec.bs_x_offset, sigma_cond: spec.bs_sigma,
@@ -233,4 +233,5 @@ async function main() {
     console.log(`${'='.repeat(72)}`);
 }
 
-main();
+import { pathToFileURL } from 'url';
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
