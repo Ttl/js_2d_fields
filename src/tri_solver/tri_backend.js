@@ -995,10 +995,12 @@ export class TriBackend {
         //   • |γ²| ≈ 0              → null space
         //   • γ² < 0                → propagating (ε_eff = −γ²/k²)
         //   • γ² > 0                → evanescent / below cutoff
-        // Plus: an OPEN domain (any radiating ABC wall) has no bound modes below the light
-        // line — ε_eff < 1 there is the radiation continuum of the truncated domain, not a
-        // guided mode — so flag those spurious. An enclosed (all-PEC) box does have them
-        // (cavity modes above their cutoff), so they stay propagating.
+        // Refinements on the γ²<0 branch:
+        //   • ε_eff ≈ 0 (γ² negligible vs the k²·ε mode scale, only escaped the absolute
+        //     nullThresh band) → null space, not a guided mode.
+        //   • OPEN domain (any radiating ABC wall) has no bound modes below the light line —
+        //     ε_eff < 1 there is the radiation continuum of the truncated domain → spurious.
+        //   • enclosed (all-PEC) box keeps sub-light-line modes (cavity modes above cutoff).
         const isEnclosed = !(abc.left || abc.right || abc.top || abc.bottom);
         const list = [];
         for (let i = 0; i < res.nconv; i++) {
@@ -1018,8 +1020,15 @@ export class TriBackend {
             if (g2Re < -k2 * epsMax * 1.01) status = 'spurious';
             else if (Math.abs(g2Re) < nullThresh) status = 'nullspace';
             else if (g2Re < 0) {
-                eps_eff = -g2Re / k2;
-                status = (!isEnclosed && eps_eff < 1.0) ? 'spurious' : 'propagating';
+                const epsCand = -g2Re / k2;
+                // ε_eff ≈ 0 → null-space residue: |γ²| is negligible against the k²·ε ~ 10⁵
+                // mode scale (it only escaped the absolute nullThresh band), and such a mode
+                // is well separated from the genuine guided/cavity modes — classify it as
+                // null space rather than a real propagating mode. Above that, an OPEN domain
+                // still has no bound mode below the light line (ε_eff < 1 = radiation
+                // continuum) → spurious; an enclosed box keeps cavity modes as propagating.
+                if (epsCand < 1e-2) status = 'nullspace';
+                else { eps_eff = epsCand; status = (!isEnclosed && eps_eff < 1.0) ? 'spurious' : 'propagating'; }
             } else status = 'evanescent';
             list.push({ idx: i, g2Re, g2Im, eps_eff, overlap, status, vRe, vIm });
         }
