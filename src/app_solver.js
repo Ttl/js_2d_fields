@@ -28,6 +28,11 @@ let lastSweepDisplayUnit = null; // Display unit used during last sweep
 let isSolvingModes = false;
 let modesResult = null;          // last solveModes() summary { modes, nconv, ... }
 let modesSelectedIdx = -1;       // index into modesResult.modes of the plotted mode
+let modesSolver = null;          // INDEPENDENT solver for the Modes tab — built from the
+                                 // sidebar geometry but kept separate from the main `solver`,
+                                 // so solving modes never disturbs the main solve's results.
+let lastModesGeometry = null;    // geometry hash at the last modes solve (staleness notice)
+let lastModesFrequency = null;   // modes frequency at the last modes solve (staleness notice)
 
 // Full parameter config table. Each entry drives input writing + axis labeling.
 // fixedUnit: cosmetic axis label for plain-number inputs (sigma). Absent = derive from geometry input.
@@ -733,13 +738,15 @@ function switchTab(tabName) {
     } else if (tabName === 'modes') {
         const Plotly = getPlotly();
         const c = document.getElementById('modes-plot');
+        updateModesNotice();
         if (Plotly && c) {
-            if (c.data) {
-                // Resize the (possibly hidden-at-render) mode plot to the now-visible tab.
-                Plotly.Plots.resize(c);
+            if (modesResult) {
+                // Already solved: keep the field plot; just resize to the now-visible tab.
+                if (c.data) Plotly.Plots.resize(c);
             } else {
-                // First visit, nothing solved yet: show a geometry preview of the structure.
-                if (!solver) updateGeometry();
+                // Nothing solved yet: (re)build an independent solver from the current sidebar
+                // geometry and show a live geometry preview of the structure.
+                modesSolver = buildSolverFromParams(getParams());
                 plotModesGeometry();
             }
         }
@@ -761,9 +768,11 @@ async function runModesSolve() {
     if (!isFinite(nev) || nev < 1) { nev = 1; document.getElementById('modes-nev').value = '1'; }
     nev = Math.min(nev, 30);
 
-    // Rebuild the solver from the current sidebar geometry parameters.
-    updateGeometry();
-    if (!solver) { setModesStatus('Geometry is invalid — check parameters.'); return; }
+    // Build an INDEPENDENT solver from the current sidebar geometry. The Modes tab keeps its
+    // own solver so solving modes never disturbs the main solve (Geometry field plot, Results,
+    // S-parameters all stay intact).
+    modesSolver = buildSolverFromParams(getParams());
+    if (!modesSolver) { setModesStatus('Geometry is invalid — check parameters.'); return; }
 
     const btn = document.getElementById('btn-solve-modes');
     isSolvingModes = true;
@@ -790,8 +799,13 @@ async function runModesSolve() {
         };
         // Yield once so the "Meshing…" status paints before the synchronous eigensolve.
         await new Promise(r => setTimeout(r, 0));
-        const result = await solver.solveModes(freq, nev, onProgress, refineOpts);
+        const result = await modesSolver.solveModes(freq, nev, onProgress, refineOpts);
         modesResult = result;
+        // Record what the displayed modes were solved at, so the staleness notice can flag
+        // a later geometry/frequency change.
+        lastModesGeometry = getGeometryHash();
+        lastModesFrequency = freq;
+        updateModesNotice();
         if (result.error) {
             setModesStatus('Solve failed: ' + result.error);
             log('Modes solve error: ' + result.error);
@@ -822,6 +836,26 @@ async function runModesSolve() {
 function setModesStatus(msg) {
     const el = document.getElementById('modes-status');
     if (el) el.textContent = msg;
+}
+
+// Show a staleness warning on the Modes tab (mirroring Results / S-parameters) when the
+// geometry or the modes frequency has changed since the displayed modes were solved, so the
+// user knows the field plot is out of date. Keeps the old plot visible, like the other tabs.
+function updateModesNotice() {
+    const notice = document.getElementById('modes-notice');
+    const noticeText = document.getElementById('modes-notice-text');
+    if (!notice || !noticeText) return;
+    if (!modesResult || !lastModesGeometry) { notice.style.display = 'none'; return; }
+    const geometryChanged = getGeometryHash() !== lastModesGeometry;
+    const freqChanged = lastModesFrequency != null && getInputValue('modes-freq') !== lastModesFrequency;
+    if (isSolvingModes || !(geometryChanged || freqChanged)) {
+        notice.style.display = 'none';
+        return;
+    }
+    noticeText.textContent = geometryChanged
+        ? 'Geometry changed. Solve Modes to update.'
+        : 'Frequency changed. Solve Modes to update.';
+    notice.style.display = 'block';
 }
 
 function formatG2(re) {
@@ -866,14 +900,14 @@ function selectMode(idx, resetView = false) {
     if (!modesResult || !modesResult.modes || !modesResult.modes[idx]) return;
     modesSelectedIdx = idx;
     highlightSelectedMode();
-    const grid = solver.getModeField(idx);
+    const grid = modesSolver.getModeField(idx);
     plotModesField(grid, modesResult.modes[idx], idx, resetView);
 }
 
 function plotModesField(grid, mode, idx, resetView = false) {
     const Plotly = getPlotly();
     const container = document.getElementById('modes-plot');
-    if (!Plotly || !container || !solver) return;
+    if (!Plotly || !container || !modesSolver) return;
     if (!grid) {
         Plotly.purge(container);
         container.innerHTML = '<p style="color:var(--text-muted); padding:12px;">No field available for this mode.</p>';
@@ -881,8 +915,8 @@ function plotModesField(grid, mode, idx, resetView = false) {
     }
 
     const maxY = Math.max(
-        solver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
-        solver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
+        modesSolver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
+        modesSolver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
 
     const yArr = Array.from(grid.y);
     const maxYIdx = yArr.findIndex(y => y > maxY);
@@ -942,10 +976,10 @@ function plotModesField(grid, mode, idx, resetView = false) {
 function plotModesGeometry() {
     const Plotly = getPlotly();
     const container = document.getElementById('modes-plot');
-    if (!Plotly || !container || !solver || !solver.conductors) return;
+    if (!Plotly || !container || !modesSolver || !modesSolver.conductors) return;
     const maxY = Math.max(
-        solver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
-        solver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
+        modesSolver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
+        modesSolver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
     const view = computeModesView(maxY);
     // Invisible scatter spanning the view so the axes (and shapes) scale correctly.
     const traces = [{ type: 'scatter', x: [view.xRange[0], view.xRange[1]], y: [view.yRange[0], view.yRange[1]],
@@ -967,10 +1001,10 @@ function plotModesGeometry() {
 // the wide simulation domain.
 const MODES_VIEW_FRACTION = 1 / 3;
 function computeModesView(maxY) {
-    const signal = solver.conductors.filter(c => c.is_signal);
-    const grounds = solver.conductors.filter(c => !c.is_signal);
+    const signal = modesSolver.conductors.filter(c => c.is_signal);
+    const grounds = modesSolver.conductors.filter(c => !c.is_signal);
     if (!signal.length) {
-        return { xRange: [-solver.domain_width * 500, solver.domain_width * 500], yRange: [0, maxY * 1000] };
+        return { xRange: [-modesSolver.domain_width * 500, modesSolver.domain_width * 500], yRange: [0, maxY * 1000] };
     }
     const xl = Math.min(...signal.map(c => c.x_min));
     const xr = Math.max(...signal.map(c => c.x_max));
@@ -984,7 +1018,7 @@ function computeModesView(maxY) {
     if (hasTopGround) {
         yRange = [bottomY * 1000, maxY * 1000];
     } else {
-        const topOfConductors = Math.max(...solver.conductors.map(c => c.y_max));
+        const topOfConductors = Math.max(...modesSolver.conductors.map(c => c.y_max));
         const viewHeight = (topOfConductors - bottomY) / MODES_VIEW_FRACTION;
         yRange = [bottomY * 1000, (bottomY + viewHeight) * 1000];
     }
@@ -995,7 +1029,7 @@ function computeModesView(maxY) {
 // drawn above the heatmap so the mode field is shown over the structure.
 function buildGeometryShapes(maxY) {
     const shapes = [];
-    for (const diel of solver.dielectrics) {
+    for (const diel of modesSolver.dielectrics) {
         if (diel.y_min > maxY) continue;
         const yMax = Math.min(diel.y_max, maxY);
         const er = diel.epsilon_r;
@@ -1007,7 +1041,7 @@ function buildGeometryShapes(maxY) {
         shapes.push({ type: 'rect', x0: diel.x_min * 1000, y0: diel.y_min * 1000, x1: diel.x_max * 1000, y1: yMax * 1000,
             fillcolor, line: { color: 'rgba(160,160,160,0.25)', width: 0.5 }, layer: 'above' });
     }
-    for (const cond of solver.conductors) {
+    for (const cond of modesSolver.conductors) {
         if (cond.y_min > maxY) continue;
         const yMax = Math.min(cond.y_max, maxY);
         shapes.push({ type: 'rect', x0: cond.x_min * 1000, y0: cond.y_min * 1000, x1: cond.x_max * 1000, y1: yMax * 1000,
@@ -1163,12 +1197,20 @@ function addCommonOptions(options, p) {
 }
 
 function updateGeometry() {
-    const p = getParams();
     setCurrentView("geometry");
 
     const pbar = document.getElementById('progress_bar');
     pbar.style.width = "0%";
 
+    solver = buildSolverFromParams(getParams());
+}
+
+// Build a FieldSolver from the given sidebar params WITHOUT touching any global state.
+// updateGeometry() uses it to (re)build the main `solver`; the Modes tab uses it to build
+// its OWN independent solver (modesSolver), so solving modes never disturbs the main
+// solve's results. Returns the solver, or null if the parameters are invalid.
+function buildSolverFromParams(p) {
+    let solver = null;
     try {
         if (p.tl_type === 'gcpw') {
             const options = {
@@ -1355,6 +1397,7 @@ function updateGeometry() {
         // Set solver to null to prevent simulation from running with invalid parameters
         solver = null;
     }
+    return solver;
 }
 
 async function runSimulation() {
@@ -2241,6 +2284,7 @@ function bindEvents() {
                 draw();
                 updateResultNotices();
                 updateSweepNotice();
+                updateModesNotice();
             });
         }
     });
@@ -2259,6 +2303,7 @@ function bindEvents() {
                 draw();
                 updateResultNotices();
                 updateSweepNotice();
+                updateModesNotice();
             });
         }
     });
@@ -2269,6 +2314,7 @@ function bindEvents() {
         draw(true);  // Reset zoom/pan for new geometry
         updateResultNotices();
         updateSweepNotice();
+        updateModesNotice();
     });
 
     // Frequency inputs - update notices when changed
@@ -2280,6 +2326,13 @@ function bindEvents() {
             });
         }
     });
+
+    // Modes frequency - flag the modes plot as stale when changed after a solve
+    const modesFreqEl = document.getElementById('modes-freq');
+    if (modesFreqEl) {
+        modesFreqEl.addEventListener('input', updateModesNotice);
+        modesFreqEl.addEventListener('change', updateModesNotice);
+    }
 
     // Plot options - mode selector
     const plotModeEl = document.getElementById('plot-mode');

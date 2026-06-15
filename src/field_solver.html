@@ -599,6 +599,9 @@
             <span id="modes-status" style="color:var(--text-muted); font-size:0.85em;"></span>
             <span class="help-icon" onclick="showHelpModal('modes', event)">?</span>
         </div>
+        <div id="modes-notice" style="display: none; margin: 0 10px 8px; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; color: #fbbf24;">
+            <strong>⚠</strong> <span id="modes-notice-text"></span>
+        </div>
         <div class="modes-body">
             <div id="modes-list" class="modes-list">
                 <p style="color:var(--text-muted); font-size:0.85em; padding:8px;">Click <b>Solve Modes</b> to compute the eigenmodes of the current geometry. Found modes are listed here; click one to plot its field.</p>
