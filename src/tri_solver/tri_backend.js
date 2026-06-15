@@ -513,13 +513,14 @@ export class TriBackend {
         // critical regions are resolved — crucially the inter-trace gap, where the
         // odd mode's field concentrates and the mutual resistance R[12] comes from.
         const refModes = this.modeNames;
-        // Drive mesh refinement with the cheaper static field-energy metric (default):
-        // it refines the same critical regions as the full-wave H-field ZZ estimator
-        // (verified identical Z0/eps/loss across the test suite) while skipping the
-        // per-iteration eigensolve, roughly halving buildMesh time. Set true to restore
-        // the full-wave ZZ-driven refinement.
-        const refineFullwave = this.opts.refineFullwave ?? false;
-        const fRef = Math.max(s.freq || 1e9, 1e9);               // full-wave freq for ZZ
+        // Run the full-wave eigensolve EVERY refinement pass and converge on the actually
+        // REPORTED quantities (the dispersive ε_eff from the eigenmode and the static Z0),
+        // not on a cheaper static-only proxy. The static field-energy metric stabilises a
+        // mesh or two before the full-wave eigenmode does, so a static-only convergence test
+        // signs off while the reported ε_eff is still drifting (e.g. 4.305 → 4.416 on an open
+        // asymmetric stripline). The per-pass eigensolve costs more, but an adaptive mesh
+        // whose entire purpose is an accurate ε_eff/Z0/loss should converge on those numbers.
+        const fRef = Math.max(s.freq || 1e9, 1e9);               // full-wave eval frequency
         let prev = null, prevEnergy = null;
         for (let it = 0; it <= maxIters; it++) {
             let metric = null;
@@ -535,16 +536,19 @@ export class TriBackend {
                 const W_air = computeTriEnergy(phiAir, mesh, null);
                 const eps_static = W_eps / W_air;
                 energy.push(W_eps);
-                const fw = refineFullwave
-                    ? fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static)
-                    : null;
-                // Drive convergence on the static characteristic impedance Z = sqrt(L/C)
-                // ∝ 1/sqrt(W_eps·W_air) (constant factors cancel in the relative change),
-                // matching the reference adaptive driver. Z keeps refining the conductor /
-                // inter-trace-gap regions (which set L) past the point where eps — a pure
-                // C-ratio — has already stabilised, so the adaptive does meaningful work and
-                // the loss / mutual-R cases gain margin.
+                // Full-wave eigenmode at fRef: source of the reported dispersive ε_eff
+                // (fw.eps) and the H-field for the ZZ refinement metric. Computed every pass.
+                let fw = null;
+                try { fw = fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static); } catch { fw = null; }
+                // Converge on the REPORTED quantities, not a static proxy:
+                //   • static characteristic impedance Z0 = sqrt(L/C) ∝ 1/sqrt(W_eps·W_air)
+                //   • full-wave effective permittivity ε_eff = fw.eps (what _modeAtFreq reports)
+                // The eigenmode ε_eff lags the static energy, so including it is what makes the
+                // adaptive keep refining until the number the user sees has settled. Fall back
+                // to the static C-ratio when the eigensolve fails on a pass, so the convergence
+                // vector keeps a consistent length across passes.
                 conv.push(1 / Math.sqrt(Math.max(W_eps * W_air, 1e-300)));
+                conv.push(fw && fw.eps > 0 ? fw.eps : eps_static);
                 const metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
                 let zz = null;
                 if (fw) { try { zz = computeHtZZMetric(mesh, fm, fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, fRef, this.condRect.rects, null, null, this.ctx.wasmSolver); } catch { zz = null; } }

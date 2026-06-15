@@ -666,6 +666,7 @@ async function solve_rough_stripline() {
     // G. Gold and K. Helmreich, "A Physical Surface Roughness Model and Its
     // Applications," in IEEE Transactions on Microwave Theory and Techniques,
     // vol. 65, no. 10, pp. 3720-3732, Oct. 2017.
+    // Measurement result. This can have larger error than other tests.
     const reference = {
         "eps_eff": eps_eff,
         "loss": 80,
