@@ -1029,20 +1029,30 @@ export class TriBackend {
 
     // Resample the transverse E-field of the sortedIdx-th mode from the last solveModes()
     // onto a grid for plotting. Returns { x, y, E, Ex, Ey } (see resampleModeField) or null.
+    //
+    // The grid is a fine UNIFORM grid whose sample points are CELL CENTERS spanning exactly
+    // the domain. We deliberately do NOT reuse the FDM mesher's graded grid here: its bulk
+    // cells are coarse (~0.5 mm wide at the side walls), and Plotly's heatmap centers each
+    // cell on its coordinate — so a wall cell whose centre sits on the domain edge renders
+    // half its width (~0.28 mm) PAST the geometry, drawing field over the gridlines beyond
+    // the structure. Cell-centred samples (x_min+dx/2, x_max-dx/2) make the heatmap fill
+    // the domain exactly, with no spill beyond the walls.
     getModeField(sortedIdx) {
         const ms = this._modesState;
         if (!ms || !ms.list[sortedIdx]) return null;
         const m = ms.list[sortedIdx];
-        let grid = null;
-        try {
-            const mr = this.solver.mesher;
-            if (mr && typeof mr.generate_mesh === 'function') {
-                const [gx, gy] = mr.generate_mesh();
-                if (gx && gy && gx.length && gy.length) grid = { x: gx, y: gy };
-            }
-        } catch { grid = null; }
+        const d = this.domain;
+        const res = this.opts.resolution || 320;
+        const ax = d.x_max - d.x_min, ay = d.y_max - d.y_min;
+        const aspect = ax / (ay || 1);
+        const nx = aspect >= 1 ? res : Math.max(80, Math.round(res * aspect));
+        const ny = aspect >= 1 ? Math.max(80, Math.round(res / aspect)) : res;
+        const dx = ax / nx, dy = ay / ny;
+        const x = new Float64Array(nx), y = new Float64Array(ny);
+        for (let i = 0; i < nx; i++) x[i] = d.x_min + dx * (i + 0.5);
+        for (let j = 0; j < ny; j++) y[j] = d.y_min + dy * (j + 0.5);
         return resampleModeField(this.mesh, ms.fm, m.vRe, m.vIm, this.domain,
-            { resolution: this.opts.resolution, grid });
+            { resolution: this.opts.resolution, grid: { x, y } });
     }
 
 }

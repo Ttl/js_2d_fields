@@ -963,8 +963,8 @@ function plotModesGeometry() {
 }
 
 // Focused view (mm) around the signal conductors, mirroring the geometry tab's zoom
-// (signal conductors fill SIGNAL_CONDUCTOR_VIEW_FRACTION of the x-axis) so the field
-// isn't lost in the wide simulation domain.
+// (signal conductors fill MODES_VIEW_FRACTION of the x-axis) so the field isn't lost in
+// the wide simulation domain.
 const MODES_VIEW_FRACTION = 1 / 3;
 function computeModesView(maxY) {
     const signal = solver.conductors.filter(c => c.is_signal);
