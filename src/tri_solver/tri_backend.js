@@ -432,6 +432,46 @@ function drivePotentials(condRect, mode, symmetry) {
     });
 }
 
+// --- Helpers for general (asymmetric) two-conductor modal analysis -----------
+// Linear combination a·A + b·B of two static field objects (every component is
+// linear in the conductor drive, so the field for a combined drive is the same
+// combination of the per-trace fields). Used to synthesise the modal-eigenvector
+// field from the per-trace solves without re-solving.
+function combineStatic(a, A, b, B) {
+    const comb = (x, y) => {
+        if (!x || !y) return x || y || null;
+        const out = new Float64Array(x.length);
+        for (let i = 0; i < x.length; i++) out[i] = a * x[i] + b * y[i];
+        return out;
+    };
+    return {
+        phiVertex: comb(A.phiVertex, B.phiVertex),
+        phiEdge: comb(A.phiEdge, B.phiEdge),
+        phiEdge3: A.phiEdge3 ? comb(A.phiEdge3, B.phiEdge3) : null,
+        phiFaceNode: A.phiFaceNode ? comb(A.phiFaceNode, B.phiFaceNode) : null,
+        enrichCoeffs: A.enrichCoeffs ? comb(A.enrichCoeffs, B.enrichCoeffs) : null,
+    };
+}
+const matInv2 = ([[a, b], [c, d]]) => { const det = a * d - b * c; return [[d / det, -b / det], [-c / det, a / det]]; };
+const matMul2 = (A, B) => [
+    [A[0][0] * B[0][0] + A[0][1] * B[1][0], A[0][0] * B[0][1] + A[0][1] * B[1][1]],
+    [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]],
+];
+// Eigenpairs of a real 2×2 (here M = [C0]⁻¹[C], real eigenvalues since C, C0 are SPD).
+// Eigenvectors are normalised so the largest-magnitude component is +1 — this matches the
+// ±1 odd/even drive convention, so a symmetric pair reproduces the existing odd/even basis
+// exactly (no change to symmetric results), while an asymmetric pair gets its true modes.
+function eigGen2(M) {
+    const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
+    const tr = a + d, disc = Math.sqrt(Math.max(0, tr * tr - 4 * (a * d - b * c)));
+    const vecFor = (l) => {
+        let v = Math.abs(b) > 1e-300 ? [b, l - a] : (Math.abs(c) > 1e-300 ? [l - d, c] : [1, 0]);
+        const m = Math.abs(v[0]) >= Math.abs(v[1]) ? v[0] : v[1];
+        return m !== 0 ? [v[0] / m, v[1] / m] : v;
+    };
+    return { vals: [(tr + disc) / 2, (tr - disc) / 2], vecs: [vecFor((tr + disc) / 2), vecFor((tr - disc) / 2)] };
+}
+
 export class TriBackend {
     constructor(ctx, solver, opts = {}) {
         this.ctx = ctx;
@@ -641,6 +681,12 @@ export class TriBackend {
                 if (gx && gy && gx.length && gy.length) grid = { x: gx, y: gy };
             }
         } catch { grid = null; }
+        // Asymmetric differential pair on the full domain: the odd/even excitation basis is
+        // NOT the modal basis (the two traces sit in different environments), so driving
+        // odd/even and picking one eigenmode per drive can return the SAME eigenmode twice
+        // (e.g. broadside stripline with an unequal er stack). Use the genuine line modes
+        // instead — the eigenvectors of [C0]⁻¹[C] from per-trace drives.
+        if (s.is_differential && !this.symmetry) { this._prepareStaticModal(grid); return; }
         for (const mode of this.modeNames) {
             const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry, this.condRect.wallPEC);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
@@ -661,6 +707,55 @@ export class TriBackend {
                 fields,
             };
         }
+    }
+
+    // General two-conductor modal analysis for an asymmetric differential pair (full domain).
+    // Drives each trace independently to assemble the full 2×2 capacitance matrices [C]
+    // (dielectric) and [C0] (vacuum), diagonalises [C0]⁻¹[C] to get the two genuine line
+    // modes (eps_eff = eigenvalues, modal voltage ratios = eigenvectors), and builds each
+    // mode's static field as the eigenvector combination of the per-trace fields. The two
+    // modes are labelled odd/even by differential character (opposite-sign components → odd)
+    // so the downstream result assembly is unchanged. For a symmetric pair the eigenvectors
+    // come out as [1,∓1], reproducing the existing odd/even basis exactly.
+    _prepareStaticModal(grid) {
+        const { mesh } = this;
+        const roles = this.condRect.rectRoles;
+        const { abc, kC } = modeConfig('odd', true, false, this.condRect.wallPEC);
+        const fm = buildTriFreedomMap(mesh, this.condRect, abc);
+        // Per-trace drives (positive- and negative-polarity signal conductors).
+        const potA = roles.map(r => (r.is_signal && (r.polarity || 1) > 0) ? 1 : 0);
+        const potB = roles.map(r => (r.is_signal && (r.polarity || 1) < 0) ? 1 : 0);
+        const phiA = solveTriStatic(mesh, fm, mesh.epsMap, potA);
+        const phiB = solveTriStatic(mesh, fm, mesh.epsMap, potB);
+        const phiAa = solveTriStatic(mesh, fm, null, potA);
+        const phiBa = solveTriStatic(mesh, fm, null, potB);
+        // 2×2 capacitance matrices via the energy form W = ½·vᵀ·C·v.
+        const We = X => computeTriEnergy(X, mesh, mesh.epsMap);
+        const Wa = X => computeTriEnergy(X, mesh, null);
+        const eaa = We(phiA), ebb = We(phiB), eab = We(combineStatic(1, phiA, 1, phiB));
+        const aaa = Wa(phiAa), abb = Wa(phiBa), aab = Wa(combineStatic(1, phiAa, 1, phiBa));
+        const C = [[2 * eaa, eab - eaa - ebb], [eab - eaa - ebb, 2 * ebb]];
+        const C0m = [[2 * aaa, aab - aaa - abb], [aab - aaa - abb, 2 * abb]];
+        const { vals, vecs } = eigGen2(matMul2(matInv2(C0m), C));
+        // Differential character: (v0·v1)/|v|² < 0 ⇒ opposite-sign ⇒ differential ("odd").
+        const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
+        const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
+        ['odd', 'even'].forEach((label, li) => {
+            const v = vecs[order[li]];
+            const phiEps = combineStatic(v[0], phiA, v[1], phiB);
+            const phiAir = combineStatic(v[0], phiAa, v[1], phiBa);
+            const W_air = Wa(phiAir);
+            const C0 = kC * eps0 * W_air;
+            const eps_eff_static = We(phiEps) / W_air;
+            const fields = resampleStatic(mesh, phiEps, this.domain,
+                { resolution: this.opts.resolution, parity: null, grid });
+            this._static[label] = {
+                fm, abc, kC, phiEps, C0, W_loss: computeTriEnergy(phiEps, mesh, mesh.lossMap),
+                eps_eff_static,
+                Z_static: 1 / (c0 * Math.sqrt(C0 * eps_eff_static * C0)),
+                fields, modalVec: v,
+            };
+        });
     }
 
     // Per-mode result at frequency f, reusing the cached static solve.

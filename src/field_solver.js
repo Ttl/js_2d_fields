@@ -10,6 +10,26 @@ export const CONSTANTS = {
     PI: Math.PI
 };
 
+// --- 2×2 helpers for general (asymmetric) two-conductor modal analysis -------
+const _matInv2 = ([[a, b], [c, d]]) => { const det = a * d - b * c; return [[d / det, -b / det], [-c / det, a / det]]; };
+const _matMul2 = (A, B) => [
+    [A[0][0] * B[0][0] + A[0][1] * B[1][0], A[0][0] * B[0][1] + A[0][1] * B[1][1]],
+    [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]],
+];
+// Eigenpairs of a real 2×2 (here M = [C0]⁻¹[C], real eigenvalues since C, C0 are SPD).
+// Eigenvectors are normalised so the largest-magnitude component is +1, matching the ±1
+// odd/even drive convention so a symmetric pair reproduces the existing odd/even basis.
+function _eigGen2(M) {
+    const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
+    const tr = a + d, disc = Math.sqrt(Math.max(0, tr * tr - 4 * (a * d - b * c)));
+    const vecFor = (l) => {
+        let v = Math.abs(b) > 1e-300 ? [b, l - a] : (Math.abs(c) > 1e-300 ? [l - d, c] : [1, 0]);
+        const m = Math.abs(v[0]) >= Math.abs(v[1]) ? v[0] : v[1];
+        return m !== 0 ? [v[0] / m, v[1] / m] : v;
+    };
+    return { vals: [(tr + disc) / 2, (tr - disc) / 2], vecs: [vecFor((tr + disc) / 2), vecFor((tr - disc) / 2)] };
+}
+
 // --- Math Utils ---
 
 export function diff(arr) {
@@ -272,6 +292,33 @@ export class FieldSolver2D {
             }
         }
         return V;
+    }
+
+    /**
+     * Voltage array driving the positive trace at vp and the negative trace at vn
+     * (grounds at 0). Used for per-conductor / modal-eigenvector excitation.
+     */
+    _create_voltage_array_drive(vp, vn) {
+        const ny = this.y.length, nx = this.x.length;
+        const V = Array(ny).fill().map(() => new Float64Array(nx));
+        for (let i = 0; i < ny; i++) {
+            for (let j = 0; j < nx; j++) {
+                if (this.ground_mask[i][j]) V[i][j] = 0.0;
+                else if (this.signal_p_mask[i][j]) V[i][j] = vp;
+                else if (this.signal_n_mask[i][j]) V[i][j] = vn;
+            }
+        }
+        return V;
+    }
+
+    // Charge on the positive / negative trace for a given potential field (uses the
+    // validated Gauss-flux integrator with the per-trace mask). Returns |Q|.
+    _trace_charge(V, mask, vacuum) {
+        const orig = this.signal_mask;
+        this.signal_mask = mask;
+        const Q = this.calculate_capacitance(V, vacuum);
+        this.signal_mask = orig;
+        return Q;
     }
 
     /**
@@ -1325,6 +1372,63 @@ export class FieldSolver2D {
         return Math.max(z_err, c_err);
     }
 
+    // General two-conductor modal analysis for a differential pair, run on the converged
+    // mesh as a post-pass. Drives each trace independently to assemble the full 2×2
+    // capacitance matrices [C] (dielectric) and [C0] (vacuum), diagonalises [C0]⁻¹[C] to
+    // get the two genuine line modes (eps_eff = eigenvalues, modal voltage ratios =
+    // eigenvectors), and builds each mode's fields/loss from the eigenvector combination of
+    // the per-trace fields. Replaces the odd/even drive results, which only coincide with
+    // the modes for a SYMMETRIC pair (where the eigenvectors come out as [1,∓1], so this
+    // reproduces the existing odd/even basis exactly — no change to symmetric results).
+    async _solve_modal_differential() {
+        // Per-trace static fields (dielectric + vacuum). The Laplace solve is linear in the
+        // drive, so the field for any drive [vp,vn] is vp·(A field) + vn·(B field).
+        const solveDrive = async (vp, vn, vac) => {
+            const V = await this.solve_laplace(this._create_voltage_array_drive(vp, vn), vac);
+            return { V, ...this.compute_fields(V) };
+        };
+        const A = await solveDrive(1, 0, false), Av = await solveDrive(1, 0, true);
+        const B = await solveDrive(0, 1, false), Bv = await solveDrive(0, 1, true);
+        // Full 2×2 Maxwell capacitance matrices from per-trace charges (Gauss flux). Diagonal
+        // is the self charge (driven trace), off-diagonal the induced charge on the other
+        // trace (negative). Symmetrised for reciprocity. Building the matrix this way (rather
+        // than the energy integral) keeps the validated absolute scale, so C_k = ½·vᵀ·Cm·v
+        // reproduces the existing C_odd/C_even exactly for a symmetric pair.
+        const sp = this.signal_p_mask, sn = this.signal_n_mask;
+        const maxwell = (DA, DB, vac) => {
+            const m12 = -0.5 * (this._trace_charge(DA.V, sn, vac) + this._trace_charge(DB.V, sp, vac));
+            return [[this._trace_charge(DA.V, sp, vac), m12],
+                    [m12, this._trace_charge(DB.V, sn, vac)]];
+        };
+        const Cm = maxwell(A, B, false), Cm0 = maxwell(Av, Bv, true);
+        const quad = (M, v) => 0.5 * (v[0] * v[0] * M[0][0] + 2 * v[0] * v[1] * M[0][1] + v[1] * v[1] * M[1][1]);
+        const { vecs } = _eigGen2(_matMul2(_matInv2(Cm0), Cm));
+        // Assign to odd/even by differential character (opposite-sign components → odd).
+        const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
+        const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
+        const comb = (a, P, b, Q) => P.map((row, i) => row.map((val, j) => a * val + b * Q[i][j]));
+        const results = [];
+        ['odd', 'even'].forEach((label, li) => {
+            const v = vecs[order[li]];
+            const V = comb(v[0], A.V, v[1], B.V);
+            const Ex = comb(v[0], A.Ex, v[1], B.Ex), Ey = comb(v[0], A.Ey, v[1], B.Ey);
+            const Ck = quad(Cm, v);          // ½·vᵀ·Cm·v  (mode capacitance, matches C_odd/C_even)
+            const C0k = quad(Cm0, v);
+            const eps_eff = Ck / C0k;
+            const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
+            const { R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
+            const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
+            const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, Ck, Z0);
+            const alpha_c = 8.686 * R_total / (2 * Zc.re);
+            results.push({
+                mode: label, Z0, eps_eff: eps_eff_mode, C: Ck, C0: C0k, RLGC: rlgc, Zc,
+                alpha_c, alpha_d, alpha_total: alpha_c + alpha_d, L_internal, L_external,
+                V, Ex, Ey, modalVec: v,
+            });
+        });
+        return results;
+    }
+
     async _solve_single_mode(mode, vacuum_first = true) {
         /**
          * Solve a single mode and return full results.
@@ -1525,11 +1629,11 @@ export class FieldSolver2D {
 
         // If skip_mesh is true, just solve once with existing mesh
         if (skip_mesh) {
-            const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
-            const modeResults = [];
-            for (const modeName of modeNames) {
-                const result = await this._solve_single_mode(modeName, true);
-                modeResults.push(result);
+            let modeResults;
+            if (this.is_differential) {
+                modeResults = await this._solve_modal_differential();
+            } else {
+                modeResults = [await this._solve_single_mode('single', true)];
             }
             // Store fields as arrays
             this.V = modeResults.map(r => r.V);
@@ -1632,6 +1736,14 @@ export class FieldSolver2D {
                 }
                 this._setup_geometry();
             }
+        }
+
+        // For a differential pair, replace the odd/even drive results with the genuine
+        // two-conductor modal decomposition on the converged mesh. Correct for asymmetric
+        // pairs (the two traces sit in different environments, so odd/even ≠ the modes);
+        // identical to odd/even for symmetric pairs.
+        if (this.is_differential) {
+            modeResults = await this._solve_modal_differential();
         }
 
         // Store fields as arrays
