@@ -120,6 +120,7 @@ export function buildSolver(spec, backend) {
             h_middle: spec.bs_h_middle, er_middle: spec.bs_er_middle, tand_middle: spec.bs_tand_middle,
             h_top: spec.bs_h_top, er_top: spec.bs_er_top, tand_top: spec.bs_tand_top,
             freq: spec.freq, rq: spec.rq, boundaries: ['open', 'open', 'gnd', 'gnd'], mesh_backend: backend,
+            nx: 30, ny: 30,   // coarse initial grid (matches the app) so adaptive refinement has headroom
         };
         if (spec.use_enclosure) { o.enclosure_width = spec.enclosure_width; if (spec.use_side_gnd) o.boundaries = ['gnd', 'gnd', 'gnd', 'gnd']; }
         if (spec.use_plating) o.plating = { sigma: 1e7, thickness: 4e-6, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
@@ -131,6 +132,7 @@ export function buildSolver(spec, backend) {
         trace_width: spec.w, substrate_height: spec.h, trace_thickness: spec.t, gnd_thickness: spec.gnd_thickness,
         epsilon_r: spec.er, tan_delta: spec.tand, sigma_cond: spec.sigma, freq: spec.freq, rq: spec.rq,
         mesh_backend: backend,
+        nx: 30, ny: 30,   // coarse initial grid (matches the app) so adaptive refinement has headroom
     };
     const o = { ...base };
     if (spec.trace_spacing) o.trace_spacing = spec.trace_spacing;
@@ -148,7 +150,14 @@ async function solveOn(spec, backend) {
     console.log = () => {};
     try {
         const s = buildSolver(spec, backend);
-        const r = await s.solve_adaptive();
+        // Mirror the app's adaptive controls (src/app_solver.js) so the fuzzer measures
+        // real app behaviour, not an unrefined coarse grid. Without these the rectilinear
+        // backend inherited nx=300 (a >90k-node initial grid that exceeds the 20k budget →
+        // zero refinement) and min_converged_passes=1 (stops at the first stably-wrong pass),
+        // which manufactured spurious QS-vs-FW discrepancies on tight differential gaps.
+        const r = await s.solve_adaptive({
+            max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2,
+        });
         const m = r.modes[0];
         return {
             Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C,
