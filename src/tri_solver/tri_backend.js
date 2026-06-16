@@ -458,16 +458,16 @@ const matMul2 = (A, B) => [
     [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]],
 ];
 // Eigenpairs of a real 2×2 (here M = [C0]⁻¹[C], real eigenvalues since C, C0 are SPD).
-// Eigenvectors are normalised so the largest-magnitude component is +1 — this matches the
-// ±1 odd/even drive convention, so a symmetric pair reproduces the existing odd/even basis
-// exactly (no change to symmetric results), while an asymmetric pair gets its true modes.
+// Eigenvectors are normalised to |v|=√2 — equals the ±1 odd/even drive for a symmetric pair
+// (symmetric results reproduced) and is continuous through symmetry (max-component normalisation
+// jumps when the dominant component switches, making the modal Z0 discontinuous in the asymmetry).
 function eigGen2(M) {
     const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
     const tr = a + d, disc = Math.sqrt(Math.max(0, tr * tr - 4 * (a * d - b * c)));
     const vecFor = (l) => {
         let v = Math.abs(b) > 1e-300 ? [b, l - a] : (Math.abs(c) > 1e-300 ? [l - d, c] : [1, 0]);
-        const m = Math.abs(v[0]) >= Math.abs(v[1]) ? v[0] : v[1];
-        return m !== 0 ? [v[0] / m, v[1] / m] : v;
+        const n = Math.hypot(v[0], v[1]);
+        return n > 0 ? [v[0] * Math.SQRT2 / n, v[1] * Math.SQRT2 / n] : v;
     };
     return { vals: [(tr + disc) / 2, (tr - disc) / 2], vecs: [vecFor((tr + disc) / 2), vecFor((tr - disc) / 2)] };
 }
@@ -686,7 +686,7 @@ export class TriBackend {
         // odd/even and picking one eigenmode per drive can return the SAME eigenmode twice
         // (e.g. broadside stripline with an unequal er stack). Use the genuine line modes
         // instead — the eigenvectors of [C0]⁻¹[C] from per-trace drives.
-        if (s.is_differential && !this.symmetry) { this._prepareStaticModal(grid); return; }
+        if (s.is_differential && !this.symmetry && this._prepareStaticModal(grid)) return;
         for (const mode of this.modeNames) {
             const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry, this.condRect.wallPEC);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
@@ -737,6 +737,20 @@ export class TriBackend {
         const C = [[2 * eaa, eab - eaa - ebb], [eab - eaa - ebb, 2 * ebb]];
         const C0m = [[2 * aaa, aab - aaa - abb], [aab - aaa - abb, 2 * abb]];
         const { vals, vecs } = eigGen2(matMul2(matInv2(C0m), C));
+        // Engage the modal decomposition ONLY for a genuinely asymmetric, non-degenerate pair.
+        // A symmetric pair (C11≈C22) or a velocity-degenerate one (homogeneous εr ⇒ both modes
+        // share eps_eff) is exactly the odd/even decomposition — and for the degenerate case the
+        // eigenvectors are arbitrary — so return false and let _prepareStatic do the odd/even prep.
+        const asym = Math.abs(C[0][0] - C[1][1]) / (Math.abs(C[0][0]) + Math.abs(C[1][1]) + 1e-30);
+        const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
+        const force = globalThis.__MODAL_FORCE__;   // 'on'|'off' test override; undefined = guard
+        if (force !== 'on' && (force === 'off' || asym < 0.02 || sep < 0.02)) { this._modalPhys = null; return false; }
+        // Physical p.u.l. matrices for the MTL 4-port S-parameter path. The energy-form C is
+        // scaled to F/m by kC·ε0 (same factor as the per-mode C0 = kC·ε0·W_air); [L] = (1/c²)[C0]⁻¹.
+        const ksc = kC * eps0, kL = 1 / (c0 * c0);
+        const sc2 = (M, s) => [[M[0][0] * s, M[0][1] * s], [M[1][0] * s, M[1][1] * s]];
+        const C0pInv = matInv2(sc2(C0m, ksc));
+        this._modalPhys = { C: sc2(C, ksc), L: sc2(C0pInv, kL) };
         // Differential character: (v0·v1)/|v|² < 0 ⇒ opposite-sign ⇒ differential ("odd").
         const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
         const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
@@ -756,6 +770,7 @@ export class TriBackend {
                 fields, modalVec: v,
             };
         });
+        return true;
     }
 
     // Per-mode result at frequency f, reusing the cached static solve.
@@ -1040,6 +1055,8 @@ export class TriBackend {
             result.Z_diff = 2 * odd.Z0;
             result.Z_common = even.Z0 / 2;
             result.RLGC_matrix = modalToPhysicalRLGC(odd, even);
+            // True physical 2×2 [C]/[L] for the asymmetric MTL 4-port S-parameter path.
+            if (this._modalPhys) result.physMatrix = this._modalPhys;
         }
         // Write plotting state onto the solver (mirrors the FDM backend).
         const f0 = this._static[this.modeNames[0]].fields;

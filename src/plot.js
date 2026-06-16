@@ -1,5 +1,5 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
-import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
+import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB } from './sparameters.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -986,7 +986,7 @@ function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) 
         for (const { freq, result } of sweepResults) {
             const oddMode = result.modes.find(m => m.mode === 'odd');
             const evenMode = result.modes.find(m => m.mode === 'even');
-            const sp = computeSParamsDifferential(freq, oddMode.RLGC, evenMode.RLGC, length, Z_ref);
+            const sp = computeSParamsDiffAuto(freq, oddMode.RLGC, evenMode.RLGC, result.physMatrix, length, Z_ref);
 
             if (plotMode === 'magnitude') {
                 SDD11_data.push(sParamTodB(sp.SDD11));
@@ -1012,7 +1012,7 @@ function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) 
         for (const { freq, result } of sweepResults) {
             const oddMode = result.modes.find(m => m.mode === 'odd');
             const evenMode = result.modes.find(m => m.mode === 'even');
-            const sp = computeSParamsDifferential(freq, oddMode.RLGC, evenMode.RLGC, length, Z_ref);
+            const sp = computeSParamsDiffAuto(freq, oddMode.RLGC, evenMode.RLGC, result.physMatrix, length, Z_ref);
 
             const S11 = sp.S[0][0], S21 = sp.S[1][0], S31 = sp.S[2][0], S41 = sp.S[3][0];
 

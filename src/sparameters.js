@@ -201,6 +201,94 @@ function computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref) {
 }
 
 /**
+ * Differential S-parameters, automatically using the full MTL 4-port when the physical 2×2
+ * [C]/[L] matrices are available (asymmetric-correct) and falling back to the odd/even
+ * combination otherwise. Loss [R]/[G] use the symmetric modal reconstruction (the reactive
+ * asymmetry that drives S11≠S22 / mode conversion is exact; loss asymmetry is neglected).
+ * @param {object} physMatrix {C:[[..]], L:[[..]]} true physical p.u.l. matrices, or null
+ */
+function computeSParamsDiffAuto(freq, rlgc_odd, rlgc_even, physMatrix, length, Z_ref) {
+    if (!physMatrix || !physMatrix.C || !physMatrix.L) {
+        return computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref);
+    }
+    const sym = (o, e) => [[(o + e) / 2, (e - o) / 2], [(e - o) / 2, (o + e) / 2]];
+    const R2 = sym(rlgc_odd.R, rlgc_even.R);
+    const G2 = sym(rlgc_odd.G, rlgc_even.G);
+    return computeSParamsDifferentialMTL(freq, R2, physMatrix.L, G2, physMatrix.C, length, Z_ref);
+}
+
+// 2×2 matrix transpose (Matrix2x2 stores a,b,c,d = [[a,b],[c,d]]).
+function mTranspose(M) { return new Matrix2x2(M.a, M.c, M.b, M.d); }
+// Build a complex 2×2 from real part [[..]] and imaginary part [[..]].
+function mComplex(re, im) {
+    return new Matrix2x2(
+        new Complex(re[0][0], im[0][0]), new Complex(re[0][1], im[0][1]),
+        new Complex(re[1][0], im[1][0]), new Complex(re[1][1], im[1][1]));
+}
+
+/**
+ * Full multiconductor (MTL) 4-port S-parameters for a coupled pair from the physical 2×2
+ * per-unit-length matrices [R],[L],[G],[C]. Unlike computeSParamsDifferential (which combines
+ * odd/even single-ended responses and is exact only for a SYMMETRIC pair), this handles an
+ * asymmetric pair: it yields S11≠S22 and non-zero mode-conversion SDC/SCD.
+ *
+ * Method: [Z]=[R]+jω[L], [Y]=[G]+jω[C]; [γ]=√([Z][Y]); chain blocks A=cosh(γℓ),
+ * B=[Z]·γ⁻¹sinh(γℓ), C=[Y]·γ⁻¹sinh(γℓ), D=Aᵀ (reciprocal); block ABCD→4-port S; mixed-mode
+ * transform → SDD/SCC/SDC/SCD. Port order: {1,2}=near ends of trace1/2, {3,4}=far ends.
+ *
+ * @param {number} freq Hz; @param {number[][]} R2,L2,G2,C2 physical 2×2 p.u.l. matrices (SI)
+ * @param {number} length m; @param {number} Z_ref Ω
+ */
+function computeSParamsDifferentialMTL(freq, R2, L2, G2, C2, length, Z_ref) {
+    const omega = 2 * Math.PI * freq;
+    const Z = mComplex(R2, L2.map(row => row.map(v => v * omega)));   // [R] + jω[L]
+    const Y = mComplex(G2, C2.map(row => row.map(v => v * omega)));   // [G] + jω[C]
+    const gamma = Z.mul(Y).sqrt();                                     // [γ] = √([Z][Y])
+    const gl = gamma.mul(length);
+    const sinch = gamma.inv().mul(gl.sinh());                          // γ⁻¹·sinh(γℓ)
+    const A = gl.cosh();
+    const B = Z.mul(sinch);
+    const Cb = Y.mul(sinch);
+    const D = mTranspose(A);                                           // reciprocal: D = Aᵀ
+    // Block ABCD → S (post-multiply by den⁻¹), Z_ref·I on every port.
+    const Y0 = 1 / Z_ref;
+    const BY = B.mul(Y0), CZ = Cb.mul(Z_ref);
+    const den = A.add(BY).add(CZ).add(D);
+    const denI = den.inv();
+    const S11 = A.add(BY).sub(CZ).sub(D).mul(denI);                   // near-near
+    const S22 = A.mul(-1).add(BY).sub(CZ).add(D).mul(denI);          // far-far
+    const S21 = denI.mul(2);                                           // far-near (reciprocal, det≈1)
+    const S12 = S21;
+    // Assemble single-ended 4×4 (ports 1,2 near; 3,4 far), then mixed-mode transform.
+    const blk = (m) => [[m.a, m.b], [m.c, m.d]];
+    const b11 = blk(S11), b12 = blk(S12), b21 = blk(S21), b22 = blk(S22);
+    const S = [
+        [b11[0][0], b11[0][1], b12[0][0], b12[0][1]],
+        [b11[1][0], b11[1][1], b12[1][0], b12[1][1]],
+        [b21[0][0], b21[0][1], b22[0][0], b22[0][1]],
+        [b21[1][0], b21[1][1], b22[1][0], b22[1][1]],
+    ];
+    // M: [V1,V2,V3,V4] → [d1,d2,c1,c2], rows = (1/√2)·{[1,-1,0,0],[0,0,1,-1],[1,1,0,0],[0,0,1,1]}.
+    const r = 1 / Math.SQRT2;
+    const M = [[r, -r, 0, 0], [0, 0, r, -r], [r, r, 0, 0], [0, 0, r, r]];
+    const mm = Array.from({ length: 4 }, () => Array.from({ length: 4 }, () => new Complex(0, 0)));
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+        let s = new Complex(0, 0);
+        for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++)
+            s = s.add(S[a][b].mul(M[i][a] * M[j][b]));                // (M·S·Mᵀ)_ij
+        mm[i][j] = s;
+    }
+    // mm order [d1,d2,c1,c2].
+    return {
+        S,
+        SDD11: mm[0][0], SDD21: mm[1][0],
+        SCC11: mm[2][2], SCC21: mm[3][2],
+        SDC11: mm[0][2], SDC21: mm[1][2],
+        SCD11: mm[2][0], SCD21: mm[3][0],
+    };
+}
+
+/**
  * Convert Complex S-parameter to dB magnitude
  * @param {Complex} s - S-parameter
  * @returns {number} - Magnitude in dB
@@ -223,6 +311,8 @@ function sParamToPhase(s) {
 export {
     computeSParamsSingleEnded,
     computeSParamsDifferential,
+    computeSParamsDifferentialMTL,
+    computeSParamsDiffAuto,
     computeZ0,
     sParamTodB,
     sParamToPhase

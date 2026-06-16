@@ -1,5 +1,5 @@
 // snp_export.js - Touchstone (SnP) File Export for S-Parameters
-import { computeSParamsSingleEnded, computeSParamsDifferential } from './sparameters.js';
+import { computeSParamsSingleEnded, computeSParamsDiffAuto } from './sparameters.js';
 
 // Map transmission line types to short names
 const TL_TYPE_SHORT_NAMES = {
@@ -171,7 +171,7 @@ function generateS4P(frequencySweepResults, length, Z_ref, params = {}) {
         const oddMode = result.modes.find(m => m.mode === 'odd');
         const evenMode = result.modes.find(m => m.mode === 'even');
 
-        const sp = computeSParamsDifferential(freq, oddMode.RLGC, evenMode.RLGC, length, Z_ref);
+        const sp = computeSParamsDiffAuto(freq, oddMode.RLGC, evenMode.RLGC, result.physMatrix, length, Z_ref);
         const S = sp.S;
 
         // First line: frequency and first row (S11, S12, S13, S14)
