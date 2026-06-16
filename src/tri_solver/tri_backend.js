@@ -363,7 +363,8 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // a "closest-eps to eps_static" pick then jumps between them across frequency,
     // producing the loss/eps_eff dips. A loose eps gate drops near-cutoff / continuum
     // modes (eps ≪ eps_static) that can otherwise score a deceptively high overlap.
-    let bestIdx = -1, bestOvl = 0.3;                       // require overlap > 0.3
+    let bestIdx = -1, bestOvl = 0.3, bestEps = 0;          // require overlap > 0.3
+    let altOvl = 0, altEps = 0;                            // runner-up, for ambiguity detection
     for (let i = 0; i < res.nconv; i++) {
         if (res.evalsRe[i] >= 0) continue;                 // physical: γ² < 0
         const epsMode = -res.evalsRe[i] / k2;
@@ -373,14 +374,26 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         for (let k = 0; k < fm.nFreeTransverse; k++) { dot += staticSeed[k] * vR[k]; nS += staticSeed[k] ** 2; nV += vR[k] ** 2; }
         const ovl = nS > 0 && nV > 0 ? Math.abs(dot) / Math.sqrt(nS * nV) : 0;
         globalThis.__TRI_DEBUG__ && console.log(`    cand ${i}: eps=${epsMode.toFixed(4)} ovl=${ovl.toFixed(3)} (target ${eps_static.toFixed(4)})`);
-        if (ovl > bestOvl) { bestOvl = ovl; bestIdx = i; }
+        if (ovl > bestOvl) {
+            if (bestIdx >= 0) { altOvl = bestOvl; altEps = bestEps; }   // demote the prior best
+            bestOvl = ovl; bestIdx = i; bestEps = epsMode;
+        } else if (ovl > altOvl) { altOvl = ovl; altEps = epsMode; }
     }
     if (bestIdx < 0) return null;
+    // Ambiguity: a runner-up mode carries comparable overlap with the static drive but a
+    // very different ε. That means the quasi-TEM has fragmented across degenerate modes
+    // (inhomogeneous fill, esp. two-ground / differential geometries) and the single-mode
+    // pick is unreliable — the eigenvalue is one fragment, not the true quasi-TEM ε. See
+    // the broadside-stripline open-side case. Distinct from a clean near-degenerate pair
+    // that AGREES on ε (e.g. embedded microstrip), which is harmless.
+    const ambiguous = altOvl >= 0.4 && altOvl >= 0.6 * bestOvl
+        && Math.abs(altEps - bestEps) / Math.max(bestEps, 1e-9) >= 0.10;
     return {
         eps: -res.evalsRe[bestIdx] / k2,
         vRe: res.evecsRe.slice(bestIdx * N, (bestIdx + 1) * N),
         vIm: res.evecsIm.slice(bestIdx * N, (bestIdx + 1) * N),
         g2Re: res.evalsRe[bestIdx], g2Im: res.evalsIm[bestIdx],
+        ambiguous, bestOvl, altOvl, bestEps, altEps,
     };
 }
 
@@ -689,6 +702,18 @@ export class TriBackend {
             fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
                 null, cacheBox);
             if (fw && fw.eps > 0) eps_d = fw.eps;
+            if (fw && fw.ambiguous && this._modeWarnings) {
+                const msg = `${mode} mode: full-wave quasi-TEM pick is ambiguous at ${(f / 1e9).toFixed(2)} GHz — `
+                    + `picked ε_eff=${fw.bestEps.toFixed(3)} (overlap ${fw.bestOvl.toFixed(2)}) but a competing mode `
+                    + `ε_eff=${fw.altEps.toFixed(3)} (overlap ${fw.altOvl.toFixed(2)}) carries comparable weight; `
+                    + `static ε_eff=${eps_eff_static.toFixed(3)}. The quasi-TEM has likely fragmented across degenerate `
+                    + `modes (inhomogeneous fill) — reported ε_eff/Z0 may be unreliable.`;
+                if (!this._modeWarnings.some(w => w.mode === mode)) {
+                    this._modeWarnings.push({ mode, freq: f, bestEps: fw.bestEps, altEps: fw.altEps,
+                        bestOvl: fw.bestOvl, altOvl: fw.altOvl, staticEps: eps_eff_static, message: msg });
+                    console.warn('[tri full-wave] ' + msg);
+                }
+            }
         }
         // Dielectric dispersion is a capacitance effect: C = eps_d·C0 (geometric
         // L_external = 1/(c²C0)). Reduces to the static result when eps_d = eps_static.
@@ -909,8 +934,11 @@ export class TriBackend {
     solveAt(f) {
         if (!this.mesh) this.buildMesh();
         if (this.solver.use_causal_materials) this._applyCausal(f);
+        this._modeWarnings = [];
         const modes = this.modeNames.map(m => this._modeAtFreq(m, f));
         const result = { modes };
+        if (this._modeWarnings.length) result.warnings = this._modeWarnings;
+        this.solver.modeWarnings = this._modeWarnings;
         if (this.solver.is_differential) {
             const odd = modes.find(m => m.mode === 'odd');
             const even = modes.find(m => m.mode === 'even');

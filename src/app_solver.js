@@ -1493,6 +1493,15 @@ async function runSimulation() {
                 `Try adjusting geometry or enclosure size.`);
         }
 
+        // Mode-ambiguity warning (triangular full-wave backend): the quasi-TEM eigenmode
+        // pick fragmented across near-degenerate modes (typical of inhomogeneous broadside /
+        // two-ground geometries), so the reported eps_eff/Z0 may be unreliable. The static
+        // (variational) eps_eff in the message is the trustworthy magnitude.
+        const modeWarnings = (results && results.warnings) || solver.modeWarnings || [];
+        for (const mw of modeWarnings) {
+            log(`⚠ Mode warning: ${mw.message}`);
+        }
+
         if (stopRequested) {
             log("Simulation stopped by user");
             pbar.style.width = "0%";
