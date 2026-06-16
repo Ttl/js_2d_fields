@@ -1,6 +1,6 @@
 // sparameters.js - S-Parameter Calculations for Transmission Lines
 import { Complex } from './complex.js';
-import { Matrix2x2 } from './matrix.js';
+import { Matrix2x2, mat2Mul, mat2Inv, mat2T } from './matrix.js';
 
 /**
  * Compute 2-port S-parameters for a single-ended transmission line
@@ -200,25 +200,44 @@ function computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref) {
     };
 }
 
+// Modal→physical for a per-unit-length quantity, given the unit-norm voltage-eigenvector matrix
+// Tv (columns = modes). Series quantities (R, L) transform as Tv·diag·Tvᵀ; shunt quantities
+// (G, C) as Tv⁻ᵀ·diag·Tv⁻¹ (verified to reproduce the Maxwell [C] exactly). Both reduce to the
+// symmetric reconstruction X11=X22=(Xo+Xe)/2, X12=(Xe−Xo)/2 when Tv = [1,∓1]/√2.
+function _modalToPhys2x2(Xo, Xe, Tv, shunt) {
+    const D = [[Xo, 0], [0, Xe]];
+    const A = shunt ? mat2T(mat2Inv(Tv)) : Tv;        // left factor
+    const B = shunt ? mat2Inv(Tv) : mat2T(Tv);        // right factor
+    return mat2Mul(mat2Mul(A, D), B);
+}
+
 /**
  * Differential S-parameters, automatically using the full MTL 4-port when the physical 2×2
  * [C]/[L] matrices are available (asymmetric-correct) and falling back to the odd/even
- * combination otherwise. Loss [R]/[G] use the symmetric modal reconstruction (the reactive
- * asymmetry that drives S11≠S22 / mode conversion is exact; loss asymmetry is neglected).
- * @param {object} physMatrix {C:[[..]], L:[[..]]} true physical p.u.l. matrices, or null
+ * combination otherwise. When the modal eigenvectors (physMatrix.Tv) are present the loss
+ * matrices [R]/[G] are reconstructed with the true (asymmetric) modal transform; otherwise the
+ * symmetric reconstruction is used.
+ * @param {object} physMatrix {C, L, Tv?:[[vo],[ve]]} physical p.u.l. matrices + eigenvectors, or null
  */
 function computeSParamsDiffAuto(freq, rlgc_odd, rlgc_even, physMatrix, length, Z_ref) {
     if (!physMatrix || !physMatrix.C || !physMatrix.L) {
         return computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref);
     }
-    const sym = (o, e) => [[(o + e) / 2, (e - o) / 2], [(e - o) / 2, (o + e) / 2]];
-    const R2 = sym(rlgc_odd.R, rlgc_even.R);
-    const G2 = sym(rlgc_odd.G, rlgc_even.G);
+    let R2, G2;
+    if (physMatrix.Tv) {
+        const [vo, ve] = physMatrix.Tv;               // eigenvectors (any norm); use unit-norm columns
+        const no = Math.hypot(vo[0], vo[1]) || 1, ne = Math.hypot(ve[0], ve[1]) || 1;
+        const Tv = [[vo[0] / no, ve[0] / ne], [vo[1] / no, ve[1] / ne]];
+        R2 = _modalToPhys2x2(rlgc_odd.R, rlgc_even.R, Tv, false);   // series
+        G2 = _modalToPhys2x2(rlgc_odd.G, rlgc_even.G, Tv, true);    // shunt
+    } else {
+        const sym = (o, e) => [[(o + e) / 2, (e - o) / 2], [(e - o) / 2, (o + e) / 2]];
+        R2 = sym(rlgc_odd.R, rlgc_even.R);
+        G2 = sym(rlgc_odd.G, rlgc_even.G);
+    }
     return computeSParamsDifferentialMTL(freq, R2, physMatrix.L, G2, physMatrix.C, length, Z_ref);
 }
 
-// 2×2 matrix transpose (Matrix2x2 stores a,b,c,d = [[a,b],[c,d]]).
-function mTranspose(M) { return new Matrix2x2(M.a, M.c, M.b, M.d); }
 // Build a complex 2×2 from real part [[..]] and imaginary part [[..]].
 function mComplex(re, im) {
     return new Matrix2x2(
@@ -249,7 +268,7 @@ function computeSParamsDifferentialMTL(freq, R2, L2, G2, C2, length, Z_ref) {
     const A = gl.cosh();
     const B = Z.mul(sinch);
     const Cb = Y.mul(sinch);
-    const D = mTranspose(A);                                           // reciprocal: D = Aᵀ
+    const D = A.transpose();                                           // reciprocal: D = Aᵀ
     // Block ABCD → S (post-multiply by den⁻¹), Z_ref·I on every port.
     const Y0 = 1 / Z_ref;
     const BY = B.mul(Y0), CZ = Cb.mul(Z_ref);

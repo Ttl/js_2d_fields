@@ -86,6 +86,11 @@ class Matrix2x2 {
         return this.a.add(this.d);
     }
 
+    transpose() {
+        // Transpose: swap b and c
+        return new Matrix2x2(this.a, this.c, this.b, this.d);
+    }
+
     /**
      * Matrix square root using eigendecomposition
      * For a 2x2 matrix A, sqrt(A) such that sqrt(A) * sqrt(A) = A
@@ -180,4 +185,28 @@ class Matrix2x2 {
     }
 }
 
-export { Matrix2x2 };
+// --- Real 2×2 helpers (matrices as [[a,b],[c,d]] of plain numbers) ----------
+const mat2Mul = (A, B) => [
+    [A[0][0] * B[0][0] + A[0][1] * B[1][0], A[0][0] * B[0][1] + A[0][1] * B[1][1]],
+    [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]],
+];
+const mat2Inv = (M) => { const d = M[0][0] * M[1][1] - M[0][1] * M[1][0]; return [[M[1][1] / d, -M[0][1] / d], [-M[1][0] / d, M[0][0] / d]]; };
+const mat2T = (M) => [[M[0][0], M[1][0]], [M[0][1], M[1][1]]];
+
+// Eigenpairs of a real 2×2 M (here M = [C0]⁻¹[C], real eigenvalues since C, C0 are SPD).
+// Eigenvectors are normalised to |v|=√2 — equals the ±1 odd/even drive for a symmetric pair
+// (so symmetric results are reproduced) AND is continuous through symmetry (normalising to the
+// max component would jump when the dominant component switches, making the modal Z0
+// discontinuous in the asymmetry). Returns { vals:[λ1,λ2], vecs:[v1,v2] }.
+function eig2x2(M) {
+    const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
+    const tr = a + d, disc = Math.sqrt(Math.max(0, tr * tr - 4 * (a * d - b * c)));
+    const vecFor = (l) => {
+        const v = Math.abs(b) > 1e-300 ? [b, l - a] : (Math.abs(c) > 1e-300 ? [l - d, c] : [1, 0]);
+        const n = Math.hypot(v[0], v[1]);
+        return n > 0 ? [v[0] * Math.SQRT2 / n, v[1] * Math.SQRT2 / n] : v;
+    };
+    return { vals: [(tr + disc) / 2, (tr - disc) / 2], vecs: [vecFor((tr + disc) / 2), vecFor((tr - disc) / 2)] };
+}
+
+export { Matrix2x2, mat2Mul, mat2Inv, mat2T, eig2x2 };

@@ -2,6 +2,7 @@ import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
 import { calculate_Zrough, calculate_Zrough_layered } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
+import { mat2Mul, mat2Inv, eig2x2 } from './matrix.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -9,28 +10,6 @@ export const CONSTANTS = {
     C: 299792458,
     PI: Math.PI
 };
-
-// --- 2×2 helpers for general (asymmetric) two-conductor modal analysis -------
-const _matInv2 = ([[a, b], [c, d]]) => { const det = a * d - b * c; return [[d / det, -b / det], [-c / det, a / det]]; };
-const _matMul2 = (A, B) => [
-    [A[0][0] * B[0][0] + A[0][1] * B[1][0], A[0][0] * B[0][1] + A[0][1] * B[1][1]],
-    [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]],
-];
-// Eigenpairs of a real 2×2 (here M = [C0]⁻¹[C], real eigenvalues since C, C0 are SPD).
-// Eigenvectors are normalised to |v|=√2 — this equals the ±1 odd/even drive for a symmetric
-// pair (so symmetric results are reproduced) AND is continuous through symmetry (normalising
-// to the max component would jump when the dominant component switches, making the modal Z0
-// discontinuous in the asymmetry).
-function _eigGen2(M) {
-    const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
-    const tr = a + d, disc = Math.sqrt(Math.max(0, tr * tr - 4 * (a * d - b * c)));
-    const vecFor = (l) => {
-        let v = Math.abs(b) > 1e-300 ? [b, l - a] : (Math.abs(c) > 1e-300 ? [l - d, c] : [1, 0]);
-        const n = Math.hypot(v[0], v[1]);
-        return n > 0 ? [v[0] * Math.SQRT2 / n, v[1] * Math.SQRT2 / n] : v;
-    };
-    return { vals: [(tr + disc) / 2, (tr - disc) / 2], vecs: [vecFor((tr + disc) / 2), vecFor((tr - disc) / 2)] };
-}
 
 // --- Math Utils ---
 
@@ -1404,7 +1383,7 @@ export class FieldSolver2D {
         };
         const Cm = maxwell(A, B, false), Cm0 = maxwell(Av, Bv, true);
         const quad = (M, v) => 0.5 * (v[0] * v[0] * M[0][0] + 2 * v[0] * v[1] * M[0][1] + v[1] * v[1] * M[1][1]);
-        const { vals, vecs } = _eigGen2(_matMul2(_matInv2(Cm0), Cm));
+        const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(Cm0), Cm));
         // Engage the modal decomposition ONLY for a genuinely asymmetric, non-degenerate pair.
         // A symmetric pair (C11≈C22) or a homogeneous-dielectric pair (degenerate eps_eff, e.g.
         // a uniform-εr stripline) is exactly the odd/even drives — and for the degenerate case
@@ -1416,11 +1395,12 @@ export class FieldSolver2D {
         if (force !== 'on' && (force === 'off' || asym < 0.02 || sep < 0.02)) { this._modalPhys = null; return null; }
         // Physical p.u.l. matrices for the (asymmetric) MTL 4-port S-parameter path:
         // [C] = Maxwell matrix, [L] = μ0·ε0·[C0]⁻¹ = (1/c²)·[C0]⁻¹.
-        const Cm0inv = _matInv2(Cm0), kL = 1 / (CONSTANTS.C * CONSTANTS.C);
+        const Cm0inv = mat2Inv(Cm0), kL = 1 / (CONSTANTS.C * CONSTANTS.C);
         this._modalPhys = { C: Cm, L: [[Cm0inv[0][0] * kL, Cm0inv[0][1] * kL], [Cm0inv[1][0] * kL, Cm0inv[1][1] * kL]] };
         // Assign to odd/even by differential character (opposite-sign components → odd).
         const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
         const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
+        this._modalPhys.Tv = [vecs[order[0]], vecs[order[1]]];   // [v_odd, v_even] for the loss reconstruction
         const comb = (a, P, b, Q) => P.map((row, i) => row.map((val, j) => a * val + b * Q[i][j]));
         const results = [];
         ['odd', 'even'].forEach((label, li) => {

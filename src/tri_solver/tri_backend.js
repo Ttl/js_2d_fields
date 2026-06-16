@@ -39,6 +39,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField } from './resample.js';
 import { Complex } from '../complex.js';
+import { mat2Mul, mat2Inv, eig2x2 } from '../matrix.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
 
 const c0 = 299792458;
@@ -452,25 +453,6 @@ function combineStatic(a, A, b, B) {
         enrichCoeffs: A.enrichCoeffs ? comb(A.enrichCoeffs, B.enrichCoeffs) : null,
     };
 }
-const matInv2 = ([[a, b], [c, d]]) => { const det = a * d - b * c; return [[d / det, -b / det], [-c / det, a / det]]; };
-const matMul2 = (A, B) => [
-    [A[0][0] * B[0][0] + A[0][1] * B[1][0], A[0][0] * B[0][1] + A[0][1] * B[1][1]],
-    [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]],
-];
-// Eigenpairs of a real 2×2 (here M = [C0]⁻¹[C], real eigenvalues since C, C0 are SPD).
-// Eigenvectors are normalised to |v|=√2 — equals the ±1 odd/even drive for a symmetric pair
-// (symmetric results reproduced) and is continuous through symmetry (max-component normalisation
-// jumps when the dominant component switches, making the modal Z0 discontinuous in the asymmetry).
-function eigGen2(M) {
-    const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
-    const tr = a + d, disc = Math.sqrt(Math.max(0, tr * tr - 4 * (a * d - b * c)));
-    const vecFor = (l) => {
-        let v = Math.abs(b) > 1e-300 ? [b, l - a] : (Math.abs(c) > 1e-300 ? [l - d, c] : [1, 0]);
-        const n = Math.hypot(v[0], v[1]);
-        return n > 0 ? [v[0] * Math.SQRT2 / n, v[1] * Math.SQRT2 / n] : v;
-    };
-    return { vals: [(tr + disc) / 2, (tr - disc) / 2], vecs: [vecFor((tr + disc) / 2), vecFor((tr - disc) / 2)] };
-}
 
 export class TriBackend {
     constructor(ctx, solver, opts = {}) {
@@ -736,7 +718,7 @@ export class TriBackend {
         const aaa = Wa(phiAa), abb = Wa(phiBa), aab = Wa(combineStatic(1, phiAa, 1, phiBa));
         const C = [[2 * eaa, eab - eaa - ebb], [eab - eaa - ebb, 2 * ebb]];
         const C0m = [[2 * aaa, aab - aaa - abb], [aab - aaa - abb, 2 * abb]];
-        const { vals, vecs } = eigGen2(matMul2(matInv2(C0m), C));
+        const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(C0m), C));
         // Engage the modal decomposition ONLY for a genuinely asymmetric, non-degenerate pair.
         // A symmetric pair (C11≈C22) or a velocity-degenerate one (homogeneous εr ⇒ both modes
         // share eps_eff) is exactly the odd/even decomposition — and for the degenerate case the
@@ -749,11 +731,12 @@ export class TriBackend {
         // scaled to F/m by kC·ε0 (same factor as the per-mode C0 = kC·ε0·W_air); [L] = (1/c²)[C0]⁻¹.
         const ksc = kC * eps0, kL = 1 / (c0 * c0);
         const sc2 = (M, s) => [[M[0][0] * s, M[0][1] * s], [M[1][0] * s, M[1][1] * s]];
-        const C0pInv = matInv2(sc2(C0m, ksc));
+        const C0pInv = mat2Inv(sc2(C0m, ksc));
         this._modalPhys = { C: sc2(C, ksc), L: sc2(C0pInv, kL) };
         // Differential character: (v0·v1)/|v|² < 0 ⇒ opposite-sign ⇒ differential ("odd").
         const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
         const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
+        this._modalPhys.Tv = [vecs[order[0]], vecs[order[1]]];   // [v_odd, v_even] for the loss reconstruction
         ['odd', 'even'].forEach((label, li) => {
             const v = vecs[order[li]];
             const phiEps = combineStatic(v[0], phiA, v[1], phiB);
