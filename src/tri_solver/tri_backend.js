@@ -357,15 +357,11 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     try { res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed); }
     catch { return null; }
     if (!res || !res.nconv) return null;
-    // Pick the quasi-TEM mode by MAXIMUM overlap with the static drive (the static
-    // field IS the quasi-TEM shape). This is robust where several eigenmodes cluster
-    // at eps ≈ ε_r — e.g. a homogeneous (stripline) fill in an open/parallel-plate
-    // domain, where the odd quasi-TEM is near-degenerate with lateral resonances:
-    // a "closest-eps to eps_static" pick then jumps between them across frequency,
-    // producing the loss/eps_eff dips. A loose eps gate drops near-cutoff / continuum
-    // modes (eps ≪ eps_static) that can otherwise score a deceptively high overlap.
-    let bestIdx = -1, bestOvl = 0.3, bestEps = 0;          // require overlap > 0.3
-    let altOvl = 0, altEps = 0;                            // runner-up, for ambiguity detection
+    // Pick the quasi-TEM mode by overlap with the static drive (the static field IS the
+    // quasi-TEM shape), with a tie-break by proximity to eps_static. A loose eps gate drops
+    // near-cutoff / continuum modes (eps ≪ eps_static) that can score a deceptively high
+    // overlap. Collect every physical candidate, then select.
+    const cands = [];
     for (let i = 0; i < res.nconv; i++) {
         if (res.evalsRe[i] >= 0) continue;                 // physical: γ² < 0
         const epsMode = -res.evalsRe[i] / k2;
@@ -375,12 +371,24 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         for (let k = 0; k < fm.nFreeTransverse; k++) { dot += staticSeed[k] * vR[k]; nS += staticSeed[k] ** 2; nV += vR[k] ** 2; }
         const ovl = nS > 0 && nV > 0 ? Math.abs(dot) / Math.sqrt(nS * nV) : 0;
         globalThis.__TRI_DEBUG__ && console.log(`    cand ${i}: eps=${epsMode.toFixed(4)} ovl=${ovl.toFixed(3)} (target ${eps_static.toFixed(4)})`);
-        if (ovl > bestOvl) {
-            if (bestIdx >= 0) { altOvl = bestOvl; altEps = bestEps; }   // demote the prior best
-            bestOvl = ovl; bestIdx = i; bestEps = epsMode;
-        } else if (ovl > altOvl) { altOvl = ovl; altEps = epsMode; }
+        if (ovl > 0.3) cands.push({ i, eps: epsMode, ovl });   // require overlap > 0.3
     }
-    if (bestIdx < 0) return null;
+    if (!cands.length) return null;
+    // Among the overlap-COMPETITIVE candidates (within 0.05 of the best overlap), pick the one
+    // CLOSEST to eps_static. The quasi-TEM disperses smoothly from eps_static, so it stays near
+    // it, whereas a box/cavity resonance can transiently MATCH the overlap (a near-tie) while
+    // sitting far from eps_static. Pure max-overlap then coin-flips between them right at the
+    // crossing — so the reported eps jumps to the resonance depending on the mesh. The tie-break
+    // tracks the quasi-TEM robustly, and reduces to max-overlap whenever there is no tie.
+    const maxOvl = Math.max(...cands.map(c => c.ovl));
+    const competitive = cands.filter(c => c.ovl >= maxOvl - 0.05);
+    let pick = competitive[0];
+    for (const c of competitive) if (Math.abs(c.eps - eps_static) < Math.abs(pick.eps - eps_static)) pick = c;
+    const bestIdx = pick.i, bestEps = pick.eps, bestOvl = pick.ovl;
+    // Ambiguity: a competitive runner-up carries comparable overlap but a very different ε
+    // (near-degenerate modes). The pick is now robust, but the closeness is still worth flagging.
+    const runner = cands.filter(c => c.i !== bestIdx).sort((a, b) => b.ovl - a.ovl)[0] || { ovl: 0, eps: bestEps };
+    const altOvl = runner.ovl, altEps = runner.eps;
     // Ambiguity: a runner-up mode carries comparable overlap with the static drive but a
     // very different ε. That means the quasi-TEM has fragmented across degenerate modes
     // (inhomogeneous fill, esp. two-ground / differential geometries) and the single-mode
