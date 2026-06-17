@@ -47,6 +47,32 @@ const eps0 = 8.854187817e-12;
 const MU0 = 4 * Math.PI * 1e-7;
 const NP_TO_DB = 8.685889638;
 
+// ---- Mesh-size budget (memory parity with the FDM backend) ----
+// The full-wave eigensolve is far heavier per mesh entity than the quasi-static FDM
+// Poisson solve: it factorizes a COMPLEX matrix over EDGE DOFs (~1.5 per triangle)
+// instead of a real one over node DOFs. Per triangle that is roughly
+//   1.5 (edges/tri) × 2 (complex doubles) × ~1.4 (Nédélec vs 5-point sparsity) ≈ 4×
+// the bytes the FDM solver spends per node. So a triangle budget of maxNodes/4 keeps the
+// full-wave memory footprint ABOUT THE SAME as the FDM backend at the same Max Nodes
+// setting — letting both backends accept the same max_nodes value (UI: Max Nodes
+// (thousands)). Without this the eigensolve can be handed an unbounded mesh (seen: a
+// 62k-triangle modes mesh) and the eigensolver heap-abort()s with an opaque assertion.
+const FW_NODES_PER_TRI = 4;
+function maxTrisForBudget(maxNodes) {
+    return Math.max(800, Math.floor((maxNodes || 18000) / FW_NODES_PER_TRI));
+}
+
+// Absolute backend ceiling, mirroring the FDM solver's "Problem too large" guard
+// (field_solver.js throws above 1 GB). Refuse a solve whose complex matrices would not
+// fit the eigensolver's WASM heap (2 GB hard cap) with a clean error instead of an opaque
+// eigensolver abort(). bytes ≈ complex (2×) sparse-factorization estimate, same shape as
+// the FDM estimate 10·(12·nnz + 20·N). With the triangle budget above this never trips in
+// normal use; it backstops direct/programmatic misuse and extreme Max Nodes settings.
+const MAX_SOLVE_BYTES = 1e9;
+function eigenSolveBytes(N, nnz) {
+    return 2 * 10 * (12 * nnz + 20 * N);
+}
+
 // ---- WASM context (lazy singleton) ----
 let _ctxPromise = null;
 export function initTriBackend() {
@@ -353,6 +379,11 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // (-k2·eps_static), so the target mode converges first. (Was 8 — halving the
     // Krylov subspace markedly speeds the eigensolve with no change in the picked mode.)
     const nev = 4, ncv = Math.min(2 * nev + 1, N - 1);
+    // Absolute ceiling (mirrors the FDM "Problem too large" guard): refuse a solve that
+    // would overrun the eigensolver heap with a clear error rather than an opaque abort().
+    // The triangle budget keeps normal solves well under this; this backstops misuse.
+    if (eigenSolveBytes(N, fem.csrA.colIdx.length) > MAX_SOLVE_BYTES)
+        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem.csrA.colIdx.length) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
     let res;
     try { res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed); }
     catch { return null; }
@@ -520,14 +551,27 @@ export class TriBackend {
         // loss solve anyway, and eps/Z0 converge at a few hundred triangles. The
         // rough-stripline roughness loss is the binding constraint (it sits ~7% high vs
         // ref on any mesh); coarsening further than this eats its margin.
-        const hFine = this.opts.hFine ?? Math.min(tAbs, wRef / 4) * 1.5;
-        const hCoarse = this._wavelengthCap(this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5);
-        let mesh = buildOccMeshFromGeometry(this.ctx.G, {
-            conductors: s.conductors, dielectrics: s.dielectrics,
-            domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
-            meshConductorInterior: true,   // conductor interiors meshed for the MQS loss solve
-            gmshOptions: this.opts.gmshOptions,
-        });
+        let hFine = this.opts.hFine ?? Math.min(tAbs, wRef / 4) * 1.5;
+        let hCoarse = this._wavelengthCap(this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5);
+        // Triangle budget derived from the Max Nodes setting (memory parity with the FDM
+        // backend — see maxTrisForBudget). Cap the INITIAL mesh here: element count ∝ 1/h²,
+        // so if the feature-/wavelength-sized start overshoots (thin trace → tiny hFine, or a
+        // high modesFreq → fine bulk), coarsen hFine/hCoarse by √(nTris/budget) and rebuild.
+        // The refinement loop below also stops at this budget; capping the initial mesh too is
+        // what prevents the very first eigensolve from running on an unbounded mesh.
+        const maxTris = maxTrisForBudget(this.opts.maxNodes ?? 18000);
+        let mesh;
+        for (let attempt = 0; ; attempt++) {
+            mesh = buildOccMeshFromGeometry(this.ctx.G, {
+                conductors: s.conductors, dielectrics: s.dielectrics,
+                domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
+                meshConductorInterior: true,   // conductor interiors meshed for the MQS loss solve
+                gmshOptions: this.opts.gmshOptions,
+            });
+            if (mesh.nTris <= maxTris || attempt >= 4) break;
+            const factor = Math.sqrt(mesh.nTris / maxTris) * 1.05;   // +5% margin to land under
+            hFine *= factor; hCoarse *= factor;
+        }
         this.condRect = mesh.condRect;
 
         // Loss routines read condRects[0].symmetry to scale the half-domain integral.
@@ -543,7 +587,6 @@ export class TriBackend {
         const maxIters = this.opts.maxRefineIters ??
             (typeof process !== 'undefined' && process.env && process.env.TRI_MAXREF !== undefined
                 ? +process.env.TRI_MAXREF : 6);
-        const maxNodes = this.opts.maxNodes ?? 18000;
         const refTol = this.opts.refineTol ?? 0.003;
         const refineFrac = this.opts.refineFrac ?? 0.15;   // matches the FDM backend's fraction
         const minRefineNodes = this.opts.minRefineNodes ?? 0;
@@ -634,7 +677,12 @@ export class TriBackend {
             // Count consecutive converged passes; only stop once minConvergedPasses in a
             // row meet the tolerance (reset the streak on any non-converged pass).
             if (maxRel < refTol && enoughNodes) convergedCount++; else convergedCount = 0;
-            if (it === maxIters || convergedCount >= minConvergedPasses || mesh.nNodes > maxNodes) break;
+            // Stop before exceeding the triangle budget. Refining marks refineFrac of the
+            // triangles and splits each ~1→4 (≈ +3·refineFrac growth), so project the next
+            // size and stop now if it would blow the budget — keeps every SOLVED mesh within
+            // the memory-parity budget rather than overshooting by a full pass.
+            const projTris = Math.round(mesh.nTris * (1 + 3 * refineFrac));
+            if (it === maxIters || convergedCount >= minConvergedPasses || projTris > maxTris) break;
             const marked = markTrianglesForRefinement(metric, refineFrac);
             const refined = refineTriMesh(mesh, marked);
             refined.condRect = this.condRect;
@@ -800,6 +848,13 @@ export class TriBackend {
             // converges to a different in-subspace mixture depending on which frequency
             // ran last — so the out-of-order interpolating sweep produced order-dependent
             // conductor loss → ripple + non-convergent interpolant (excess solves).
+            // The pick uses the same 'pmc' open walls + REAL ε as the static solve (st.abc).
+            // The Modes-tab recipe (radiating ABC + lossy tanδ ε) was tried here and aborts the
+            // shift-invert (Assertion ,1148): with ABC alone the only imaginary part is the thin
+            // jk boundary term and the real-shift factorization hits a near-singular pivot, and
+            // the full lossy-ε+ABC+wide-ncv combination aborts too on these (smaller, default-
+            // mesher, half-domain) impedance meshes. The Modes tab gets away with that recipe
+            // only on its full-domain MeshAdapt meshes — it doesn't transfer here. See solveModes.
             fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
                 null, cacheBox);
             if (fw && fw.eps > 0) eps_d = fw.eps;
@@ -1101,6 +1156,11 @@ export class TriBackend {
         try { fem = assembleTriFEM(mesh, fm, k2, lossyEpsMap(mesh), abc, cr, null); }
         catch (e) { return { modes: [], nconv: 0, error: String(e && e.message || e) }; }
         const N = fem.N;
+        // Absolute ceiling (mirrors the FDM "Problem too large" guard) — return a clean
+        // error instead of letting the eigensolver heap-abort(). The mesh is already held to
+        // the triangle budget, so this only trips on extreme settings.
+        if (eigenSolveBytes(N, fem.csrA.colIdx.length) > MAX_SOLVE_BYTES)
+            return { modes: [], nconv: 0, error: `Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem.csrA.colIdx.length) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.` };
         // Static-field "drive" seeds for every physical conductor excitation (single-ended:
         // one; differential: even AND odd). A genuine quasi-TEM mode matches ONE of these
         // (high overlap); a spurious discrete gradient mode matches none. All modes share
