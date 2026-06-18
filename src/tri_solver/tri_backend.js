@@ -997,7 +997,14 @@ export class TriBackend {
             // Accept MQS only if physically sane.
             if (mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop) && mqs.L_loop > 0) {
                 R_total = s.is_differential ? mqs.R_total / 2 : mqs.R_total;
-                L_internal = Math.max(0, Math.min(mqs.L_loop - L_external, 3 * L_external));
+                // Internal (skin) inductance from the closed form L_int = R_ac/ω, NOT the
+                // difference (mqs.L_loop − L_external): that subtracts two large near-equal
+                // numbers (~L_external each, computed on different bases — MQS magnetic
+                // energy vs analytic 1/c²C0) so the small ~1 nH internal part is lost to
+                // noise and clamps to 0 at high f, undershooting eps_eff vs the FDM/static
+                // backends. The skin-regime closed form (Zs=Rs(1+j) ⇒ X_int=R_ac) is well
+                // conditioned and matches the perturbation path below + the FDM backend.
+                L_internal = (omega > 0) ? Math.max(0, Math.min(R_total / omega, 0.5 * L_external)) : 0;
             }
         }
         // Perturbation conductor loss (used for the 'perturbation' option and as the
