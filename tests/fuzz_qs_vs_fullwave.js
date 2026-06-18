@@ -11,7 +11,10 @@
 //   line types — microstrip, diff_microstrip, stripline, diff_stripline,
 //                gcpw, diff_gcpw, broadside_stripline
 //   features   — solder mask, top dielectric, ground cutout, enclosure (side/top
-//                ground walls), surface plating, surface roughness, differential gaps
+//                ground walls), surface plating, surface roughness, differential gaps,
+//                causal (Djordjevic-Sarkar) dielectric dispersion
+//   modes      — single-ended lines compare the one quasi-TEM mode; differential pairs
+//                compare BOTH the odd and the even mode (the worst of the two is flagged)
 //
 // Loss (R / alpha_c) is intentionally NOT compared — the two methods model conductor
 // loss differently (full-wave MQS captures proximity the quasi-static perturbation
@@ -49,6 +52,13 @@ const TL_TYPES = ['microstrip', 'diff_microstrip', 'stripline', 'diff_stripline'
 export function randomSpec(rng) {
     const tl = rng.pick(TL_TYPES);
     const spec = { tl, freq: rng.logf(0.5e9, 50e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 1e-6) : 0 };
+    // Causal (Djordjevic-Sarkar) dielectric dispersion — applies to every line type and to
+    // both backends, so it stays inside the cross-backend comparison (it shifts er(f), hence
+    // C and eps_eff, which the fuzzer DOES compare). See solveOn for how it is evaluated.
+    // Kept a modest fraction (not 0.3+): a causal full-wave case is ~20× slower than a plain
+    // one because the triangular backend bypasses its eigensolve cache on every refinement
+    // pass when causal is on, so too many causal cases make a 100-run impractically long.
+    spec.use_causal = rng.bool(0.2);
 
     if (tl === 'broadside_stripline') {
         Object.assign(spec, {
@@ -125,7 +135,7 @@ export function buildSolver(spec, backend) {
         if (spec.use_enclosure) { o.enclosure_width = spec.enclosure_width; if (spec.use_side_gnd) o.boundaries = ['gnd', 'gnd', 'gnd', 'gnd']; }
         if (spec.use_plating) o.plating = { sigma: 1e7, thickness: 4e-6, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
         const s = new BroadsideStriplineSolver(o);
-        s.use_causal_materials = false;
+        s.use_causal_materials = !!spec.use_causal;
         return s;
     }
     const base = {
@@ -141,7 +151,7 @@ export function buildSolver(spec, backend) {
     else o.boundaries = ['open', 'open', 'open', 'gnd'];
     addCommon(o, spec);
     const s = new MicrostripSolver(o);
-    s.use_causal_materials = false;
+    s.use_causal_materials = !!spec.use_causal;
     return s;
 }
 
@@ -155,12 +165,20 @@ async function solveOn(spec, backend) {
         // backend inherited nx=300 (a >90k-node initial grid that exceeds the 20k budget →
         // zero refinement) and min_converged_passes=1 (stops at the first stably-wrong pass),
         // which manufactured spurious QS-vs-FW discrepancies on tight differential gaps.
-        const r = await s.solve_adaptive({
+        let r = await s.solve_adaptive({
             max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2,
         });
-        const m = r.modes[0];
+        // Causal materials: solve_adaptive refines the mesh with NON-causal er, so — exactly as
+        // the app does (app_solver.runSimulation re-evaluates the solve point through
+        // computeAtFrequency when use_causal_materials is set) — re-evaluate at the solve
+        // frequency to apply the Djordjevic-Sarkar model. This applies the SAME er(f) shift to
+        // both backends (rectilinear re-solves Laplace with the causal er; triangular re-runs
+        // solveAt → _applyCausal), keeping the cross-backend comparison fair.
+        if (spec.use_causal) r = await s.computeAtFrequency(s.freq, r);
+        // Compare every mode the backend returns: single-ended → [single]; differential →
+        // [odd, even], in that fixed order from the shared FieldSolver2D path on both backends.
         return {
-            Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C,
+            modes: r.modes.map(m => ({ Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C, mode: m.mode })),
             maxQ: s.meshQuality ? s.meshQuality.maxQ : null,
             degenerate: s.meshQuality ? s.meshQuality.degenerateCount : 0,
             nan: s.meshQuality ? s.meshQuality.nanNodes : 0,
@@ -179,7 +197,7 @@ function fmtSpec(spec) {
     else s += ` w=${u(spec.w)}mm h=${u(spec.h)}mm t=${u(spec.t, 1e6, 1)}µm er=${spec.er.toFixed(2)}`;
     s += ` f=${(spec.freq / 1e9).toFixed(2)}GHz`;
     if (spec.trace_spacing) s += ` gap=${u(spec.trace_spacing)}mm`;
-    const feats = ['use_sm', 'use_top_diel', 'use_gnd_cut', 'use_enclosure', 'use_side_gnd', 'use_top_gnd', 'use_plating']
+    const feats = ['use_sm', 'use_top_diel', 'use_gnd_cut', 'use_enclosure', 'use_side_gnd', 'use_top_gnd', 'use_plating', 'use_causal']
         .filter(k => spec[k]).map(k => k.replace('use_', ''));
     if (feats.length) s += ` [${feats.join(',')}]`;
     return s;
@@ -189,7 +207,7 @@ const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1
 
 async function main() {
     console.log(`\n### Fuzz QS vs full-wave — N=${N} seed=${SEED} flag>${(THRESH * 100).toFixed(0)}% Qmax>${BAD_Q} ###`);
-    console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness\n`);
+    console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
     const rng = createRng(SEED);
     const flagged = { discrepancy: [], badMesh: [], crash: [] };
     let ok = 0, skipped = 0;
@@ -223,16 +241,26 @@ async function main() {
         // pure C/C0 — so it differs by the (loss-dependent) L_internal even when the
         // electrostatic field agrees. That's the loss-modeling difference the fuzzer is
         // meant to exclude; eps is still printed for context.
-        const dZ = relDiff(qs.Z0, fw.Z0), dE = relDiff(qs.eps_eff, fw.eps_eff), dC = relDiff(qs.C, fw.C);
-        const dMax = Math.max(dZ, dC);
-        if (dMax > THRESH) {
-            flagged.discrepancy.push({ spec, dZ, dE, dC });
-            console.log(`[${i}] ✗ DISCREPANCY ${(dMax * 100).toFixed(0)}% (Z0 ${(dZ * 100).toFixed(0)}% eps ${(dE * 100).toFixed(0)}% C ${(dC * 100).toFixed(0)}%)\n` +
-                `      ${fmtSpec(spec)}\n` +
-                `      qs: Z0=${qs.Z0.toFixed(2)} eps=${qs.eps_eff.toFixed(3)} C=${(qs.C * 1e12).toFixed(1)}pF | ` +
-                `fw: Z0=${fw.Z0.toFixed(2)} eps=${fw.eps_eff.toFixed(3)} C=${(fw.C * 1e12).toFixed(1)}pF`);
+        // Compare each matched mode pair and flag the worst. Single-ended lines have one
+        // quasi-TEM mode; differential pairs have two (odd then even), so the even mode — which
+        // the old fuzzer never checked — is now validated cross-backend alongside the odd.
+        const nModes = Math.min(qs.modes.length, fw.modes.length);
+        let worst = null;
+        for (let mi = 0; mi < nModes; mi++) {
+            const q = qs.modes[mi], w = fw.modes[mi];
+            const dZ = relDiff(q.Z0, w.Z0), dE = relDiff(q.eps_eff, w.eps_eff), dC = relDiff(q.C, w.C);
+            const dMax = Math.max(dZ, dC);
+            if (!worst || dMax > worst.dMax) worst = { mode: q.mode, dZ, dE, dC, dMax, q, w };
         }
-        if (!badMesh && dMax <= THRESH) ok++;
+        if (worst && worst.dMax > THRESH) {
+            flagged.discrepancy.push({ spec, mode: worst.mode, dZ: worst.dZ, dE: worst.dE, dC: worst.dC });
+            const tag = nModes > 1 ? ` [${worst.mode}]` : '';
+            console.log(`[${i}] ✗ DISCREPANCY ${(worst.dMax * 100).toFixed(0)}%${tag} (Z0 ${(worst.dZ * 100).toFixed(0)}% eps ${(worst.dE * 100).toFixed(0)}% C ${(worst.dC * 100).toFixed(0)}%)\n` +
+                `      ${fmtSpec(spec)}\n` +
+                `      qs: Z0=${worst.q.Z0.toFixed(2)} eps=${worst.q.eps_eff.toFixed(3)} C=${(worst.q.C * 1e12).toFixed(1)}pF | ` +
+                `fw: Z0=${worst.w.Z0.toFixed(2)} eps=${worst.w.eps_eff.toFixed(3)} C=${(worst.w.C * 1e12).toFixed(1)}pF`);
+        }
+        if (!badMesh && (!worst || worst.dMax <= THRESH)) ok++;
     }
 
     console.log(`\n${'='.repeat(72)}`);
