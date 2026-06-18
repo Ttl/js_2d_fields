@@ -47,6 +47,7 @@ const eps0 = 8.854187817e-12;
 const MU0 = 4 * Math.PI * 1e-7;
 const NP_TO_DB = 8.685889638;
 
+
 // ---- Mesh-size budget (memory parity with the FDM backend) ----
 // The full-wave eigensolve is far heavier per mesh entity than the quasi-static FDM
 // Poisson solve: it factorizes a COMPLEX matrix over EDGE DOFs (~1.5 per triangle)
@@ -375,10 +376,21 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // overlaps against the static drive (staticSeed), independent of the warm start.
     const staticSeed = staticToEdgeDofs(phiEps, mesh, fm);
     const seed = (seedVec && seedVec.length === N) ? seedVec : staticSeed;
-    // 4 eigenpairs is ample: shift-invert is centered on the quasi-TEM eigenvalue
-    // (-k2·eps_static), so the target mode converges first. (Was 8 — halving the
-    // Krylov subspace markedly speeds the eigensolve with no change in the picked mode.)
-    const nev = 4, ncv = Math.min(2 * nev + 1, N - 1);
+    // Request enough eigenpairs that the quasi-TEM is in the returned set even when it has
+    // DISPERSED away from the shift. Shift-invert is centered on -k2·eps_static, so the
+    // solver returns the `nev` modes nearest that shift. At high frequency on an inhomogeneous
+    // line the quasi-TEM ε_eff disperses well ABOVE eps_static (e.g. a wide GCPW at 40 GHz:
+    // eps_static 3.6 but the quasi-TEM has risen to ~5), so with too small an `nev` the only
+    // modes near the shift are spurious/lower ones and the pick mode-hops to a wrong, lower ε.
+    // nev=8 keeps the dispersed quasi-TEM in the candidate set; the overlap-with-static-drive
+    // selection below then picks it (it carries the highest overlap, ~0.7, vs ~0.6 for the
+    // spurious neighbours). (Was 4, which mode-hopped a wide-GCPW case at 40 GHz to ε≈2.7.)
+    // For the radiating-ABC pick path ncv is already floored at 20 (the non-Hermitian matrix
+    // needs the wider Krylov subspace), so raising nev 4→8 there costs nothing — the same
+    // 20-vector subspace, just more Ritz pairs extracted. The closed 'pmc' assembly
+    // (refinement metric, enclosed structures) pays the modest ncv 9→17.
+    const hasRadiatingAbc = abc && Object.values(abc).some(v => v === true);
+    const nev = 8, ncv = Math.min(hasRadiatingAbc ? Math.max(2 * nev + 1, 20) : 2 * nev + 1, N - 1);
     // Absolute ceiling (mirrors the FDM "Problem too large" guard): refuse a solve that
     // would overrun the eigensolver heap with a clear error rather than an opaque abort().
     // The triangle budget keeps normal solves well under this; this backstops misuse.
@@ -392,11 +404,21 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // quasi-TEM shape), with a tie-break by proximity to eps_static. A loose eps gate drops
     // near-cutoff / continuum modes (eps ≪ eps_static) that can score a deceptively high
     // overlap. Collect every physical candidate, then select.
+    // Physical upper bound for a guided quasi-TEM mode: its phase velocity cannot be slower
+    // than light in the densest dielectric, so ε_eff ≤ max(ε_r). A mode above that is a
+    // spurious discrete-FEM eigenvector (same rule solveModes uses to classify spurious). This
+    // gate matters specifically with the larger nev needed to catch the dispersed quasi-TEM:
+    // the wider candidate set can surface a spurious high-ε mode with deceptively high overlap
+    // (e.g. a near-degenerate broadside stripline produced ε≈15 with εr≤6) that would otherwise
+    // win the pick. The 1.01 slack mirrors solveModes.
+    let epsRMax = 1;
+    for (let t = 0; t < epsMap.length; t++) if (epsMap[t].re > epsRMax) epsRMax = epsMap[t].re;
     const cands = [];
     for (let i = 0; i < res.nconv; i++) {
         if (res.evalsRe[i] >= 0) continue;                 // physical: γ² < 0
         const epsMode = -res.evalsRe[i] / k2;
         if (epsMode < 0.5 * eps_static) continue;          // drop near-cutoff / lateral-continuum modes
+        if (epsMode > epsRMax * 1.01) continue;            // drop spurious super-dense modes (ε_eff > max εr)
         const vR = res.evecsRe.subarray(i * N, (i + 1) * N);
         let dot = 0, nS = 0, nV = 0;
         for (let k = 0; k < fm.nFreeTransverse; k++) { dot += staticSeed[k] * vR[k]; nS += staticSeed[k] ** 2; nV += vR[k] ** 2; }
@@ -836,10 +858,6 @@ export class TriBackend {
         const lossMethod = this.opts.lossMethod ?? 'auto';
         let eps_d = eps_eff_static, fw = null;
         if (f >= F_STATIC_MAX) {
-            // Causal materials change epsMap per frequency, so the k2-interpolation cache
-            // (which assumes a constant epsMap) must be bypassed — re-assemble each freq.
-            let cacheBox = null;
-            if (!s.use_causal_materials) cacheBox = st.femCacheBox ??= { ready: null, prev: null };
             // Seed the eigensolve with the STATIC field (frequency-deterministic), NOT a
             // cross-frequency eigenvector warm-start. The static seed is the quasi-TEM
             // shape (a good initial guess) AND it makes the picked eigenvector independent
@@ -848,15 +866,28 @@ export class TriBackend {
             // converges to a different in-subspace mixture depending on which frequency
             // ran last — so the out-of-order interpolating sweep produced order-dependent
             // conductor loss → ripple + non-convergent interpolant (excess solves).
-            // The pick uses the same 'pmc' open walls + REAL ε as the static solve (st.abc).
-            // The Modes-tab recipe (radiating ABC + lossy tanδ ε) was tried here and aborts the
-            // shift-invert (Assertion ,1148): with ABC alone the only imaginary part is the thin
-            // jk boundary term and the real-shift factorization hits a near-singular pivot, and
-            // the full lossy-ε+ABC+wide-ncv combination aborts too on these (smaller, default-
-            // mesher, half-domain) impedance meshes. The Modes tab gets away with that recipe
-            // only on its full-domain MeshAdapt meshes — it doesn't transfer here. See solveModes.
-            fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                null, cacheBox);
+            //
+            // Pick the quasi-TEM with a radiating first-order ABC (=== true) on the OPEN
+            // walls, REAL ε. The radiation term absorbs outgoing waves so an open structure
+            // has no closed-box cavity resonances to compete with the quasi-TEM — the closed
+            // 'pmc' box instead manufactured spurious near-degenerate modes that tripped the
+            // ambiguity detector on ~9/40 fuzzer geometries (all false positives: the pick
+            // was right, eps smooth). PEC ('gnd') walls stay PEC, so a fully ENCLOSED
+            // structure is byte-identical to the old closed solve and correctly keeps its
+            // real box modes; ABC only changes genuinely open walls. The symmetry plane stays
+            // 'pmc' (even/single) / PEC (odd, absent). Validated reference 16/16, output
+            // byte-identical to the old 'pmc' pick. Lossy ε was tried too but only removed one
+            // more false-positive flag for no accuracy gain, so it's not used. The ABC's √k²
+            // boundary term is non-affine in k², so the per-frequency k²-cache can't be reused
+            // (≈2× the old sweep cost — the deliberate price for the robustness).
+            const pickAbc = {};
+            for (const k of ['left', 'right', 'top', 'bottom']) {
+                const v = st.abc[k];
+                if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
+                pickAbc[k] = (this.symmetry && k === 'left') ? 'pmc' : true;
+            }
+            fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
+                null, null);
             if (fw && fw.eps > 0) eps_d = fw.eps;
             if (fw && fw.ambiguous && this._modeWarnings) {
                 const msg = `${mode} mode: full-wave quasi-TEM pick is ambiguous at ${(f / 1e9).toFixed(2)} GHz — `

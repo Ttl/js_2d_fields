@@ -48,7 +48,7 @@ const TL_TYPES = ['microstrip', 'diff_microstrip', 'stripline', 'diff_stripline'
 // --- Random spec generator (geometry + which features are enabled) ---
 export function randomSpec(rng) {
     const tl = rng.pick(TL_TYPES);
-    const spec = { tl, freq: rng.logf(0.5e9, 12e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 1e-6) : 0 };
+    const spec = { tl, freq: rng.logf(0.5e9, 50e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 1e-6) : 0 };
 
     if (tl === 'broadside_stripline') {
         Object.assign(spec, {
