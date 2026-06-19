@@ -10,99 +10,6 @@ export const QL2 = [0.44594849, 0.44594849, 0.10810302, 0.09157621, 0.09157621, 
 export const QL3 = [0.44594849, 0.10810302, 0.44594849, 0.09157621, 0.81684757, 0.09157621];
 export const NQ = 6;
 
-// --- Mesh: perturbed grid → unstructured triangles ---
-
-export function triMeshFromQuads(xs, ys, perturbFrac = 0.3, fixedYs = [], fixedXs = []) {
-    const Nx = xs.length - 1, Ny = ys.length - 1;
-    const nNodes = (Nx + 1) * (Ny + 1);
-    const nodes = new Float64Array(2 * nNodes);
-
-    const fixedI = new Uint8Array(Nx + 1);
-    const fixedJ = new Uint8Array(Ny + 1);
-    for (const fx of fixedXs) for (let i = 0; i <= Nx; i++) if (Math.abs(xs[i] - fx) < 1e-12) fixedI[i] = 1;
-    for (const fy of fixedYs) for (let j = 0; j <= Ny; j++) if (Math.abs(ys[j] - fy) < 1e-12) fixedJ[j] = 1;
-
-    for (let j = 0; j <= Ny; j++) {
-        for (let i = 0; i <= Nx; i++) {
-            const n = j * (Nx + 1) + i;
-            let x = xs[i], y = ys[j];
-            if (i > 0 && i < Nx && j > 0 && j < Ny && !fixedI[i] && !fixedJ[j] && perturbFrac > 0) {
-                const dx = (xs[i + 1] - xs[i - 1]) / 2 * perturbFrac;
-                const dy = (ys[j + 1] - ys[j - 1]) / 2 * perturbFrac;
-                const hash1 = Math.sin(i * 127.1 + j * 311.7) * 43758.5453;
-                const hash2 = Math.sin(i * 269.5 + j * 183.3) * 43758.5453;
-                x += dx * (hash1 - Math.floor(hash1) - 0.5) * 2;
-                y += dy * (hash2 - Math.floor(hash2) - 0.5) * 2;
-            }
-            nodes[2 * n] = x;
-            nodes[2 * n + 1] = y;
-        }
-    }
-
-    const nTris = 2 * Nx * Ny;
-    const tris = new Int32Array(3 * nTris);
-    let ti = 0;
-    for (let j = 0; j < Ny; j++) {
-        for (let i = 0; i < Nx; i++) {
-            const bl = j * (Nx + 1) + i;
-            const br = bl + 1;
-            const tl = bl + (Nx + 1);
-            const tr = tl + 1;
-            if ((i + j) % 2 === 0) {
-                tris[ti++] = bl; tris[ti++] = br; tris[ti++] = tr;
-                tris[ti++] = bl; tris[ti++] = tr; tris[ti++] = tl;
-            } else {
-                tris[ti++] = bl; tris[ti++] = br; tris[ti++] = tl;
-                tris[ti++] = br; tris[ti++] = tr; tris[ti++] = tl;
-            }
-        }
-    }
-
-    // Ensure CCW winding
-    for (let t = 0; t < nTris; t++) {
-        const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
-        const x0 = nodes[2 * v0], y0 = nodes[2 * v0 + 1];
-        const x1 = nodes[2 * v1], y1 = nodes[2 * v1 + 1];
-        const x2 = nodes[2 * v2], y2 = nodes[2 * v2 + 1];
-        const area2 = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-        if (area2 < 0) { tris[3 * t + 1] = v2; tris[3 * t + 2] = v1; }
-    }
-
-    // Extract unique edges and build tri→edge mapping
-    const edgeMap = new Map();
-    const edgeList = [];
-    const triEdges = new Int32Array(3 * nTris);
-    const triSigns = new Int8Array(3 * nTris);
-
-    for (let t = 0; t < nTris; t++) {
-        const localEdges = [[0, 1], [1, 2], [2, 0]];
-        for (let le = 0; le < 3; le++) {
-            const na = tris[3 * t + localEdges[le][0]];
-            const nb = tris[3 * t + localEdges[le][1]];
-            const n0 = Math.min(na, nb), n1 = Math.max(na, nb);
-            const key = n0 * nNodes + n1;
-            let eIdx;
-            if (edgeMap.has(key)) {
-                eIdx = edgeMap.get(key);
-            } else {
-                eIdx = edgeList.length;
-                edgeList.push([n0, n1]);
-                edgeMap.set(key, eIdx);
-            }
-            triEdges[3 * t + le] = eIdx;
-            triSigns[3 * t + le] = (na === n0) ? 1 : -1;
-        }
-    }
-
-    const nEdges = edgeList.length;
-    const edges = new Int32Array(2 * nEdges);
-    for (let e = 0; e < nEdges; e++) {
-        edges[2 * e] = edgeList[e][0];
-        edges[2 * e + 1] = edgeList[e][1];
-    }
-
-    return { nodes, tris, edges, triEdges, triSigns, nNodes, nTris, nEdges, Nx, Ny };
-}
 
 // --- Barycentric coefficients ---
 // Returns normalized coeff: coeff[i] = [a_i/(2A), b_i/(2A), c_i/(2A)]
@@ -559,32 +466,6 @@ export function computeTriP2Matrices(nodes, v0, v1, v2, epsRe, epsIm, k0) {
     for (let i = 0; i < 48; i++) { Dzt[i] *= Area; }
     for (let i = 0; i < 36; i++) { Dzz1[i] *= Area; Dzz2Re[i] *= Area; Dzz2Im[i] *= Area; }
 
-    // Edge length scaling (Ls matrix from EMerge lines 297-310)
-    // Edge lengths
-    const Ds = new Float64Array(9); // 3x3 distance matrix
-    for (let a = 0; a < 3; a++) {
-        for (let b = a + 1; b < 3; b++) {
-            const dx = txs[a] - txs[b], dy = tys[a] - tys[b];
-            const d = Math.sqrt(dx*dx + dy*dy);
-            Ds[a*3+b] = d; Ds[b*3+a] = d;
-        }
-    }
-
-    // Build 14-element scaling vector (Ls[i] = product of edge lengths for DOF i)
-    // ne1 DOFs (0-2): scale by edge length
-    // nf1 DOF (3): scale by Ds[0,2] (edge between vertices 0 and 2, which is edge 2: v2-v0)
-    // ne2 DOFs (4-6): scale by edge length
-    // nf2 DOF (7): scale by Ds[0,1] (edge between vertices 0 and 1, which is edge 0: v0-v1)
-    // nodal DOFs (8-13): no scaling
-    const Lscale = new Float64Array(14).fill(1);
-    for (let k = 0; k < 3; k++) {
-        const [p, qq] = edgeVerts[k];
-        const Le = Ds[p*3+qq];
-        Lscale[k] = Le;       // ne1
-        Lscale[k+4] = Le;     // ne2
-    }
-    Lscale[3] = Ds[0*3+2];  // nf1: distance v0-v2
-    Lscale[7] = Ds[0*3+1];  // nf2: distance v0-v1
 
     // Assemble 14x14 A and B:
     // A[0:8,0:8] = Att - k0² * Btt
@@ -1095,7 +976,7 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, enrichment) 
             nLocal = 14;
         }
 
-        if (t === 0) {
+        if (t === 0 && globalThis.__TRI_DEBUG__) {
             const ntrans = order >= 3 ? NT3 : 8;
             let attMax = 0, dttMax = 0;
             for (let i = 0; i < ntrans*ntrans; i++) { attMax = Math.max(attMax, Math.abs(Att[i])); dttMax = Math.max(dttMax, Math.abs(Dtt[i])); }
@@ -1208,48 +1089,6 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, enrichment) 
             // P2 nodal Robin on boundary: DISABLED — the Ez ABC distorts the
             // eigenvector by forcing ∂Ez/∂n + jk₀Ez = 0, which is a poor approximation
             // for quasi-TEM modes. The transverse ABC alone suppresses cavity modes.
-            // To re-enable, uncomment the block below.
-            /*
-            // For quadratic Lagrange on edge: 3 DOFs (2 vertex + 1 midpoint)
-            // Using 2-point Gauss on edge:
-            // lv_i on edge: -λ_i + 2λ_i², le_ij = 4λ_iλ_j
-            // The 3x3 mass matrix on the edge for [lv_p, lv_q, le_pq]:
-            // Use exact integration: ∫₀¹ f(s)g(s) L ds
-            // lv_p(s) = -s + 2s² = s(2s-1), lv_q(s) = -(1-s) + 2(1-s)² = (1-s)(2(1-s)-1) = (1-s)(1-2s)
-            // le(s) = 4s(1-s)
-            // ∫₀¹ lv_p lv_p ds = ∫₀¹ s²(2s-1)² ds = ∫₀¹ (4s⁴ - 4s³ + s²) ds = 4/5-1+1/3 = 2/15
-            // ∫₀¹ lv_p lv_q ds = ∫₀¹ s(2s-1)(1-s)(1-2s) ds = -∫₀¹ s(1-s)(2s-1)² ds = -(4/5-6/4+13/12-1/3+1/30)...
-            // Actually, use standard reference: 1D quadratic mass matrix on [0,1]:
-            // basis: φ₁(s) = (1-s)(1-2s), φ₂(s) = s(2s-1), φ₃(s) = 4s(1-s)
-            // M_ij = ∫₀¹ φ_i φ_j ds (times L)
-            // M = L/30 * [4, -1, 2; -1, 4, 2; 2, 2, 16]
-            const nf0 = nodeF[n0], nf1_v = nodeF[n1], enf = edgeNodeF[e];
-            // Map to global DOFs with lzOff
-            const gn0 = nf0 >= 0 ? lzOff + nf0 : -1;
-            const gn1 = nf1_v >= 0 ? lzOff + nf1_v : -1;
-            const ge = enf >= 0 ? lzOff + nFreeVertexDof + enf : -1;
-
-            // Determine which vertex is "first" on the edge for lv basis ordering
-            // Edge stored as n0→n1 (global), lv_n0 = φ₁ or φ₂ depends on local ordering
-            // For Robin BC the mass matrix is symmetric, so it doesn't matter.
-            const m = -k0 * L / 30;
-            function addRB(i, j, vre, vim) { RBr.push(i); RBc.push(j); RBvRe.push(vre); RBvIm.push(vim); }
-            if (gn0 >= 0) addRB(gn0, gn0, 0, m * 4);
-            if (gn1 >= 0) addRB(gn1, gn1, 0, m * 4);
-            if (ge >= 0) addRB(ge, ge, 0, m * 16);
-            if (gn0 >= 0 && gn1 >= 0) {
-                addRB(gn0, gn1, 0, m * (-1));
-                addRB(gn1, gn0, 0, m * (-1));
-            }
-            if (gn0 >= 0 && ge >= 0) {
-                addRB(gn0, ge, 0, m * 2);
-                addRB(ge, gn0, 0, m * 2);
-            }
-            if (gn1 >= 0 && ge >= 0) {
-                addRB(gn1, ge, 0, m * 2);
-                addRB(ge, gn1, 0, m * 2);
-            }
-            */
         }
     }
 
@@ -1867,24 +1706,6 @@ export function staticToEdgeDofs(phi, mesh, fm) {
 }
 
 // --- Triangular adaptive refinement ---
-
-// Error metric per triangle from P2 static solution (gradient energy density)
-export function computeTriMetric(phi, mesh, epsMap) {
-    const { nodes, tris, nTris } = mesh;
-    const metric = new Float64Array(nTris);
-    for (let t = 0; t < nTris; t++) {
-        const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-        const eps = epsMap ? epsMap[t].re : 1.0;
-        // Gradient at centroid using vertex values only (P1 approximation)
-        const phi0 = phi.phiVertex[v0], phi1 = phi.phiVertex[v1], phi2 = phi.phiVertex[v2];
-        // ∇φ = Σ φ_i ∇λ_i, ∇λ_i = (b_i, c_i) (normalized coeff)
-        const dphidx = phi0*coeff[0][1] + phi1*coeff[1][1] + phi2*coeff[2][1];
-        const dphidy = phi0*coeff[0][2] + phi1*coeff[1][2] + phi2*coeff[2][2];
-        metric[t] = eps * (dphidx*dphidx + dphidy*dphidy) * Area;
-    }
-    return metric;
-}
 
 // Select top refineFrac fraction of triangles by metric value for refinement.
 export function markTrianglesForRefinement(metric, refineFrac) {

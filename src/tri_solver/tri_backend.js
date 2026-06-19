@@ -352,7 +352,7 @@ function femFromK2Cache(cache, k2) {
 }
 
 function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static, seedVec = null, cacheBox = null) {
-    const k2 = (2 * Math.PI * f / 299792458) ** 2;
+    const k2 = (2 * Math.PI * f / c0) ** 2;
     let fem;
     if (cacheBox && cacheBox.ready) {
         fem = femFromK2Cache(cacheBox.ready, k2);   // O(nnz) rebuild, no re-assembly
@@ -943,6 +943,10 @@ export class TriBackend {
         const useMQS = (lossMethod === 'mqs')
             || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
         let R_total = 0, L_internal = 0;
+        // Smallest conductor cross-section dimension (gates the skin-band remesh and
+        // the static/SIBC blend below).
+        let minDim = Infinity;
+        for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
         if (f > 0 && useMQS) {
             // The volume eddy solve runs the conductor BODY at the bulk metal σ;
             // plating is a SURFACE effect applied only through surfaceZs (relative to
@@ -951,8 +955,6 @@ export class TriBackend {
             // no-op). The skin band is sized by the matching bulk skin depth.
             const mqsSigma = anyPlating ? (s.sigma_cond ?? 5.8e7) : sigma;
             const mqsDelta = anyPlating ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
-            let minDim = Infinity;
-            for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
             // Skin-band target element size (× δ): the band must be resolved to a
             // fraction of δ for accurate R (matches ms2d's mqs_band_delta).
             // Skin-band target element size (×δ) and band width (×δ): resolve the skin
@@ -1034,8 +1036,6 @@ export class TriBackend {
             const deltaRef = Math.sqrt(2 / (omu * sigmaRef));
             const RsRef = 1 / (sigmaRef * Math.min(deltaRef, 1e30));
 
-            let minDim = Infinity;
-            for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
             const useFW = !!fw && lossMethod !== 'static';
             let an = null;
             if (useFW) {
