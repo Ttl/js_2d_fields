@@ -511,7 +511,6 @@ function combineStatic(a, A, b, B) {
         phiEdge: comb(A.phiEdge, B.phiEdge),
         phiEdge3: A.phiEdge3 ? comb(A.phiEdge3, B.phiEdge3) : null,
         phiFaceNode: A.phiFaceNode ? comb(A.phiFaceNode, B.phiFaceNode) : null,
-        enrichCoeffs: A.enrichCoeffs ? comb(A.enrichCoeffs, B.enrichCoeffs) : null,
     };
 }
 
@@ -659,7 +658,7 @@ export class TriBackend {
                 conv.push(fw && fw.eps > 0 ? fw.eps : eps_static);
                 const metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
                 let zz = null;
-                if (fw) { try { zz = computeHtZZMetric(mesh, fm, fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, fRef, this.condRect.rects, null, null, this.ctx.wasmSolver); } catch { zz = null; } }
+                if (fw) { try { zz = computeHtZZMetric(mesh, fm, fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, fRef, this.condRect.rects, null, this.ctx.wasmSolver); } catch { zz = null; } }
                 let mS = 0, mZ = 0;
                 for (let i = 0; i < metricS.length; i++) { if (metricS[i] > mS) mS = metricS[i]; if (zz && zz[i] > mZ) mZ = zz[i]; }
                 if (!metric) metric = new Float64Array(metricS.length);
@@ -1049,12 +1048,12 @@ export class TriBackend {
             for (const g of groups) {
                 const fRg = RsRef > 0 ? g.Zs.re / RsRef : 1;
                 const lossS = staticConductorLoss(cr.rects, f, sigmaRef, mesh, fm, phiEps,
-                    Z0, eps_eff_static, eps_d, null, g.mask);
+                    Z0, eps_eff_static, eps_d, g.mask);
                 R_dc = lossS.R_dc;   // mask-independent (full cross-section at sigmaRef)
                 let racg = lossS.R_ac * fRg;
                 if (haveFW && wFW > 0) {
                     const lossW = solveConductorLoss(cr.rects, f, sigmaRef, mesh, fm, fw.vRe, fw.vIm,
-                        fw.g2Re, fw.g2Im, Math.abs(an.P), Z0, mesh.epsMap, g.mask, null, null, this.ctx.wasmSolver);
+                        fw.g2Re, fw.g2Im, Math.abs(an.P), Z0, mesh.epsMap, g.mask, null, this.ctx.wasmSolver);
                     racg = (1 - wFW) * racg + wFW * (lossW.R_ac * fRg);
                 }
                 R_ac += racg;

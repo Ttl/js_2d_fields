@@ -3,12 +3,20 @@
 // PEC eliminates tangential E, not tangential H.
 // Loss integral: α_c = Rs · ∮(|Ht|² + |Hz|²) dl / (4P)
 
-import { csqrt, tripletsToCSR } from './fem_core.js';
+import { csqrt, tripletsToCSR, GL3p, GL3w } from './fem_core.js';
 import { ne1, ne2, ne3, nf1, nf2, nf3, nf4, nf5, nf6,
          lv, le, le3, lf3, lvGrad, leGrad, le3Grad, lf3Grad, triCoefficients,
          ne1Curl, ne2Curl, ne3Curl, nf1Curl, nf2Curl, nf3Curl, nf4Curl, nf5Curl, nf6Curl,
          QW, QL1, QL2, QL3, NQ, QW12, QL1_12, QL2_12, QL3_12, NQ12,
          getLzOffsets, computeTriP2Matrices, computeTriP3Matrices } from './tri_fem.js';
+
+// --- Helper: edge → list-of-adjacent-triangles adjacency map ---
+function buildEdgeToTri(nEdges, nTris, triEdges) {
+    const edgeToTri = new Array(nEdges);
+    for (let e = 0; e < nEdges; e++) edgeToTri[e] = [];
+    for (let t = 0; t < nTris; t++) for (let le = 0; le < 3; le++) edgeToTri[triEdges[3*t+le]].push(t);
+    return edgeToTri;
+}
 
 // --- Helper: evaluate Nedelec basis functions at a point for P2 or P3 ---
 // Returns { Wx, Wy, curlW, nNed } with nNed = 8 (P2) or 15 (P3)
@@ -139,7 +147,7 @@ const SAT_KAPPA = 1.0;
 // Hz: jωμ·Mz·Hz = curl_z(Et)          →  Mz·Hz_s = RHS_z  (Hz_s = jωμ·Hz)
 // ALL DOFs — H is not subject to PEC BCs.
 // Uses faceF from freedom map to identify conductor-interior triangles (geometry-independent).
-export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, enrichment, wasmSolver) {
+export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
     const { nodes, tris, triEdges, triSigns, nTris, nEdges, nNodes } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF, nFreeTransverse, nFreeVertexDof,
             elemOrder, edgeF3, faceF3, edgeNodeF3, faceNodeF,
@@ -262,21 +270,6 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, enrichment, wasmSo
 
             let exR=0,exI=0,eyR=0,eyI=0;
             for (let k=0;k<nNed;k++){exR+=Wx[k]*etR[k];exI+=Wx[k]*etI[k];eyR+=Wy[k]*etR[k];eyI+=Wy[k]*etI[k];}
-
-            // Enrichment contributions
-            if (enrichment) {
-                const { corners, evalFn, vecRe: evR, vecIm: evI, nStd, nCorners } = enrichment;
-                for (let ci = 0; ci < nCorners; ci++) {
-                    const { dphidx, dphidy } = evalFn(xq, yq, corners[ci]);
-                    if (dphidx === 0 && dphidy === 0) continue;
-                    const ctR = evR[nStd + ci], ctI = evI[nStd + ci];
-                    exR += dphidx*ctR; exI += dphidx*ctI;
-                    eyR += dphidy*ctR; eyI += dphidy*ctI;
-                    const czR = evR[nStd + nCorners + ci], czI = evI[nStd + nCorners + ci];
-                    dxR += dphidx*czR; dxI += dphidx*czI;
-                    dyR += dphidy*czR; dyI += dphidy*czI;
-                }
-            }
 
             // Ht RHS (γ-scaled convention)
             const fxR=-dyR+gamma.re*(-eyR)-gamma.im*(-eyI);
@@ -498,12 +491,9 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
     const omu2 = omu*omu;
 
     // Build edge-to-triangle map
-    const edgeToTri = new Array(nEdges);
-    for (let e=0;e<nEdges;e++) edgeToTri[e]=[];
-    for (let t=0;t<nTris;t++) for (let le=0;le<3;le++) edgeToTri[triEdges[3*t+le]].push(t);
+    const edgeToTri = buildEdgeToTri(nEdges, nTris, triEdges);
 
     // --- Step 1: Compute per-edge h2dl and |Ht|² at 3 quadrature points ---
-    const GL3p=[0.11270,0.50000,0.88730], GL3w=[0.27778,0.44444,0.27778];
     const edgeH2dl = new Float64Array(nEdges);
     // Store |Ht|² at each of the 3 Gauss points per edge (for fitting)
     const edgeHt2 = new Array(nEdges); // edgeHt2[e] = [ht2_q0, ht2_q1, ht2_q2] or null
@@ -741,7 +731,7 @@ export function buildMicrostripLossEdges(mesh, fm, condRect) {
 //   If not provided, uses buildMicrostripLossEdges (backward compatible).
 // condArea: conductor cross-section area for DC resistance (default: computed from condRects).
 export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, vecIm,
-                                    gamma2Re, gamma2Im, P_poynting, Z0, epsMap, isLossEdge, enrichment, projectedH, wasmSolver) {
+                                    gamma2Re, gamma2Im, P_poynting, Z0, epsMap, isLossEdge, projectedH, wasmSolver) {
     const omega = 2*Math.PI*freq;
     const delta = Math.sqrt(2/(omega*MU0*sigma));
     const Rs = 1/(sigma*delta);
@@ -756,9 +746,9 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
 
     // Galerkin-projected H with γ-scaled convention: both h2dl and P_proj carry the same
     // γ² factor from the e_t term, which cancels exactly in the ratio αc = h2dl/(4P).
-    // The enrichment improves the RHS accuracy (enriched ∇Ez and Et), and the projection
-    // distributes the singularity information over the boundary through the mass matrix.
-    const projResult = projectedH || projectH(extMesh, fm, vecRe, vecIm, gamma, freq, enrichment, wasmSolver);
+    // The projection distributes the singularity information over the boundary through
+    // the mass matrix.
+    const projResult = projectedH || projectH(extMesh, fm, vecRe, vecIm, gamma, freq, wasmSolver);
     const {htRe,htIm,hzRe,hzIm,hDofs} = projResult;
     // Use corner-corrected h2dl: analytically corrects corner-adjacent edges using a
     // two-parameter model (singular + regular) fitted from neighboring edges.
@@ -802,7 +792,7 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
 // Algorithm: compute raw curl_z(Ht) per element at centroid, smooth to vertices via
 // area-weighted averaging, then error = ||curl_raw - curl_smooth||² × Area per element.
 // Returns Float64Array(nTris) of per-element error estimates.
-export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, freq, condRects, enrichment, projectedH, wasmSolver) {
+export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, freq, condRects, projectedH, wasmSolver) {
     const { nodes, tris, triEdges, triSigns, nTris, nEdges, nNodes } = mesh;
     const { elemOrder } = fm;
     const edgeVerts = [[0,1],[1,2],[2,0]];
@@ -811,7 +801,7 @@ export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, fr
     let gamma = csqrt(gamma2Re, gamma2Im);
     if (gamma.im < 0) gamma = { re: -gamma.re, im: -gamma.im };
 
-    const { htRe, htIm, omu, hDofs } = projectedH || projectH(mesh, fm, vecRe, vecIm, gamma, freq, enrichment || null, wasmSolver);
+    const { htRe, htIm, omu, hDofs } = projectedH || projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver);
 
     const curlRe = new Float64Array(nTris);
     const curlIm = new Float64Array(nTris);
@@ -888,7 +878,7 @@ export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, fr
 // For TEM: Ht = ẑ×∇φ/Z₀, so ∮|Ht|²dl = ∮|∇φ|²dl/Z₀².
 // α_c = Rs · ∮|∇φ|²dl / (2·Z₀)  (with φ normalized so V=1).
 // For quasi-TEM at frequency f: scale by √(ε_eff(f)/ε_eff(static)) via Z₀(f).
-export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, epsEff, epsEffMode, enrichment = null, isLossEdgeArg = null) {
+export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, epsEff, epsEffMode, isLossEdgeArg = null) {
     const omega = 2*Math.PI*freq;
     const delta = Math.sqrt(2/(omega*MU0*sigma));
     const Rs = 1/(sigma*delta);
@@ -900,12 +890,9 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
     // Build loss edge mask (caller may supply a generalized one)
     const isLossEdge = isLossEdgeArg || buildMicrostripLossEdges(mesh, fm, condRects && condRects[0]);
 
-    const edgeToTri = new Array(nEdges);
-    for (let e=0;e<nEdges;e++) edgeToTri[e]=[];
-    for (let t=0;t<nTris;t++) for (let le=0;le<3;le++) edgeToTri[triEdges[3*t+le]].push(t);
+    const edgeToTri = buildEdgeToTri(nEdges, nTris, triEdges);
 
     // Standard 3-point Gauss-Legendre on [0,1]
-    const GL3p=[0.11270,0.50000,0.88730], GL3w=[0.27778,0.44444,0.27778];
 
     // Graded quadrature for edges touching PEC corners: use substitution s = t^β
     // to cluster points toward t=0 (the corner end). With β = 1/(2ν), this cancels
@@ -916,12 +903,8 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
 
     // Identify corner node indices for graded quadrature
     const cornerNodes = new Map(); // nodeIdx → corner info
-    if (enrichment && enrichment.corners) {
-        for (const c of enrichment.corners) {
-            if (c.nodeIdx >= 0) cornerNodes.set(c.nodeIdx, c);
-        }
-    } else if (condRects) {
-        // Even without enrichment, detect corners for graded quadrature
+    if (condRects) {
+        // Detect conductor corners for graded quadrature
         const TOL = 1e-10;
         for (const cr of condRects) {
             const symX = (cr.symmetry > 1) ? cr.xmin_domain : null;
@@ -1004,7 +987,7 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
         for(let q=0;q<nq;q++){
             const px=x0+qp[q]*tx, py=y0+qp[q]*ty;
 
-            // ∇φ at quadrature point (P2/P3 Lagrange gradient + enrichment)
+            // ∇φ at quadrature point (P2/P3 Lagrange gradient)
             let gx=0, gy=0;
             for (let k=0;k<3;k++){
                 const [dgx,dgy]=lvGrad(coeff,k,px,py);
@@ -1022,17 +1005,6 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
                     gx+=dgx*phiLoc[k+6]; gy+=dgy*phiLoc[k+6];
                 }
                 { const [dgx,dgy]=lf3Grad(coeff,px,py); gx+=dgx*phiLoc[9]; gy+=dgy*phiLoc[9]; }
-            }
-
-            // Add enrichment gradient: ∇φ_enrich = Σ c_i · ∇ψ_i
-            if (enrichment && enrichment.coeffs) {
-                const { corners, evalFn, coeffs } = enrichment;
-                for (let ci = 0; ci < corners.length; ci++) {
-                    if (Math.abs(coeffs[ci]) < 1e-30) continue;
-                    const { dphidx, dphidy } = evalFn(px, py, corners[ci]);
-                    gx += coeffs[ci] * dphidx;
-                    gy += coeffs[ci] * dphidy;
-                }
             }
 
             gradPhi2dl += qw[q]*L*(gx*gx + gy*gy);

@@ -1,6 +1,6 @@
 // Triangular P2 Nedelec FEM — generic mesh, basis, assembly, and solver functions
 
-import { tripletsToCSR, solveCG } from './fem_core.js';
+import { tripletsToCSR, solveCG, triQuality as triQualityXY } from './fem_core.js';
 
 // --- 6-point Gauss quadrature on triangle (barycentric) ---
 
@@ -935,15 +935,12 @@ export function buildTriFreedomMap(mesh, condRect, abc, elemOrder = null) {
 
 // --- Assembly ---
 
-export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, enrichment) {
+export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
     const { tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF, nFreeTransverse, nFreeVertexDof,
             edgeF3, faceF3, edgeNodeF3, faceNodeF, elemOrder,
             nFreeEdgeNodeDof, nFreeEdgeNode3Dof, nFreeFaceNodeDof } = fm;
-    const nCorners = enrichment ? enrichment.corners.length : 0;
-    const nCornerDofs = nCorners * 2;
-    const N = fm.nFreeTransverse + fm.nFreeLongitudinal + nCornerDofs;
-    const cornerDofOff = fm.nFreeTransverse + fm.nFreeLongitudinal;
+    const N = fm.nFreeTransverse + fm.nFreeLongitudinal;
 
     const nodes = mesh.nodes;
     const k0 = Math.sqrt(k2);
@@ -1092,214 +1089,6 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, enrichment) 
         }
     }
 
-    // Corner singularity enrichment (de Rham compatible).
-    // Each corner adds 2 DOFs: 1 transverse (S_t = ∇φ_s) + 1 longitudinal (φ_s).
-    // S_t = ∇φ_s ensures grad(Ez_enriched) ⊂ Et_enriched (de Rham).
-    // curl(S_t) = 0 (gradient), so St (curl-curl) coupling is zero.
-    //
-    // DOF ordering: [...standard..., et_corner0, ..., et_cornerN, ez_corner0, ..., ez_cornerN]
-    // gt = cornerDofOff + ci (transverse), gz = cornerDofOff + nCorners + ci (longitudinal)
-    //
-    // Matrix conventions (from computeTriP2Matrices):
-    //   A_tt = Att - k₀²ε·Mt       (Att = ∫curl·curl, no ε; ε·Mt in subtracted term)
-    //   B_tt = Dtt = ∫W·W           (no ε)
-    //   B_zt = Dzt = ∫∇N·W          (no ε)
-    //   B_zz = Dzz1 - k₀²·Dzz2     (Dzz1 = ∫∇N·∇N no ε; Dzz2 = ε·∫N·N)
-    if (enrichment) {
-        const { corners, supports, evalFn, duffyQuadPoints: duffyQP } = enrichment;
-        const edgeVerts = [[0, 1], [1, 2], [2, 0]];
-
-        for (let ci = 0; ci < corners.length; ci++) {
-            const gt = cornerDofOff + ci;               // transverse enrichment DOF
-            const gz = cornerDofOff + nCorners + ci;     // longitudinal enrichment DOF
-            const corner = corners[ci];
-            const { tris: supportTris, cornerVerts } = supports[ci];
-
-            for (let si = 0; si < supportTris.length; si++) {
-                const t = supportTris[si];
-                const cornerLocalIdx = cornerVerts[si];
-                const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-                if (faceF[2*t] < 0) continue; // skip conductor interior
-
-                const eps = epsMap[t];
-                const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-                const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-                const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
-                const verts = [v0, v1, v2];
-
-                // Quadrature: Duffy for corner-touching, standard otherwise
-                const useDuffy = cornerLocalIdx >= 0 && duffyQP;
-                const qpts = useDuffy ? duffyQP(cornerLocalIdx) : null;
-                const nqp = useDuffy ? qpts.length : NQ;
-
-                for (let q = 0; q < nqp; q++) {
-                    let w, xq, yq;
-                    if (useDuffy) {
-                        const qp = qpts[q];
-                        w = qp.w;
-                        xq = txs[0]*qp.l1 + txs[1]*qp.l2 + txs[2]*qp.l3;
-                        yq = tys[0]*qp.l1 + tys[1]*qp.l2 + tys[2]*qp.l3;
-                    } else {
-                        w = QW[q];
-                        xq = txs[0]*QL1[q] + txs[1]*QL2[q] + txs[2]*QL3[q];
-                        yq = tys[0]*QL1[q] + tys[1]*QL2[q] + tys[2]*QL3[q];
-                    }
-
-                    // Enrichment: φ_s (scalar) and S_t = ∇φ_s (vector)
-                    const { phi, dphidx, dphidy } = evalFn(xq, yq, corner);
-                    if (phi === 0 && dphidx === 0 && dphidy === 0) continue;
-                    // S_t = (dphidx, dphidy) — the vector enrichment
-
-                    // Standard Nedelec basis at quadrature point
-                    const Wx = new Float64Array(8), Wy = new Float64Array(8);
-                    for (let k = 0; k < 3; k++) {
-                        const [p, qq] = edgeVerts[k];
-                        [Wx[k], Wy[k]] = ne1(coeff, p, qq, xq, yq);
-                        [Wx[k+4], Wy[k+4]] = ne2(coeff, p, qq, xq, yq);
-                    }
-                    [Wx[3], Wy[3]] = nf1(coeff, xq, yq);
-                    [Wx[7], Wy[7]] = nf2(coeff, xq, yq);
-
-                    const wA = w * Area;
-                    const St_dot_St = dphidx*dphidx + dphidy*dphidy; // |S_t|² = |∇φ_s|²
-
-                    // === A matrix entries ===
-                    // A[gt, j_t] = -k₀²ε · ∫ S_t·W_j dA  (curl(S_t)=0, so Att=0)
-                    // Complex ε: ε = eps.re + j·eps.im (eps.im < 0 for lossy materials)
-                    function addA_enr(gi, gj, dot) {
-                        const vre = -k2 * wA * (eps.re * dot);
-                        const vim = -k2 * wA * (eps.im * dot);
-                        if (vre !== 0 || vim !== 0) {
-                            RAr.push(gi); RAc.push(gj); RAvRe.push(vre); RAvIm.push(vim);
-                            RAr.push(gj); RAc.push(gi); RAvRe.push(vre); RAvIm.push(vim);
-                        }
-                    }
-                    for (let k = 0; k < 3; k++) {
-                        const eIdx = triEdges[3*t+k], s = triSigns[3*t+k];
-                        const ef1 = edgeF[2*eIdx];
-                        if (ef1 >= 0) addA_enr(gt, ef1, dphidx*s*Wx[k] + dphidy*s*Wy[k]);
-                        const ef2 = edgeF[2*eIdx+1];
-                        if (ef2 >= 0) addA_enr(gt, ef2, dphidx*Wx[k+4] + dphidy*Wy[k+4]);
-                    }
-                    { const f1=faceF[2*t]; if(f1>=0) addA_enr(gt, f1, dphidx*Wx[3]+dphidy*Wy[3]); }
-                    { const f2=faceF[2*t+1]; if(f2>=0) addA_enr(gt, f2, dphidx*Wx[7]+dphidy*Wy[7]); }
-                    // A[gt, gt] self
-                    { const vre = -k2*wA*eps.re*St_dot_St, vim = -k2*wA*eps.im*St_dot_St;
-                      if(vre!==0||vim!==0){ RAr.push(gt);RAc.push(gt);RAvRe.push(vre);RAvIm.push(vim); }}
-
-                    // === B matrix: transverse block (Dtt-like, NO ε) ===
-                    // B[gt, j_t] = ∫ S_t·W_j dA
-                    for (let k = 0; k < 3; k++) {
-                        const eIdx = triEdges[3*t+k], s = triSigns[3*t+k];
-                        const ef1 = edgeF[2*eIdx];
-                        if (ef1 >= 0) {
-                            const v = wA * (dphidx*s*Wx[k] + dphidy*s*Wy[k]);
-                            if (v !== 0) { RBr.push(gt);RBc.push(ef1);RBvRe.push(v);RBvIm.push(0);
-                                           RBr.push(ef1);RBc.push(gt);RBvRe.push(v);RBvIm.push(0); }
-                        }
-                        const ef2 = edgeF[2*eIdx+1];
-                        if (ef2 >= 0) {
-                            const v = wA * (dphidx*Wx[k+4] + dphidy*Wy[k+4]);
-                            if (v !== 0) { RBr.push(gt);RBc.push(ef2);RBvRe.push(v);RBvIm.push(0);
-                                           RBr.push(ef2);RBc.push(gt);RBvRe.push(v);RBvIm.push(0); }
-                        }
-                    }
-                    { const f1=faceF[2*t]; if(f1>=0){ const v=wA*(dphidx*Wx[3]+dphidy*Wy[3]);
-                      if(v!==0){ RBr.push(gt);RBc.push(f1);RBvRe.push(v);RBvIm.push(0); RBr.push(f1);RBc.push(gt);RBvRe.push(v);RBvIm.push(0); }}}
-                    { const f2=faceF[2*t+1]; if(f2>=0){ const v=wA*(dphidx*Wx[7]+dphidy*Wy[7]);
-                      if(v!==0){ RBr.push(gt);RBc.push(f2);RBvRe.push(v);RBvIm.push(0); RBr.push(f2);RBc.push(gt);RBvRe.push(v);RBvIm.push(0); }}}
-                    // B[gt, gt] self = ∫|S_t|² dA (no ε)
-                    { const v = wA*St_dot_St;
-                      if(v!==0){ RBr.push(gt);RBc.push(gt);RBvRe.push(v);RBvIm.push(0); }}
-
-                    // === B matrix: gradient coupling (Dzt-like, NO ε) ===
-                    // B[gz, j_t] = ∫ ∇φ_s·W_j dA (same as B[gt, j_t] since S_t = ∇φ_s)
-                    for (let k = 0; k < 3; k++) {
-                        const eIdx = triEdges[3*t+k], s = triSigns[3*t+k];
-                        const ef1 = edgeF[2*eIdx];
-                        if (ef1 >= 0) {
-                            const v = wA * (dphidx*s*Wx[k] + dphidy*s*Wy[k]);
-                            if (v !== 0) { RBr.push(gz);RBc.push(ef1);RBvRe.push(v);RBvIm.push(0);
-                                           RBr.push(ef1);RBc.push(gz);RBvRe.push(v);RBvIm.push(0); }
-                        }
-                        const ef2 = edgeF[2*eIdx+1];
-                        if (ef2 >= 0) {
-                            const v = wA * (dphidx*Wx[k+4] + dphidy*Wy[k+4]);
-                            if (v !== 0) { RBr.push(gz);RBc.push(ef2);RBvRe.push(v);RBvIm.push(0);
-                                           RBr.push(ef2);RBc.push(gz);RBvRe.push(v);RBvIm.push(0); }
-                        }
-                    }
-                    { const f1=faceF[2*t]; if(f1>=0){ const v=wA*(dphidx*Wx[3]+dphidy*Wy[3]);
-                      if(v!==0){ RBr.push(gz);RBc.push(f1);RBvRe.push(v);RBvIm.push(0); RBr.push(f1);RBc.push(gz);RBvRe.push(v);RBvIm.push(0); }}}
-                    { const f2=faceF[2*t+1]; if(f2>=0){ const v=wA*(dphidx*Wx[7]+dphidy*Wy[7]);
-                      if(v!==0){ RBr.push(gz);RBc.push(f2);RBvRe.push(v);RBvIm.push(0); RBr.push(f2);RBc.push(gz);RBvRe.push(v);RBvIm.push(0); }}}
-
-                    // === B matrix: longitudinal block (Dzz-like) ===
-                    // B[gz, j_z] = ∫∇φ_s·∇N_j dA - k₀²ε·∫φ_s·N_j dA (Dzz1 - k₀²Dzz2)
-                    // Dzz1 has no ε; Dzz2 has complex ε
-                    for (let k = 0; k < 3; k++) {
-                        const nf = nodeF[verts[k]]; if (nf < 0) continue;
-                        const gj = nFreeTransverse + nf;
-                        const [gx,gy] = lvGrad(coeff, k, xq, yq);
-                        const Nv = lv(coeff, k, xq, yq);
-                        const vre = wA * ((dphidx*gx + dphidy*gy) - k2*eps.re*phi*Nv);
-                        const vim = wA * (-k2*eps.im*phi*Nv);
-                        if (vre !== 0 || vim !== 0) { RBr.push(gz);RBc.push(gj);RBvRe.push(vre);RBvIm.push(vim);
-                                       RBr.push(gj);RBc.push(gz);RBvRe.push(vre);RBvIm.push(vim); }
-                    }
-                    for (let k = 0; k < 3; k++) {
-                        const enf = edgeNodeF[triEdges[3*t+k]]; if (enf < 0) continue;
-                        const gj = nFreeTransverse + nFreeVertexDof + enf;
-                        const [p,qq] = edgeVerts[k];
-                        const [gx,gy] = leGrad(coeff, p, qq, xq, yq);
-                        const Nv = le(coeff, p, qq, xq, yq);
-                        const vre = wA * ((dphidx*gx + dphidy*gy) - k2*eps.re*phi*Nv);
-                        const vim = wA * (-k2*eps.im*phi*Nv);
-                        if (vre !== 0 || vim !== 0) { RBr.push(gz);RBc.push(gj);RBvRe.push(vre);RBvIm.push(vim);
-                                       RBr.push(gj);RBc.push(gz);RBvRe.push(vre);RBvIm.push(vim); }
-                    }
-
-                    // === B matrix: self-couplings ===
-                    // B[gt, gz] = ∫∇φ_s·∇φ_s dA = ∫|S_t|² dA (Dzt self, no ε)
-                    { const v = wA*St_dot_St;
-                      if(v!==0){ RBr.push(gt);RBc.push(gz);RBvRe.push(v);RBvIm.push(0);
-                                 RBr.push(gz);RBc.push(gt);RBvRe.push(v);RBvIm.push(0); }}
-                    // B[gz, gz] = ∫|∇φ_s|² dA - k₀²ε·∫φ_s² dA (Dzz self)
-                    { const vre = wA*(St_dot_St - k2*eps.re*phi*phi);
-                      const vim = wA*(-k2*eps.im*phi*phi);
-                      if(vre!==0||vim!==0){ RBr.push(gz);RBc.push(gz);RBvRe.push(vre);RBvIm.push(vim); }}
-
-                    // === Cross-coupling between corners (if overlapping supports) ===
-                    for (let cj = ci + 1; cj < nCorners; cj++) {
-                        const gtj = cornerDofOff + cj, gzj = cornerDofOff + nCorners + cj;
-                        const { phi:pj, dphidx:dxj, dphidy:dyj } = evalFn(xq, yq, corners[cj]);
-                        if (pj === 0 && dxj === 0 && dyj === 0) continue;
-                        const dot_ij = dphidx*dxj + dphidy*dyj;
-                        // A[gt, gtj] — complex ε
-                        { const vre = -k2*wA*eps.re*dot_ij, vim = -k2*wA*eps.im*dot_ij;
-                          if(vre!==0||vim!==0){ RAr.push(gt);RAc.push(gtj);RAvRe.push(vre);RAvIm.push(vim);
-                                     RAr.push(gtj);RAc.push(gt);RAvRe.push(vre);RAvIm.push(vim); }}
-                        // B[gt, gtj] (Dtt cross — no ε)
-                        { const v = wA*dot_ij;
-                          if(v!==0){ RBr.push(gt);RBc.push(gtj);RBvRe.push(v);RBvIm.push(0);
-                                     RBr.push(gtj);RBc.push(gt);RBvRe.push(v);RBvIm.push(0); }}
-                        // B[gz, gzj] (Dzz cross — complex ε in mass term)
-                        { const vre = wA*(dot_ij - k2*eps.re*phi*pj);
-                          const vim = wA*(-k2*eps.im*phi*pj);
-                          if(vre!==0||vim!==0){ RBr.push(gz);RBc.push(gzj);RBvRe.push(vre);RBvIm.push(vim);
-                                     RBr.push(gzj);RBc.push(gz);RBvRe.push(vre);RBvIm.push(vim); }}
-                        // B[gt, gzj] and B[gz, gtj] (Dzt cross — no ε)
-                        { const v = wA*dot_ij;
-                          if(v!==0){ RBr.push(gt);RBc.push(gzj);RBvRe.push(v);RBvIm.push(0);
-                                     RBr.push(gzj);RBc.push(gt);RBvRe.push(v);RBvIm.push(0);
-                                     RBr.push(gz);RBc.push(gtj);RBvRe.push(v);RBvIm.push(0);
-                                     RBr.push(gtj);RBc.push(gz);RBvRe.push(v);RBvIm.push(0); }}
-                    }
-                }
-            }
-        }
-    }
-
     // Merge pre-allocated element arrays with Robin BC dynamic arrays
     const totalA = aNnz + RAr.length;
     const fAr = new Int32Array(totalA), fAc = new Int32Array(totalA);
@@ -1323,10 +1112,8 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, enrichment) 
 // --- P2 Static solver ---
 // Uses 6 nodal DOFs per triangle: 3 vertex (lv) + 3 edge midpoint (le)
 
-// enrichment: optional { corners, supports, evalFn, duffyQuadPoints } for corner singularities.
-// When provided, adds scalar enrichment DOFs (one per corner) to capture r^ν singular behavior.
-// Returns { phiVertex, phiEdge, enrichCoeffs }.
-export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, enrichment = null) {
+// Returns { phiVertex, phiEdge, phiEdge3, phiFaceNode }.
+export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
     // condPotentials: array of potentials per conductor group [V1, V2, ...].
     // If null, all conductors get V=1.0.
     const { nodes, tris, nTris } = mesh;
@@ -1334,9 +1121,8 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, enrichme
             isCondNode, isCondEdge, condNodeGroup,
             elemOrder, edgeOrder, edgeNodeF3, faceNodeF,
             nFreeEdgeNode3Dof, nFreeFaceNodeDof } = fm;
-    const nCorners = enrichment ? enrichment.corners.length : 0;
     const nFreeFEM = nFreeVertexDof + nFreeEdgeNodeDof + (nFreeEdgeNode3Dof || 0) + (nFreeFaceNodeDof || 0);
-    const nFreeDof = nFreeFEM + nCorners;
+    const nFreeDof = nFreeFEM;
 
     // Longitudinal DOF offsets (within the static system, lzOff=0)
     const edgeMidOff = nFreeVertexDof;
@@ -1435,78 +1221,6 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, enrichme
         }
     }
 
-    // Enrichment assembly
-    if (enrichment) {
-        const { corners, supports, evalFn, duffyQuadPoints: duffyQP } = enrichment;
-        for (let ci = 0; ci < nCorners; ci++) {
-            const gc = nFreeFEM + ci;
-            const corner = corners[ci];
-            const { tris: supportTris, cornerVerts } = supports[ci];
-
-            for (let si = 0; si < supportTris.length; si++) {
-                const t = supportTris[si];
-                const cornerLocalIdx = cornerVerts[si];
-                const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-                const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-                const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-                const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
-                const verts = [v0, v1, v2];
-                const eps = epsMap ? epsMap[t].re : 1.0;
-                const useDuffy = cornerLocalIdx >= 0 && duffyQP;
-                const qpts = useDuffy ? duffyQP(cornerLocalIdx) : null;
-                const nqp = useDuffy ? qpts.length : NQ;
-
-                // Element DOF map
-                const gDof = new Int32Array(6);
-                const isDir = new Uint8Array(6);
-                const dirVal = new Float64Array(6);
-                for (let k = 0; k < 3; k++) {
-                    const nf = nodeF[verts[k]];
-                    if (nf >= 0) gDof[k] = nf;
-                    else if (isCondNode[verts[k]]) { gDof[k]=-1; isDir[k]=1; const cg=condNodeGroup?condNodeGroup[verts[k]]:1; dirVal[k]=condPotentials?condPotentials[cg-1]:1.0; }
-                    else gDof[k] = -1;
-                }
-                for (let k = 0; k < 3; k++) {
-                    const eIdx = mesh.triEdges[3*t+k];
-                    const enf = edgeNodeF[eIdx];
-                    if (enf >= 0) gDof[k+3] = nFreeVertexDof + enf;
-                    else if (isCondEdge[eIdx]) { gDof[k+3]=-1; isDir[k+3]=1; const eg=condNodeGroup?condNodeGroup[mesh.edges[2*eIdx]]:1; dirVal[k+3]=condPotentials?condPotentials[eg-1]:1.0; }
-                    else gDof[k+3] = -1;
-                }
-
-                for (let q = 0; q < nqp; q++) {
-                    let w, xq, yq;
-                    if (useDuffy) { const qp=qpts[q]; w=qp.w; xq=txs[0]*qp.l1+txs[1]*qp.l2+txs[2]*qp.l3; yq=tys[0]*qp.l1+tys[1]*qp.l2+tys[2]*qp.l3; }
-                    else { w=QW[q]; xq=txs[0]*QL1[q]+txs[1]*QL2[q]+txs[2]*QL3[q]; yq=tys[0]*QL1[q]+tys[1]*QL2[q]+tys[2]*QL3[q]; }
-                    const { phi: psi, dphidx: dpx, dphidy: dpy } = evalFn(xq, yq, corner);
-                    if (psi === 0 && dpx === 0 && dpy === 0) continue;
-                    const wA = w * Area;
-                    // P2 Lagrange gradients
-                    const Gx = new Float64Array(6), Gy = new Float64Array(6);
-                    for (let k=0;k<3;k++) { const [gx,gy]=lvGrad(coeff,k,xq,yq); Gx[k]=gx; Gy[k]=gy; }
-                    for (let k=0;k<3;k++) { const [p,qq]=edgeVerts[k]; const [gx,gy]=leGrad(coeff,p,qq,xq,yq); Gx[k+3]=gx; Gy[k+3]=gy; }
-                    // K[gi, gc] = ε·∫∇N_i·∇ψ dA
-                    for (let li=0;li<6;li++) {
-                        const v = eps*wA*(Gx[li]*dpx + Gy[li]*dpy);
-                        if (v === 0) continue;
-                        const gi = gDof[li];
-                        if (gi >= 0) { Rows.push(gi);Cols.push(gc);Vals.push(v); Rows.push(gc);Cols.push(gi);Vals.push(v); }
-                        else if (isDir[li]) { rhs[gc] -= v * dirVal[li]; }
-                    }
-                    // K[gc, gc] = ε·∫|∇ψ|² dA
-                    { const v=eps*wA*(dpx*dpx+dpy*dpy); if(v!==0){Rows.push(gc);Cols.push(gc);Vals.push(v);} }
-                    // Cross-coupling between corners
-                    for (let cj=ci+1;cj<nCorners;cj++) {
-                        const gcj=nFreeFEM+cj;
-                        const {dphidx:dx2,dphidy:dy2}=evalFn(xq,yq,corners[cj]);
-                        if(dx2===0&&dy2===0) continue;
-                        const v=eps*wA*(dpx*dx2+dpy*dy2);
-                        if(v!==0){Rows.push(gc);Cols.push(gcj);Vals.push(v); Rows.push(gcj);Cols.push(gc);Vals.push(v);}
-                    }
-                }
-            }
-        }
-    }
 
     const csrS = tripletsToCSR(Rows, Cols, Vals, nFreeDof);
     const { x: phiFree, iters, residual } = solveCG(csrS, rhs, nFreeDof);
@@ -1543,13 +1257,11 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, enrichme
         }
     }
 
-    const enrichCoeffs = nCorners > 0 ? new Float64Array(phiFree.buffer, nFreeFEM * 8, nCorners) : null;
-    return { phiVertex, phiEdge, phiEdge3, phiFaceNode, enrichCoeffs };
+    return { phiVertex, phiEdge, phiEdge3, phiFaceNode };
 }
 
-// Compute energy W = ½∫ε|∇φ|² dA including enrichment cross terms.
-// enrichment: optional { corners, evalFn, coeffs } for including singular contribution.
-export function computeTriEnergy(phi, mesh, epsMap, enrichment = null, elemOrder = null) {
+// Compute energy W = ½∫ε|∇φ|² dA.
+export function computeTriEnergy(phi, mesh, epsMap, elemOrder = null) {
     const { nodes, tris, nTris } = mesh;
     const { phiVertex, phiEdge, phiEdge3, phiFaceNode } = phi;
     let W = 0;
@@ -1578,62 +1290,6 @@ export function computeTriEnergy(phi, mesh, epsMap, enrichment = null, elemOrder
         for (let li = 0; li < nLocal; li++)
             for (let lj = 0; lj < nLocal; lj++)
                 W += eps * Sz[li * nLocal + lj] * localPhi[li] * localPhi[lj];
-    }
-
-    // Enrichment cross and self terms: ∫ε(2·∇φ_FEM·c∇ψ + |c∇ψ|²) dA
-    if (enrichment && enrichment.coeffs) {
-        const { corners, evalFn, coeffs, supports, duffyQuadPoints: duffyQP } = enrichment;
-        const { triEdges } = mesh;
-        const edgeVerts2 = [[0,1],[1,2],[2,0]];
-
-        for (let ci = 0; ci < corners.length; ci++) {
-            if (Math.abs(coeffs[ci]) < 1e-30) continue;
-            const corner = corners[ci];
-            const supportTris = supports[ci].tris;
-            const cornerVerts = supports[ci].cornerVerts;
-
-            for (let si = 0; si < supportTris.length; si++) {
-                const t = supportTris[si];
-                const cornerLocalIdx = cornerVerts[si];
-                const v0=tris[3*t],v1=tris[3*t+1],v2=tris[3*t+2];
-                const {coeff,Area}=triCoefficients(nodes,v0,v1,v2);
-                const txs=[nodes[2*v0],nodes[2*v1],nodes[2*v2]];
-                const tys=[nodes[2*v0+1],nodes[2*v1+1],nodes[2*v2+1]];
-                const verts2=[v0,v1,v2];
-                const eps = epsMap ? epsMap[t].re : 1.0;
-                const lp = new Float64Array(6);
-                for(let k=0;k<3;k++) lp[k]=phiVertex[verts2[k]];
-                for(let k=0;k<3;k++) lp[k+3]=phiEdge[triEdges[3*t+k]];
-
-                const useDuffy = cornerLocalIdx >= 0 && duffyQP;
-                const qpts = useDuffy ? duffyQP(cornerLocalIdx) : null;
-                const nqp = useDuffy ? qpts.length : NQ;
-
-                for (let q = 0; q < nqp; q++) {
-                    let w, xq, yq;
-                    if (useDuffy) { const qp=qpts[q]; w=qp.w; xq=txs[0]*qp.l1+txs[1]*qp.l2+txs[2]*qp.l3; yq=tys[0]*qp.l1+tys[1]*qp.l2+tys[2]*qp.l3; }
-                    else { w=QW[q]; xq=txs[0]*QL1[q]+txs[1]*QL2[q]+txs[2]*QL3[q]; yq=tys[0]*QL1[q]+tys[1]*QL2[q]+tys[2]*QL3[q]; }
-                    const {dphidx:dpx,dphidy:dpy}=evalFn(xq,yq,corner);
-                    if(dpx===0&&dpy===0) continue;
-                    // ∇φ_FEM at quadrature point
-                    let gx=0,gy=0;
-                    for(let k=0;k<3;k++){const [dx,dy]=lvGrad(coeff,k,xq,yq);gx+=dx*lp[k];gy+=dy*lp[k];}
-                    for(let k=0;k<3;k++){const [p,qq]=edgeVerts2[k];const [dx,dy]=leGrad(coeff,p,qq,xq,yq);gx+=dx*lp[k+3];gy+=dy*lp[k+3];}
-                    const wA = w * Area;
-                    // 2·c_i·∫ε∇φ_FEM·∇ψ_i dA
-                    W += eps * 2 * coeffs[ci] * wA * (gx*dpx + gy*dpy);
-                    // c_i²·∫ε|∇ψ_i|² dA
-                    W += eps * coeffs[ci]*coeffs[ci] * wA * (dpx*dpx + dpy*dpy);
-                    // Cross: c_i·c_j·∫ε∇ψ_i·∇ψ_j dA
-                    for (let cj=ci+1;cj<corners.length;cj++) {
-                        if(Math.abs(coeffs[cj])<1e-30) continue;
-                        const {dphidx:dx2,dphidy:dy2}=evalFn(xq,yq,corners[cj]);
-                        if(dx2===0&&dy2===0) continue;
-                        W += eps * 2*coeffs[ci]*coeffs[cj] * wA * (dpx*dx2 + dpy*dy2);
-                    }
-                }
-            }
-        }
     }
 
     return 0.5 * W;
@@ -1892,16 +1548,10 @@ export function refineTriMesh(mesh, marked) {
 
     function triQuality(t) {
         const va = newTriArr[3*t], vb = newTriArr[3*t+1], vc = newTriArr[3*t+2];
-        const ax = newNodes[2*va], ay = newNodes[2*va+1];
-        const bx = newNodes[2*vb], by = newNodes[2*vb+1];
-        const cx = newNodes[2*vc], cy = newNodes[2*vc+1];
-        const al = Math.sqrt((bx-cx)**2+(by-cy)**2);
-        const bl = Math.sqrt((ax-cx)**2+(ay-cy)**2);
-        const cl = Math.sqrt((ax-bx)**2+(ay-by)**2);
-        const s = (al+bl+cl)/2;
-        const area = Math.abs((bx-ax)*(cy-ay)-(cx-ax)*(by-ay))/2;
-        if (area < 1e-30) return 1e10;
-        return al*bl*cl/(8*area*(area/s));
+        return triQualityXY(
+            newNodes[2*va], newNodes[2*va+1],
+            newNodes[2*vb], newNodes[2*vb+1],
+            newNodes[2*vc], newNodes[2*vc+1]);
     }
 
     function smoothVertexSet(eligible, maxPasses, clampLo, clampHi) {

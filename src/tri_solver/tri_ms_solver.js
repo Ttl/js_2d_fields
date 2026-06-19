@@ -1,6 +1,6 @@
 // Microstrip analysis functions for triangular P2 Nedelec FEM
 
-import { csqrt } from './fem_core.js';
+import { csqrt, GL3p, GL3w } from './fem_core.js';
 import { ne1, ne2, ne3, nf1, nf2, nf3, nf4, nf5, nf6,
          lvGrad, leGrad, le3Grad, lf3Grad, triCoefficients,
          ne1Curl, ne2Curl, ne3Curl, nf1Curl, nf2Curl, nf3Curl, nf4Curl, nf5Curl, nf6Curl,
@@ -10,9 +10,7 @@ import { ne1, ne2, ne3, nf1, nf2, nf3, nf4, nf5, nf6,
 // --- Evaluate e_t and grad(ez) at point (px,py) inside triangle t ---
 // Returns the Lee-Jin eigenvector fields: e_t (= γ·Et) and ∇ez (= ∇Ez).
 // H can be computed from these as: jωμ₀Ht = ẑ×∇ez + ẑ×e_t (no γ multiply).
-// Optional enrichment: { corners, evalFn, vecRe, vecIm, nStd, nCorners }
-//   Adds ∇φ_ci·coeff to both e_t and ∇ez (de Rham compatible enrichment).
-export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm, enrichment) {
+export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm) {
     const { tris, triEdges, triSigns, nodes } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF,
             elemOrder, edgeF3, faceF3, edgeNodeF3, faceNodeF } = fm;
@@ -79,21 +77,6 @@ export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm, enrichment)
         { const [gx,gy] = lf3Grad(cf, px, py); dezdxr += gx*nDR[9]; dezdxi += gx*nDI[9]; dezdyr += gy*nDR[9]; dezdyi += gy*nDI[9]; }
     }
 
-    // Add enrichment contributions to e_t and ∇ez
-    if (enrichment) {
-        const { corners, evalFn, vecRe: evR, vecIm: evI, nStd, nCorners } = enrichment;
-        for (let ci = 0; ci < nCorners; ci++) {
-            const { dphidx, dphidy } = evalFn(px, py, corners[ci]);
-            if (dphidx === 0 && dphidy === 0) continue;
-            const ctR = evR[nStd + ci], ctI = evI[nStd + ci];
-            exr += dphidx * ctR; exi += dphidx * ctI;
-            eyr += dphidy * ctR; eyi += dphidy * ctI;
-            const czR = evR[nStd + nCorners + ci], czI = evI[nStd + nCorners + ci];
-            dezdxr += dphidx * czR; dezdxi += dphidx * czI;
-            dezdyr += dphidy * czR; dezdyi += dphidy * czI;
-        }
-    }
-
     // curl(Et)_z = ∂Ey/∂x - ∂Ex/∂y — computed from analytical Nedelec curl.
     let curlEtRe = 0, curlEtIm = 0;
     for (let k = 0; k < 3; k++) {
@@ -115,12 +98,6 @@ export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm, enrichment)
 }
 
 // --- Mode analysis ---
-// Note: enrichment DOFs are NOT included here. The enrichment basis has compact support
-// near PEC corners with small coefficients (~1e-4), so its contribution to full-domain
-// integrals (Poynting power, voltage, ∮H·dl) is negligible for impedance computation.
-// Conductor loss handles enrichment separately via the Galerkin H projection in
-// conductor_loss.js::projectH, where the singular corner fields matter most.
-
 export function analyzeTriMode(vecRe, vecIm, gamma2Re, gamma2Im, mesh, fm, k2, f, epsMap, condRect, distFrac) {
     const { nodes, tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF, isCondNode,
@@ -440,8 +417,6 @@ export function analyzeTriMode(vecRe, vecIm, gamma2Re, gamma2Im, mesh, fm, k2, f
         for (let le = 0; le < 3; le++) edgeToTriListB[triEdges[3*t+le]].push(t);
     }
 
-    const GL3p = [0.11270, 0.50000, 0.88730];
-    const GL3w = [0.27778, 0.44444, 0.27778];
     const eps0_c = 8.854187817e-12;
 
     // PMC symmetry plane: skip these edges (Ht·dl ≡ 0 analytically, but FEM

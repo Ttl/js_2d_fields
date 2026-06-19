@@ -183,7 +183,7 @@ function recoverNodalModeField(mesh, fm, vRe, vIm) {
         const area = Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2;
         if (!(area > 0)) continue;
         for (const vk of [v0, v1, v2]) {
-            const f = evalFieldsAtPoint(t, nodes[2 * vk], nodes[2 * vk + 1], mesh, fm, vRe, vIm, null);
+            const f = evalFieldsAtPoint(t, nodes[2 * vk], nodes[2 * vk + 1], mesh, fm, vRe, vIm);
             exr[vk] += area * f.exr; exi[vk] += area * f.exi;
             eyr[vk] += area * f.eyr; eyi[vk] += area * f.eyi; w[vk] += area;
         }

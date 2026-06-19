@@ -740,3 +740,22 @@ export function modeOverlap(staticEdge, evecRe, evecIm, nFreeEdge) {
 // P2 edge Robin: ∫₀¹ |E_t|² dξ in DOF basis = [[1,0],[0,3]]
 // (For E_t = d₀ + d₁(2ξ-1)/... → bilinear form is d₀² + 3d₁²)
 // Scale by 1/h_perp for physical integral.
+
+// ==================== Shared geometric / quadrature constants ====================
+
+// 3-point Gauss-Legendre rule on [0,1] (for edge / line-contour integrals).
+export const GL3p = [0.11270, 0.50000, 0.88730];
+export const GL3w = [0.27778, 0.44444, 0.27778];
+
+// Triangle quality metric (∝ circumradius / inradius; ≈1 for an equilateral triangle,
+// larger is worse). Returns 1e10 for a degenerate (near-zero-area) triangle. Inputs are
+// the three vertex coordinates.
+export function triQuality(ax, ay, bx, by, cx, cy) {
+    const al = Math.sqrt((bx-cx)**2+(by-cy)**2);
+    const bl = Math.sqrt((ax-cx)**2+(ay-cy)**2);
+    const cl = Math.sqrt((ax-bx)**2+(ay-by)**2);
+    const s = (al+bl+cl)/2;
+    const area = Math.abs((bx-ax)*(cy-ay)-(cx-ax)*(by-ay))/2;
+    if (area < 1e-30) return 1e10;
+    return al*bl*cl/(8*area*(area/s));
+}

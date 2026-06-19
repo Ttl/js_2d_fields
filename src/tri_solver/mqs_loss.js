@@ -19,7 +19,7 @@
 // block [[S, −βM],[−βM, −S]]·[Ar; Ai] = [μ₀σFc; 0] — symmetry is required because
 // the WASM solver's LDLT fast path assumes a symmetric matrix.
 
-import { tripletsToCSR } from './fem_core.js';
+import { tripletsToCSR, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
          refineTriMesh } from './tri_fem.js';
 import { calculate_Zrough } from '../surface_roughness.js';
@@ -272,7 +272,6 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
     // conductor surfaces, used below to scale the smooth loss per face.
     let gndS = 0, gndZreS = 0, gndZimS = 0;
-    const GL3p = [0.11270, 0.5, 0.88730], GL3w = [0.27778, 0.44444, 0.27778];
     function isGroundY(y) {
         if (Math.abs(y) < 1e-9) return true;
         if (opts.topGround && Math.abs(y - ymax_d) < 1e-9) return true;
