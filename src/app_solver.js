@@ -161,6 +161,7 @@ const DEFAULT_SETTINGS = {
     enclosure_height: NaN, // auto
     max_iters: 10,
     tolerance: 0.01,
+    min_converged_passes: 2,
     max_nodes: 20,
     rq: 0,             // μm
     use_plating: 0,
@@ -251,6 +252,7 @@ function getUISettings() {
         enclosure_height: getDisplayValue('inp_enclosure_height'),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
         tolerance: getInputValueUnitless('inp_tolerance'),
+        min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         rq: getDisplayValue('inp_rq'),
         use_plating: document.getElementById('chk_plating').checked ? 1 : 0,
@@ -439,6 +441,8 @@ function restoreSettings(settings) {
 
         document.getElementById('inp_max_iters').value = fullSettings.max_iters;
         document.getElementById('inp_tolerance').value = fullSettings.tolerance;
+        if (fullSettings.min_converged_passes !== undefined)
+            document.getElementById('inp_min_converged_passes').value = fullSettings.min_converged_passes;
         document.getElementById('inp_max_nodes').value = fullSettings.max_nodes;
         setValueWithUnit('inp_rq', fullSettings.rq);
 
