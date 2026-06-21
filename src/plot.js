@@ -53,6 +53,55 @@ function contourScaledB(min, max, n) {
     return [eMin, eMax, logStep];
 }
 
+// Opaque conductor fills (+ yellow plating edges), drawn ABOVE the field. Shared by the geometry
+// view and the field views so conductors look identical and the field views don't show heatmap/
+// contour bleed inside the PEC (the resampled field is identically zero in the conductor interior;
+// this just masks the zsmooth/contour interpolation that spills the steep boundary field inward).
+function conductorFillShapes(solver, maxY) {
+    const out = [];
+    for (const cond of (solver.conductors || [])) {
+        if (cond.y_min > maxY) continue;
+        const yMax = Math.min(cond.y_max, maxY);
+        out.push({
+            type: 'rect',
+            x0: cond.x_min * 1000, y0: cond.y_min * 1000,
+            x1: cond.x_max * 1000, y1: yMax * 1000,
+            fillcolor: 'rgba(217, 119, 6, 1.0)',
+            line: { color: 'rgba(0, 0, 0, 0.5)', width: 1 },
+            layer: 'above'
+        });
+        if (cond.plating) {   // yellow lines on plated edges
+            const x0 = cond.x_min * 1000, x1 = cond.x_max * 1000, y0 = cond.y_min * 1000, y1 = yMax * 1000;
+            const plateLine = { color: 'rgba(255, 215, 0, 1.0)', width: 3 };
+            if (cond.plating.top) out.push({ type: 'line', x0, y0: y1, x1, y1: y1, line: plateLine, layer: 'above' });
+            if (cond.plating.bottom) out.push({ type: 'line', x0, y0: y0, x1, y1: y0, line: plateLine, layer: 'above' });
+            if (cond.plating.sides) {
+                out.push({ type: 'line', x0: x0, y0: y0, x1: x0, y1: y1, line: plateLine, layer: 'above' });
+                out.push({ type: 'line', x0: x1, y0: y0, x1: x1, y1: y1, line: plateLine, layer: 'above' });
+            }
+        }
+    }
+    return out;
+}
+
+// The log-spaced |E| contour-LINE trace (lines only, no fill), shared by the geometry overlay and
+// the |E| field view so their contours are identical. z = log10(|E|) with log-spaced levels keeps
+// the lines evenly spaced instead of crowding at the singular trace corners. Named "E-field
+// contours" so setScaleRange can rescale it live in either view.
+function efieldContourTrace(xMM, yMM, zData, eMin, eMax, n) {
+    const limits = contourScaledB(eMin, eMax, n);
+    return {
+        type: "contour",
+        x: xMM, y: yMM,
+        z: zData.map(row => row.map(v => Math.log10(Math.max(v, 1e-3)))),
+        contours: { showlines: true, coloring: "none", start: limits[0], end: limits[1], size: limits[2] },
+        line: { smoothing: 1.3, width: 1, color: "rgba(0, 0, 0, 0.4)" },
+        showscale: false,
+        name: "E-field contours",
+        hoverinfo: "skip"
+    };
+}
+
 // Export functions to get/set scale range for current view
 function getScaleRange() {
     return { min: zMin, max: zMax, view: currentView };
@@ -71,49 +120,31 @@ function setScaleRange(min, max) {
     const Plotly = getPlotly();
     if (!container || !container.data || !Plotly) return;
 
-    // For geometry view with contours, update contour properties
-    if (currentView === "geometry") {
-        // Find the contour trace (if it exists)
-        const contourTraceIdx = container.data.findIndex(trace =>
-            trace.type === 'contour' && trace.name === 'E-field contours'
-        );
+    const n = getPlotOptions().contours;
 
-        if (contourTraceIdx !== -1) {
-            // Get number of contours from plotOptions
-            const plotOptions = getPlotOptions();
-            const n = plotOptions.contours;
-            const limits = contourScaledB(min, max, n);
+    // The shared log-spaced "E-field contours" line trace appears in BOTH the geometry overlay
+    // and the |E| field view — rescale its log levels identically wherever it is.
+    const cIdx = container.data.findIndex(t => t.type === 'contour' && t.name === 'E-field contours');
+    if (cIdx !== -1 && n > 0) {
+        const limits = contourScaledB(min, max, n);
+        Plotly.restyle(container, {
+            'contours.start': limits[0], 'contours.end': limits[1], 'contours.size': limits[2]
+        }, [cIdx]);
+    }
 
-            if (n > 0) {
-                Plotly.restyle(container, {
-                    'contours.start': limits[0],
-                    'contours.end': limits[1],
-                    'contours.size': limits[2]
-                }, [contourTraceIdx]);
+    // Field views also carry the color in a heatmap (|E|) or a linear contour (potential) — update
+    // its zmin/zmax (and linear levels for the potential contour). The geometry view has no such trace.
+    if (currentView !== "geometry") {
+        const hIdx = container.data.findIndex(t =>
+            t.type === 'heatmap' || (t.type === 'contour' && t.name !== 'E-field contours'));
+        if (hIdx !== -1) {
+            const restyle = { zmin: min, zmax: max };
+            if (container.data[hIdx].type === 'contour' && n > 0) {
+                restyle['contours.start'] = min;
+                restyle['contours.end'] = max;
+                restyle['contours.size'] = (max - min) / n;
             }
-        }
-    } else {
-        // For E-field and potential views, update heatmap/contour zmin/zmax
-        // Also update contour properties if contours are enabled
-        const plotOptions = getPlotOptions();
-        const n = plotOptions.contours;
-
-        if (n > 0) {
-            // Contour plot - update both color scale and contour lines
-            const step = (max - min) / n;
-            Plotly.restyle(container, {
-                zmin: min,
-                zmax: max,
-                'contours.start': min,
-                'contours.end': max,
-                'contours.size': step
-            });
-        } else {
-            // Heatmap - just update color scale
-            Plotly.restyle(container, {
-                zmin: min,
-                zmax: max
-            });
+            Plotly.restyle(container, restyle, [hIdx]);
         }
     }
 }
@@ -221,43 +252,7 @@ function draw(resetZoom = false) {
             });
         }
 
-        for (const cond of solver.conductors) {
-            if (cond.y_min > maxY) continue;
-
-            const yMax = Math.min(cond.y_max, maxY);
-            const fillcolor = cond.is_signal ?
-                'rgba(217, 119, 6, 1.0)' :  // Orange for signal
-                'rgba(217, 119, 6, 1.0)' ;  // and ground too
-
-            shapes.push({
-                type: 'rect',
-                x0: cond.x_min * 1000,
-                y0: cond.y_min * 1000,
-                x1: cond.x_max * 1000,
-                y1: yMax * 1000,
-                fillcolor: fillcolor,
-                line: { color: 'rgba(0, 0, 0, 0.5)', width: 1 },
-                layer: 'above'
-            });
-
-            // Yellow lines on plated edges
-            if (cond.plating) {
-                const x0 = cond.x_min * 1000, x1 = cond.x_max * 1000;
-                const y0 = cond.y_min * 1000, y1 = yMax * 1000;
-                const plateLine = { color: 'rgba(255, 215, 0, 1.0)', width: 3 };
-
-                if (cond.plating.top) {
-                    shapes.push({ type: 'line', x0, y0: y1, x1, y1: y1, line: plateLine, layer: 'above' });
-                }
-                if (cond.plating.bottom) {
-                    shapes.push({ type: 'line', x0, y0: y0, x1, y1: y0, line: plateLine, layer: 'above' });
-                }
-                if (cond.plating.sides) {
-                    shapes.push({ type: 'line', x0: x0, y0: y0, x1: x0, y1: y1, line: plateLine, layer: 'above' });
-                    shapes.push({ type: 'line', x0: x1, y0: y0, x1: x1, y1: y1, line: plateLine, layer: 'above' });
-                }
-            }
-        }
+        shapes.push(...conductorFillShapes(solver, maxY));
 
         // If solution available, overlay E-field contours
         if (solver.solution_valid && solver.mesh_generated) {
@@ -386,6 +381,9 @@ function draw(resetZoom = false) {
         // Store actual data range for efield view
         actualDataMin = zMin;
         actualDataMax = zMax;
+        // Mask the conductor interior (field is 0 inside the PEC) so the heatmap/contour bleed
+        // across the boundary is hidden, like the geometry view.
+        shapes.push(...conductorFillShapes(solver, yArr[nyDisplay - 1]));
     }
 
     else {
@@ -420,31 +418,10 @@ function draw(resetZoom = false) {
         }
 
         const n = plotOptions.contours;
-        const limits = contourScaledB(eMin, eMax, n);
 
-        // Add E-field contours if requested
-        if (plotOptions.contours > 0) {
-            traces.push({
-                type: "contour",
-                x: xMM,
-                y: yMM,
-                contours: {
-                    showlines: true,
-                    coloring: "none",
-                    start: limits[0],
-                    end: limits[1],
-                    size: limits[2]
-                },
-                z: zData.map(row => row.map(v => Math.log10(Math.max(v, 1e-3)))),
-                line: {
-                    smoothing: 1.3,
-                    width: 1,
-                    color: "rgba(0, 0, 0, 0.4)"
-                },
-                showscale: false,  // No colorbar
-                name: "E-field contours",
-                hoverinfo: "skip"
-            });
+        // Add E-field contours if requested (shared with the |E| field view)
+        if (n > 0) {
+            traces.push(efieldContourTrace(xMM, yMM, zData, eMin, eMax, n));
         }
 
         // Add streamlines if requested via plot options
@@ -477,7 +454,7 @@ function draw(resetZoom = false) {
             hoverinfo: "skip"
         });
     } else if (zData.length > 0) {
-        // Field views only. Use heatmap with optional contour lines
+        // Field views. Heatmap with optional contour lines.
 
         // Check if there's a user-defined scale override
         if (window.getStoredScale) {
@@ -489,42 +466,43 @@ function draw(resetZoom = false) {
         }
 
         const n = plotOptions.contours;
+        const hoverTpl = "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.3e}<extra></extra>";
 
-        const contourSettings = {
-            coloring: 'heatmap',
-            showlines: n > 0
-        };
-
-        if (n > 0) {
-            const step = (zMax - zMin) / n;
-            contourSettings.start = zMin;
-            contourSettings.end = zMax;
-            contourSettings.size = step;
+        if (currentView.startsWith("efield")) {
+            // |E| heatmap (linear) for the color + colorbar...
+            traces.push({
+                type: "heatmap",
+                zsmooth: "best",
+                x: xMM, y: yMM, z: zData,
+                zmin: zMin, zmax: zMax,
+                colorscale: colorscale,
+                colorbar: { title: zTitle, len: 0.8 },
+                hovertemplate: hoverTpl
+            });
+            // ...overlaid with the SAME log-spaced contour-line trace the geometry view uses.
+            if (n > 0) {
+                traces.push(efieldContourTrace(xMM, yMM, zData, Math.max(zMin, 0), zMax, n));
+            }
+        } else {
+            // Potential (and any other field view): linear heatmap + linear contour lines.
+            const contourSettings = { coloring: 'heatmap', showlines: n > 0 };
+            if (n > 0) {
+                contourSettings.start = zMin;
+                contourSettings.end = zMax;
+                contourSettings.size = (zMax - zMin) / n;
+            }
+            traces.push({
+                type: n > 0 ? "contour" : "heatmap",
+                zsmooth: "best",
+                x: xMM, y: yMM, z: zData,
+                zmin: zMin, zmax: zMax,
+                colorscale: colorscale,
+                contours: contourSettings,
+                line: { smoothing: 1.3, width: 0.5 },
+                colorbar: { title: zTitle, len: 0.8 },
+                hovertemplate: hoverTpl
+            });
         }
-
-        traces.push({
-            type: n > 0 ? "contour" : "heatmap",
-            zsmooth: "best",
-            x: xMM,
-            y: yMM,
-            z: zData,
-            zmin: zMin,
-            zmax: zMax,
-            colorscale: colorscale,
-            contours: contourSettings,
-            line: {
-              smoothing: 1.3,
-              width: 0.5
-            },
-            colorbar: {
-                title: zTitle,
-                len: 0.8
-            },
-            hovertemplate:
-                "x: %{x:.2f} mm<br>" +
-                "y: %{y:.2f} mm<br>" +
-                "value: %{z:.3e}<extra></extra>"
-        });
     }
 
     // Mesh overlay

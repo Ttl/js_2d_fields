@@ -96,29 +96,6 @@ function evalPhi(phi, mesh, coeff, t, x, y) {
     return { V: val, Ex: -gx, Ey: -gy };
 }
 
-// Recover a CONTINUOUS nodal E-field by area-weighted averaging of the per-element
-// gradient at each node. E = −∇φ from a P2 potential is linear within a triangle but
-// DISCONTINUOUS across triangle edges, so sampling it directly gives faceted |E|
-// contours (kinked at element boundaries, worst near corners). Averaging to nodes and
-// interpolating linearly yields a smooth field, like the FDM finite-difference field.
-function recoverNodalE(phi, mesh, coeffOf) {
-    const { nodes, tris, nTris, nNodes } = mesh;
-    const Ex = new Float64Array(nNodes), Ey = new Float64Array(nNodes), w = new Float64Array(nNodes);
-    for (let t = 0; t < nTris; t++) {
-        const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
-        const ax = nodes[2*v0], ay = nodes[2*v0+1], bx = nodes[2*v1], by = nodes[2*v1+1], cx = nodes[2*v2], cy = nodes[2*v2+1];
-        const area = Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2;
-        if (!(area > 0)) continue;
-        const coeff = coeffOf(t);
-        for (const vk of [v0, v1, v2]) {
-            const r = evalPhi(phi, mesh, coeff, t, nodes[2 * vk], nodes[2 * vk + 1]);
-            Ex[vk] += area * r.Ex; Ey[vk] += area * r.Ey; w[vk] += area;
-        }
-    }
-    for (let i = 0; i < nNodes; i++) { if (w[i] > 0) { Ex[i] /= w[i]; Ey[i] /= w[i]; } }
-    return { Ex, Ey };
-}
-
 // Resample a static solution onto a regular grid spanning `domain`.
 // Returns { x:Float64Array(nx), y:Float64Array(ny), V, Ex, Ey } with V/Ex/Ey as
 // [ny][nx] arrays (row index = y, matching plot.js / streamlines.js). Points
@@ -134,8 +111,15 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
     // parity: 'even' → V even, Ex odd, Ey even; 'odd' → V odd, Ex even, Ey odd.
     const parity = opts.parity || null;
     const { locate, coeffOf } = buildLocator(mesh);
-    const nodalE = recoverNodalE(phi, mesh, coeffOf);   // continuous E for smooth contours
-    const { tris } = mesh;
+    // E = −∇φ is evaluated DIRECTLY from the P2 element at each grid point — the same kind of
+    // local gradient the quasi-static FDM backend computes, with no smoothing. We deliberately
+    // do NOT node-average: averaging biases the field low right at the conductor surfaces (where
+    // it is largest, since each node's patch reaches away from the surface into weaker field),
+    // which pulls the |E| contours outward and makes them visibly wider than the FDM plot.
+    // Direct evaluation matches the FDM field on the conductor faces and, being single-valued
+    // per grid point, has no cross/kink artifacts. The located triangle carries its own
+    // material, so the dielectric-interface E_n jump is automatic. The only cost is faint
+    // faceting where the mesh is coarse (the P2 gradient is discontinuous across element edges).
     const V = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ex = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ey = Array.from({ length: ny }, () => new Float64Array(nx));
@@ -150,16 +134,10 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
             const t = locate(qx, y[j]);
             if (t < 0) continue;
             const coeff = coeffOf(t);
-            // V from the P2 field (already C0-smooth); E from the recovered nodal field
-            // interpolated linearly over the triangle (barycentric), so it's continuous.
+            // V (C0-smooth, continuous across the interface) and the direct local gradient E
+            // from the P2 element containing the point.
             const r = evalPhi(phi, mesh, coeff, t, qx, y[j]);
-            const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
-            const l0 = coeff[0][0] + coeff[0][1] * qx + coeff[0][2] * y[j];
-            const l1 = coeff[1][0] + coeff[1][1] * qx + coeff[1][2] * y[j];
-            const l2 = coeff[2][0] + coeff[2][1] * qx + coeff[2][2] * y[j];
-            const ex = l0 * nodalE.Ex[v0] + l1 * nodalE.Ex[v1] + l2 * nodalE.Ex[v2];
-            const ey = l0 * nodalE.Ey[v0] + l1 * nodalE.Ey[v1] + l2 * nodalE.Ey[v2];
-            V[j][i] = sV * r.V; Ex[j][i] = sEx * ex; Ey[j][i] = sEy * ey;
+            V[j][i] = sV * r.V; Ex[j][i] = sEx * r.Ex; Ey[j][i] = sEy * r.Ey;
         }
     }
     return { x, y, V, Ex, Ey };
