@@ -126,6 +126,7 @@ function getInputValueUnitless(id) {
  */
 const DEFAULT_SETTINGS = {
     tl_type: 'microstrip',
+    mesh_backend: 'rectilinear',
     w: 0.35,           // mm
     h: 0.21,           // mm
     t: 35,             // μm
@@ -177,6 +178,9 @@ const DEFAULT_SETTINGS = {
     use_causal_materials: 0,
     interp_sweep: 1,
     interp_tolerance: 0.5,
+    // Modes tab (eigenmode viewer)
+    modes_freq: 10,    // GHz
+    modes_nev: 6,
     // Broadside coupled stripline (display units: mm, μm)
     bs_w: 0.2,           // mm
     bs_t: 35,            // μm
@@ -268,6 +272,8 @@ function getUISettings() {
         use_causal_materials: document.getElementById('chk_causal_materials').checked ? 1 : 0,
         interp_sweep: document.getElementById('chk_interp_sweep').checked ? 1 : 0,
         interp_tolerance: parseFloat(document.getElementById('interp_tolerance').value),
+        modes_freq: getDisplayValue('modes-freq'),
+        modes_nev: parseInt(document.getElementById('modes-nev').value),
         bs_w: getDisplayValue('inp_bs_w'),
         bs_t: getDisplayValue('inp_bs_t'),
         bs_x_offset: getDisplayValue('inp_bs_x_offset'),
@@ -288,43 +294,32 @@ function getUISettings() {
  * Serialize settings to URL-safe base64 string
  * Only includes non-default parameters to keep URLs short
  */
-function settingsToURL(settings) {
-    // Broadside coupled stripline uses an allowlist. Only its own fields plus
-    // shared frequency/sparam/enclosure/plating fields are written into the link.
-    if (settings.tl_type === 'broadside_stripline') {
-        const allow = new Set([
-            'tl_type',
-            'bs_w', 'bs_t', 'bs_x_offset', 'bs_sigma',
-            'bs_h_bottom', 'bs_er_bottom', 'bs_tand_bottom',
-            'bs_h_middle', 'bs_er_middle', 'bs_tand_middle',
-            'bs_h_top', 'bs_er_top', 'bs_tand_top',
-            'freq_start', 'freq_stop', 'freq_points',
-            'sparam_length', 'sparam_z_ref',
-            'use_enclosure', 'use_side_gnd', 'enclosure_width',
-            'use_plating', 'plating_sigma', 'plating_t', 'plating_rq',
-            'plating_top', 'plating_sides', 'plating_bottom', 'plating_thick_corners',
-            'use_causal_materials', 'interp_sweep', 'interp_tolerance',
-            'max_iters', 'tolerance', 'max_nodes',
-        ]);
-        const out = {};
-        for (const key in settings) {
-            if (!allow.has(key)) continue;
-            const value = settings[key];
-            const defaultValue = DEFAULT_SETTINGS[key];
-            const bothNaN = (typeof value === 'number' && isNaN(value)) &&
-                            (typeof defaultValue === 'number' && isNaN(defaultValue));
-            if (bothNaN) continue;
-            if (value !== defaultValue) out[key] = value;
-        }
-        // Always include tl_type so the link round-trips.
-        out.tl_type = 'broadside_stripline';
-        const json = JSON.stringify(out);
-        return btoa(encodeURIComponent(json));
-    }
+// Geometry fields belonging to the other transmission-line types (microstrip /
+// diff / gcpw / stripline and their solder-mask, top-dielectric and ground-cutout
+// options). For broadside coupled stripline these are excluded from the link; it
+// has its own bs_* fields. The top-ground enclosure controls are excluded too —
+// broadside's top/bottom grounds are intrinsic, so only the side-wall enclosure
+// applies (see buildSolverFromParams). Everything not listed here (frequency,
+// s-params, side enclosure, plating, surface roughness, solver, modes, material
+// and interpolation options) is shared and round-trips when non-default.
+const BROADSIDE_EXCLUDED_KEYS = new Set([
+    'w', 'h', 't', 'er', 'tand', 'sigma',
+    'trace_spacing', 'gap', 'via_gap',
+    'stripline_top_h', 'er_top', 'tand_top',
+    'use_sm', 'sm_t_sub', 'sm_t_trace', 'sm_t_side', 'sm_er', 'sm_tand',
+    'use_top_diel', 'top_diel_h', 'top_diel_er', 'top_diel_tand',
+    'use_gnd_cut', 'gnd_cut_w', 'gnd_cut_h',
+    'use_top_gnd', 'enclosure_height',
+]);
 
-    // Filter out default values
+function settingsToURL(settings) {
+    const isBroadside = settings.tl_type === 'broadside_stripline';
+
+    // Filter out default values (and, for broadside, the other types' geometry fields)
     const nonDefaultSettings = {};
     for (const key in settings) {
+        if (isBroadside && BROADSIDE_EXCLUDED_KEYS.has(key)) continue;
+
         const value = settings[key];
         const defaultValue = DEFAULT_SETTINGS[key];
 
@@ -459,6 +454,9 @@ function restoreSettings(settings) {
 
         document.getElementById('chk_interp_sweep').checked = !!fullSettings.interp_sweep;
         document.getElementById('interp_tolerance').value = fullSettings.interp_tolerance;
+
+        setValueWithUnit('modes-freq', fullSettings.modes_freq);
+        document.getElementById('modes-nev').value = fullSettings.modes_nev;
 
         setValueWithUnit('sparam-length', fullSettings.sparam_length);
         document.getElementById('sparam-z-ref').value = fullSettings.sparam_z_ref;
