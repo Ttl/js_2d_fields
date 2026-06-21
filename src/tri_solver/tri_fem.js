@@ -177,167 +177,6 @@ export function nf2Curl(coeff, x, y) {
            6*b2*b3*c1*x + 3*b2*c1*c3*y + 3*b3*c1*c2*y;
 }
 
-// --- 12-point Dunavant quadrature on triangle (exact for degree 6) ---
-// Used for P3 element matrices where integrands have degree up to 6.
-export const QW12 = [
-    0.05084490637, 0.05084490637, 0.05084490637,
-    0.11678627572, 0.11678627572, 0.11678627572,
-    0.08285107561, 0.08285107561, 0.08285107561,
-    0.08285107561, 0.08285107561, 0.08285107561
-];
-// Orbit 1 (3 pts): (1-2a, a, a) permuted, a=0.063089
-// Orbit 2 (3 pts): (1-2a, a, a) permuted, a=0.249287
-// Orbit 3 (6 pts): all permutations of (a, b, c), a=0.310352, b=0.053145, c=0.636503
-export const QL1_12 = [
-    0.87382197101, 0.06308901449, 0.06308901449,
-    0.50142650966, 0.24928674517, 0.24928674517,
-    0.63650249912, 0.31035245103, 0.05314504984,
-    0.63650249912, 0.05314504984, 0.31035245103
-];
-export const QL2_12 = [
-    0.06308901449, 0.87382197101, 0.06308901449,
-    0.24928674517, 0.50142650966, 0.24928674517,
-    0.31035245103, 0.63650249912, 0.63650249912,
-    0.05314504984, 0.31035245103, 0.05314504984
-];
-export const QL3_12 = [
-    0.06308901449, 0.06308901449, 0.87382197101,
-    0.24928674517, 0.24928674517, 0.50142650966,
-    0.05314504984, 0.05314504984, 0.31035245103,
-    0.31035245103, 0.63650249912, 0.63650249912
-];
-export const NQ12 = 12;
-
-// --- P3 Nedelec basis functions (H(curl), hierarchical extension of P2) ---
-// P3 adds 7 transverse DOFs: ne3 (3 edge) + nf3..nf6 (4 face)
-// Total P3 transverse: 15 DOFs = 9 edge + 6 face
-//
-// Local DOF ordering for P3 transverse:
-// [ne1_0, ne1_1, ne1_2, nf1, ne2_0, ne2_1, ne2_2, nf2,  <- P2 (8)
-//  ne3_0, ne3_1, ne3_2, nf3, nf4, nf5, nf6]              <- P3 extra (7)
-
-// _ne3: cubic edge basis for edge (p, q) — ne1 * (λ_p - λ_q)²
-// Antisymmetric: ne3(q,p) = -ne3(p,q) — needs sign flip like ne1
-export function ne3(coeff, p, q, x, y) {
-    const [W0, W1] = ne1(coeff, p, q, x, y);
-    const [a1, b1, c1] = coeff[p];
-    const [a2, b2, c2] = coeff[q];
-    const diff = (a1 - a2) + (b1 - b2)*x + (c1 - c2)*y;
-    const d2 = diff * diff;
-    return [W0 * d2, W1 * d2];
-}
-
-// _ne3_curl: curl of cubic edge basis
-// curl(ne1·f²) = 2f·∇f × ne1 + f²·curl(ne1) where f = λ_p - λ_q
-// Simplifies to: (λ_p - λ_q)·[(b_p-b_q)ne2_y - (c_p-c_q)ne2_x] + (λ_p-λ_q)·ne2Curl
-export function ne3Curl(coeff, p, q, x, y) {
-    const [a1, b1, c1] = coeff[p];
-    const [a2, b2, c2] = coeff[q];
-    const diff = (a1 - a2) + (b1 - b2)*x + (c1 - c2)*y;
-    const [ne2x, ne2y] = ne2(coeff, p, q, x, y);
-    const cross = (b1 - b2)*ne2y - (c1 - c2)*ne2x;
-    return cross + diff * ne2Curl(coeff, p, q, x, y);
-}
-
-// _nf3..nf6: P3 face interior basis functions (4 new, hierarchical)
-// Constructed as λ_i · nf_j, which vanishes tangentially on all edges.
-// nf3 = λ_0 · nf1,  nf4 = λ_1 · nf1,  nf5 = λ_0 · nf2,  nf6 = λ_1 · nf2
-export function nf3(coeff, x, y) {
-    const lam0 = coeff[0][0] + coeff[0][1]*x + coeff[0][2]*y;
-    const [fx, fy] = nf1(coeff, x, y);
-    return [lam0 * fx, lam0 * fy];
-}
-export function nf4(coeff, x, y) {
-    const lam1 = coeff[1][0] + coeff[1][1]*x + coeff[1][2]*y;
-    const [fx, fy] = nf1(coeff, x, y);
-    return [lam1 * fx, lam1 * fy];
-}
-export function nf5(coeff, x, y) {
-    const lam0 = coeff[0][0] + coeff[0][1]*x + coeff[0][2]*y;
-    const [fx, fy] = nf2(coeff, x, y);
-    return [lam0 * fx, lam0 * fy];
-}
-export function nf6(coeff, x, y) {
-    const lam1 = coeff[1][0] + coeff[1][1]*x + coeff[1][2]*y;
-    const [fx, fy] = nf2(coeff, x, y);
-    return [lam1 * fx, lam1 * fy];
-}
-
-// Curls of P3 face functions: curl(λ_i · F) = b_i·F_y - c_i·F_x + λ_i·curl(F)
-export function nf3Curl(coeff, x, y) {
-    const [, b0, c0] = coeff[0];
-    const lam0 = coeff[0][0] + b0*x + c0*y;
-    const [fx, fy] = nf1(coeff, x, y);
-    return b0*fy - c0*fx + lam0*nf1Curl(coeff, x, y);
-}
-export function nf4Curl(coeff, x, y) {
-    const [, b1, c1] = coeff[1];
-    const lam1 = coeff[1][0] + b1*x + c1*y;
-    const [fx, fy] = nf1(coeff, x, y);
-    return b1*fy - c1*fx + lam1*nf1Curl(coeff, x, y);
-}
-export function nf5Curl(coeff, x, y) {
-    const [, b0, c0] = coeff[0];
-    const lam0 = coeff[0][0] + b0*x + c0*y;
-    const [fx, fy] = nf2(coeff, x, y);
-    return b0*fy - c0*fx + lam0*nf2Curl(coeff, x, y);
-}
-export function nf6Curl(coeff, x, y) {
-    const [, b1, c1] = coeff[1];
-    const lam1 = coeff[1][0] + b1*x + c1*y;
-    const [fx, fy] = nf2(coeff, x, y);
-    return b1*fy - c1*fx + lam1*nf2Curl(coeff, x, y);
-}
-
-// --- P3 Lagrange basis functions (H1, hierarchical extension of P2) ---
-// P3 adds 4 longitudinal DOFs: le3 (3 edge extra) + lf3 (1 face bubble)
-// Total P3 longitudinal: 10 DOFs = 3 vertex + 3 edge-mid + 3 edge-extra + 1 face
-//
-// Local DOF ordering for P3 longitudinal:
-// [lv_0, lv_1, lv_2, le_0, le_1, le_2,   <- P2 (6)
-//  le3_0, le3_1, le3_2, lf3]               <- P3 extra (4)
-//
-// Hierarchical: P2 vertex (lv) and edge (le) functions are reused unchanged.
-// le3(i,j) = λ_i·λ_j·(λ_i - λ_j) — zero at vertices and edge midpoints.
-// lf3 = 27·λ_0·λ_1·λ_2 — zero on all edges, = 1 at centroid.
-
-export function le3(coeff, i, j, x, y) {
-    const lam_i = coeff[i][0] + coeff[i][1]*x + coeff[i][2]*y;
-    const lam_j = coeff[j][0] + coeff[j][1]*x + coeff[j][2]*y;
-    return lam_i * lam_j * (lam_i - lam_j);
-}
-
-export function le3Grad(coeff, i, j, x, y) {
-    const [ai, bi, ci] = coeff[i];
-    const [aj, bj, cj] = coeff[j];
-    const lam_i = ai + bi*x + ci*y;
-    const lam_j = aj + bj*x + cj*y;
-    // ∇(λ_i·λ_j·(λ_i-λ_j)) = ∇λ_i·λ_j(2λ_i-λ_j) + ∇λ_j·λ_i(λ_i-2λ_j)
-    const fi = lam_j * (2*lam_i - lam_j);
-    const fj = lam_i * (lam_i - 2*lam_j);
-    return [bi*fi + bj*fj, ci*fi + cj*fj];
-}
-
-export function lf3(coeff, x, y) {
-    const lam0 = coeff[0][0] + coeff[0][1]*x + coeff[0][2]*y;
-    const lam1 = coeff[1][0] + coeff[1][1]*x + coeff[1][2]*y;
-    const lam2 = coeff[2][0] + coeff[2][1]*x + coeff[2][2]*y;
-    return 27 * lam0 * lam1 * lam2;
-}
-
-export function lf3Grad(coeff, x, y) {
-    const [a0, b0, c0] = coeff[0];
-    const [a1, b1, c1] = coeff[1];
-    const [a2, b2, c2] = coeff[2];
-    const lam0 = a0 + b0*x + c0*y;
-    const lam1 = a1 + b1*x + c1*y;
-    const lam2 = a2 + b2*x + c2*y;
-    return [
-        27*(b0*lam1*lam2 + lam0*b1*lam2 + lam0*lam1*b2),
-        27*(c0*lam1*lam2 + lam0*c1*lam2 + lam0*lam1*c2)
-    ];
-}
-
 // --- P2 element matrices via Gauss quadrature ---
 // Returns 14x14 A and B matrices for the generalized eigenvalue problem
 // DOF ordering: [ne1_0, ne1_1, ne1_2, nf1, ne2_0, ne2_1, ne2_2, nf2, lv_0, lv_1, lv_2, le_0, le_1, le_2]
@@ -565,207 +404,20 @@ export function computeTriP2StaticMatrices(nodes, v0, v1, v2) {
     return { Sz, Mz, Area };
 }
 
-// --- P3 element matrices via Gauss quadrature ---
-// Returns 25x25 A and B matrices for the generalized eigenvalue problem.
-// DOF ordering: [ne1_0..2, nf1, ne2_0..2, nf2, ne3_0..2, nf3..nf6, lv_0..2, le_0..2, le3_0..2, lf3]
-// First 14 DOFs (8 transverse + 6 longitudinal) match the P2 ordering.
-const NT3 = 15; // P3 transverse DOFs
-const NZ3 = 10; // P3 longitudinal DOFs
-const NDOF3 = NT3 + NZ3; // 25 total
-
-export function computeTriP3Matrices(nodes, v0, v1, v2, epsRe, epsIm, k0) {
-    const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-    const k02 = k0 * k0;
-    const edgeVerts = [[0, 1], [1, 2], [2, 0]];
-
-    const Att = new Float64Array(NT3 * NT3);
-    const BttRe = new Float64Array(NT3 * NT3);
-    const BttIm = new Float64Array(NT3 * NT3);
-    const Dtt = new Float64Array(NT3 * NT3);
-    const Dzt = new Float64Array(NZ3 * NT3);
-    const Dzz1 = new Float64Array(NZ3 * NZ3);
-    const Dzz2Re = new Float64Array(NZ3 * NZ3);
-    const Dzz2Im = new Float64Array(NZ3 * NZ3);
-
-    const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-    const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
-
-    for (let q = 0; q < NQ12; q++) {
-        const w = QW12[q];
-        const xq = txs[0]*QL1_12[q] + txs[1]*QL2_12[q] + txs[2]*QL3_12[q];
-        const yq = tys[0]*QL1_12[q] + tys[1]*QL2_12[q] + tys[2]*QL3_12[q];
-
-        // Evaluate all 15 transverse basis functions and their curls
-        // [0-2: ne1, 3: nf1, 4-6: ne2, 7: nf2, 8-10: ne3, 11-14: nf3..nf6]
-        const Wx = new Float64Array(NT3), Wy = new Float64Array(NT3), curlW = new Float64Array(NT3);
-
-        for (let k = 0; k < 3; k++) {
-            const [p, qq] = edgeVerts[k];
-            [Wx[k], Wy[k]] = ne1(coeff, p, qq, xq, yq);
-            curlW[k] = ne1Curl(coeff, p, qq);
-            [Wx[k+4], Wy[k+4]] = ne2(coeff, p, qq, xq, yq);
-            curlW[k+4] = ne2Curl(coeff, p, qq, xq, yq);
-            [Wx[k+8], Wy[k+8]] = ne3(coeff, p, qq, xq, yq);
-            curlW[k+8] = ne3Curl(coeff, p, qq, xq, yq);
-        }
-        [Wx[3], Wy[3]] = nf1(coeff, xq, yq); curlW[3] = nf1Curl(coeff, xq, yq);
-        [Wx[7], Wy[7]] = nf2(coeff, xq, yq); curlW[7] = nf2Curl(coeff, xq, yq);
-        [Wx[11], Wy[11]] = nf3(coeff, xq, yq); curlW[11] = nf3Curl(coeff, xq, yq);
-        [Wx[12], Wy[12]] = nf4(coeff, xq, yq); curlW[12] = nf4Curl(coeff, xq, yq);
-        [Wx[13], Wy[13]] = nf5(coeff, xq, yq); curlW[13] = nf5Curl(coeff, xq, yq);
-        [Wx[14], Wy[14]] = nf6(coeff, xq, yq); curlW[14] = nf6Curl(coeff, xq, yq);
-
-        // Evaluate all 10 longitudinal basis functions and their gradients
-        // [0-2: lv, 3-5: le, 6-8: le3, 9: lf3]
-        const Lz = new Float64Array(NZ3), Gx = new Float64Array(NZ3), Gy = new Float64Array(NZ3);
-
-        for (let k = 0; k < 3; k++) {
-            Lz[k] = lv(coeff, k, xq, yq);
-            [Gx[k], Gy[k]] = lvGrad(coeff, k, xq, yq);
-        }
-        for (let k = 0; k < 3; k++) {
-            const [p, qq] = edgeVerts[k];
-            Lz[k+3] = le(coeff, p, qq, xq, yq);
-            [Gx[k+3], Gy[k+3]] = leGrad(coeff, p, qq, xq, yq);
-            Lz[k+6] = le3(coeff, p, qq, xq, yq);
-            [Gx[k+6], Gy[k+6]] = le3Grad(coeff, p, qq, xq, yq);
-        }
-        Lz[9] = lf3(coeff, xq, yq);
-        [Gx[9], Gy[9]] = lf3Grad(coeff, xq, yq);
-
-        // Accumulate sub-matrices
-        for (let i = 0; i < NT3; i++) {
-            for (let j = 0; j < NT3; j++) {
-                const idx = i * NT3 + j;
-                Att[idx] += w * curlW[i] * curlW[j];
-                const dot = Wx[i]*Wx[j] + Wy[i]*Wy[j];
-                BttRe[idx] += w * epsRe * dot;
-                BttIm[idx] += w * epsIm * dot;
-                Dtt[idx] += w * dot;
-            }
-        }
-
-        for (let i = 0; i < NZ3; i++)
-            for (let j = 0; j < NT3; j++)
-                Dzt[i * NT3 + j] += w * (Gx[i]*Wx[j] + Gy[i]*Wy[j]);
-
-        for (let i = 0; i < NZ3; i++) {
-            for (let j = 0; j < NZ3; j++) {
-                const idx = i * NZ3 + j;
-                Dzz1[idx] += w * (Gx[i]*Gx[j] + Gy[i]*Gy[j]);
-                const prod = Lz[i]*Lz[j];
-                Dzz2Re[idx] += w * epsRe * prod;
-                Dzz2Im[idx] += w * epsIm * prod;
-            }
-        }
-    }
-
-    // Zero out P2 face-face entries in Dtt (EMerge convention)
-    for (const fi of [3, 7]) for (const fj of [3, 7]) Dtt[fi*NT3+fj] = 0;
-
-    // Multiply by Area
-    for (let i = 0; i < NT3*NT3; i++) { Att[i] *= Area; BttRe[i] *= Area; BttIm[i] *= Area; Dtt[i] *= Area; }
-    for (let i = 0; i < NZ3*NT3; i++) { Dzt[i] *= Area; }
-    for (let i = 0; i < NZ3*NZ3; i++) { Dzz1[i] *= Area; Dzz2Re[i] *= Area; Dzz2Im[i] *= Area; }
-
-    // Assemble 25x25 A and B
-    const ARe = new Float64Array(NDOF3 * NDOF3);
-    const AIm = new Float64Array(NDOF3 * NDOF3);
-    const BRe = new Float64Array(NDOF3 * NDOF3);
-    const BIm = new Float64Array(NDOF3 * NDOF3);
-
-    for (let i = 0; i < NT3; i++) {
-        for (let j = 0; j < NT3; j++) {
-            ARe[i*NDOF3+j] = Att[i*NT3+j] - k02 * BttRe[i*NT3+j];
-            AIm[i*NDOF3+j] = -k02 * BttIm[i*NT3+j];
-            BRe[i*NDOF3+j] = Dtt[i*NT3+j];
-        }
-    }
-
-    for (let i = 0; i < NZ3; i++)
-        for (let j = 0; j < NT3; j++)
-            BRe[(i+NT3)*NDOF3+j] = Dzt[i*NT3+j];
-
-    for (let i = 0; i < NT3; i++)
-        for (let j = 0; j < NZ3; j++)
-            BRe[i*NDOF3+(j+NT3)] = Dzt[j*NT3+i];
-
-    for (let i = 0; i < NZ3; i++) {
-        for (let j = 0; j < NZ3; j++) {
-            BRe[(i+NT3)*NDOF3+(j+NT3)] = Dzz1[i*NZ3+j] - k02 * Dzz2Re[i*NZ3+j];
-            BIm[(i+NT3)*NDOF3+(j+NT3)] = -k02 * Dzz2Im[i*NZ3+j];
-        }
-    }
-
-    return { ARe, AIm, BRe, BIm, Area, coeff, Dzz1, Dzz2Re, Dzz2Im, Att, Dtt, Dzt, NT: NT3, NZ: NZ3, NDOF: NDOF3 };
-}
-
-// --- P3 static element matrices (10x10 nodal only) ---
-
-export function computeTriP3StaticMatrices(nodes, v0, v1, v2) {
-    const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-    const edgeVerts = [[0, 1], [1, 2], [2, 0]];
-
-    const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-    const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
-
-    const Sz = new Float64Array(100); // 10x10 stiffness
-    const Mz = new Float64Array(100); // 10x10 mass
-
-    for (let q = 0; q < NQ12; q++) {
-        const w = QW12[q];
-        const xq = txs[0]*QL1_12[q] + txs[1]*QL2_12[q] + txs[2]*QL3_12[q];
-        const yq = tys[0]*QL1_12[q] + tys[1]*QL2_12[q] + tys[2]*QL3_12[q];
-
-        const Lz = new Float64Array(NZ3), Gx = new Float64Array(NZ3), Gy = new Float64Array(NZ3);
-
-        for (let k = 0; k < 3; k++) {
-            Lz[k] = lv(coeff, k, xq, yq);
-            [Gx[k], Gy[k]] = lvGrad(coeff, k, xq, yq);
-        }
-        for (let k = 0; k < 3; k++) {
-            const [p, qq] = edgeVerts[k];
-            Lz[k+3] = le(coeff, p, qq, xq, yq);
-            [Gx[k+3], Gy[k+3]] = leGrad(coeff, p, qq, xq, yq);
-            Lz[k+6] = le3(coeff, p, qq, xq, yq);
-            [Gx[k+6], Gy[k+6]] = le3Grad(coeff, p, qq, xq, yq);
-        }
-        Lz[9] = lf3(coeff, xq, yq);
-        [Gx[9], Gy[9]] = lf3Grad(coeff, xq, yq);
-
-        for (let i = 0; i < NZ3; i++) {
-            for (let j = 0; j < NZ3; j++) {
-                Sz[i*NZ3+j] += w * (Gx[i]*Gx[j] + Gy[i]*Gy[j]);
-                Mz[i*NZ3+j] += w * Lz[i]*Lz[j];
-            }
-        }
-    }
-
-    for (let i = 0; i < 100; i++) { Sz[i] *= Area; Mz[i] *= Area; }
-
-    return { Sz, Mz, Area };
-}
-
 // --- Longitudinal DOF offsets ---
 // Returns the global index offsets for each longitudinal DOF group.
 export function getLzOffsets(fm) {
     const lzOff = fm.nFreeTransverse;
     const lzEdgeMidOff = lzOff + fm.nFreeVertexDof;
-    const lzEdge3Off = lzEdgeMidOff + fm.nFreeEdgeNodeDof;
-    const lzFaceNodeOff = lzEdge3Off + (fm.nFreeEdgeNode3Dof || 0);
-    return { lzOff, lzEdgeMidOff, lzEdge3Off, lzFaceNodeOff };
+    return { lzOff, lzEdgeMidOff };
 }
 
 // --- Freedom map ---
-// Global DOF layout (P2-only, backward compatible):
+// Global DOF layout (P2):
 // Transverse: [0, 2*nEdges) edge DOFs + [2*nEdges, 2*nEdges+2*nTris) face DOFs
 // Longitudinal: [n_xy, n_xy+nNodes) vertex DOFs + [n_xy+nNodes, n_xy+nNodes+nEdges) edge DOFs
-//
-// Variable-order (when elemOrder is provided):
-// Transverse: [edge Nedelec DOFs (2-3/edge)] [face DOFs (2-6/tri)]
-// Longitudinal: [vertex DOFs] [edge midpoint DOFs (1/edge)] [edge extra DOFs (0-1/edge)] [face node DOFs (0-1/tri)]
 
-export function buildTriFreedomMap(mesh, condRect, abc, elemOrder = null) {
+export function buildTriFreedomMap(mesh, condRect, abc) {
     const { nodes, edges, nNodes, nEdges, nTris } = mesh;
     const TOL = 1e-12;
     const xmin = condRect.xmin_domain, xmax = condRect.xmax_domain;
@@ -798,22 +450,6 @@ export function buildTriFreedomMap(mesh, condRect, abc, elemOrder = null) {
         if (isCondNode[edges[2*e]] && isCondNode[edges[2*e+1]]) isCondEdge[e] = 1;
     }
 
-    // Compute edge order: min of adjacent element orders (minimum rule)
-    // For edges on a single triangle (boundary), use that triangle's order.
-    let edgeOrder = null;
-    if (elemOrder) {
-        edgeOrder = new Uint8Array(nEdges).fill(255);
-        for (let t = 0; t < nTris; t++) {
-            const order = elemOrder[t];
-            for (let k = 0; k < 3; k++) {
-                const e = mesh.triEdges[3*t+k];
-                if (order < edgeOrder[e]) edgeOrder[e] = order;
-            }
-        }
-        // Edges not touched by any triangle stay at 255 → default to 2
-        for (let e = 0; e < nEdges; e++) if (edgeOrder[e] === 255) edgeOrder[e] = 2;
-    }
-
     // Helper: check if edge is on a PEC boundary (ground, conductor, walls)
     function isEdgePEC(e) {
         const n0 = edges[2*e], n1 = edges[2*e+1];
@@ -827,26 +463,17 @@ export function buildTriFreedomMap(mesh, condRect, abc, elemOrder = null) {
         return false;
     }
 
-    // --- Transverse edge DOFs ---
-    // P2: 2 per edge (ne1, ne2). P3: 3 per edge (ne1, ne2, ne3).
-    // edgeF[2*e], edgeF[2*e+1]: P2 DOFs (always populated)
-    // edgeF3[e]: P3 ne3 DOF index (or -1)
+    // --- Transverse edge DOFs (2 per edge: ne1, ne2) ---
     const edgeF = new Int32Array(2 * nEdges).fill(-1);
-    const edgeF3 = elemOrder ? new Int32Array(nEdges).fill(-1) : null;
     let nFreeEdgeDof = 0;
     for (let e = 0; e < nEdges; e++) {
         if (isEdgePEC(e)) continue;
         edgeF[2*e] = nFreeEdgeDof++;     // ne1
         edgeF[2*e+1] = nFreeEdgeDof++;   // ne2
-        if (edgeOrder && edgeOrder[e] >= 3) {
-            edgeF3[e] = nFreeEdgeDof++;   // ne3
-        }
     }
 
-    // --- Transverse face DOFs ---
-    // P2: 2 per tri (nf1, nf2). P3: 6 per tri (nf1, nf2, nf3..nf6).
+    // --- Transverse face DOFs (2 per tri: nf1, nf2) ---
     const faceF = new Int32Array(2 * nTris).fill(-1);
-    const faceF3 = elemOrder ? new Int32Array(4 * nTris).fill(-1) : null; // nf3..nf6
     let nFreeFaceDof = 0;
     for (let t = 0; t < nTris; t++) {
         const v0 = mesh.tris[3*t], v1 = mesh.tris[3*t+1], v2 = mesh.tris[3*t+2];
@@ -860,11 +487,6 @@ export function buildTriFreedomMap(mesh, condRect, abc, elemOrder = null) {
         if (inCond) continue;
         faceF[2*t] = nFreeEdgeDof + nFreeFaceDof++;   // nf1
         faceF[2*t+1] = nFreeEdgeDof + nFreeFaceDof++; // nf2
-        if (elemOrder && elemOrder[t] >= 3) {
-            for (let k = 0; k < 4; k++) {
-                faceF3[4*t+k] = nFreeEdgeDof + nFreeFaceDof++; // nf3..nf6
-            }
-        }
     }
 
     const nFreeTransverse = nFreeEdgeDof + nFreeFaceDof;
@@ -897,38 +519,12 @@ export function buildTriFreedomMap(mesh, condRect, abc, elemOrder = null) {
         edgeNodeF[e] = nFreeEdgeNodeDof++;
     }
 
-    // --- Longitudinal edge extra DOFs (le3, P3 only) ---
-    const edgeNodeF3 = elemOrder ? new Int32Array(nEdges).fill(-1) : null;
-    let nFreeEdgeNode3Dof = 0;
-    if (elemOrder) {
-        for (let e = 0; e < nEdges; e++) {
-            if (edgeOrder[e] < 3) continue;
-            // Same PEC/conductor conditions as edge midpoint
-            if (edgeNodeF[e] < 0) continue; // if midpoint was eliminated, extra is too
-            edgeNodeF3[e] = nFreeEdgeNode3Dof++;
-        }
-    }
-
-    // --- Longitudinal face bubble DOFs (lf3, P3 only) ---
-    const faceNodeF = elemOrder ? new Int32Array(nTris).fill(-1) : null;
-    let nFreeFaceNodeDof = 0;
-    if (elemOrder) {
-        for (let t = 0; t < nTris; t++) {
-            if (elemOrder[t] < 3) continue;
-            if (faceF[2*t] < 0) continue; // conductor interior
-            faceNodeF[t] = nFreeFaceNodeDof++;
-        }
-    }
-
-    const nFreeLongitudinal = nFreeVertexDof + nFreeEdgeNodeDof + nFreeEdgeNode3Dof + nFreeFaceNodeDof;
+    const nFreeLongitudinal = nFreeVertexDof + nFreeEdgeNodeDof;
 
     return {
         edgeF, faceF, nodeF, edgeNodeF,
-        edgeF3, faceF3, edgeNodeF3, faceNodeF,
-        elemOrder, edgeOrder,
         nFreeEdgeDof, nFreeFaceDof, nFreeTransverse,
-        nFreeVertexDof, nFreeEdgeNodeDof, nFreeEdgeNode3Dof: nFreeEdgeNode3Dof || 0,
-        nFreeFaceNodeDof: nFreeFaceNodeDof || 0, nFreeLongitudinal,
+        nFreeVertexDof, nFreeEdgeNodeDof, nFreeLongitudinal,
         isCondNode, isCondEdge, condNodeGroup,
     };
 }
@@ -938,17 +534,16 @@ export function buildTriFreedomMap(mesh, condRect, abc, elemOrder = null) {
 export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
     const { tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF, nFreeTransverse, nFreeVertexDof,
-            edgeF3, faceF3, edgeNodeF3, faceNodeF, elemOrder,
-            nFreeEdgeNodeDof, nFreeEdgeNode3Dof, nFreeFaceNodeDof } = fm;
+            nFreeEdgeNodeDof } = fm;
     const N = fm.nFreeTransverse + fm.nFreeLongitudinal;
 
     const nodes = mesh.nodes;
     const k0 = Math.sqrt(k2);
 
-    const { lzOff, lzEdgeMidOff, lzEdge3Off, lzFaceNodeOff } = getLzOffsets(fm);
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
 
-    // Pre-allocate COO arrays: max 625 nonzeros per P3 element (25×25)
-    const maxNnz = nTris * (elemOrder ? 625 : 196);
+    // Pre-allocate COO arrays: max 196 nonzeros per P2 element (14×14)
+    const maxNnz = nTris * 196;
     const Ar = new Int32Array(maxNnz), Ac = new Int32Array(maxNnz);
     const AvRe = new Float64Array(maxNnz), AvIm = new Float64Array(maxNnz);
     const Br = new Int32Array(maxNnz), Bc = new Int32Array(maxNnz);
@@ -960,21 +555,13 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const eps = epsMap[t];
-        const order = elemOrder ? elemOrder[t] : 2;
 
-        let ARe, AIm, BRe, BIm, Att, Dtt, nLocal;
-        if (order >= 3) {
-            const m = computeTriP3Matrices(nodes, v0, v1, v2, eps.re, eps.im, k0);
-            ARe = m.ARe; AIm = m.AIm; BRe = m.BRe; BIm = m.BIm; Att = m.Att; Dtt = m.Dtt;
-            nLocal = NDOF3; // 25
-        } else {
-            const m = computeTriP2Matrices(nodes, v0, v1, v2, eps.re, eps.im, k0);
-            ARe = m.ARe; AIm = m.AIm; BRe = m.BRe; BIm = m.BIm; Att = m.Att; Dtt = m.Dtt;
-            nLocal = 14;
-        }
+        const m = computeTriP2Matrices(nodes, v0, v1, v2, eps.re, eps.im, k0);
+        const ARe = m.ARe, AIm = m.AIm, BRe = m.BRe, BIm = m.BIm, Att = m.Att, Dtt = m.Dtt;
+        const nLocal = 14;
 
         if (t === 0 && globalThis.__TRI_DEBUG__) {
-            const ntrans = order >= 3 ? NT3 : 8;
+            const ntrans = 8;
             let attMax = 0, dttMax = 0;
             for (let i = 0; i < ntrans*ntrans; i++) { attMax = Math.max(attMax, Math.abs(Att[i])); dttMax = Math.max(dttMax, Math.abs(Dtt[i])); }
             let areMax = 0, breMax = 0;
@@ -998,45 +585,22 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
             globalDof[le+4] = edgeF[2*eIdx+1];
 
             // le DOF (edge midpoint nodal)
+            // P2 local: [ne1_0..2, nf1, ne2_0..2, nf2, lv_0..2, le_0..2]
             const enf = edgeNodeF[eIdx];
-            if (order >= 3) {
-                // P3 local: [ne1_0..2, nf1, ne2_0..2, nf2, ne3_0..2, nf3..6, lv_0..2, le_0..2, le3_0..2, lf3]
-                globalDof[le+18] = enf >= 0 ? lzEdgeMidOff + enf : -1; // le at offset 18
-                // ne3 DOF (antisymmetric like ne1)
-                globalDof[le+8] = edgeF3 ? edgeF3[eIdx] : -1;
-                signs[le+8] = s;
-                // le3 DOF (edge extra, antisymmetric — needs sign flip like ne1)
-                const enf3 = edgeNodeF3 ? edgeNodeF3[eIdx] : -1;
-                globalDof[le+21] = enf3 >= 0 ? lzEdge3Off + enf3 : -1;
-                signs[le+21] = s; // le3(i,j) = -le3(j,i)
-            } else {
-                // P2 local: [ne1_0..2, nf1, ne2_0..2, nf2, lv_0..2, le_0..2]
-                globalDof[le+11] = enf >= 0 ? lzEdgeMidOff + enf : -1;
-            }
+            globalDof[le+11] = enf >= 0 ? lzEdgeMidOff + enf : -1;
         }
 
         // Face DOFs
         globalDof[3] = faceF[2*t];   // nf1
         globalDof[7] = faceF[2*t+1]; // nf2
-        if (order >= 3 && faceF3) {
-            for (let k = 0; k < 4; k++)
-                globalDof[11+k] = faceF3[4*t+k]; // nf3..nf6
-        }
 
         // Vertex DOFs (lv)
         const verts = [v0, v1, v2];
-        const lvOff = order >= 3 ? 15 : 8;
         for (let k = 0; k < 3; k++) {
             const nf = nodeF[verts[k]];
-            globalDof[lvOff + k] = nf >= 0 ? lzOff + nf : -1;
+            globalDof[8 + k] = nf >= 0 ? lzOff + nf : -1;
         }
         // le DOFs already set above
-
-        // Face node DOF (lf3, P3 only)
-        if (order >= 3 && faceNodeF) {
-            const fnf = faceNodeF[t];
-            globalDof[24] = fnf >= 0 ? lzFaceNodeOff + fnf : -1;
-        }
 
         // Assemble element matrices into global COO
         for (let li = 0; li < nLocal; li++) {
@@ -1112,37 +676,27 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
 // --- P2 Static solver ---
 // Uses 6 nodal DOFs per triangle: 3 vertex (lv) + 3 edge midpoint (le)
 
-// Returns { phiVertex, phiEdge, phiEdge3, phiFaceNode }.
+// Returns { phiVertex, phiEdge }.
 export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
     // condPotentials: array of potentials per conductor group [V1, V2, ...].
     // If null, all conductors get V=1.0.
     const { nodes, tris, nTris } = mesh;
     const { nodeF, edgeNodeF, nFreeVertexDof, nFreeEdgeNodeDof,
-            isCondNode, isCondEdge, condNodeGroup,
-            elemOrder, edgeOrder, edgeNodeF3, faceNodeF,
-            nFreeEdgeNode3Dof, nFreeFaceNodeDof } = fm;
-    const nFreeFEM = nFreeVertexDof + nFreeEdgeNodeDof + (nFreeEdgeNode3Dof || 0) + (nFreeFaceNodeDof || 0);
-    const nFreeDof = nFreeFEM;
+            isCondNode, isCondEdge, condNodeGroup } = fm;
+    const nFreeDof = nFreeVertexDof + nFreeEdgeNodeDof;
 
     // Longitudinal DOF offsets (within the static system, lzOff=0)
     const edgeMidOff = nFreeVertexDof;
-    const edge3Off = edgeMidOff + nFreeEdgeNodeDof;
-    const faceNodeOff = edge3Off + (nFreeEdgeNode3Dof || 0);
     // Note: these are offsets within the longitudinal block (no lzOff prefix)
     // because the static solver only has longitudinal DOFs.
 
     const Rows = [], Cols = [], Vals = [];
     const rhs = new Float64Array(nFreeDof);
 
-    const edgeVerts = [[0, 1], [1, 2], [2, 0]];
-
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const order = elemOrder ? elemOrder[t] : 2;
-        const nLocal = order >= 3 ? 10 : 6;
-        const Sz = order >= 3
-            ? computeTriP3StaticMatrices(nodes, v0, v1, v2).Sz
-            : computeTriP2StaticMatrices(nodes, v0, v1, v2).Sz;
+        const nLocal = 6;
+        const Sz = computeTriP2StaticMatrices(nodes, v0, v1, v2).Sz;
         const eps = epsMap ? epsMap[t].re : 1.0;
         const verts = [v0, v1, v2];
 
@@ -1180,29 +734,6 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
             } else {
                 globalDof[k+3] = -1;
             }
-        }
-
-        // P3 extra DOFs
-        if (order >= 3) {
-            // Edge extra DOFs (le3): indices 6-8 (antisymmetric)
-            for (let k = 0; k < 3; k++) {
-                const eIdx = mesh.triEdges[3*t + k];
-                const enf3 = edgeNodeF3 ? edgeNodeF3[eIdx] : -1;
-                if (enf3 >= 0) {
-                    globalDof[k+6] = edge3Off + enf3;
-                    signs[k+6] = mesh.triSigns[3*t + k]; // antisymmetric
-                } else if (isCondEdge[eIdx]) {
-                    globalDof[k+6] = -1;
-                    isDirichlet[k+6] = 1;
-                    // le3 on conductor is zero (not the conductor potential)
-                    dirichletVal[k+6] = 0;
-                } else {
-                    globalDof[k+6] = -1;
-                }
-            }
-            // Face node DOF (lf3): index 9
-            const fnf = faceNodeF ? faceNodeF[t] : -1;
-            globalDof[9] = fnf >= 0 ? faceNodeOff + fnf : -1;
         }
 
         // Stiffness assembly
@@ -1243,49 +774,25 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
         } else if (edgeNodeF[e] >= 0) phiEdge[e] = phiFree[edgeMidOff + edgeNodeF[e]];
     }
 
-    // P3 extra DOFs
-    const phiEdge3 = elemOrder ? new Float64Array(mesh.nEdges) : null;
-    const phiFaceNode = elemOrder ? new Float64Array(nTris) : null;
-    if (elemOrder) {
-        for (let e = 0; e < mesh.nEdges; e++) {
-            const enf3 = edgeNodeF3 ? edgeNodeF3[e] : -1;
-            if (enf3 >= 0) phiEdge3[e] = phiFree[edge3Off + enf3];
-        }
-        for (let t = 0; t < nTris; t++) {
-            const fnf = faceNodeF ? faceNodeF[t] : -1;
-            if (fnf >= 0) phiFaceNode[t] = phiFree[faceNodeOff + fnf];
-        }
-    }
-
-    return { phiVertex, phiEdge, phiEdge3, phiFaceNode };
+    return { phiVertex, phiEdge };
 }
 
 // Compute energy W = ½∫ε|∇φ|² dA.
-export function computeTriEnergy(phi, mesh, epsMap, elemOrder = null) {
+export function computeTriEnergy(phi, mesh, epsMap) {
     const { nodes, tris, nTris } = mesh;
-    const { phiVertex, phiEdge, phiEdge3, phiFaceNode } = phi;
+    const { phiVertex, phiEdge } = phi;
     let W = 0;
 
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const order = elemOrder ? elemOrder[t] : 2;
-        const nLocal = order >= 3 ? 10 : 6;
-        const Sz = order >= 3
-            ? computeTriP3StaticMatrices(nodes, v0, v1, v2).Sz
-            : computeTriP2StaticMatrices(nodes, v0, v1, v2).Sz;
+        const nLocal = 6;
+        const Sz = computeTriP2StaticMatrices(nodes, v0, v1, v2).Sz;
         const eps = epsMap ? epsMap[t].re : 1.0;
 
         const localPhi = new Float64Array(nLocal);
         const verts = [v0, v1, v2];
         for (let k = 0; k < 3; k++) localPhi[k] = phiVertex[verts[k]];
         for (let k = 0; k < 3; k++) localPhi[k+3] = phiEdge[mesh.triEdges[3*t+k]];
-        if (order >= 3) {
-            const signs = mesh.triSigns;
-            for (let k = 0; k < 3; k++) {
-                localPhi[k+6] = phiEdge3 ? signs[3*t+k] * phiEdge3[mesh.triEdges[3*t+k]] : 0;
-            }
-            localPhi[9] = phiFaceNode ? phiFaceNode[t] : 0;
-        }
 
         for (let li = 0; li < nLocal; li++)
             for (let lj = 0; lj < nLocal; lj++)
@@ -1299,11 +806,10 @@ export function computeTriEnergy(phi, mesh, epsMap, elemOrder = null) {
 // Compute initial guess from the static potential
 
 export function staticToEdgeDofs(phi, mesh, fm) {
-    const { nodes, edges, nEdges, tris, triEdges, triSigns, nTris } = mesh;
-    const { edgeF, faceF, nFreeTransverse, nFreeVertexDof, nodeF, edgeNodeF,
-            nFreeLongitudinal, edgeF3, edgeNodeF3, faceNodeF,
-            nFreeEdgeNodeDof, nFreeEdgeNode3Dof, nFreeFaceNodeDof } = fm;
-    const { phiVertex, phiEdge, phiEdge3, phiFaceNode } = phi;
+    const { edges, nEdges } = mesh;
+    const { edgeF, nFreeTransverse, nodeF, edgeNodeF,
+            nFreeLongitudinal } = fm;
+    const { phiVertex, phiEdge } = phi;
     const N = nFreeTransverse + nFreeLongitudinal;
 
     const initVec = new Float64Array(N);
@@ -1321,20 +827,9 @@ export function staticToEdgeDofs(phi, mesh, fm) {
         const n0 = edges[2*e], n1 = edges[2*e+1];
         initVec[ef] = (2/3)*(phiVertex[n0] + phiVertex[n1]) - (4/3)*phiEdge[e];
     }
+    // Face DOFs: set to 0 (interior bubbles, small for quasi-TEM)
 
-    // ne3 DOFs: ∫ E·ne3 dl along each edge.
-    // For quasi-TEM static approximation: ne3_DOF ≈ (φp - φq) / 3.
-    // (Same convention as ne1_DOF = -(φq - φp) = φp - φq for linear φ.)
-    if (edgeF3) {
-        for (let e = 0; e < nEdges; e++) {
-            const ef3 = edgeF3[e]; if (ef3 < 0) continue;
-            const n0 = edges[2*e], n1 = edges[2*e+1];
-            initVec[ef3] = (phiVertex[n0] - phiVertex[n1]) / 3;
-        }
-    }
-    // Face DOFs (P2 and P3): set to 0 (interior bubbles, small for quasi-TEM)
-
-    const { lzOff, lzEdgeMidOff, lzEdge3Off, lzFaceNodeOff } = getLzOffsets(fm);
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
 
     for (let n = 0; n < mesh.nNodes; n++) {
         const nf = nodeF[n];
@@ -1343,19 +838,6 @@ export function staticToEdgeDofs(phi, mesh, fm) {
     for (let e = 0; e < nEdges; e++) {
         const enf = edgeNodeF[e];
         if (enf >= 0) initVec[lzEdgeMidOff + enf] = phiEdge[e];
-    }
-    // P3 extra longitudinal DOFs
-    if (edgeNodeF3 && phiEdge3) {
-        for (let e = 0; e < nEdges; e++) {
-            const enf3 = edgeNodeF3[e];
-            if (enf3 >= 0) initVec[lzEdge3Off + enf3] = phiEdge3[e];
-        }
-    }
-    if (faceNodeF && phiFaceNode) {
-        for (let t = 0; t < nTris; t++) {
-            const fnf = faceNodeF[t];
-            if (fnf >= 0) initVec[lzFaceNodeOff + fnf] = phiFaceNode[t];
-        }
     }
 
     return initVec;

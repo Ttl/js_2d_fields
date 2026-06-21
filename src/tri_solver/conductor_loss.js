@@ -4,11 +4,11 @@
 // Loss integral: α_c = Rs · ∮(|Ht|² + |Hz|²) dl / (4P)
 
 import { csqrt, tripletsToCSR, GL3p, GL3w } from './fem_core.js';
-import { ne1, ne2, ne3, nf1, nf2, nf3, nf4, nf5, nf6,
-         lv, le, le3, lf3, lvGrad, leGrad, le3Grad, lf3Grad, triCoefficients,
-         ne1Curl, ne2Curl, ne3Curl, nf1Curl, nf2Curl, nf3Curl, nf4Curl, nf5Curl, nf6Curl,
-         QW, QL1, QL2, QL3, NQ, QW12, QL1_12, QL2_12, QL3_12, NQ12,
-         getLzOffsets, computeTriP2Matrices, computeTriP3Matrices } from './tri_fem.js';
+import { ne1, ne2, nf1, nf2,
+         lv, le, lvGrad, leGrad, triCoefficients,
+         ne1Curl, ne2Curl, nf1Curl, nf2Curl,
+         QW, QL1, QL2, QL3, NQ,
+         getLzOffsets } from './tri_fem.js';
 
 // --- Helper: edge → list-of-adjacent-triangles adjacency map ---
 function buildEdgeToTri(nEdges, nTris, triEdges) {
@@ -18,34 +18,25 @@ function buildEdgeToTri(nEdges, nTris, triEdges) {
     return edgeToTri;
 }
 
-// --- Helper: evaluate Nedelec basis functions at a point for P2 or P3 ---
-// Returns { Wx, Wy, curlW, nNed } with nNed = 8 (P2) or 15 (P3)
-function evalNedelecBasis(coeff, order, edgeVerts, xq, yq) {
-    const nNed = order >= 3 ? 15 : 8;
+// --- Helper: evaluate P2 Nedelec basis functions at a point ---
+// Returns { Wx, Wy, curlW, nNed } with nNed = 8.
+function evalNedelecBasis(coeff, edgeVerts, xq, yq) {
+    const nNed = 8;
     const Wx = new Float64Array(nNed), Wy = new Float64Array(nNed), curlW = new Float64Array(nNed);
     for (let k = 0; k < 3; k++) {
         const [p, q] = edgeVerts[k];
         [Wx[k], Wy[k]] = ne1(coeff, p, q, xq, yq); curlW[k] = ne1Curl(coeff, p, q);
         [Wx[k+4], Wy[k+4]] = ne2(coeff, p, q, xq, yq); curlW[k+4] = ne2Curl(coeff, p, q, xq, yq);
-        if (order >= 3) {
-            [Wx[k+8], Wy[k+8]] = ne3(coeff, p, q, xq, yq); curlW[k+8] = ne3Curl(coeff, p, q, xq, yq);
-        }
     }
     [Wx[3], Wy[3]] = nf1(coeff, xq, yq); curlW[3] = nf1Curl(coeff, xq, yq);
     [Wx[7], Wy[7]] = nf2(coeff, xq, yq); curlW[7] = nf2Curl(coeff, xq, yq);
-    if (order >= 3) {
-        [Wx[11], Wy[11]] = nf3(coeff, xq, yq); curlW[11] = nf3Curl(coeff, xq, yq);
-        [Wx[12], Wy[12]] = nf4(coeff, xq, yq); curlW[12] = nf4Curl(coeff, xq, yq);
-        [Wx[13], Wy[13]] = nf5(coeff, xq, yq); curlW[13] = nf5Curl(coeff, xq, yq);
-        [Wx[14], Wy[14]] = nf6(coeff, xq, yq); curlW[14] = nf6Curl(coeff, xq, yq);
-    }
     return { Wx, Wy, curlW, nNed };
 }
 
-// --- Helper: evaluate Lagrange basis functions at a point for P2 or P3 ---
-// Returns { Nz, Gx, Gy, nLag } with nLag = 6 (P2) or 10 (P3)
-function evalLagrangeBasis(coeff, order, edgeVerts, xq, yq) {
-    const nLag = order >= 3 ? 10 : 6;
+// --- Helper: evaluate P2 Lagrange basis functions at a point ---
+// Returns { Nz, Gx, Gy, nLag } with nLag = 6.
+function evalLagrangeBasis(coeff, edgeVerts, xq, yq) {
+    const nLag = 6;
     const Nz = new Float64Array(nLag), Gx = new Float64Array(nLag), Gy = new Float64Array(nLag);
     for (let k = 0; k < 3; k++) {
         Nz[k] = lv(coeff, k, xq, yq);
@@ -55,83 +46,35 @@ function evalLagrangeBasis(coeff, order, edgeVerts, xq, yq) {
         const [p, q] = edgeVerts[k];
         Nz[k+3] = le(coeff, p, q, xq, yq);
         [Gx[k+3], Gy[k+3]] = leGrad(coeff, p, q, xq, yq);
-        if (order >= 3) {
-            Nz[k+6] = le3(coeff, p, q, xq, yq);
-            [Gx[k+6], Gy[k+6]] = le3Grad(coeff, p, q, xq, yq);
-        }
-    }
-    if (order >= 3) {
-        Nz[9] = lf3(coeff, xq, yq);
-        [Gx[9], Gy[9]] = lf3Grad(coeff, xq, yq);
     }
     return { Nz, Gx, Gy, nLag };
 }
 
-// --- Helper: compute full H DOF counts for variable-order mesh ---
-// Returns { NH, NHz, htEdgeOff, htFaceOff, hzVertOff, hzEdgeMidOff, hzEdge3Off, hzFaceOff }
+// --- Helper: compute full H DOF counts (P2) ---
+// Returns { NH, NHz, htEdgeTotal, htEdgeDofStart, htFaceDofStart }
 function computeHDofCounts(mesh, fm) {
     const { nEdges, nTris, nNodes } = mesh;
-    const elemOrder = fm.elemOrder;
 
-    // Ht DOFs: per edge (2 for P2, 3 for P3) + per face (2 for P2, 6 for P3)
-    // Use max order touching each edge for full H space (H is NOT subject to minimum rule)
-    const edgeMaxOrder = new Uint8Array(nEdges).fill(2);
-    if (elemOrder) {
-        for (let t = 0; t < nTris; t++) {
-            const ord = elemOrder[t];
-            for (let k = 0; k < 3; k++) {
-                const e = mesh.triEdges[3*t+k];
-                if (ord > edgeMaxOrder[e]) edgeMaxOrder[e] = ord;
-            }
-        }
-    }
-
-    // Edge Ht DOFs: variable per edge
+    // Ht DOFs: 2 per edge (ne1, ne2) + 2 per face (nf1, nf2).
     const htEdgeDofStart = new Int32Array(nEdges);
     let htEdgeTotal = 0;
     for (let e = 0; e < nEdges; e++) {
         htEdgeDofStart[e] = htEdgeTotal;
-        htEdgeTotal += edgeMaxOrder[e] >= 3 ? 3 : 2;
+        htEdgeTotal += 2;
     }
 
-    // Face Ht DOFs: variable per triangle
     const htFaceDofStart = new Int32Array(nTris);
     let htFaceTotal = 0;
     for (let t = 0; t < nTris; t++) {
         htFaceDofStart[t] = htFaceTotal;
-        const ord = elemOrder ? elemOrder[t] : 2;
-        htFaceTotal += ord >= 3 ? 6 : 2;
+        htFaceTotal += 2;
     }
     const NH = htEdgeTotal + htFaceTotal;
 
-    // Hz DOFs: vertex + edge midpoint + (P3: edge extra + face bubble)
-    const hzEdgeMidStart = nNodes; // after vertices
-    let hzEdge3Start = hzEdgeMidStart + nEdges; // after edge midpoints
-    let hzEdge3Total = 0;
-    const hzEdge3DofStart = new Int32Array(nEdges).fill(-1);
-    if (elemOrder) {
-        for (let e = 0; e < nEdges; e++) {
-            if (edgeMaxOrder[e] >= 3) {
-                hzEdge3DofStart[e] = hzEdge3Start + hzEdge3Total;
-                hzEdge3Total++;
-            }
-        }
-    }
-    let hzFaceStart = hzEdge3Start + hzEdge3Total;
-    let hzFaceTotal = 0;
-    const hzFaceDofStart = new Int32Array(nTris).fill(-1);
-    if (elemOrder) {
-        for (let t = 0; t < nTris; t++) {
-            if (elemOrder[t] >= 3) {
-                hzFaceDofStart[t] = hzFaceStart + hzFaceTotal;
-                hzFaceTotal++;
-            }
-        }
-    }
-    const NHz = nNodes + nEdges + hzEdge3Total + hzFaceTotal;
+    // Hz DOFs: vertex + edge midpoint.
+    const NHz = nNodes + nEdges;
 
-    return { NH, NHz, htEdgeTotal, htEdgeDofStart, htFaceDofStart, edgeMaxOrder,
-             hzEdge3DofStart, hzFaceDofStart };
+    return { NH, NHz, htEdgeTotal, htEdgeDofStart, htFaceDofStart };
 }
 
 const MU0 = 4 * Math.PI * 1e-7;
@@ -149,18 +92,15 @@ const SAT_KAPPA = 1.0;
 // Uses faceF from freedom map to identify conductor-interior triangles (geometry-independent).
 export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
     const { nodes, tris, triEdges, triSigns, nTris, nEdges, nNodes } = mesh;
-    const { edgeF, faceF, nodeF, edgeNodeF, nFreeTransverse, nFreeVertexDof,
-            elemOrder, edgeF3, faceF3, edgeNodeF3, faceNodeF,
-            nFreeEdgeNodeDof, nFreeEdgeNode3Dof, nFreeFaceNodeDof } = fm;
+    const { edgeF, faceF, nodeF, edgeNodeF } = fm;
     const omega = 2 * Math.PI * freq;
     const omu = omega * MU0;
-    const { lzOff, lzEdgeMidOff, lzEdge3Off, lzFaceNodeOff } = getLzOffsets(fm);
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
     const edgeVerts = [[0, 1], [1, 2], [2, 0]];
 
-    // Full H DOF counts (variable for hp)
+    // Full H DOF counts
     const hDofs = computeHDofCounts(mesh, fm);
-    const { NH, NHz, htEdgeDofStart, htFaceDofStart, edgeMaxOrder,
-            hzEdge3DofStart, hzFaceDofStart } = hDofs;
+    const { NH, NHz, htEdgeDofStart, htFaceDofStart } = hDofs;
 
     // Ht system
     const MtR = [], MtC = [], MtV = [];
@@ -178,38 +118,24 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
         const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
         const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
         const verts = [v0, v1, v2];
-        const order = elemOrder ? elemOrder[t] : 2;
-        const nNed = order >= 3 ? 15 : 8;
-        const nLag = order >= 3 ? 10 : 6;
+        const nNed = 8;
+        const nLag = 6;
 
-        // Ht DOFs: full numbering (variable per edge/face)
+        // Ht DOFs: full numbering
         const hD = new Int32Array(nNed), hS = new Float64Array(nNed).fill(1);
         for (let k = 0; k < 3; k++) {
             const eIdx = triEdges[3*t+k], base = htEdgeDofStart[eIdx];
             hD[k] = base; hS[k] = triSigns[3*t+k]; // ne1
             hD[k+4] = base + 1; // ne2
-            if (order >= 3) { hD[k+8] = base + 2; hS[k+8] = triSigns[3*t+k]; } // ne3
         }
         const faceBlockStart = hDofs.htEdgeTotal;
         hD[3] = faceBlockStart + htFaceDofStart[t]; // nf1
         hD[7] = faceBlockStart + htFaceDofStart[t] + 1; // nf2
-        if (order >= 3) {
-            for (let k = 0; k < 4; k++)
-                hD[11+k] = faceBlockStart + htFaceDofStart[t] + 2 + k; // nf3..6
-        }
 
         // Hz DOFs: full numbering
         const hzD = new Int32Array(nLag);
         for (let k = 0; k < 3; k++) hzD[k] = verts[k];
         for (let k = 0; k < 3; k++) hzD[k+3] = nNodes + triEdges[3*t+k];
-        if (order >= 3) {
-            for (let k = 0; k < 3; k++) {
-                const d3 = hzEdge3DofStart[triEdges[3*t+k]];
-                if (d3 >= 0) hzD[k+6] = d3;
-            }
-            const fnd = hzFaceDofStart[t];
-            if (fnd >= 0) hzD[9] = fnd;
-        }
 
         // E DOFs: free (PEC eliminated) — for building RHS
         const eD = new Int32Array(nNed), eS = new Float64Array(nNed).fill(1);
@@ -217,12 +143,8 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
             const eIdx = triEdges[3*t+k];
             eD[k] = edgeF[2*eIdx]; eS[k] = triSigns[3*t+k];
             eD[k+4] = edgeF[2*eIdx+1];
-            if (order >= 3) { eD[k+8] = edgeF3 ? edgeF3[eIdx] : -1; eS[k+8] = triSigns[3*t+k]; }
         }
         eD[3] = faceF[2*t]; eD[7] = faceF[2*t+1];
-        if (order >= 3 && faceF3) {
-            for (let k = 0; k < 4; k++) eD[11+k] = faceF3[4*t+k];
-        }
 
         // Gather Et from eigenvector
         const etR = new Float64Array(nNed), etI = new Float64Array(nNed);
@@ -232,37 +154,25 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
         const ezR = new Float64Array(nLag), ezI = new Float64Array(nLag);
         for (let k = 0; k < 3; k++) { const nf=nodeF[verts[k]]; if(nf>=0){ezR[k]=vecRe[lzOff+nf]; ezI[k]=vecIm[lzOff+nf];} }
         for (let k = 0; k < 3; k++) { const enf=edgeNodeF[triEdges[3*t+k]]; if(enf>=0){ezR[k+3]=vecRe[lzEdgeMidOff+enf]; ezI[k+3]=vecIm[lzEdgeMidOff+enf];} }
-        if (order >= 3 && edgeNodeF3) {
-            const signs = triSigns;
-            for (let k = 0; k < 3; k++) {
-                const enf3 = edgeNodeF3[triEdges[3*t+k]];
-                if (enf3 >= 0) { ezR[k+6] = signs[3*t+k]*vecRe[lzEdge3Off+enf3]; ezI[k+6] = signs[3*t+k]*vecIm[lzEdge3Off+enf3]; }
-            }
-            if (faceNodeF) {
-                const fnf = faceNodeF[t];
-                if (fnf >= 0) { ezR[9] = vecRe[lzFaceNodeOff+fnf]; ezI[9] = vecIm[lzFaceNodeOff+fnf]; }
-            }
-        }
 
         const MtEl = new Float64Array(nNed * nNed);
         const rR = new Float64Array(nNed), rI = new Float64Array(nNed);
         const MzEl = new Float64Array(nLag * nLag);
         const rzR = new Float64Array(nLag), rzI = new Float64Array(nLag);
 
-        const useQ12 = order >= 3;
-        const nqp = useQ12 ? NQ12 : NQ;
-        const qw = useQ12 ? QW12 : QW;
-        const ql1 = useQ12 ? QL1_12 : QL1;
-        const ql2 = useQ12 ? QL2_12 : QL2;
-        const ql3 = useQ12 ? QL3_12 : QL3;
+        const nqp = NQ;
+        const qw = QW;
+        const ql1 = QL1;
+        const ql2 = QL2;
+        const ql3 = QL3;
 
         for (let q = 0; q < nqp; q++) {
             const w = qw[q];
             const xq = txs[0]*ql1[q]+txs[1]*ql2[q]+txs[2]*ql3[q];
             const yq = tys[0]*ql1[q]+tys[1]*ql2[q]+tys[2]*ql3[q];
 
-            const { Wx, Wy, curlW } = evalNedelecBasis(coeff, order, edgeVerts, xq, yq);
-            const { Nz, Gx: LGx, Gy: LGy } = evalLagrangeBasis(coeff, order, edgeVerts, xq, yq);
+            const { Wx, Wy, curlW } = evalNedelecBasis(coeff, edgeVerts, xq, yq);
+            const { Nz, Gx: LGx, Gy: LGy } = evalLagrangeBasis(coeff, edgeVerts, xq, yq);
 
             // ∇Ez and Et interpolation from eigenvector
             let dxR=0,dxI=0,dyR=0,dyI=0;
@@ -312,7 +222,6 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
 
         // Assemble Hz system
         const hzS = new Float64Array(nLag).fill(1);
-        if (order >= 3) { for (let k=0;k<3;k++) hzS[k+6] = triSigns[3*t+k]; }
         for (let li=0;li<nLag;li++){
             const gi=hzD[li];
             rhsHzRe[gi]+=hzS[li]*rzR[li]; rhsHzIm[gi]+=hzS[li]*rzI[li];
@@ -345,20 +254,10 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
     return { htRe: hR, htIm: hI, hzRe: hzR, hzIm: hzI, omu, NH, NHz, hDofs };
 }
 
-// --- Gather H DOFs for a triangle using full numbering ---
+// --- Gather H DOFs (P2) for a triangle using full numbering ---
 function gatherHt(triIdx, mesh, htRe, htIm, hDofs) {
     const { triEdges, triSigns, nEdges } = mesh;
-    const order = hDofs ? (mesh.triEdges ? (() => {
-        // Determine element order from face DOF count
-        const faceDofs = hDofs.htFaceDofStart[triIdx + 1] !== undefined
-            ? hDofs.htFaceDofStart[triIdx + 1] - hDofs.htFaceDofStart[triIdx]
-            : 2;
-        return faceDofs > 2 ? 3 : 2;
-    })() : 2) : 2;
-    // Simpler: check edgeMaxOrder of first edge
-    const elemOrd = hDofs && hDofs.edgeMaxOrder
-        ? Math.max(...[0,1,2].map(k => hDofs.edgeMaxOrder[triEdges[3*triIdx+k]])) : 2;
-    const nNed = elemOrd >= 3 ? 15 : 8;
+    const nNed = 8;
     const hR = new Float64Array(nNed), hI = new Float64Array(nNed);
     if (hDofs) {
         for (let k = 0; k < 3; k++) {
@@ -366,16 +265,10 @@ function gatherHt(triIdx, mesh, htRe, htIm, hDofs) {
             const base = hDofs.htEdgeDofStart[eIdx];
             hR[k] = s*htRe[base]; hI[k] = s*htIm[base];
             hR[k+4] = htRe[base+1]; hI[k+4] = htIm[base+1];
-            if (elemOrd >= 3 && hDofs.edgeMaxOrder[eIdx] >= 3) {
-                hR[k+8] = s*htRe[base+2]; hI[k+8] = s*htIm[base+2];
-            }
         }
         const fb = hDofs.htEdgeTotal + hDofs.htFaceDofStart[triIdx];
         hR[3]=htRe[fb]; hI[3]=htIm[fb];
         hR[7]=htRe[fb+1]; hI[7]=htIm[fb+1];
-        if (elemOrd >= 3) {
-            for (let k = 0; k < 4; k++) { hR[11+k]=htRe[fb+2+k]; hI[11+k]=htIm[fb+2+k]; }
-        }
     } else {
         for (let k = 0; k < 3; k++) {
             const eIdx = triEdges[3*triIdx+k], s = triSigns[3*triIdx+k];
@@ -392,9 +285,7 @@ function gatherHt(triIdx, mesh, htRe, htIm, hDofs) {
 // --- Poynting power from projected Ht (consistent with loss integral) ---
 export function computePoyntingFromProjectedH(mesh, fm, vecRe, vecIm, htRe, htIm, omu, hDofs) {
     const { nodes, tris, triEdges, triSigns, nTris, nEdges } = mesh;
-    const { edgeF, faceF, nodeF, edgeNodeF, nFreeTransverse, nFreeVertexDof,
-            elemOrder, edgeF3, faceF3, edgeNodeF3, faceNodeF,
-            nFreeEdgeNodeDof, nFreeEdgeNode3Dof } = fm;
+    const { edgeF, faceF, nFreeTransverse } = fm;
     const lzOff = nFreeTransverse;
     const edgeVerts = [[0,1],[1,2],[2,0]];
     let Pz = 0;
@@ -403,38 +294,33 @@ export function computePoyntingFromProjectedH(mesh, fm, vecRe, vecIm, htRe, htIm
         if (faceF[2*t] < 0) continue;
 
         const v0=tris[3*t],v1=tris[3*t+1],v2=tris[3*t+2];
-        const order = elemOrder ? elemOrder[t] : 2;
-        const nNed = order >= 3 ? 15 : 8;
+        const nNed = 8;
         const {coeff,Area}=triCoefficients(nodes,v0,v1,v2);
         const txs=[nodes[2*v0],nodes[2*v1],nodes[2*v2]];
         const tys=[nodes[2*v0+1],nodes[2*v1+1],nodes[2*v2+1]];
 
-        // Gather Et from eigenvector (P2/P3 aware)
+        // Gather Et from eigenvector
         const eD=new Int32Array(nNed), eS=new Float64Array(nNed).fill(1);
         for(let k=0;k<3;k++){
             const eIdx=triEdges[3*t+k]; eD[k]=edgeF[2*eIdx]; eS[k]=triSigns[3*t+k];
             eD[k+4]=edgeF[2*eIdx+1];
-            if (order >= 3) { eD[k+8] = edgeF3 ? edgeF3[eIdx] : -1; eS[k+8] = triSigns[3*t+k]; }
         }
         eD[3]=faceF[2*t]; eD[7]=faceF[2*t+1];
-        if (order >= 3 && faceF3) { for(let k=0;k<4;k++) eD[11+k]=faceF3[4*t+k]; }
         const etR=new Float64Array(nNed),etI=new Float64Array(nNed);
         for(let k=0;k<nNed;k++){const g=eD[k]; if(g>=0){etR[k]=eS[k]*vecRe[g]; etI[k]=eS[k]*vecIm[g];}}
 
-        // Gather Ht from projection — use projected DOF order for basis evaluation
-        const {hR,hI,nNed:hNed}=gatherHt(t, mesh, htRe, htIm, hDofs);
-        const hOrder = hNed >= 15 ? 3 : 2;
+        // Gather Ht from projection
+        const {hR,hI}=gatherHt(t, mesh, htRe, htIm, hDofs);
 
-        const useQ12 = order >= 3 || hOrder >= 3;
-        const nqp = useQ12 ? NQ12 : NQ;
-        const qw = useQ12 ? QW12 : QW;
-        const ql1 = useQ12 ? QL1_12 : QL1, ql2 = useQ12 ? QL2_12 : QL2, ql3 = useQ12 ? QL3_12 : QL3;
+        const nqp = NQ;
+        const qw = QW;
+        const ql1 = QL1, ql2 = QL2, ql3 = QL3;
 
         for(let q=0;q<nqp;q++){
             const w=qw[q];
             const xq=txs[0]*ql1[q]+txs[1]*ql2[q]+txs[2]*ql3[q];
             const yq=tys[0]*ql1[q]+tys[1]*ql2[q]+tys[2]*ql3[q];
-            const {Wx,Wy}=evalNedelecBasis(coeff, hOrder, edgeVerts, xq, yq);
+            const {Wx,Wy}=evalNedelecBasis(coeff, edgeVerts, xq, yq);
 
             let exR=0,exI=0,eyR=0,eyI=0;
             for(let k=0;k<nNed;k++){exR+=Wx[k]*etR[k];exI+=Wx[k]*etI[k];eyR+=Wy[k]*etR[k];eyI+=Wy[k]*etI[k];}
@@ -506,8 +392,7 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
 
         const n0=edges[2*e],n1=edges[2*e+1];
         const {hR,hI,nNed:hNed} = gatherHt(adj, mesh, htRe, htIm, hDofs);
-        const hOrder = hNed >= 15 ? 3 : 2;
-        const nLag = hOrder >= 3 ? 10 : 6;
+        const nLag = 6;
         const v0=tris[3*adj],v1=tris[3*adj+1],v2=tris[3*adj+2];
         const {coeff}=triCoefficients(nodes,v0,v1,v2);
         const x0=nodes[2*n0],y0=nodes[2*n0+1],tx=nodes[2*n1]-x0,ty=nodes[2*n1+1]-y0;
@@ -517,20 +402,15 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
         const hzR_loc=new Float64Array(nLag), hzI_loc=new Float64Array(nLag);
         for(let k=0;k<3;k++){hzR_loc[k]=hzRe[adjVerts[k]]; hzI_loc[k]=hzIm[adjVerts[k]];}
         for(let k=0;k<3;k++){hzR_loc[k+3]=hzRe[nNodes+triEdges[3*adj+k]]; hzI_loc[k+3]=hzIm[nNodes+triEdges[3*adj+k]];}
-        if(hOrder>=3&&hDofs){
-            const signs=mesh.triSigns;
-            for(let k=0;k<3;k++){const d3=hDofs.hzEdge3DofStart[triEdges[3*adj+k]]; if(d3>=0){hzR_loc[k+6]=signs[3*adj+k]*hzRe[d3]; hzI_loc[k+6]=signs[3*adj+k]*hzIm[d3];}}
-            const fnd=hDofs.hzFaceDofStart[adj]; if(fnd>=0){hzR_loc[9]=hzRe[fnd]; hzI_loc[9]=hzIm[fnd];}
-        }
 
         const ht2q = [0,0,0];
         for(let q=0;q<3;q++){
             const px=x0+GL3p[q]*tx, py=y0+GL3p[q]*ty;
-            const {Wx,Wy}=evalNedelecBasis(coeff, hOrder, edgeVertsLocal, px, py);
+            const {Wx,Wy}=evalNedelecBasis(coeff, edgeVertsLocal, px, py);
             let hxR=0,hxI=0,hyR=0,hyI=0;
             for(let k=0;k<hNed;k++){hxR+=Wx[k]*hR[k];hxI+=Wx[k]*hI[k];hyR+=Wy[k]*hR[k];hyI+=Wy[k]*hI[k];}
             ht2q[q]=(hxR*hxR+hxI*hxI+hyR*hyR+hyI*hyI)/omu2;
-            const {Nz}=evalLagrangeBasis(coeff, hOrder, edgeVertsLocal, px, py);
+            const {Nz}=evalLagrangeBasis(coeff, edgeVertsLocal, px, py);
             let hzR2=0,hzI2=0;
             for(let k=0;k<nLag;k++){hzR2+=Nz[k]*hzR_loc[k]; hzI2+=Nz[k]*hzI_loc[k];}
             const hz2=(hzR2*hzR2+hzI2*hzI2)/omu2;
@@ -794,7 +674,6 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
 // Returns Float64Array(nTris) of per-element error estimates.
 export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, freq, condRects, projectedH, wasmSolver) {
     const { nodes, tris, triEdges, triSigns, nTris, nEdges, nNodes } = mesh;
-    const { elemOrder } = fm;
     const edgeVerts = [[0,1],[1,2],[2,0]];
     const TOL = 1e-12;
 
@@ -820,12 +699,8 @@ export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, fr
         const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
         triArea[t] = Area;
 
-        // Use the projected H DOF count (from gatherHt) for curl evaluation,
-        // not elemOrder — the projected H lives in the full space and P2 elements
-        // adjacent to P3 elements have ne3 DOFs from the projection.
         const {hR,hI,nNed} = gatherHt(t, mesh, htRe, htIm, hDofs);
-        const evalOrder = nNed >= 15 ? 3 : 2;
-        const {curlW} = evalNedelecBasis(coeff, evalOrder, edgeVerts, xc, yc);
+        const {curlW} = evalNedelecBasis(coeff, edgeVerts, xc, yc);
 
         let cR = 0, cI = 0;
         for (let k = 0; k < nNed; k++) { cR += curlW[k]*hR[k]; cI += curlW[k]*hI[k]; }
@@ -944,16 +819,10 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
 
         // Gather φ DOFs for the adjacent triangle
         const verts=[v0,v1,v2];
-        const elemOrd = fm.elemOrder ? fm.elemOrder[adj] : 2;
-        const nLocalZ = elemOrd >= 3 ? 10 : 6;
+        const nLocalZ = 6;
         const phiLoc = new Float64Array(nLocalZ);
         for (let k=0;k<3;k++) phiLoc[k] = phi.phiVertex[verts[k]];
         for (let k=0;k<3;k++) phiLoc[k+3] = phi.phiEdge[triEdges[3*adj+k]];
-        if (elemOrd >= 3 && phi.phiEdge3) {
-            const signs = mesh.triSigns;
-            for (let k=0;k<3;k++) phiLoc[k+6] = signs[3*adj+k] * phi.phiEdge3[triEdges[3*adj+k]];
-            phiLoc[9] = phi.phiFaceNode ? phi.phiFaceNode[adj] : 0;
-        }
 
         // Check if this edge touches a PEC corner vertex
         const c0 = cornerNodes.get(n0), c1 = cornerNodes.get(n1);
@@ -987,7 +856,7 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
         for(let q=0;q<nq;q++){
             const px=x0+qp[q]*tx, py=y0+qp[q]*ty;
 
-            // ∇φ at quadrature point (P2/P3 Lagrange gradient)
+            // ∇φ at quadrature point (P2 Lagrange gradient)
             let gx=0, gy=0;
             for (let k=0;k<3;k++){
                 const [dgx,dgy]=lvGrad(coeff,k,px,py);
@@ -997,14 +866,6 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
                 const [p,qq]=edgeVerts[k];
                 const [dgx,dgy]=leGrad(coeff,p,qq,px,py);
                 gx+=dgx*phiLoc[k+3]; gy+=dgy*phiLoc[k+3];
-            }
-            if (elemOrd >= 3) {
-                for (let k=0;k<3;k++){
-                    const [p,qq]=edgeVerts[k];
-                    const [dgx,dgy]=le3Grad(coeff,p,qq,px,py);
-                    gx+=dgx*phiLoc[k+6]; gy+=dgy*phiLoc[k+6];
-                }
-                { const [dgx,dgy]=lf3Grad(coeff,px,py); gx+=dgx*phiLoc[9]; gy+=dgy*phiLoc[9]; }
             }
 
             gradPhi2dl += qw[q]*L*(gx*gx + gy*gy);

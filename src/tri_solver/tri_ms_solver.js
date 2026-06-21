@@ -1,10 +1,10 @@
 // Microstrip analysis functions for triangular P2 Nedelec FEM
 
 import { csqrt, GL3p, GL3w } from './fem_core.js';
-import { ne1, ne2, ne3, nf1, nf2, nf3, nf4, nf5, nf6,
-         lvGrad, leGrad, le3Grad, lf3Grad, triCoefficients,
-         ne1Curl, ne2Curl, ne3Curl, nf1Curl, nf2Curl, nf3Curl, nf4Curl, nf5Curl, nf6Curl,
-         QW, QL1, QL2, QL3, NQ, QW12, QL1_12, QL2_12, QL3_12, NQ12,
+import { ne1, ne2, nf1, nf2,
+         lvGrad, leGrad, triCoefficients,
+         ne1Curl, ne2Curl, nf1Curl, nf2Curl,
+         QW, QL1, QL2, QL3, NQ,
          getLzOffsets } from './tri_fem.js';
 
 // --- Evaluate e_t and grad(ez) at point (px,py) inside triangle t ---
@@ -12,16 +12,14 @@ import { ne1, ne2, ne3, nf1, nf2, nf3, nf4, nf5, nf6,
 // H can be computed from these as: jωμ₀Ht = ẑ×∇ez + ẑ×e_t (no γ multiply).
 export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm) {
     const { tris, triEdges, triSigns, nodes } = mesh;
-    const { edgeF, faceF, nodeF, edgeNodeF,
-            elemOrder, edgeF3, faceF3, edgeNodeF3, faceNodeF } = fm;
-    const { lzOff, lzEdgeMidOff, lzEdge3Off, lzFaceNodeOff } = getLzOffsets(fm);
+    const { edgeF, faceF, nodeF, edgeNodeF } = fm;
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
     const _edgeVerts = [[0, 1], [1, 2], [2, 0]];
 
     const vv0 = tris[3*t], vv1 = tris[3*t+1], vv2 = tris[3*t+2];
     const { coeff: cf } = triCoefficients(nodes, vv0, vv1, vv2);
-    const order = elemOrder ? elemOrder[t] : 2;
-    const nNed = order >= 3 ? 15 : 8;
-    const nLag = order >= 3 ? 10 : 6;
+    const nNed = 8;
+    const nLag = 6;
 
     // Gather transverse DOFs
     const eR = new Float64Array(nNed), eI = new Float64Array(nNed);
@@ -29,15 +27,9 @@ export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm) {
         const eIdx = triEdges[3*t+k], s = triSigns[3*t+k];
         const ef1 = edgeF[2*eIdx]; if (ef1 >= 0) { eR[k] = s*vecRe[ef1]; eI[k] = s*vecIm[ef1]; }
         const ef2 = edgeF[2*eIdx+1]; if (ef2 >= 0) { eR[k+4] = vecRe[ef2]; eI[k+4] = vecIm[ef2]; }
-        if (order >= 3 && edgeF3) {
-            const ef3 = edgeF3[eIdx]; if (ef3 >= 0) { eR[k+8] = s*vecRe[ef3]; eI[k+8] = s*vecIm[ef3]; }
-        }
     }
     const ff1 = faceF[2*t]; if (ff1 >= 0) { eR[3] = vecRe[ff1]; eI[3] = vecIm[ff1]; }
     const ff2 = faceF[2*t+1]; if (ff2 >= 0) { eR[7] = vecRe[ff2]; eI[7] = vecIm[ff2]; }
-    if (order >= 3 && faceF3) {
-        for (let k = 0; k < 4; k++) { const ff = faceF3[4*t+k]; if (ff >= 0) { eR[11+k] = vecRe[ff]; eI[11+k] = vecIm[ff]; } }
-    }
 
     // Evaluate e_t from all Nedelec DOFs
     let exr = 0, exi = 0, eyr = 0, eyi = 0;
@@ -45,37 +37,19 @@ export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm) {
         const [p, q] = _edgeVerts[k];
         {const [wx, wy] = ne1(cf, p, q, px, py); exr+=wx*eR[k]; exi+=wx*eI[k]; eyr+=wy*eR[k]; eyi+=wy*eI[k];}
         {const [wx, wy] = ne2(cf, p, q, px, py); exr+=wx*eR[k+4]; exi+=wx*eI[k+4]; eyr+=wy*eR[k+4]; eyi+=wy*eI[k+4];}
-        if (order >= 3) {const [wx, wy] = ne3(cf, p, q, px, py); exr+=wx*eR[k+8]; exi+=wx*eI[k+8]; eyr+=wy*eR[k+8]; eyi+=wy*eI[k+8];}
     }
     { const [wx,wy] = nf1(cf, px, py); exr+=wx*eR[3]; exi+=wx*eI[3]; eyr+=wy*eR[3]; eyi+=wy*eI[3]; }
     { const [wx,wy] = nf2(cf, px, py); exr+=wx*eR[7]; exi+=wx*eI[7]; eyr+=wy*eR[7]; eyi+=wy*eI[7]; }
-    if (order >= 3) {
-        { const [wx,wy] = nf3(cf, px, py); exr+=wx*eR[11]; exi+=wx*eI[11]; eyr+=wy*eR[11]; eyi+=wy*eI[11]; }
-        { const [wx,wy] = nf4(cf, px, py); exr+=wx*eR[12]; exi+=wx*eI[12]; eyr+=wy*eR[12]; eyi+=wy*eI[12]; }
-        { const [wx,wy] = nf5(cf, px, py); exr+=wx*eR[13]; exi+=wx*eI[13]; eyr+=wy*eR[13]; eyi+=wy*eI[13]; }
-        { const [wx,wy] = nf6(cf, px, py); exr+=wx*eR[14]; exi+=wx*eI[14]; eyr+=wy*eR[14]; eyi+=wy*eI[14]; }
-    }
 
     // Gather longitudinal DOFs and evaluate grad(Ez)
     const nDR = new Float64Array(nLag), nDI = new Float64Array(nLag);
     const vts = [vv0, vv1, vv2];
     for (let k = 0; k < 3; k++) { const nf = nodeF[vts[k]]; if (nf >= 0) { nDR[k] = vecRe[lzOff+nf]; nDI[k] = vecIm[lzOff+nf]; } }
     for (let k = 0; k < 3; k++) { const enf = edgeNodeF[triEdges[3*t+k]]; if (enf >= 0) { nDR[k+3] = vecRe[lzEdgeMidOff+enf]; nDI[k+3] = vecIm[lzEdgeMidOff+enf]; } }
-    if (order >= 3) {
-        for (let k = 0; k < 3; k++) {
-            const enf3 = edgeNodeF3 ? edgeNodeF3[triEdges[3*t+k]] : -1;
-            if (enf3 >= 0) { const s = triSigns[3*t+k]; nDR[k+6] = s*vecRe[lzEdge3Off+enf3]; nDI[k+6] = s*vecIm[lzEdge3Off+enf3]; }
-        }
-        if (faceNodeF) { const fnf = faceNodeF[t]; if (fnf >= 0) { nDR[9] = vecRe[lzFaceNodeOff+fnf]; nDI[9] = vecIm[lzFaceNodeOff+fnf]; } }
-    }
 
     let dezdxr = 0, dezdxi = 0, dezdyr = 0, dezdyi = 0;
     for (let k = 0; k < 3; k++) { const [gx,gy] = lvGrad(cf, k, px, py); dezdxr += gx*nDR[k]; dezdxi += gx*nDI[k]; dezdyr += gy*nDR[k]; dezdyi += gy*nDI[k]; }
     for (let k = 0; k < 3; k++) { const [p,q] = _edgeVerts[k]; const [gx,gy] = leGrad(cf, p, q, px, py); dezdxr += gx*nDR[k+3]; dezdxi += gx*nDI[k+3]; dezdyr += gy*nDR[k+3]; dezdyi += gy*nDI[k+3]; }
-    if (order >= 3) {
-        for (let k = 0; k < 3; k++) { const [p,q] = _edgeVerts[k]; const [gx,gy] = le3Grad(cf, p, q, px, py); dezdxr += gx*nDR[k+6]; dezdxi += gx*nDI[k+6]; dezdyr += gy*nDR[k+6]; dezdyi += gy*nDI[k+6]; }
-        { const [gx,gy] = lf3Grad(cf, px, py); dezdxr += gx*nDR[9]; dezdxi += gx*nDI[9]; dezdyr += gy*nDR[9]; dezdyi += gy*nDI[9]; }
-    }
 
     // curl(Et)_z = ∂Ey/∂x - ∂Ex/∂y — computed from analytical Nedelec curl.
     let curlEtRe = 0, curlEtIm = 0;
@@ -83,16 +57,9 @@ export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm) {
         const [p, q] = _edgeVerts[k];
         {const c = ne1Curl(cf, p, q); curlEtRe += c*eR[k]; curlEtIm += c*eI[k];}
         {const c = ne2Curl(cf, p, q, px, py); curlEtRe += c*eR[k+4]; curlEtIm += c*eI[k+4];}
-        if (order >= 3) {const c = ne3Curl(cf, p, q, px, py); curlEtRe += c*eR[k+8]; curlEtIm += c*eI[k+8];}
     }
     { const c = nf1Curl(cf, px, py); curlEtRe += c * eR[3]; curlEtIm += c * eI[3]; }
     { const c = nf2Curl(cf, px, py); curlEtRe += c * eR[7]; curlEtIm += c * eI[7]; }
-    if (order >= 3) {
-        { const c = nf3Curl(cf, px, py); curlEtRe += c*eR[11]; curlEtIm += c*eI[11]; }
-        { const c = nf4Curl(cf, px, py); curlEtRe += c*eR[12]; curlEtIm += c*eI[12]; }
-        { const c = nf5Curl(cf, px, py); curlEtRe += c*eR[13]; curlEtIm += c*eI[13]; }
-        { const c = nf6Curl(cf, px, py); curlEtRe += c*eR[14]; curlEtIm += c*eI[14]; }
-    }
 
     return { exr, exi, eyr, eyi, dezdxr, dezdxi, dezdyr, dezdyi, curlEtRe, curlEtIm };
 }
@@ -100,14 +67,13 @@ export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm) {
 // --- Mode analysis ---
 export function analyzeTriMode(vecRe, vecIm, gamma2Re, gamma2Im, mesh, fm, k2, f, epsMap, condRect, distFrac) {
     const { nodes, tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
-    const { edgeF, faceF, nodeF, edgeNodeF, isCondNode,
-            elemOrder, edgeF3, faceF3, edgeNodeF3, faceNodeF } = fm;
+    const { edgeF, faceF, nodeF, edgeNodeF, isCondNode } = fm;
     const nNodes = mesh.nNodes;
     const omega = 2 * Math.PI * f;
     const mu0 = 4 * Math.PI * 1e-7;
 
     const omu = omega * mu0;
-    const { lzOff, lzEdgeMidOff, lzEdge3Off, lzFaceNodeOff } = getLzOffsets(fm);
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
 
     let gamma = csqrt(gamma2Re, gamma2Im);
     if (gamma.im < 0) gamma = { re: -gamma.re, im: -gamma.im };
@@ -124,9 +90,8 @@ export function analyzeTriMode(vecRe, vecIm, gamma2Re, gamma2Im, mesh, fm, k2, f
         const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
         const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
         const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-        const order = elemOrder ? elemOrder[t] : 2;
-        const nNed = order >= 3 ? 15 : 8;
-        const nLag = order >= 3 ? 10 : 6;
+        const nNed = 8;
+        const nLag = 6;
 
         // Gather transverse DOFs
         const eDofRe = new Float64Array(nNed), eDofIm = new Float64Array(nNed);
@@ -134,26 +99,19 @@ export function analyzeTriMode(vecRe, vecIm, gamma2Re, gamma2Im, mesh, fm, k2, f
             const eIdx = triEdges[3*t+k], s = triSigns[3*t+k];
             const ef1 = edgeF[2*eIdx]; if (ef1 >= 0) { eDofRe[k] = s*vecRe[ef1]; eDofIm[k] = s*vecIm[ef1]; }
             const ef2 = edgeF[2*eIdx+1]; if (ef2 >= 0) { eDofRe[k+4] = vecRe[ef2]; eDofIm[k+4] = vecIm[ef2]; }
-            if (order >= 3 && edgeF3) { const ef3 = edgeF3[eIdx]; if (ef3 >= 0) { eDofRe[k+8] = s*vecRe[ef3]; eDofIm[k+8] = s*vecIm[ef3]; } }
         }
         { const ff = faceF[2*t]; if (ff >= 0) { eDofRe[3] = vecRe[ff]; eDofIm[3] = vecIm[ff]; } }
         { const ff = faceF[2*t+1]; if (ff >= 0) { eDofRe[7] = vecRe[ff]; eDofIm[7] = vecIm[ff]; } }
-        if (order >= 3 && faceF3) { for (let k = 0; k < 4; k++) { const ff = faceF3[4*t+k]; if (ff >= 0) { eDofRe[11+k] = vecRe[ff]; eDofIm[11+k] = vecIm[ff]; } } }
 
         // Gather longitudinal DOFs
         const nDofRe = new Float64Array(nLag), nDofIm = new Float64Array(nLag);
         const verts = [v0, v1, v2];
         for (let k = 0; k < 3; k++) { const nf = nodeF[verts[k]]; if (nf >= 0) { nDofRe[k] = vecRe[lzOff+nf]; nDofIm[k] = vecIm[lzOff+nf]; } }
         for (let k = 0; k < 3; k++) { const enf = edgeNodeF[triEdges[3*t+k]]; if (enf >= 0) { nDofRe[k+3] = vecRe[lzEdgeMidOff+enf]; nDofIm[k+3] = vecIm[lzEdgeMidOff+enf]; } }
-        if (order >= 3) {
-            for (let k = 0; k < 3; k++) { const enf3 = edgeNodeF3 ? edgeNodeF3[triEdges[3*t+k]] : -1; if (enf3 >= 0) { const s = triSigns[3*t+k]; nDofRe[k+6] = s*vecRe[lzEdge3Off+enf3]; nDofIm[k+6] = s*vecIm[lzEdge3Off+enf3]; } }
-            if (faceNodeF) { const fnf = faceNodeF[t]; if (fnf >= 0) { nDofRe[9] = vecRe[lzFaceNodeOff+fnf]; nDofIm[9] = vecIm[lzFaceNodeOff+fnf]; } }
-        }
 
-        const useQ12 = order >= 3;
-        const nqp = useQ12 ? NQ12 : NQ;
-        const qw = useQ12 ? QW12 : QW;
-        const ql1 = useQ12 ? QL1_12 : QL1, ql2 = useQ12 ? QL2_12 : QL2, ql3 = useQ12 ? QL3_12 : QL3;
+        const nqp = NQ;
+        const qw = QW;
+        const ql1 = QL1, ql2 = QL2, ql3 = QL3;
 
         for (let q = 0; q < nqp; q++) {
             const xq = txs[0]*ql1[q] + txs[1]*ql2[q] + txs[2]*ql3[q];
@@ -165,25 +123,14 @@ export function analyzeTriMode(vecRe, vecIm, gamma2Re, gamma2Im, mesh, fm, k2, f
                 const [p, qq] = edgeVerts[k];
                 {const [wx,wy]=ne1(coeff,p,qq,xq,yq); exr+=wx*eDofRe[k]; exi+=wx*eDofIm[k]; eyr+=wy*eDofRe[k]; eyi+=wy*eDofIm[k];}
                 {const [wx,wy]=ne2(coeff,p,qq,xq,yq); exr+=wx*eDofRe[k+4]; exi+=wx*eDofIm[k+4]; eyr+=wy*eDofRe[k+4]; eyi+=wy*eDofIm[k+4];}
-                if (order >= 3) {const [wx,wy]=ne3(coeff,p,qq,xq,yq); exr+=wx*eDofRe[k+8]; exi+=wx*eDofIm[k+8]; eyr+=wy*eDofRe[k+8]; eyi+=wy*eDofIm[k+8];}
             }
             {const [wx,wy]=nf1(coeff,xq,yq); exr+=wx*eDofRe[3]; exi+=wx*eDofIm[3]; eyr+=wy*eDofRe[3]; eyi+=wy*eDofIm[3];}
             {const [wx,wy]=nf2(coeff,xq,yq); exr+=wx*eDofRe[7]; exi+=wx*eDofIm[7]; eyr+=wy*eDofRe[7]; eyi+=wy*eDofIm[7];}
-            if (order >= 3) {
-                {const [wx,wy]=nf3(coeff,xq,yq); exr+=wx*eDofRe[11]; exi+=wx*eDofIm[11]; eyr+=wy*eDofRe[11]; eyi+=wy*eDofIm[11];}
-                {const [wx,wy]=nf4(coeff,xq,yq); exr+=wx*eDofRe[12]; exi+=wx*eDofIm[12]; eyr+=wy*eDofRe[12]; eyi+=wy*eDofIm[12];}
-                {const [wx,wy]=nf5(coeff,xq,yq); exr+=wx*eDofRe[13]; exi+=wx*eDofIm[13]; eyr+=wy*eDofRe[13]; eyi+=wy*eDofIm[13];}
-                {const [wx,wy]=nf6(coeff,xq,yq); exr+=wx*eDofRe[14]; exi+=wx*eDofIm[14]; eyr+=wy*eDofRe[14]; eyi+=wy*eDofIm[14];}
-            }
 
             // Evaluate grad(Ez)
             let dezdxr = 0, dezdxi = 0, dezdyr = 0, dezdyi = 0;
             for (let k = 0; k < 3; k++) { const [gx,gy]=lvGrad(coeff,k,xq,yq); dezdxr+=gx*nDofRe[k]; dezdxi+=gx*nDofIm[k]; dezdyr+=gy*nDofRe[k]; dezdyi+=gy*nDofIm[k]; }
             for (let k = 0; k < 3; k++) { const [p,qq]=edgeVerts[k]; const [gx,gy]=leGrad(coeff,p,qq,xq,yq); dezdxr+=gx*nDofRe[k+3]; dezdxi+=gx*nDofIm[k+3]; dezdyr+=gy*nDofRe[k+3]; dezdyi+=gy*nDofIm[k+3]; }
-            if (order >= 3) {
-                for (let k = 0; k < 3; k++) { const [p,qq]=edgeVerts[k]; const [gx,gy]=le3Grad(coeff,p,qq,xq,yq); dezdxr+=gx*nDofRe[k+6]; dezdxi+=gx*nDofIm[k+6]; dezdyr+=gy*nDofRe[k+6]; dezdyi+=gy*nDofIm[k+6]; }
-                { const [gx,gy]=lf3Grad(coeff,xq,yq); dezdxr+=gx*nDofRe[9]; dezdxi+=gx*nDofIm[9]; dezdyr+=gy*nDofRe[9]; dezdyi+=gy*nDofIm[9]; }
-            }
 
             const nHxr = -(dezdyr + eyr), nHxi = -(dezdyi + eyi);
             const nHyr = exr + dezdxr, nHyi = exi + dezdxi;
@@ -273,14 +220,6 @@ export function analyzeTriMode(vecRe, vecIm, gamma2Re, gamma2Im, mesh, fm, k2, f
             if (ef >= 0) {
                 Vre -= pathSign * vecRe[ef];
                 Vim -= pathSign * vecIm[ef];
-            }
-            // ne3: ∫ne3·dl = 1/3 (antisymmetric like ne1, so pathSign applies)
-            if (edgeF3) {
-                const ef3 = edgeF3[e];
-                if (ef3 >= 0) {
-                    Vre -= pathSign * vecRe[ef3] / 3;
-                    Vim -= pathSign * vecIm[ef3] / 3;
-                }
             }
             pathLen++;
             cur = prev[cur];

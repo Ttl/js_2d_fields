@@ -1,25 +1,6 @@
-// Mesh utilities for 2D FEM: element order assignment and quality checking
+// Mesh utilities for 2D FEM: quality checking
 
 import { triQuality } from './fem_core.js';
-
-// --- Assign element polynomial orders for hp-refinement ---
-// Elements near PEC corners get P3, others stay P2.
-// corners: array of {x, y} corner points
-// radius: elements within this distance from a corner get P3
-export function assignElementOrders(mesh, corners, radius) {
-    const { nodes, tris, nTris } = mesh;
-    const elemOrder = new Uint8Array(nTris).fill(2);
-    for (let t = 0; t < nTris; t++) {
-        const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const xc = (nodes[2*v0] + nodes[2*v1] + nodes[2*v2]) / 3;
-        const yc = (nodes[2*v0+1] + nodes[2*v1+1] + nodes[2*v2+1]) / 3;
-        for (const c of corners) {
-            const d = Math.sqrt((xc - c.x) ** 2 + (yc - c.y) ** 2);
-            if (d < radius) { elemOrder[t] = 3; break; }
-        }
-    }
-    return elemOrder;
-}
 
 // --- Mesh quality check ---
 // Validates mesh quality before FEM solve. Returns { ok, warnings, errors, metrics }.

@@ -509,8 +509,6 @@ function combineStatic(a, A, b, B) {
     return {
         phiVertex: comb(A.phiVertex, B.phiVertex),
         phiEdge: comb(A.phiEdge, B.phiEdge),
-        phiEdge3: A.phiEdge3 ? comb(A.phiEdge3, B.phiEdge3) : null,
-        phiFaceNode: A.phiFaceNode ? comb(A.phiFaceNode, B.phiFaceNode) : null,
     };
 }
 
