@@ -40,6 +40,8 @@ import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness
 import { resampleStatic, resampleModeField } from './resample.js';
 import { Complex } from '../complex.js';
 import { mat2Mul, mat2Inv, eig2x2 } from '../matrix.js';
+import { conductorSwapSymmetric } from '../geometry_symmetry.js';
+import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
 
 const c0 = 299792458;
@@ -776,6 +778,7 @@ export class TriBackend {
     // come out as [1,∓1], reproducing the existing odd/even basis exactly.
     _prepareStaticModal(grid) {
         const { mesh } = this;
+        const s = this.solver;
         const roles = this.condRect.rectRoles;
         const { abc, kC } = modeConfig('odd', true, false, this.condRect.wallPEC);
         const fm = buildTriFreedomMap(mesh, this.condRect, abc);
@@ -797,14 +800,21 @@ export class TriBackend {
         // A symmetric pair (C11≈C22) is exactly the odd/even decomposition — return false and let
         // _prepareStatic do the odd/even prep, with no physMatrix (the symmetric S-parameter
         // combination is exact).
-        const asym = Math.abs(C[0][0] - C[1][1]) / (Math.abs(C[0][0]) + Math.abs(C[1][1]) + 1e-30);
         const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
         const force = globalThis.__MODAL_FORCE__;   // 'on'|'off' test override; undefined = guard
-        // asym is the per-trace self-capacitance imbalance |C11−C22|/(C11+C22). A truly symmetric
-        // pair sits at the mesh-discretisation floor (≈1e-3 worst case); a genuine geometric
-        // asymmetry is well above it (a 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2). 5e-3
-        // separates the two with margin (kept in sync with field_solver.js's rectilinear guard).
-        if (force === 'off' || (force !== 'on' && asym < 5e-3)) { this._modalPhys = null; return false; }
+        // Symmetry is a property of the input geometry, not the discretised solve: read it from
+        // the conductor/dielectric layout (exact, mesh-independent) rather than from the noisy
+        // capacitance imbalance. A symmetric pair is exactly the odd/even decomposition — return
+        // false and let _prepareStatic do the odd/even prep, with no physMatrix (the symmetric
+        // S-parameter combination is exact). When the geometric test cannot decide (e.g. an
+        // imported mesh) fall back to the |C11−C22| capacitance imbalance against a mesh-noise
+        // floor (≈1e-3 worst case; 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2; 5e-3 splits;
+        // kept in sync with field_solver.js's rectilinear guard).
+        const symGeo = conductorSwapSymmetric(s.conductors, s.dielectrics);
+        const asym = Math.abs(C[0][0] - C[1][1]) / (Math.abs(C[0][0]) + Math.abs(C[1][1]) + 1e-30);
+        const isSymmetric = force === 'off'
+            || (force !== 'on' && (symGeo === null ? asym < 5e-3 : symGeo));
+        if (isSymmetric) { this._modalPhys = null; return false; }
         // Genuinely asymmetric pair: expose the true physical p.u.l. matrices for the MTL 4-port
         // S-parameter path (yields S11≠S22 etc.). The energy-form C is scaled to F/m by kC·ε0 (same
         // factor as the per-mode C0 = kC·ε0·W_air); [L] = (1/c²)[C0]⁻¹. These are well-defined even
@@ -1146,7 +1156,10 @@ export class TriBackend {
             const even = modes.find(m => m.mode === 'even');
             result.Z_diff = 2 * odd.Z0;
             result.Z_common = even.Z0 / 2;
-            result.RLGC_matrix = modalToPhysicalRLGC(odd, even);
+            // Genuine asymmetric [C]/[L] (with Tv-reconstructed [R]/[G]) when an asymmetric
+            // physMatrix was computed for this pair, else the symmetric odd/even reconstruction.
+            // Shared with the S-parameter path so RLGC_matrix matches what drives the S-params.
+            result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, this._modalPhys);
             // True physical 2×2 [C]/[L] for the asymmetric MTL 4-port S-parameter path.
             if (this._modalPhys) result.physMatrix = this._modalPhys;
         }
@@ -1307,13 +1320,3 @@ export class TriBackend {
 
 }
 
-// even/odd modal -> physical 2x2 (matches field_solver._modal_to_physical_rlgc)
-function modalToPhysicalRLGC(odd, even) {
-    const mk = (xo, xe) => [[(xo + xe) / 2, (xe - xo) / 2], [(xe - xo) / 2, (xo + xe) / 2]];
-    return {
-        R: mk(odd.RLGC.R, even.RLGC.R),
-        L: mk(odd.RLGC.L, even.RLGC.L),
-        G: mk(odd.RLGC.G, even.RLGC.G),
-        C: mk(odd.RLGC.C, even.RLGC.C),
-    };
-}

@@ -3,6 +3,8 @@ import { Complex } from "./complex.js";
 import { calculate_Zrough, calculate_Zrough_layered } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { mat2Mul, mat2Inv, eig2x2 } from './matrix.js';
+import { conductorSwapSymmetric } from './geometry_symmetry.js';
+import { buildPhysicalRLGC } from './sparameters.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -1387,14 +1389,21 @@ export class FieldSolver2D {
         // A symmetric pair (C11≈C22) is exactly the odd/even drives — keep them and expose no
         // physMatrix (the symmetric S-parameter combination is exact). Returning null signals the
         // caller to keep the odd/even drive results.
-        const asym = Math.abs(Cm[0][0] - Cm[1][1]) / (Math.abs(Cm[0][0]) + Math.abs(Cm[1][1]) + 1e-30);
         const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
         const force = globalThis.__MODAL_FORCE__;   // 'on'|'off' test override; undefined = guard
-        // asym is the per-trace self-capacitance imbalance |C11−C22|/(C11+C22). A truly symmetric
-        // pair sits at the mesh-discretisation floor (≈3e-6 on a fine mesh, up to ≈1.3e-3 on a
-        // coarse/refined one); a genuine geometric asymmetry is well above it (a 5% broadside
-        // height imbalance ≈7e-3, 10% ≈1.5e-2). 5e-3 separates the two with margin on both sides.
-        if (force === 'off' || (force !== 'on' && asym < 5e-3)) { this._modalPhys = null; return null; }
+        // Symmetry is a property of the input geometry, not the discretised solve: read it from
+        // the conductor/dielectric layout (exact, mesh-independent) rather than from the noisy
+        // capacitance imbalance. A symmetric pair is exactly the odd/even drives — keep them and
+        // expose no physMatrix (the symmetric S-parameter combination is exact). Returning null
+        // signals the caller to keep the odd/even drive results. When the geometric test cannot
+        // decide (e.g. an imported mesh with no clean rect decomposition) fall back to the
+        // |C11−C22| capacitance imbalance against a mesh-noise floor (≈3e-6 fine … ≈1.3e-3 coarse;
+        // a 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2; 5e-3 separates the two).
+        const symGeo = conductorSwapSymmetric(this.conductors, this.dielectrics);
+        const asym = Math.abs(Cm[0][0] - Cm[1][1]) / (Math.abs(Cm[0][0]) + Math.abs(Cm[1][1]) + 1e-30);
+        const isSymmetric = force === 'off'
+            || (force !== 'on' && (symGeo === null ? asym < 5e-3 : symGeo));
+        if (isSymmetric) { this._modalPhys = null; return null; }
         // Genuinely asymmetric pair: expose the true physical p.u.l. matrices for the MTL 4-port
         // S-parameter path (yields S11≠S22 etc.). [C] = Maxwell matrix, [L] = μ0·ε0·[C0]⁻¹ =
         // (1/c²)·[C0]⁻¹. These are well-defined even for a velocity-degenerate (homogeneous-
@@ -1766,70 +1775,24 @@ export class FieldSolver2D {
 
     _modal_to_physical_rlgc(odd, even) {
         /**
-         * Convert modal (odd/even) RLGC parameters to physical 2x2 RLGC matrices.
-         *
-         * For a differential pair with two traces (left and right), the physical
-         * RLGC matrices relate the voltages and currents on each trace:
-         *
-         *   V1 = Z11*I1 + Z12*I2  (per unit length)
-         *   V2 = Z21*I1 + Z22*I2
-         *
-         * The transformation from modal to physical domain is:
-         *   Self terms (diagonal):     X11 = X22 = (X_odd + X_even) / 2
-         *   Mutual terms (off-diag):   X12 = X21 = (X_even - X_odd) / 2
-         *
-         * where X represents R, L, G, or C.
-         *
-         * Physical interpretation:
-         * - Odd mode: traces driven with opposite polarity (differential excitation)
-         * - Even mode: traces driven with same polarity (common-mode excitation)
-         *
-         * Note: Coupling terms (off-diagonal) are NEGATIVE for L and C because:
-         * - L_even > L_odd (same-direction currents create more inductance)
-         * - C_even < C_odd (opposite charges reduce capacitance)
-         * Therefore: L12 = (L_even - L_odd)/2 > 0 (positive mutual inductance)
-         *           C12 = (C_even - C_odd)/2 < 0 (negative mutual capacitance)
+         * Physical 2×2 RLGC matrices for the differential pair (relating the per-unit-length
+         * voltages/currents on the two traces: V1 = Z11·I1 + Z12·I2, V2 = Z21·I1 + Z22·I2).
          *
          * @param {object} odd - Odd mode results with RLGC
          * @param {object} even - Even mode results with RLGC
          * @returns {object} - Physical 2x2 matrices { R, L, G, C }
          */
-        const R_odd = odd.RLGC.R;
-        const R_even = even.RLGC.R;
-        const L_odd = odd.RLGC.L;
-        const L_even = even.RLGC.L;
-        const G_odd = odd.RLGC.G;
-        const G_even = even.RLGC.G;
-        const C_odd = odd.RLGC.C;
-        const C_even = even.RLGC.C;
-
-        // Transform to physical domain
-        const R11 = (R_odd + R_even) / 2;
-        const R22 = R11;
-        const R12 = (R_even - R_odd) / 2;
-        const R21 = R12;
-
-        const L11 = (L_odd + L_even) / 2;
-        const L22 = L11;
-        const L12 = (L_even - L_odd) / 2;
-        const L21 = L12;
-
-        const G11 = (G_odd + G_even) / 2;
-        const G22 = G11;
-        const G12 = (G_even - G_odd) / 2;
-        const G21 = G12;
-
-        const C11 = (C_odd + C_even) / 2;
-        const C22 = C11;
-        const C12 = (C_even - C_odd) / 2;
-        const C21 = C12;
-
-        return {
-            R: [[R11, R12], [R21, R22]],
-            L: [[L11, L12], [L21, L22]],
-            G: [[G11, G12], [G21, G22]],
-            C: [[C11, C12], [C21, C22]]
-        };
+        // Delegate to the shared builder: the genuine asymmetric [C]/[L] (with Tv-reconstructed
+        // [R]/[G]) when an asymmetric physMatrix was computed for this pair, else the symmetric
+        // odd/even reconstruction below. Sharing the builder with the S-parameter path guarantees
+        // RLGC_matrix matches the matrices that actually drive the S-parameters.
+        //
+        //   Symmetric reconstruction: X11 = X22 = (X_odd + X_even)/2,  X12 = X21 = (X_even − X_odd)/2
+        //   - Odd mode = opposite-polarity (differential) drive; even mode = same-polarity (common).
+        //   - L12 = (L_even − L_odd)/2 > 0 (positive mutual L); C12 = (C_even − C_odd)/2 < 0.
+        // For an asymmetric pair the diagonal self terms differ (C11 ≠ C22) and come from the
+        // physical Maxwell matrix rather than the odd/even average.
+        return buildPhysicalRLGC(odd.RLGC, even.RLGC, this._modalPhys);
     }
 
     _build_results(modeResults) {

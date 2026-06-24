@@ -1648,13 +1648,23 @@ async function runSimulation() {
                 const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
                 lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`;
             }
+            // For an asymmetric pair the two traces are not interchangeable: the physical self
+            // terms differ (C11 ≠ C22) and S22 ≠ S11. Surface that here — otherwise the summary
+            // looks identical to a symmetric line. odd/even are then only the approximate eigenmodes.
+            const mC = results.RLGC_matrix?.C, mL = results.RLGC_matrix?.L;
+            const asymStr = (results.physMatrix && mC && mL)
+                ? `\n\nAsymmetric pair (S22 ≠ S11; odd/even are the approximate eigenmodes):\n` +
+                  `  Self-C:  C11 = ${(mC[0][0] * 1e12).toFixed(2)} pF/m,  C22 = ${(mC[1][1] * 1e12).toFixed(2)} pF/m\n` +
+                  `  Self-L:  L11 = ${(mL[0][0] * 1e9).toFixed(2)} nH/m,  L22 = ${(mL[1][1] * 1e9).toFixed(2)} nH/m`
+                : '';
             log(`\nDIFFERENTIAL RESULTS:\n` +
                      `======================\n` +
                      `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ohm  (2 x Z_odd)\n` +
                      `Common-Mode Impedance Z_common: ${results.Z_common.toFixed(2)} Ohm  (Z_even / 2)\n` +
                      `\nModal Impedances:\n` +
                      `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ohm  (eps_eff = ${odd.eps_eff.toFixed(3)})\n` +
-                     `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ohm  (eps_eff = ${even.eps_eff.toFixed(3)})\n` +
+                     `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ohm  (eps_eff = ${even.eps_eff.toFixed(3)})` +
+                     `${asymStr}\n` +
                      `\n${lossStr}`);
         } else {
             let lossStr;

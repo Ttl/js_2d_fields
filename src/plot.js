@@ -959,23 +959,26 @@ function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) 
         traces.push({ x: freqs, y: S11_data, name: `S11 ${label}`, type: 'scatter', mode: lineMode });
         traces.push({ x: freqs, y: S21_data, name: `S21 ${label}`, type: 'scatter', mode: lineMode });
     } else if (useMixedMode) {
+        // An asymmetric pair converts between differential and common mode: SDC/SCD are non-zero
+        // (zero for a symmetric line). Plot those terms when physMatrix is present so the mixed-mode
+        // signature of the asymmetry is visible, not just the pure SDD/SCC responses.
+        const isAsymmetric = sweepResults.some(({ result }) => result.physMatrix);
         const SDD11_data = [], SDD21_data = [], SCC11_data = [], SCC21_data = [];
+        const SDC11_data = [], SCD11_data = [];
+        const conv = plotMode === 'magnitude' ? sParamTodB : sParamToPhase;
 
         for (const { freq, result } of sweepResults) {
             const oddMode = result.modes.find(m => m.mode === 'odd');
             const evenMode = result.modes.find(m => m.mode === 'even');
             const sp = computeSParamsDiffAuto(freq, oddMode.RLGC, evenMode.RLGC, result.physMatrix, length, Z_ref);
 
-            if (plotMode === 'magnitude') {
-                SDD11_data.push(sParamTodB(sp.SDD11));
-                SDD21_data.push(sParamTodB(sp.SDD21));
-                SCC11_data.push(sParamTodB(sp.SCC11));
-                SCC21_data.push(sParamTodB(sp.SCC21));
-            } else {
-                SDD11_data.push(sParamToPhase(sp.SDD11));
-                SDD21_data.push(sParamToPhase(sp.SDD21));
-                SCC11_data.push(sParamToPhase(sp.SCC11));
-                SCC21_data.push(sParamToPhase(sp.SCC21));
+            SDD11_data.push(conv(sp.SDD11));
+            SDD21_data.push(conv(sp.SDD21));
+            SCC11_data.push(conv(sp.SCC11));
+            SCC21_data.push(conv(sp.SCC21));
+            if (isAsymmetric) {
+                SDC11_data.push(conv(sp.SDC11));   // common→differential conversion (reflection)
+                SCD11_data.push(conv(sp.SCD11));   // differential→common conversion (reflection)
             }
         }
 
@@ -984,6 +987,10 @@ function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) 
         traces.push({ x: freqs, y: SDD21_data, name: `SDD21 ${label}`, type: 'scatter', mode: lineMode });
         traces.push({ x: freqs, y: SCC11_data, name: `SCC11 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
         traces.push({ x: freqs, y: SCC21_data, name: `SCC21 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
+        if (isAsymmetric) {
+            traces.push({ x: freqs, y: SDC11_data, name: `SDC11 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dot' } });
+            traces.push({ x: freqs, y: SCD11_data, name: `SCD11 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dot' } });
+        }
     } else {
         // An asymmetric coupled pair (physMatrix present) has a non-degenerate second column:
         // S22≠S11, S32≠S41, S42≠S31. Plot those extra terms so the asymmetry is visible.

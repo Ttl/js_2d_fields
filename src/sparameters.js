@@ -212,30 +212,50 @@ function _modalToPhys2x2(Xo, Xe, Tv, shunt) {
 }
 
 /**
+ * The physical 2×2 per-unit-length [R][L][G][C] matrices for a coupled pair, EXACTLY as fed to
+ * the MTL 4-port S-parameter computation. With a physMatrix ({C,L,Tv?}) the reactive [C]/[L] are
+ * the genuine (asymmetric) Maxwell matrices, and [R]/[G] use the modal-eigenvector transform when
+ * Tv is present (else the symmetric reconstruction, which is what a velocity-degenerate pair
+ * gets). Without a physMatrix every quantity uses the symmetric odd/even reconstruction
+ * (X11=X22=(Xo+Xe)/2, X12=(Xe−Xo)/2). Shared by computeSParamsDiffAuto and the RLGC_matrix result
+ * field so the displayed/exported matrix matches the one that actually drives the S-parameters.
+ * @param {object} rlgc_odd  per-mode scalars {R,L,G,C} for the odd mode
+ * @param {object} rlgc_even per-mode scalars {R,L,G,C} for the even mode
+ * @param {object|null} physMatrix {C, L, Tv?:[[vo],[ve]]} physical p.u.l. matrices + eigenvectors
+ * @returns {{R:number[][], L:number[][], G:number[][], C:number[][]}} physical 2×2 matrices
+ */
+function buildPhysicalRLGC(rlgc_odd, rlgc_even, physMatrix) {
+    const sym = (o, e) => [[(o + e) / 2, (e - o) / 2], [(e - o) / 2, (o + e) / 2]];
+    if (!physMatrix || !physMatrix.C || !physMatrix.L) {
+        return { R: sym(rlgc_odd.R, rlgc_even.R), L: sym(rlgc_odd.L, rlgc_even.L),
+                 G: sym(rlgc_odd.G, rlgc_even.G), C: sym(rlgc_odd.C, rlgc_even.C) };
+    }
+    let R, G;
+    if (physMatrix.Tv) {
+        const [vo, ve] = physMatrix.Tv;               // eigenvectors (any norm); use unit-norm columns
+        const no = Math.hypot(vo[0], vo[1]) || 1, ne = Math.hypot(ve[0], ve[1]) || 1;
+        const Tv = [[vo[0] / no, ve[0] / ne], [vo[1] / no, ve[1] / ne]];
+        R = _modalToPhys2x2(rlgc_odd.R, rlgc_even.R, Tv, false);    // series
+        G = _modalToPhys2x2(rlgc_odd.G, rlgc_even.G, Tv, true);     // shunt
+    } else {
+        R = sym(rlgc_odd.R, rlgc_even.R);
+        G = sym(rlgc_odd.G, rlgc_even.G);
+    }
+    return { R, L: physMatrix.L, G, C: physMatrix.C };
+}
+
+/**
  * Differential S-parameters, automatically using the full MTL 4-port when the physical 2×2
  * [C]/[L] matrices are available (asymmetric-correct) and falling back to the odd/even
- * combination otherwise. When the modal eigenvectors (physMatrix.Tv) are present the loss
- * matrices [R]/[G] are reconstructed with the true (asymmetric) modal transform; otherwise the
- * symmetric reconstruction is used.
+ * combination otherwise.
  * @param {object} physMatrix {C, L, Tv?:[[vo],[ve]]} physical p.u.l. matrices + eigenvectors, or null
  */
 function computeSParamsDiffAuto(freq, rlgc_odd, rlgc_even, physMatrix, length, Z_ref) {
     if (!physMatrix || !physMatrix.C || !physMatrix.L) {
         return computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref);
     }
-    let R2, G2;
-    if (physMatrix.Tv) {
-        const [vo, ve] = physMatrix.Tv;               // eigenvectors (any norm); use unit-norm columns
-        const no = Math.hypot(vo[0], vo[1]) || 1, ne = Math.hypot(ve[0], ve[1]) || 1;
-        const Tv = [[vo[0] / no, ve[0] / ne], [vo[1] / no, ve[1] / ne]];
-        R2 = _modalToPhys2x2(rlgc_odd.R, rlgc_even.R, Tv, false);   // series
-        G2 = _modalToPhys2x2(rlgc_odd.G, rlgc_even.G, Tv, true);    // shunt
-    } else {
-        const sym = (o, e) => [[(o + e) / 2, (e - o) / 2], [(e - o) / 2, (o + e) / 2]];
-        R2 = sym(rlgc_odd.R, rlgc_even.R);
-        G2 = sym(rlgc_odd.G, rlgc_even.G);
-    }
-    return computeSParamsDifferentialMTL(freq, R2, physMatrix.L, G2, physMatrix.C, length, Z_ref);
+    const { R, L, G, C } = buildPhysicalRLGC(rlgc_odd, rlgc_even, physMatrix);
+    return computeSParamsDifferentialMTL(freq, R, L, G, C, length, Z_ref);
 }
 
 // Build a complex 2×2 from real part [[..]] and imaginary part [[..]].
@@ -332,6 +352,7 @@ export {
     computeSParamsDifferential,
     computeSParamsDifferentialMTL,
     computeSParamsDiffAuto,
+    buildPhysicalRLGC,
     computeZ0,
     sParamTodB,
     sParamToPhase
