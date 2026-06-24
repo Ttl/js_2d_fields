@@ -1384,20 +1384,31 @@ export class FieldSolver2D {
         const Cm = maxwell(A, B, false), Cm0 = maxwell(Av, Bv, true);
         const quad = (M, v) => 0.5 * (v[0] * v[0] * M[0][0] + 2 * v[0] * v[1] * M[0][1] + v[1] * v[1] * M[1][1]);
         const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(Cm0), Cm));
-        // Engage the modal decomposition ONLY for a genuinely asymmetric, non-degenerate pair.
-        // A symmetric pair (C11≈C22) or a homogeneous-dielectric pair (degenerate eps_eff, e.g.
-        // a uniform-εr stripline) is exactly the odd/even drives — and for the degenerate case
-        // the eigenvectors are arbitrary — so fall back to the direct odd/even result (exact,
-        // matches the reference suite). Returning null signals the caller to keep odd/even.
+        // A symmetric pair (C11≈C22) is exactly the odd/even drives — keep them and expose no
+        // physMatrix (the symmetric S-parameter combination is exact). Returning null signals the
+        // caller to keep the odd/even drive results.
         const asym = Math.abs(Cm[0][0] - Cm[1][1]) / (Math.abs(Cm[0][0]) + Math.abs(Cm[1][1]) + 1e-30);
         const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
         const force = globalThis.__MODAL_FORCE__;   // 'on'|'off' test override; undefined = guard
-        if (force !== 'on' && (force === 'off' || asym < 0.02 || sep < 0.02)) { this._modalPhys = null; return null; }
-        // Physical p.u.l. matrices for the (asymmetric) MTL 4-port S-parameter path:
-        // [C] = Maxwell matrix, [L] = μ0·ε0·[C0]⁻¹ = (1/c²)·[C0]⁻¹.
+        // asym is the per-trace self-capacitance imbalance |C11−C22|/(C11+C22). A truly symmetric
+        // pair sits at the mesh-discretisation floor (≈3e-6 on a fine mesh, up to ≈1.3e-3 on a
+        // coarse/refined one); a genuine geometric asymmetry is well above it (a 5% broadside
+        // height imbalance ≈7e-3, 10% ≈1.5e-2). 5e-3 separates the two with margin on both sides.
+        if (force === 'off' || (force !== 'on' && asym < 5e-3)) { this._modalPhys = null; return null; }
+        // Genuinely asymmetric pair: expose the true physical p.u.l. matrices for the MTL 4-port
+        // S-parameter path (yields S11≠S22 etc.). [C] = Maxwell matrix, [L] = μ0·ε0·[C0]⁻¹ =
+        // (1/c²)·[C0]⁻¹. These are well-defined even for a velocity-degenerate (homogeneous-
+        // dielectric) pair, where the modal eigenvectors are arbitrary.
         const Cm0inv = mat2Inv(Cm0), kL = 1 / (CONSTANTS.C * CONSTANTS.C);
         this._modalPhys = { C: Cm, L: [[Cm0inv[0][0] * kL, Cm0inv[0][1] * kL], [Cm0inv[1][0] * kL, Cm0inv[1][1] * kL]] };
-        // Assign to odd/even by differential character (opposite-sign components → odd).
+        // When the two modes are velocity-degenerate (homogeneous dielectric, e.g. a uniform-εr
+        // broadside stripline) the eigenvectors of [C0]⁻¹[C] are arbitrary, so we cannot rebuild
+        // per-mode fields or hand a meaningful Tv to the loss reconstruction. Keep the odd/even
+        // drive results for the per-mode quantities; the asymmetric [C]/[L] above still drives the
+        // asymmetric 4-port S-matrix (loss [R]/[G] use the symmetric reconstruction). Returning
+        // null leaves modeResults as odd/even while _modalPhys (without Tv) is picked up downstream.
+        if (force !== 'on' && sep < 0.02) { return null; }
+        // Non-degenerate modes: assign to odd/even by differential character (opposite-sign → odd).
         const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
         const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
         this._modalPhys.Tv = [vecs[order[0]], vecs[order[1]]];   // [v_odd, v_even] for the loss reconstruction

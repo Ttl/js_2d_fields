@@ -985,25 +985,27 @@ function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) 
         traces.push({ x: freqs, y: SCC11_data, name: `SCC11 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
         traces.push({ x: freqs, y: SCC21_data, name: `SCC21 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
     } else {
+        // An asymmetric coupled pair (physMatrix present) has a non-degenerate second column:
+        // S22≠S11, S32≠S41, S42≠S31. Plot those extra terms so the asymmetry is visible.
+        const isAsymmetric = sweepResults.some(({ result }) => result.physMatrix);
+
         const S11_data = [], S21_data = [], S31_data = [], S41_data = [];
+        const S22_data = [], S32_data = [], S42_data = [];
+        const conv = plotMode === 'magnitude' ? sParamTodB : sParamToPhase;
 
         for (const { freq, result } of sweepResults) {
             const oddMode = result.modes.find(m => m.mode === 'odd');
             const evenMode = result.modes.find(m => m.mode === 'even');
             const sp = computeSParamsDiffAuto(freq, oddMode.RLGC, evenMode.RLGC, result.physMatrix, length, Z_ref);
 
-            const S11 = sp.S[0][0], S21 = sp.S[1][0], S31 = sp.S[2][0], S41 = sp.S[3][0];
-
-            if (plotMode === 'magnitude') {
-                S11_data.push(sParamTodB(S11));
-                S21_data.push(sParamTodB(S21));
-                S31_data.push(sParamTodB(S31));
-                S41_data.push(sParamTodB(S41));
-            } else {
-                S11_data.push(sParamToPhase(S11));
-                S21_data.push(sParamToPhase(S21));
-                S31_data.push(sParamToPhase(S31));
-                S41_data.push(sParamToPhase(S41));
+            S11_data.push(conv(sp.S[0][0]));
+            S21_data.push(conv(sp.S[1][0]));
+            S31_data.push(conv(sp.S[2][0]));
+            S41_data.push(conv(sp.S[3][0]));
+            if (isAsymmetric) {
+                S22_data.push(conv(sp.S[1][1]));
+                S32_data.push(conv(sp.S[2][1]));
+                S42_data.push(conv(sp.S[3][1]));
             }
         }
 
@@ -1012,6 +1014,11 @@ function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) 
         traces.push({ x: freqs, y: S21_data, name: `S21 ${label}`, type: 'scatter', mode: lineMode });
         traces.push({ x: freqs, y: S31_data, name: `S31 ${label}`, type: 'scatter', mode: lineMode });
         traces.push({ x: freqs, y: S41_data, name: `S41 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dash' } });
+        if (isAsymmetric) {
+            traces.push({ x: freqs, y: S22_data, name: `S22 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dot' } });
+            traces.push({ x: freqs, y: S32_data, name: `S32 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dot' } });
+            traces.push({ x: freqs, y: S42_data, name: `S42 ${label}`, type: 'scatter', mode: lineMode, line: { dash: 'dot' } });
+        }
     }
 
     return traces;

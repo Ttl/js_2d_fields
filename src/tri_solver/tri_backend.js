@@ -794,21 +794,32 @@ export class TriBackend {
         const C = [[2 * eaa, eab - eaa - ebb], [eab - eaa - ebb, 2 * ebb]];
         const C0m = [[2 * aaa, aab - aaa - abb], [aab - aaa - abb, 2 * abb]];
         const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(C0m), C));
-        // Engage the modal decomposition ONLY for a genuinely asymmetric, non-degenerate pair.
-        // A symmetric pair (C11≈C22) or a velocity-degenerate one (homogeneous εr ⇒ both modes
-        // share eps_eff) is exactly the odd/even decomposition — and for the degenerate case the
-        // eigenvectors are arbitrary — so return false and let _prepareStatic do the odd/even prep.
+        // A symmetric pair (C11≈C22) is exactly the odd/even decomposition — return false and let
+        // _prepareStatic do the odd/even prep, with no physMatrix (the symmetric S-parameter
+        // combination is exact).
         const asym = Math.abs(C[0][0] - C[1][1]) / (Math.abs(C[0][0]) + Math.abs(C[1][1]) + 1e-30);
         const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
         const force = globalThis.__MODAL_FORCE__;   // 'on'|'off' test override; undefined = guard
-        if (force !== 'on' && (force === 'off' || asym < 0.02 || sep < 0.02)) { this._modalPhys = null; return false; }
-        // Physical p.u.l. matrices for the MTL 4-port S-parameter path. The energy-form C is
-        // scaled to F/m by kC·ε0 (same factor as the per-mode C0 = kC·ε0·W_air); [L] = (1/c²)[C0]⁻¹.
+        // asym is the per-trace self-capacitance imbalance |C11−C22|/(C11+C22). A truly symmetric
+        // pair sits at the mesh-discretisation floor (≈1e-3 worst case); a genuine geometric
+        // asymmetry is well above it (a 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2). 5e-3
+        // separates the two with margin (kept in sync with field_solver.js's rectilinear guard).
+        if (force === 'off' || (force !== 'on' && asym < 5e-3)) { this._modalPhys = null; return false; }
+        // Genuinely asymmetric pair: expose the true physical p.u.l. matrices for the MTL 4-port
+        // S-parameter path (yields S11≠S22 etc.). The energy-form C is scaled to F/m by kC·ε0 (same
+        // factor as the per-mode C0 = kC·ε0·W_air); [L] = (1/c²)[C0]⁻¹. These are well-defined even
+        // for a velocity-degenerate (homogeneous-εr) pair, where the modal eigenvectors are not.
         const ksc = kC * eps0, kL = 1 / (c0 * c0);
         const sc2 = (M, s) => [[M[0][0] * s, M[0][1] * s], [M[1][0] * s, M[1][1] * s]];
         const C0pInv = mat2Inv(sc2(C0m, ksc));
         this._modalPhys = { C: sc2(C, ksc), L: sc2(C0pInv, kL) };
-        // Differential character: (v0·v1)/|v|² < 0 ⇒ opposite-sign ⇒ differential ("odd").
+        // When the two modes are velocity-degenerate (homogeneous εr, e.g. a uniform-εr broadside
+        // stripline with unequal heights) the eigenvectors of [C0]⁻¹[C] are arbitrary, so we cannot
+        // build meaningful per-mode fields or hand a Tv to the loss reconstruction. Return false so
+        // _prepareStatic builds the odd/even per-mode static; the asymmetric [C]/[L] above still
+        // drives the asymmetric 4-port S-matrix (loss [R]/[G] use the symmetric reconstruction).
+        if (force !== 'on' && sep < 0.02) return false;
+        // Non-degenerate modes: differential character (v0·v1)/|v|² < 0 ⇒ opposite-sign ⇒ "odd".
         const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
         const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
         this._modalPhys.Tv = [vecs[order[0]], vecs[order[1]]];   // [v_odd, v_even] for the loss reconstruction
