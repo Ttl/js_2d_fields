@@ -248,6 +248,148 @@ export class FieldSolver2D {
     }
 
     /**
+     * Pre-mesh sanity check: can this geometry be meshed at fine enough detail to be
+     * resolved while keeping the mesh under the node budget?
+     *
+     * Two distinct requirements set the mesh size, and the binding one varies:
+     *   1. FEATURE resolution — the smallest geometric feature (thin trace, coating,
+     *      conductor edge) needs a few cells across it, setting the FINE cell size hFine.
+     *   2. WAVELENGTH resolution — at high frequency the field-concentration ("active")
+     *      region near the conductors must be sampled at a fraction of the in-medium
+     *      wavelength. This is a GLOBAL, ungradeable floor over that region: a graded mesh
+     *      can only be so coarse there. A genuinely electrically-large cross-section (e.g.
+     *      a 1 m structure at 100 GHz → λ≈3 mm → ~hundreds of cells per side) needs an
+     *      impossibly dense mesh. We apply this to the active region, NOT the auto-padded
+     *      air domain, and use only ~3 cells/λ (just above Nyquist), so the gate fires only
+     *      for the surely-unsolvable — never a normal mm-scale line at any frequency.
+     *
+     * The two backends pay for this differently, so the estimate is per-backend:
+     *   - Rectilinear FDM is a TENSOR grid: nodes = nx·ny, and a fine feature forces fine
+     *     graded LINES spanning the whole opposite axis. Budget = max_nodes mesh lines².
+     *   - Triangular FEM grades in 2D: a fine feature costs only a LOCAL patch (so it can't
+     *     be unsolvable on its own), and the full-wave eigensolve is ~4× heavier per entity,
+     *     so its triangle budget is max_nodes/4 (memory parity — see tri_backend.js).
+     *
+     * Throws an Error (with the dominant cause and remedies) when the geometry cannot fit
+     * the budget; returns silently when it can or when the domain isn't known yet.
+     *
+     * @param {number} maxNodes - The node budget (UI "Max Nodes"), default 20000.
+     */
+    _check_meshability(maxNodes = 20000) {
+        const W = this.domain_width;
+        const yBottom = -(this.t_gnd ?? 0);
+        const H = (this.domain_height ?? NaN) - yBottom;
+        // Subclasses that haven't set up a domain yet (or degenerate inputs) — nothing to check.
+        if (!(W > 0) || !(H > 0) || !this.conductors || this.conductors.length === 0) return;
+
+        // --- 1. Smallest geometric feature → the fine cell size hFine ---
+        // Mirror what the real meshers key off: conductor widths/heights and dielectric
+        // layer thicknesses (FDM corner_size = min_conductor_dimension/10; tri hFine =
+        // min(thickness, width/4)). A few cells per feature.
+        const featDims = [];
+        for (const c of this.conductors) {
+            if (Math.abs(c.width) > 0) featDims.push(Math.abs(c.width));
+            if (Math.abs(c.height) > 0) featDims.push(Math.abs(c.height));
+        }
+        for (const d of (this.dielectrics || [])) {
+            if (Math.abs(d.height) > 0) featDims.push(Math.abs(d.height));
+        }
+        const dMin = featDims.length ? Math.min(...featDims) : Math.min(W, H);
+        const CELLS_PER_FEATURE = 3;
+        const hFine = Math.max(dMin / CELLS_PER_FEATURE, 1e-12);
+
+        // --- 2. The field-concentration ("active") region that must be wavelength-resolved ---
+        // A bound quasi-TEM mode's field lives within ~a few substrate heights of the
+        // conductors; the auto-sized domain pads far beyond that with near-field-free air
+        // that only needs a coarse mesh. So the WAVELENGTH-resolution requirement applies
+        // to the active region, NOT the full (often heavily over-padded) air domain — that
+        // is what separates a normal mm-scale line at 100 GHz (active region ≪ λ, fine) from
+        // a genuinely electrically-large 1 m cross-section at 100 GHz (active region ≫ λ).
+        // Build the structure box from the conductors and the real substrate dielectrics
+        // (ε_r > 1). The air fill is often modelled as a full-height ε_r=1 dielectric that
+        // spans the whole padded domain — including it would wrongly make the structure look
+        // domain-sized. The substrate thickness + conductor extent is the true field scale.
+        const stackYs = [...this.conductors,
+            ...(this.dielectrics || []).filter(d => (d.epsilon_r || 1) > 1.001)];
+        let yLo = Infinity, yHi = -Infinity;
+        for (const r of stackYs) { yLo = Math.min(yLo, r.y_min); yHi = Math.max(yHi, r.y_max); }
+        if (!(yHi > yLo)) { yLo = 0; yHi = dMin; }       // degenerate fallback
+        const G = Math.max(yHi - yLo, dMin);             // transverse structure scale (substrate stack)
+        // Horizontal span of the conductor cluster, ignoring full-domain-width grounds
+        // (which are absorbed into PEC walls and carry no localized field structure).
+        let cxLo = Infinity, cxHi = -Infinity;
+        for (const c of this.conductors) {
+            if (Math.abs(c.width) >= W * 0.99) continue;
+            cxLo = Math.min(cxLo, c.x_min); cxHi = Math.max(cxHi, c.x_max);
+        }
+        const clusterW = (cxHi > cxLo) ? (cxHi - cxLo) : dMin;
+        // Field decays ~exponentially over a few G; pad the cluster by 3·G each side
+        // vertically and horizontally, capped at the actual domain.
+        const Lx = Math.min(W, clusterW + 6 * G);
+        const Ly = Math.min(H, (yHi - yLo) + 6 * G);
+
+        // --- 3. Cell sizes: coarse geometric background + wavelength-resolved active patch ---
+        const epsMax = Math.max(1, ...(this.dielectrics || []).map(d => d.epsilon_r || 1));
+        const geomCoarse = Math.max(Math.min(W, H) / 5, hFine);  // mesher bulk target
+        let hWave = geomCoarse;                                   // active-region cell size
+        let lambdaLimited = false;
+        if (this.freq > 0) {
+            const lambdaMin = CONSTANTS.C / (this.freq * Math.sqrt(epsMax));
+            // ~3 cells per wavelength — just above the Nyquist floor. These quasi-TEM
+            // backends solve bound modes on much coarser meshes than a full-wave λ/10
+            // rule would demand, so this only flags structures so electrically large that
+            // even a crude (alias-level) mesh blows the budget — i.e. surely unsolvable.
+            const N_LAMBDA = 3;
+            const hLambda = lambdaMin / N_LAMBDA;
+            if (hLambda < hWave) { hWave = Math.max(hLambda, hFine); lambdaLimited = true; }
+        }
+
+        // --- 4. Estimate the mesh size for the active backend and compare to budget ---
+        const fmtL = (m) => m >= 1e-3 ? `${(m * 1e3).toFixed(3)} mm` : `${(m * 1e6).toFixed(1)} µm`;
+        const lambdaMm = this.freq > 0 ? fmtL(CONSTANTS.C / (this.freq * Math.sqrt(epsMax))) : '';
+        const cause = lambdaLimited
+            ? `the ${fmtL(Lx)}×${fmtL(Ly)} field region is electrically large at ${(this.freq / 1e9).toFixed(2)} GHz ` +
+              `(λ≈${lambdaMm} in ε_r=${epsMax.toFixed(1)}), needing ~${fmtL(hWave)} cells to resolve the wavelength`
+            : `resolving the ${fmtL(dMin)} feature across the ${fmtL(W)}×${fmtL(H)} domain`;
+        const remedy = lambdaLimited
+            ? 'reduce the structure/enclosure size, lower the maximum frequency, or raise Max Nodes'
+            : 'enlarge the smallest feature, shrink the domain, or raise Max Nodes';
+
+        if (this.mesh_backend === 'triangular') {
+            // Triangles grade in 2D, so a fine FEATURE only costs a small LOCAL patch — never
+            // enough on its own to be "surely unsolvable" (the suite meshes 16–35 µm features
+            // in cm-scale domains fine). The only triangular blow-up that is genuinely
+            // unsolvable is an electrically-large field region: a coarse background plus a
+            // wavelength-resolved active patch that exceeds the triangle budget.
+            const FW_NODES_PER_TRI = 4;
+            const triBudget = Math.max(800, maxNodes / FW_NODES_PER_TRI);
+            let tris = 2 * (W / geomCoarse) * (H / geomCoarse);   // coarse background
+            if (lambdaLimited) tris += 2 * (Lx / hWave) * (Ly / hWave);   // active wavelength patch
+            if (tris > triBudget) {
+                throw new Error(
+                    `Geometry cannot be meshed for the full-wave (triangular) solver within the node budget: ` +
+                    `${cause}, needing ~${Math.round(tris).toLocaleString()} triangles vs a budget of ` +
+                    `${Math.round(triBudget).toLocaleString()} (Max Nodes ${maxNodes.toLocaleString()}). To proceed, ${remedy}.`);
+            }
+        } else {
+            // Rectilinear tensor grid: nodes = nx·ny. The coarse geometric cell sets the
+            // baseline line count per axis; the wavelength-resolved active region adds fine
+            // lines over its span; a fine feature adds graded transition lines (logarithmic).
+            const GROWTH = 1.3;                                    // graded neighbour ratio
+            const gradeLines = Math.max(0, Math.log(geomCoarse / hFine) / Math.log(GROWTH));
+            const axisLines = (L, La) => L / geomCoarse + (lambdaLimited ? La / hWave : 0) + 2 * gradeLines;
+            const nx = axisLines(W, Lx), ny = axisLines(H, Ly);
+            const nodes = nx * ny;
+            if (nodes > maxNodes) {
+                throw new Error(
+                    `Geometry cannot be meshed for the rectilinear (FDM) solver within the node budget: ` +
+                    `${cause}, needing ~${Math.round(nx)}×${Math.round(ny)} ≈ ${Math.round(nodes).toLocaleString()} mesh nodes vs a budget of ` +
+                    `${maxNodes.toLocaleString()} (Max Nodes). To proceed, ${remedy}.`);
+            }
+        }
+    }
+
+    /**
      * Create a voltage array based on conductor masks and solve mode.
      * @param {string} mode - 'single', 'odd', or 'even'
      * @returns {Array<Float64Array>} - 2D voltage array
@@ -1609,6 +1751,11 @@ export class FieldSolver2D {
          * elements (11, 22) are self-parameters, and off-diagonal elements (12, 21) are mutual
          * coupling parameters. For L and C, coupling terms are negative.
          */
+        // Reject geometries that can't be meshed finely enough to resolve features and
+        // the wavelength while staying under the node budget, before either backend
+        // starts building a (possibly enormous) mesh.
+        this._check_meshability(options.max_nodes ?? 20000);
+
         // Triangular FEM backend: delegate the whole solve (mesh + static +
         // full-wave eigenmode + loss) to TriBackend, lazily loaded so the gmsh
         // WASM is only fetched when this backend is selected.
@@ -1868,6 +2015,10 @@ export class FieldSolver2D {
 
         // Set frequency to max for finest skin depth mesh
         this.freq = maxFreq;
+
+        // Fail fast (before building the FDM mesh below) if the geometry can't be meshed
+        // finely enough to resolve features and the wavelength within the node budget.
+        this._check_meshability(max_nodes);
 
         // Force mesh regeneration
         this.mesh_generated = false;
