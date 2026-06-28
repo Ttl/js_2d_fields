@@ -23,7 +23,7 @@
 import createModule from '../wasm_solver/eigen_solver.js';
 import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
-import { buildOccMeshFromGeometry, tagMaterials } from './occ_to_mesh.js';
+import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh } from './occ_to_mesh.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
          staticToEdgeDofs, assembleTriFEM } from './tri_fem.js';
@@ -321,63 +321,17 @@ function perElementEnergy(phi, mesh, epsMap) {
 // the HIGHEST overlap to the static drive (the static field is the quasi-TEM shape) —
 // reliable even when several modes cluster at eps ≈ ε_r (homogeneous/stripline fills).
 // Returns { eps, vRe, vIm, g2Re, g2Im } for the chosen mode, or null.
-// k²-decomposition cache. The FEM matrices A(k²), B(k²) are exactly affine in k²
-// (Lee–Jin form; the only √k² term, the radiating Robin ABC, is absent here — the walls
-// are PEC/PMC), with fixed sparsity across frequency. Assemble at the first two distinct
-// frequencies, store A0/A1 and B0/B1, then rebuild any frequency's CSR with a cheap
-// a0+k²·a1 combine — skipping the per-frequency element re-assembly, which profiling
-// showed costs MORE than the eigensolve itself. Exact to machine precision; falls back
-// to per-frequency assembly if the two sparsity patterns ever differ.
-function buildFemK2Cache(femA, kA, femB, kB) {
-    const samePat = (x, y) => {
-        if (x.colIdx.length !== y.colIdx.length || x.rowPtr.length !== y.rowPtr.length) return false;
-        for (let i = 0; i < x.colIdx.length; i++) if (x.colIdx[i] !== y.colIdx[i]) return false;
-        for (let i = 0; i < x.rowPtr.length; i++) if (x.rowPtr[i] !== y.rowPtr[i]) return false;
-        return true;
-    };
-    if (!samePat(femA.csrA, femB.csrA) || !samePat(femA.csrB, femB.csrB)) return null;
-    const inv = 1 / (kB - kA);
-    const mk = (ca, cb) => {
-        const n = ca.valRe.length, a0 = new Float64Array(n), a1 = new Float64Array(n);
-        for (let i = 0; i < n; i++) { a1[i] = (cb.valRe[i] - ca.valRe[i]) * inv; a0[i] = ca.valRe[i] - kA * a1[i]; }
-        return { rowPtr: ca.rowPtr, colIdx: ca.colIdx, a0, a1, zeros: new Float64Array(n) };
-    };
-    return { N: femA.N, A: mk(femA.csrA, femB.csrA), B: mk(femA.csrB, femB.csrB) };
-}
-function femFromK2Cache(cache, k2) {
-    const build = (m) => {
-        const n = m.a0.length, v = new Float64Array(n);
-        for (let i = 0; i < n; i++) v[i] = m.a0[i] + k2 * m.a1[i];
-        return { rowPtr: m.rowPtr, colIdx: m.colIdx, valRe: v, valIm: m.zeros };
-    };
-    return { csrA: build(cache.A), csrB: build(cache.B), N: cache.N };
-}
-
-function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static, seedVec = null, cacheBox = null) {
+function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static) {
     const k2 = (2 * Math.PI * f / c0) ** 2;
     let fem;
-    if (cacheBox && cacheBox.ready) {
-        fem = femFromK2Cache(cacheBox.ready, k2);   // O(nnz) rebuild, no re-assembly
-    } else {
-        try { fem = assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, null); }
-        catch { return null; }
-        if (cacheBox) {   // lazily build the cache from the first two distinct frequencies
-            if (cacheBox.prev && Math.abs(cacheBox.prev.k2 - k2) > 0) {
-                cacheBox.ready = buildFemK2Cache(cacheBox.prev.fem, cacheBox.prev.k2, fem, k2);
-                cacheBox.prev = null;
-            } else if (!cacheBox.prev) {
-                cacheBox.prev = { k2, fem };
-            }
-        }
-    }
+    try { fem = assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, null); }
+    catch { return null; }
     if (!fem) return null;
     const N = fem.N;
-    // Warm start the Arnoldi from the previous frequency's eigenvector when available
-    // (same mesh → same N); falls back to the static-field projection. A near-converged
-    // start cuts the iterations across a sweep. The quasi-TEM mode-pick below always
-    // overlaps against the static drive (staticSeed), independent of the warm start.
+    // Seed the Arnoldi from the static-field projection (the quasi-TEM shape). The
+    // mode-pick below also overlaps every candidate against this static drive.
     const staticSeed = staticToEdgeDofs(phiEps, mesh, fm);
-    const seed = (seedVec && seedVec.length === N) ? seedVec : staticSeed;
+    const seed = staticSeed;
     // Request enough eigenpairs that the quasi-TEM is in the returned set even when it has
     // DISPERSED away from the shift. Shift-invert is centered on -k2·eps_static, so the
     // solver returns the `nev` modes nearest that shift. At high frequency on an inhomogeneous
@@ -721,6 +675,12 @@ export class TriBackend {
             this.meshQuality = mq.metrics;
             if (this.solver) this.solver.meshQuality = mq.metrics;
         } catch { this.meshQuality = null; }
+        // Reject a degenerate/collapsed mesh up front (the full-wave analogue of the
+        // rectilinear validate_laplace_inputs guard) rather than producing NaN/Inf in the
+        // eigensolve.
+        const meshErrors = validateTriMesh(mesh, this.condRect);
+        if (meshErrors.length)
+            throw new Error('Full-wave mesh validation failed:\n' + meshErrors.map(e => ' - ' + e).join('\n'));
         this._prepareStatic();
         return mesh;
     }
@@ -740,6 +700,9 @@ export class TriBackend {
                 if (gx && gy && gx.length && gy.length) grid = { x: gx, y: gy };
             }
         } catch { grid = null; }
+        // Cached for the per-frequency causal-materials rebuild (_applyCausal), which re-runs
+        // the same static preparation under the updated permittivity.
+        this._staticGrid = grid;
         // Asymmetric differential pair on the full domain: the odd/even excitation basis is
         // NOT the modal basis (the two traces sit in different environments), so driving
         // odd/even and picking one eigenmode per drive can return the SAME eigenmode twice
@@ -895,17 +858,16 @@ export class TriBackend {
             // real box modes; ABC only changes genuinely open walls. The symmetry plane stays
             // 'pmc' (even/single) / PEC (odd, absent). Validated reference 16/16, output
             // byte-identical to the old 'pmc' pick. Lossy ε was tried too but only removed one
-            // more false-positive flag for no accuracy gain, so it's not used. The ABC's √k²
-            // boundary term is non-affine in k², so the per-frequency k²-cache can't be reused
-            // (≈2× the old sweep cost — the deliberate price for the robustness).
+            // more false-positive flag for no accuracy gain, so it's not used. The FEM is
+            // re-assembled per frequency (the ABC's √k² boundary term is non-affine in k², so
+            // an a0+k²·a1 reuse is not possible) — the deliberate cost for the robustness.
             const pickAbc = {};
             for (const k of ['left', 'right', 'top', 'bottom']) {
                 const v = st.abc[k];
                 if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
                 pickAbc[k] = (this.symmetry && k === 'left') ? 'pmc' : true;
             }
-            fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                null, null);
+            fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static);
             if (fw && fw.eps > 0) eps_d = fw.eps;
             if (fw && fw.ambiguous && this._modeWarnings) {
                 const msg = `${mode} mode: full-wave quasi-TEM pick is ambiguous at ${(f / 1e9).toFixed(2)} GHz — `
@@ -914,9 +876,11 @@ export class TriBackend {
                     + `static ε_eff=${eps_eff_static.toFixed(3)}. The quasi-TEM has likely fragmented across degenerate `
                     + `modes (inhomogeneous fill) — reported ε_eff/Z0 may be unreliable.`;
                 if (!this._modeWarnings.some(w => w.mode === mode)) {
+                    // Surfaced to the UI via result.warnings / solver.modeWarnings; the console
+                    // line is dev-only (avoid duplicate user-facing noise).
                     this._modeWarnings.push({ mode, freq: f, bestEps: fw.bestEps, altEps: fw.altEps,
                         bestOvl: fw.bestOvl, altOvl: fw.altOvl, staticEps: eps_eff_static, message: msg });
-                    console.warn('[tri full-wave] ' + msg);
+                    globalThis.__TRI_DEBUG__ && console.warn('[tri full-wave] ' + msg);
                 }
             }
         }
@@ -939,7 +903,6 @@ export class TriBackend {
         const delta = f > 0 ? Math.sqrt(2 / (omu * sigma)) : Infinity;
         const Rs_smooth = 1 / (sigma * Math.min(delta, 1e30));
         const Zr = calculate_Zrough(f > 0 ? f : 1, sigma, rq);
-        const fR = Rs_smooth > 0 ? Zr.re / Rs_smooth : 1, fL = Rs_smooth > 0 ? Zr.im / Rs_smooth : 1;
 
         // Per-face plating: split the loss surface into surface-impedance groups.
         // Used by the perturbation path below (when MQS doesn't apply) to evaluate
@@ -1132,6 +1095,14 @@ export class TriBackend {
         });
         const { epsMap, lossMap } = tagMaterials(this.mesh, causalDiel);
         this.mesh.epsMap = epsMap; this.mesh.lossMap = lossMap;
+        // Asymmetric differential pair: the odd/even drive is NOT the modal basis, so re-derive
+        // the genuine line modes (and the physical [C]/[L] matrices that drive the 4-port
+        // S-parameters) under the causal permittivity — exactly as the initial build does.
+        // _prepareStaticModal rebuilds this._static[*] (fields, eps_eff_static, W_loss) and
+        // this._modalPhys from the now-causal mesh.epsMap. It returns false for an electrically
+        // symmetric or velocity-degenerate pair, in which case the odd/even drive below is the
+        // correct basis (and any _modalPhys it set is already causal-consistent).
+        if (s.is_differential && !this.symmetry && this._prepareStaticModal(this._staticGrid)) return;
         for (const mode of this.modeNames) {
             const st = this._static[mode];
             const pot = drivePotentials(this.condRect, mode, this.symmetry);
@@ -1140,11 +1111,15 @@ export class TriBackend {
             st.phiEps = phiEps;
             st.eps_eff_static = computeTriEnergy(phiEps, this.mesh, epsMap) / W_air;
             st.W_loss = computeTriEnergy(phiEps, this.mesh, lossMap);
+            // Refresh the resampled plot fields so contour plots track the causal ε.
+            const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
+            st.fields = resampleStatic(this.mesh, phiEps, this.domain,
+                { resolution: this.opts.resolution, parity, grid: this._staticGrid });
         }
     }
 
     solveAt(f) {
-        if (!this.mesh) this.buildMesh();
+        if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         if (this.solver.use_causal_materials) this._applyCausal(f);
         this._modeWarnings = [];
         const modes = this.modeNames.map(m => this._modeAtFreq(m, f));
@@ -1192,7 +1167,7 @@ export class TriBackend {
     // Per-mode eigenvectors are cached for getModeField(); eps_eff is -γ²/k² for
     // propagating modes (γ²<0), null otherwise.
     solveModes(f, nev = 4) {
-        if (!this.mesh) this.buildMesh();
+        if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         if (this.solver.use_causal_materials) this._applyCausal(f);
         const s = this.solver, cr = this.condRect, mesh = this.mesh;
         const st = this._static[this.modeNames[0]];   // any cached static solve seeds the shift

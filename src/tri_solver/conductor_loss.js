@@ -381,8 +381,6 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
 
     // --- Step 1: Compute per-edge h2dl and |Ht|² at 3 quadrature points ---
     const edgeH2dl = new Float64Array(nEdges);
-    // Store |Ht|² at each of the 3 Gauss points per edge (for fitting)
-    const edgeHt2 = new Array(nEdges); // edgeHt2[e] = [ht2_q0, ht2_q1, ht2_q2] or null
 
     for (let e=0;e<nEdges;e++){
         if (!isLossEdge[e]) continue;
@@ -416,7 +414,6 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
             const hz2=(hzR2*hzR2+hzI2*hzI2)/omu2;
             edgeH2dl[e] += GL3w[q]*L*(ht2q[q]+hz2);
         }
-        edgeHt2[e] = ht2q;
     }
 
     let h2dl = 0;
