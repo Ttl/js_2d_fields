@@ -56,8 +56,10 @@ rm -f dist/tri_solver/_smoke_test.mjs
 # must exist alongside dist/ at runtime (dist/tri_solver/foo.js → dist/bar.js).
 # These modules are also inlined into the app_solver bundle, but the external tree
 # needs its own standalone copies. Keep this list in sync with the `../*.js`
-# imports in src/tri_solver/*.js (complex, surface_roughness, djordjevic_sarkar, matrix).
-cp src/complex.js src/surface_roughness.js src/djordjevic_sarkar.js src/matrix.js dist/
+# imports in src/tri_solver/*.js (complex, surface_roughness, djordjevic_sarkar,
+# matrix, sparameters, geometry_symmetry).
+cp src/complex.js src/surface_roughness.js src/djordjevic_sarkar.js src/matrix.js \
+   src/sparameters.js src/geometry_symmetry.js dist/
 
 # Full-wave WASM runtime: tri_solver loads these from ../wasm_solver via
 # import.meta.url, and each emscripten module locates its .wasm relative to its
