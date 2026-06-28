@@ -1466,7 +1466,7 @@ async function runSimulation() {
 
         // Run adaptive refinement at highest frequency first
         // Note: Causal materials will be applied during frequency sweep in computeAtFrequency()
-        log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes} nodes, tolerance ${p.tolerance})...`);
+        log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes}k nodes, tolerance ${p.tolerance})...`);
 
         let results = await solver.solve_adaptive({
             max_iters: p.max_iters,
