@@ -38,6 +38,45 @@ export function tagMaterials(mesh, dielectrics, tol) {
     return { epsMap, lossMap };
 }
 
+// Validate a built triangular mesh before the FEM solve — the full-wave analogue of
+// field_solver.js's validate_laplace_inputs(). Returns an array of human-readable error
+// strings (empty ⇒ OK). Catches the degenerate-geometry / collapsed-mesh cases that would
+// otherwise surface as opaque NaN/Inf (Area=0 → division) or a heap abort deep in the
+// eigensolve, mirroring how the rectilinear backend rejects a bad Laplace input up front.
+export function validateTriMesh(mesh, condRect) {
+    const errors = [];
+    if (!mesh || !mesh.nNodes || !mesh.nTris) {
+        errors.push('Mesh is empty (no nodes or triangles).');
+        return errors;
+    }
+    const { nodes, tris, nNodes, nTris, epsMap } = mesh;
+    for (let i = 0; i < 2 * nNodes; i++) {
+        if (!Number.isFinite(nodes[i])) { errors.push(`Non-finite node coordinate at index ${i}.`); break; }
+    }
+    let degenerate = 0, badIdx = false;
+    for (let t = 0; t < nTris; t++) {
+        const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
+        if (v0 < 0 || v1 < 0 || v2 < 0 || v0 >= nNodes || v1 >= nNodes || v2 >= nNodes) { badIdx = true; continue; }
+        const ax = nodes[2 * v0], ay = nodes[2 * v0 + 1];
+        const bx = nodes[2 * v1], by = nodes[2 * v1 + 1];
+        const cx = nodes[2 * v2], cy = nodes[2 * v2 + 1];
+        if (!(Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) > 0)) degenerate++;
+    }
+    if (badIdx) errors.push('A triangle references an out-of-range node index.');
+    if (degenerate) errors.push(`${degenerate} degenerate (zero-area) triangle(s) in the mesh.`);
+    if (!epsMap || epsMap.length !== nTris) {
+        errors.push(`Permittivity map length ${epsMap ? epsMap.length : 'null'} does not match triangle count ${nTris}.`);
+    } else {
+        for (let t = 0; t < nTris; t++) {
+            const e = epsMap[t];
+            if (!e || !Number.isFinite(e.re) || !(e.re > 0)) { errors.push(`Invalid permittivity at triangle ${t} (re=${e && e.re}).`); break; }
+        }
+    }
+    const roles = condRect && condRect.rectRoles;
+    if (!roles || !roles.some(r => r.is_signal)) errors.push('No signal conductor found in the geometry.');
+    return errors;
+}
+
 function _cstr(G, str) {
     const len = G.lengthBytesUTF8(str) + 1;
     const ptr = G.stackAlloc(len);
@@ -243,11 +282,25 @@ export function buildOccMeshFromGeometry(G, opts) {
     const enPtr = G.getValue(enPtrPtr, 'i32');
     G._gmshFree(G.getValue(etPtrPtr, 'i32'));
     const tris = new Int32Array(3 * nTris);
+    // tagToIdx.get() returns undefined for an unknown tag, which the Int32Array would
+    // silently coerce to node 0 (corrupt geometry). Flag it and fail loudly below.
+    let badTag = false;
     for (let t = 0; t < nTris; t++)
-        for (let k = 0; k < 3; k++) tris[3 * t + k] = tagToIdx.get(G.getValue(enPtr + (3 * t + k) * 4, 'i32'));
+        for (let k = 0; k < 3; k++) {
+            const idx = tagToIdx.get(G.getValue(enPtr + (3 * t + k) * 4, 'i32'));
+            if (idx === undefined) badTag = true;
+            tris[3 * t + k] = idx | 0;
+        }
     G._gmshFree(enPtr);
 
     G.stackRestore(stack);
+
+    // Fail loudly on a collapsed/empty or corrupt mesh rather than feeding empty/garbage
+    // arrays into the FEM solve (where they surface as opaque NaN/Inf or a heap abort).
+    if (nTris === 0)
+        throw new Error('Full-wave mesher produced no triangles — the geometry may be degenerate or the OCC fragment collapsed.');
+    if (badTag)
+        throw new Error('Full-wave mesh extraction referenced an unknown node tag (corrupt mesh).');
 
     // ---- CCW winding ----
     for (let t = 0; t < nTris; t++) {
