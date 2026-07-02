@@ -5,6 +5,7 @@ import { initTriBackend, TriBackend } from '../tri_backend.js';
 const ctx = await initTriBackend();
 const s = new MicrostripSolver({ trace_width: 1.5e-3, substrate_height: 0.5e-3, trace_thickness: 35e-6, epsilon_r: 4.4, tan_delta: 0.02, freq: 5e9 });
 const b = new TriBackend(ctx, s);
+await b.buildMesh();
 const res = b.solveAt(5e9);
 
 console.log('result Z0=', res.modes[0].Z0.toFixed(2), 'eps_eff=', res.modes[0].eps_eff.toFixed(3));

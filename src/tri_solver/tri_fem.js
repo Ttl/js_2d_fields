@@ -622,8 +622,8 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
     }
 
     // Robin ABC: boundary edges with P2 DOFs (strict equality: 'pmc' skips Robin terms)
-    if (abc.top === true || abc.left === true || abc.right === true) {
-        const ymax = condRect.ymax_domain;
+    if (abc.top === true || abc.left === true || abc.right === true || abc.bottom === true) {
+        const ymax = condRect.ymax_domain, ymin = condRect.ymin_domain;
         const xmin = condRect.xmin_domain, xmax = condRect.xmax_domain;
         const TOL = 1e-12;
         for (let e = 0; e < nEdges; e++) {
@@ -633,6 +633,7 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
             const L = Math.sqrt((x1-x0)**2 + (y1-y0)**2);
             let isBoundary = false;
             if (abc.top === true && Math.abs(y0 - ymax) < TOL && Math.abs(y1 - ymax) < TOL) isBoundary = true;
+            if (abc.bottom === true && Math.abs(y0 - ymin) < TOL && Math.abs(y1 - ymin) < TOL) isBoundary = true;
             if (abc.left === true && Math.abs(x0 - xmin) < TOL && Math.abs(x1 - xmin) < TOL) isBoundary = true;
             if (abc.right === true && Math.abs(x0 - xmax) < TOL && Math.abs(x1 - xmax) < TOL) isBoundary = true;
             if (!isBoundary) continue;

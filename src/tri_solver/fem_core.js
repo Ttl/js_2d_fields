@@ -473,42 +473,54 @@ export function createWasmHelpers(M) {
     function readFloat64(ptr, len) {
         return new Float64Array(M.HEAPF64.buffer, ptr, len).slice();
     }
+    // Free every allocation even when the WASM call throws (the frees themselves
+    // are guarded: after a genuine abort the module is unusable and _free itself
+    // can throw, which must not mask the original error).
+    function freeAll(ptrs) {
+        for (const p of ptrs) { try { M._free(p); } catch { /* module aborted */ } }
+    }
     function solveGeneralized(N, csrA, csrB, sigma, nev, ncv, initVec) {
         const ptrs = [];
         function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
         function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
-        const pAr = ai(csrA.rowPtr), pAc = ai(csrA.colIdx), pAre = af(csrA.valRe), pAim = af(csrA.valIm);
-        const pBr = ai(csrB.rowPtr), pBc = ai(csrB.colIdx), pBre = af(csrB.valRe), pBim = af(csrB.valIm);
-        const pEvRe = M._malloc(8 * nev); ptrs.push(pEvRe);
-        const pEvIm = M._malloc(8 * nev); ptrs.push(pEvIm);
-        const pVRe = M._malloc(8 * nev * N); ptrs.push(pVRe);
-        const pVIm = M._malloc(8 * nev * N); ptrs.push(pVIm);
-        let nc;
-        if (initVec) {
-            const pInitRe = af(initVec);
-            const pInitIm = af(new Float64Array(N));
-            nc = M._solve_generalized_eigen_with_init(
-                N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
-                csrB.colIdx.length, pBr, pBc, pBre, pBim,
-                sigma[0], sigma[1], nev, ncv, pEvRe, pEvIm, pVRe, pVIm,
-                pInitRe, pInitIm
-            );
-        } else {
-            nc = M._solve_generalized_eigen(
-                N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
-                csrB.colIdx.length, pBr, pBc, pBre, pBim,
-                sigma[0], sigma[1], nev, ncv, pEvRe, pEvIm, pVRe, pVIm
-            );
+        try {
+            const pAr = ai(csrA.rowPtr), pAc = ai(csrA.colIdx), pAre = af(csrA.valRe), pAim = af(csrA.valIm);
+            const pBr = ai(csrB.rowPtr), pBc = ai(csrB.colIdx), pBre = af(csrB.valRe), pBim = af(csrB.valIm);
+            const pEvRe = M._malloc(8 * nev); ptrs.push(pEvRe);
+            const pEvIm = M._malloc(8 * nev); ptrs.push(pEvIm);
+            const pVRe = M._malloc(8 * nev * N); ptrs.push(pVRe);
+            const pVIm = M._malloc(8 * nev * N); ptrs.push(pVIm);
+            let nc;
+            if (initVec) {
+                const pInitRe = af(initVec);
+                const pInitIm = af(new Float64Array(N));
+                nc = M._solve_generalized_eigen_with_init(
+                    N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
+                    csrB.colIdx.length, pBr, pBc, pBre, pBim,
+                    sigma[0], sigma[1], nev, ncv, pEvRe, pEvIm, pVRe, pVIm,
+                    pInitRe, pInitIm
+                );
+            } else {
+                nc = M._solve_generalized_eigen(
+                    N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
+                    csrB.colIdx.length, pBr, pBc, pBre, pBim,
+                    sigma[0], sigma[1], nev, ncv, pEvRe, pEvIm, pVRe, pVIm
+                );
+            }
+            // Negative nc = solver-reported failure (factorization failed,
+            // exception caught in C++, …). Throw so callers can't mistake it for
+            // a truthy "converged" count.
+            if (nc < 0) throw new Error(`Eigensolver failed (code ${nc})`);
+            return {
+                nconv: nc,
+                evalsRe: readFloat64(pEvRe, nc > 0 ? nc : 0),
+                evalsIm: readFloat64(pEvIm, nc > 0 ? nc : 0),
+                evecsRe: readFloat64(pVRe, nc > 0 ? nc * N : 0),
+                evecsIm: readFloat64(pVIm, nc > 0 ? nc * N : 0),
+            };
+        } finally {
+            freeAll(ptrs);
         }
-        const r = {
-            nconv: nc,
-            evalsRe: readFloat64(pEvRe, nc > 0 ? nc : 0),
-            evalsIm: readFloat64(pEvIm, nc > 0 ? nc : 0),
-            evecsRe: readFloat64(pVRe, nc > 0 ? nc * N : 0),
-            evecsIm: readFloat64(pVIm, nc > 0 ? nc * N : 0),
-        };
-        ptrs.forEach(p => M._free(p));
-        return r;
     }
     // Direct sparse solver: factorize once, solve for multiple RHS.
     // csr: {rowPtr, colIdx, valRe}, rhsArrays: array of Float64Array(N)
@@ -517,22 +529,23 @@ export function createWasmHelpers(M) {
         const ptrs = [];
         function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
         function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
-        const pR = ai(csr.rowPtr), pC = ai(csr.colIdx), pV = af(csr.valRe);
-        const nRhs = rhsArrays.length;
-        // Pack RHS into contiguous array
-        const rhsPacked = new Float64Array(nRhs * N);
-        for (let r = 0; r < nRhs; r++) rhsPacked.set(rhsArrays[r], r * N);
-        const pRhs = af(rhsPacked);
-        const pX = M._malloc(8 * nRhs * N); ptrs.push(pX);
-        const rc = M._solve_sparse_multi(N, csr.colIdx.length, pR, pC, pV, nRhs, pRhs, pX);
-        const results = [];
-        if (rc === 0) {
+        try {
+            const pR = ai(csr.rowPtr), pC = ai(csr.colIdx), pV = af(csr.valRe);
+            const nRhs = rhsArrays.length;
+            // Pack RHS into contiguous array
+            const rhsPacked = new Float64Array(nRhs * N);
+            for (let r = 0; r < nRhs; r++) rhsPacked.set(rhsArrays[r], r * N);
+            const pRhs = af(rhsPacked);
+            const pX = M._malloc(8 * nRhs * N); ptrs.push(pX);
+            const rc = M._solve_sparse_multi(N, csr.colIdx.length, pR, pC, pV, nRhs, pRhs, pX);
+            if (rc !== 0) throw new Error(`solve_sparse_multi failed: ${rc}`);
+            const results = [];
             for (let r = 0; r < nRhs; r++)
                 results.push(readFloat64(pX + r * N * 8, N));
+            return results;
+        } finally {
+            freeAll(ptrs);
         }
-        ptrs.forEach(p => M._free(p));
-        if (rc !== 0) throw new Error(`solve_sparse_multi failed: ${rc}`);
-        return results;
     }
     // Rayleigh quotient iteration: refine a known eigenvalue of complex Ax=λBx.
     // csrA, csrB: complex CSR matrices. sigma: [re, im] initial eigenvalue guess.
@@ -543,28 +556,30 @@ export function createWasmHelpers(M) {
         const ptrs = [];
         function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
         function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
-        const pAr = ai(csrA.rowPtr), pAc = ai(csrA.colIdx), pAre = af(csrA.valRe), pAim = af(csrA.valIm);
-        const pBr = ai(csrB.rowPtr), pBc = ai(csrB.colIdx), pBre = af(csrB.valRe), pBim = af(csrB.valIm);
-        const pInitRe = af(initVec);
-        const pEvRe = M._malloc(8); ptrs.push(pEvRe);
-        const pEvIm = M._malloc(8); ptrs.push(pEvIm);
-        const pVRe = M._malloc(8 * N); ptrs.push(pVRe);
-        const pVIm = M._malloc(8 * N); ptrs.push(pVIm);
-        const rc = M._solve_rqi(
-            N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
-            csrB.colIdx.length, pBr, pBc, pBre, pBim,
-            sigma[0], sigma[1], maxIter, pInitRe, null,
-            pEvRe, pEvIm, pVRe, pVIm
-        );
-        const result = {
-            evalRe: readFloat64(pEvRe, 1)[0],
-            evalIm: readFloat64(pEvIm, 1)[0],
-            evecRe: readFloat64(pVRe, N),
-            evecIm: readFloat64(pVIm, N),
-        };
-        ptrs.forEach(p => M._free(p));
-        if (rc < 0) throw new Error(`solve_rqi failed: ${rc}`);
-        return result;
+        try {
+            const pAr = ai(csrA.rowPtr), pAc = ai(csrA.colIdx), pAre = af(csrA.valRe), pAim = af(csrA.valIm);
+            const pBr = ai(csrB.rowPtr), pBc = ai(csrB.colIdx), pBre = af(csrB.valRe), pBim = af(csrB.valIm);
+            const pInitRe = af(initVec);
+            const pEvRe = M._malloc(8); ptrs.push(pEvRe);
+            const pEvIm = M._malloc(8); ptrs.push(pEvIm);
+            const pVRe = M._malloc(8 * N); ptrs.push(pVRe);
+            const pVIm = M._malloc(8 * N); ptrs.push(pVIm);
+            const rc = M._solve_rqi(
+                N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
+                csrB.colIdx.length, pBr, pBc, pBre, pBim,
+                sigma[0], sigma[1], maxIter, pInitRe, null,
+                pEvRe, pEvIm, pVRe, pVIm
+            );
+            if (rc < 0) throw new Error(`solve_rqi failed: ${rc}`);
+            return {
+                evalRe: readFloat64(pEvRe, 1)[0],
+                evalIm: readFloat64(pEvIm, 1)[0],
+                evecRe: readFloat64(pVRe, N),
+                evecIm: readFloat64(pVIm, N),
+            };
+        } finally {
+            freeAll(ptrs);
+        }
     }
     // QEP Rayleigh quotient iteration: refine eigenvalue of (A0+λA1+λ²A2)x=0.
     // csr0,csr1,csr2: complex CSR matrices for A0,A1,A2. sigma: [re,im] initial guess.
@@ -573,27 +588,29 @@ export function createWasmHelpers(M) {
         const ptrs = [];
         function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
         function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
-        const p0r=ai(csr0.rowPtr),p0c=ai(csr0.colIdx),p0re=af(csr0.valRe),p0im=af(csr0.valIm||new Float64Array(csr0.valRe.length));
-        const p1r=ai(csr1.rowPtr),p1c=ai(csr1.colIdx),p1re=af(csr1.valRe),p1im=af(csr1.valIm||new Float64Array(csr1.valRe.length));
-        const p2r=ai(csr2.rowPtr),p2c=ai(csr2.colIdx),p2re=af(csr2.valRe),p2im=af(csr2.valIm||new Float64Array(csr2.valRe.length));
-        const pIRe = af(initVec);
-        const pIIm = initVecIm ? af(initVecIm) : null;
-        const pEvRe = M._malloc(8); ptrs.push(pEvRe);
-        const pEvIm = M._malloc(8); ptrs.push(pEvIm);
-        const pVRe = M._malloc(8*N); ptrs.push(pVRe);
-        const pVIm = M._malloc(8*N); ptrs.push(pVIm);
-        const rc = M._solve_qep_rqi(
-            N, csr0.colIdx.length, p0r, p0c, p0re, p0im,
-            csr1.colIdx.length, p1r, p1c, p1re, p1im,
-            csr2.colIdx.length, p2r, p2c, p2re, p2im,
-            sigma[0], sigma[1], maxIter, pIRe, pIIm,
-            pEvRe, pEvIm, pVRe, pVIm
-        );
-        const result = { evalRe: readFloat64(pEvRe,1)[0], evalIm: readFloat64(pEvIm,1)[0],
-                         evecRe: readFloat64(pVRe,N), evecIm: readFloat64(pVIm,N) };
-        ptrs.forEach(p => M._free(p));
-        if (rc < 0) throw new Error(`solve_qep_rqi failed: ${rc}`);
-        return result;
+        try {
+            const p0r=ai(csr0.rowPtr),p0c=ai(csr0.colIdx),p0re=af(csr0.valRe),p0im=af(csr0.valIm||new Float64Array(csr0.valRe.length));
+            const p1r=ai(csr1.rowPtr),p1c=ai(csr1.colIdx),p1re=af(csr1.valRe),p1im=af(csr1.valIm||new Float64Array(csr1.valRe.length));
+            const p2r=ai(csr2.rowPtr),p2c=ai(csr2.colIdx),p2re=af(csr2.valRe),p2im=af(csr2.valIm||new Float64Array(csr2.valRe.length));
+            const pIRe = af(initVec);
+            const pIIm = initVecIm ? af(initVecIm) : null;
+            const pEvRe = M._malloc(8); ptrs.push(pEvRe);
+            const pEvIm = M._malloc(8); ptrs.push(pEvIm);
+            const pVRe = M._malloc(8*N); ptrs.push(pVRe);
+            const pVIm = M._malloc(8*N); ptrs.push(pVIm);
+            const rc = M._solve_qep_rqi(
+                N, csr0.colIdx.length, p0r, p0c, p0re, p0im,
+                csr1.colIdx.length, p1r, p1c, p1re, p1im,
+                csr2.colIdx.length, p2r, p2c, p2re, p2im,
+                sigma[0], sigma[1], maxIter, pIRe, pIIm,
+                pEvRe, pEvIm, pVRe, pVIm
+            );
+            if (rc < 0) throw new Error(`solve_qep_rqi failed: ${rc}`);
+            return { evalRe: readFloat64(pEvRe,1)[0], evalIm: readFloat64(pEvIm,1)[0],
+                     evecRe: readFloat64(pVRe,N), evecIm: readFloat64(pVIm,N) };
+        } finally {
+            freeAll(ptrs);
+        }
     }
     return { allocInt32, allocFloat64, readFloat64, solveGeneralized, solveSparseMulti, solveRQI, solveQepRQI };
 }

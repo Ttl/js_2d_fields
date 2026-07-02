@@ -128,6 +128,13 @@ class InterpolatingSweep {
      */
     async _computeExact(freq) {
         const result = await this.solver.computeAtFrequency(freq, this.cachedResults);
+        // Collect per-point solver warnings (e.g. the full-wave backend's eigensolve
+        // failure / mode-ambiguity warnings) so the app can surface them after the
+        // sweep — they would otherwise be silently discarded with the result object.
+        if (result && result.warnings) {
+            if (!this.warnings) this.warnings = [];
+            this.warnings.push(...result.warnings);
+        }
         const t = Math.log10(freq);
         const modeData = result.modes.map(m => ({
             mode: m.mode,

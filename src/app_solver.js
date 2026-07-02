@@ -1495,14 +1495,20 @@ async function runSimulation() {
                 `Try adjusting geometry or enclosure size.`);
         }
 
-        // Mode-ambiguity warning (triangular full-wave backend): the quasi-TEM eigenmode
-        // pick fragmented across near-degenerate modes (typical of inhomogeneous broadside /
-        // two-ground geometries), so the reported eps_eff/Z0 may be unreliable. The static
-        // (variational) eps_eff in the message is the trustworthy magnitude.
-        const modeWarnings = (results && results.warnings) || solver.modeWarnings || [];
-        for (const mw of modeWarnings) {
-            log(`⚠ Mode warning: ${mw.message}`);
-        }
+        // Mode warnings (triangular full-wave backend): quasi-TEM pick ambiguity
+        // (fragmented near-degenerate modes) or a per-point eigensolve failure
+        // (silent fallback to the quasi-static ε). Logged once per distinct
+        // warning; sweep points report through the same channel below.
+        const seenModeWarnings = new Set();
+        const logModeWarnings = (warnings) => {
+            for (const mw of warnings || []) {
+                const key = `${mw.type || 'ambiguous'}|${mw.mode}`;
+                if (seenModeWarnings.has(key)) continue;
+                seenModeWarnings.add(key);
+                log(`⚠ Mode warning: ${mw.message}`);
+            }
+        };
+        logModeWarnings((results && results.warnings) || solver.modeWarnings);
 
         if (stopRequested) {
             log("Simulation stopped by user");
@@ -1586,6 +1592,7 @@ async function runSimulation() {
                 }
                 log(`Interpolating sweep: ${nSamples + (hasDC ? 1 : 0)} exact solves for ${frequencies.length} output points`);
             }
+            logModeWarnings(sweep.warnings);
         } else {
             // Discrete sweep: compute at every frequency point
             log(`Calculating frequency sweep (${frequencies.length} points)...`);
@@ -1610,6 +1617,7 @@ async function runSimulation() {
                 // (or full solve if causal materials are enabled)
                 const result = await solver.computeAtFrequency(freq, cachedResults);
 
+                logModeWarnings(result && result.warnings);
                 frequencySweepResults.push({ freq, result });
 
                 // Update progress (second half is for frequency sweep)

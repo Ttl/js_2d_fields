@@ -27,9 +27,10 @@ import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh } from './occ_t
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
          staticToEdgeDofs, assembleTriFEM } from './tri_fem.js';
-import { staticConductorLoss, solveConductorLoss, computeHtZZMetric } from './conductor_loss.js';
+import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
+         projectH, computePoyntingFromProjectedH } from './conductor_loss.js';
+import { csqrt } from './fem_core.js';
 import { mqsConductorLoss, refineSkinBand } from './mqs_loss.js';
-import { analyzeTriMode } from './tri_ms_solver.js';
 import { checkMeshQuality } from './tri_mesh.js';
 
 // Below this frequency the full-wave eigensolve degenerates near DC; use the
@@ -141,12 +142,15 @@ function lossyEpsMap(mesh, tandFloor = 0.002) {
 }
 
 // Effective conductor surface impedance σ/Rq: plating coats the current-carrying
-// surface, so when any signal conductor is plated use its plating σ/Rq; else base.
+// surface, so when any signal conductor is ACTIVELY plated (σ set AND at least one
+// face selected — the top/sides/bottom checkboxes can all be off, which means bare
+// metal, matching the FDM backend) use its plating σ/Rq; else base.
 function effectiveSurface(solver) {
     let sigma = solver.sigma_cond ?? 5.8e7;
     let rq = solver.rq ?? 0;
     for (const c of solver.conductors) {
-        if (c.is_signal && c.plating && c.plating.sigma) {
+        if (c.is_signal && c.plating && c.plating.sigma > 0 &&
+            (c.plating.top || c.plating.sides || c.plating.bottom)) {
             sigma = c.plating.sigma;
             rq = c.plating.rq ?? rq;
             break;
@@ -321,11 +325,12 @@ function perElementEnergy(phi, mesh, epsMap) {
 // the HIGHEST overlap to the static drive (the static field is the quasi-TEM shape) —
 // reliable even when several modes cluster at eps ≈ ε_r (homogeneous/stripline fills).
 // Returns { eps, vRe, vIm, g2Re, g2Im } for the chosen mode, or null.
+// Throws on assembly/eigensolver failure (callers catch and surface a warning);
+// returns null when the eigensolve converged but no quasi-TEM candidate passed
+// the physicality gates.
 function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static) {
     const k2 = (2 * Math.PI * f / c0) ** 2;
-    let fem;
-    try { fem = assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, null); }
-    catch { return null; }
+    const fem = assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, null);
     if (!fem) return null;
     const N = fem.N;
     // Seed the Arnoldi from the static-field projection (the quasi-TEM shape). The
@@ -346,16 +351,18 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // 20-vector subspace, just more Ritz pairs extracted. The closed 'pmc' assembly
     // (refinement metric, enclosed structures) pays the modest ncv 9→17.
     const hasRadiatingAbc = abc && Object.values(abc).some(v => v === true);
-    const nev = 8, ncv = Math.min(hasRadiatingAbc ? Math.max(2 * nev + 1, 20) : 2 * nev + 1, N - 1);
+    // Clamp nev to the problem size (a tiny mesh can have N ≤ 8).
+    const nev = Math.max(1, Math.min(8, N - 1));
+    const ncv = Math.min(hasRadiatingAbc ? Math.max(2 * nev + 1, 20) : 2 * nev + 1, N - 1);
     // Absolute ceiling (mirrors the FDM "Problem too large" guard): refuse a solve that
     // would overrun the eigensolver heap with a clear error rather than an opaque abort().
     // The triangle budget keeps normal solves well under this; this backstops misuse.
     if (eigenSolveBytes(N, fem.csrA.colIdx.length) > MAX_SOLVE_BYTES)
         throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem.csrA.colIdx.length) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
-    let res;
-    try { res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed); }
-    catch { return null; }
-    if (!res || !res.nconv) return null;
+    // solveGeneralized throws on solver failure (negative return code) — let it
+    // propagate so the caller can warn. nconv === 0 (nothing converged) → null.
+    const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed);
+    if (!res || res.nconv <= 0) return null;
     // Pick the quasi-TEM mode by overlap with the static drive (the static field IS the
     // quasi-TEM shape), with a tie-break by proximity to eps_static. A loose eps gate drops
     // near-cutoff / continuum modes (eps ≪ eps_static) that can score a deceptively high
@@ -549,8 +556,18 @@ export class TriBackend {
         }
         this.condRect = mesh.condRect;
 
-        // Loss routines read condRects[0].symmetry to scale the half-domain integral.
-        this.condRect.rects.forEach(r => { r.symmetry = this.condRect.symmetry; });
+        // Loss routines read per-rect metadata: .symmetry scales the half-domain
+        // integral, .xmin_domain locates the symmetry plane (corner/edge exclusion —
+        // rects[0] is what the loss routines receive, and without this the plane
+        // test compared against undefined and never fired), .is_signal separates
+        // signal from ground rects in the DC-resistance area.
+        this.condRect.rects.forEach((r, i) => {
+            r.symmetry = this.condRect.symmetry;
+            r.xmin_domain = this.condRect.xmin_domain;
+            r.ymin_domain = this.condRect.ymin_domain;
+            const role = this.condRect.rectRoles && this.condRect.rectRoles[i];
+            r.is_signal = role ? !!role.is_signal : true;
+        });
 
         // ---- Adaptive mesh refinement ----
         // The OCC field-graded mesh produces high-quality triangles (Q≈2), so error-driven
@@ -748,6 +765,11 @@ export class TriBackend {
         // Per-trace drives (positive- and negative-polarity signal conductors).
         const potA = roles.map(r => (r.is_signal && (r.polarity || 1) > 0) ? 1 : 0);
         const potB = roles.map(r => (r.is_signal && (r.polarity || 1) < 0) ? 1 : 0);
+        // Both polarities must actually be present in the meshed domain — a missing
+        // group (both traces tagged +, or one clipped out) makes phiB ≡ 0 and C0m
+        // singular, and mat2Inv would silently produce a NaN cascade. Fall back to
+        // the odd/even drive instead.
+        if (!potA.some(v => v) || !potB.some(v => v)) { this._modalPhys = null; return false; }
         const phiA = solveTriStatic(mesh, fm, mesh.epsMap, potA);
         const phiB = solveTriStatic(mesh, fm, mesh.epsMap, potB);
         const phiAa = solveTriStatic(mesh, fm, null, potA);
@@ -867,8 +889,26 @@ export class TriBackend {
                 if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
                 pickAbc[k] = (this.symmetry && k === 'left') ? 'pmc' : true;
             }
-            fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static);
+            let fwErr = null;
+            try {
+                fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static);
+            } catch (e) { fw = null; fwErr = e; }
             if (fw && fw.eps > 0) eps_d = fw.eps;
+            // The eigensolve failed (or converged to no physical quasi-TEM) at this
+            // frequency: the point silently degrades to the quasi-static ε, which
+            // kinks the sweep. Surface it — one warning per mode, like the
+            // ambiguity warning below.
+            if (!fw && this._modeWarnings) {
+                const reason = fwErr ? `eigensolver error: ${fwErr.message || fwErr}`
+                                     : 'no converged quasi-TEM candidate';
+                const msg = `${mode} mode: full-wave eigensolve failed at ${(f / 1e9).toFixed(2)} GHz `
+                    + `(${reason}) — falling back to the quasi-static ε_eff=${eps_eff_static.toFixed(3)} `
+                    + `for this point; the dispersion curve may show a kink here.`;
+                if (!this._modeWarnings.some(w => w.mode === mode && w.type === 'eigensolve')) {
+                    this._modeWarnings.push({ type: 'eigensolve', mode, freq: f, message: msg });
+                    globalThis.__TRI_DEBUG__ && console.warn('[tri full-wave] ' + msg);
+                }
+            }
             if (fw && fw.ambiguous && this._modeWarnings) {
                 const msg = `${mode} mode: full-wave quasi-TEM pick is ambiguous at ${(f / 1e9).toFixed(2)} GHz — `
                     + `picked ε_eff=${fw.bestEps.toFixed(3)} (overlap ${fw.bestOvl.toFixed(2)}) but a competing mode `
@@ -901,7 +941,6 @@ export class TriBackend {
         const { sigma, rq } = effectiveSurface(s);
         const omu = omega * MU0;
         const delta = f > 0 ? Math.sqrt(2 / (omu * sigma)) : Infinity;
-        const Rs_smooth = 1 / (sigma * Math.min(delta, 1e30));
         const Zr = calculate_Zrough(f > 0 ? f : 1, sigma, rq);
 
         // Per-face plating: split the loss surface into surface-impedance groups.
@@ -921,7 +960,17 @@ export class TriBackend {
         const hasGroundRect = cr.rectRoles.some(r => !r.is_signal);
         const anyPlating = cr.rectRoles.some(r => r.plating && r.plating.sigma > 0
             && (r.plating.top || r.plating.sides || r.plating.bottom));
-        const useMQS = (lossMethod === 'mqs')
+        // MQS drives every meshed conductor rect with the same source current, so
+        // explicit ground rects (coplanar GCPW grounds etc.) would carry FORWARD
+        // current instead of return current — nonsense R. Refuse the forced 'mqs'
+        // override there (with a warning) rather than produce garbage.
+        if (lossMethod === 'mqs' && hasGroundRect && this._modeWarnings
+            && !this._modeWarnings.some(w => w.type === 'mqs-grounds')) {
+            this._modeWarnings.push({ type: 'mqs-grounds', mode, freq: f,
+                message: 'MQS conductor loss is not applicable with explicit ground conductors ' +
+                         '(they would be driven as signal); using the perturbation method instead.' });
+        }
+        const useMQS = (lossMethod === 'mqs' && !hasGroundRect)
             || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
         let R_total = 0, L_internal = 0;
         // Smallest conductor cross-section dimension (gates the skin-band remesh and
@@ -945,6 +994,10 @@ export class TriBackend {
             // against the reference suite), keeping the reused mesh small and the solve
             // fast.
             const bandDelta = this.opts.mqsBandDelta ?? 0.6;
+            // Skin-mesh triangle budget: bounds the size-aware band refinement on
+            // large-perimeter/small-δ geometries (memory guard; hitting it leaves the
+            // band partially resolved rather than aborting).
+            const mqsMaxTris = this.opts.mqsMaxTris ?? 40000;
             const mqsBand = this.opts.mqsBand ?? 1.5;
             // DEFAULT: f_max-reuse. Build the skin mesh at the HIGHEST frequency seen
             // (finest target, narrowest band) and reuse it for all lower frequencies.
@@ -959,18 +1012,19 @@ export class TriBackend {
             if (mqsDelta >= minDim) {
                 mqsMesh = mesh;
             } else if (this.opts.mqsCacheMesh === false) {
-                mqsMesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta);
+                mqsMesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta, mqsMaxTris);
             } else {
                 const sc = st.skinCache || (st.skinCache = { dB: Infinity, mesh: null });
                 if (!sc.mesh || mqsDelta < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
                     sc.dB = mqsDelta;
-                    sc.mesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta);
+                    sc.mesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta, mqsMaxTris);
                 }
                 mqsMesh = sc.mesh;
             }
             // Per-face plating ⇒ weight each face's smooth current by its own surface
             // impedance (surfaceZs); otherwise the uniform roughness factor (Rq).
-            const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: mode === 'odd' };
+            const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: mode === 'odd',
+                              diffPair: !!s.is_differential };
             if (anyPlating) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
             else mqsOpts.Rq = rq;
             let mqs = null;
@@ -1002,40 +1056,77 @@ export class TriBackend {
         // The crossover (δ/t ≈ 0.08–0.15) is where the two agree, so the blend is
         // continuous — fixing the old discontinuity at F_STATIC_MAX. 'static' forces
         // the static estimator everywhere.
+        // DC resistance from the geometry lists — the SAME convention as the FDM
+        // backend (field_solver.calculate_conductor_loss): current flows through the
+        // signal cross-section and returns through the ground cross-section in
+        // series. cr.rects can NOT be used for this: it contains coplanar ground
+        // rects (which are return path, not parallel signal metal) and omits
+        // wall-absorbed grounds entirely.
+        const sigmaDC = s.sigma_cond ?? 5.8e7;
+        let sigArea = 0, gndArea = 0;
+        for (const c of s.conductors) {
+            const a = Math.abs((c.width ?? (c.x_max - c.x_min)) * (c.height ?? (c.y_max - c.y_min)));
+            if (c.is_signal) sigArea += a; else gndArea += a;
+        }
+        const R_dc = (sigArea > 0 ? 1 / (sigmaDC * sigArea) : 0)
+                   + (gndArea > 0 ? 1 / (sigmaDC * gndArea) : 0);
+        if (f === 0) {
+            // Pure DC point: no skin effect, R is the geometric DC resistance
+            // (the FDM backend returns the same; this used to return R = 0).
+            R_total = R_dc;
+            L_internal = 0;
+        }
         if (f > 0 && R_total === 0) {
-            const edges = lossEdgeMask;
-            // Per-edge surface groups (one group = one surface impedance). Without
-            // per-face plating there is a single group whose Zs equals the effective
-            // surface impedance — identical to the original single-pass behaviour.
-            // The static/SIBC loss routines return R_ac ∝ Rs(sigmaRef); scaling each
-            // group by Zs_group.re/Rs(sigmaRef) recovers the per-face surface
-            // resistance, and the groups sum (the loss is linear over edges).
-            const groups = platingPerSide
-                ? surf.groups
-                : [{ Zs: { re: Zr.re, im: Zr.im }, mask: edges }];
-            const sigmaRef = platingPerSide ? (s.sigma_cond ?? 5.8e7) : sigma;
+            // Per-edge surface groups (one group = one surface impedance). The groups
+            // from buildSurfaceGroups are used even when uniform: a fully-plated
+            // surface then correctly keeps the LAYERED plating-over-bulk impedance
+            // (substituting effectiveSurface's solid-plating-metal Zs here used to
+            // lose the bulk underneath).
+            const groups = surf.groups.length ? surf.groups
+                : [{ Zs: { re: Zr.re, im: Zr.im }, mask: lossEdgeMask }];
+            // The loss routines run at the base bulk σ; plating/roughness enter only
+            // through the per-group fRg = Re(Zs)/Rs(σ_base) scaling (the group Zs from
+            // makePlatingZs is defined relative to the base metal).
+            const sigmaRef = s.sigma_cond ?? 5.8e7;
             const deltaRef = Math.sqrt(2 / (omu * sigmaRef));
             const RsRef = 1 / (sigmaRef * Math.min(deltaRef, 1e30));
 
             const useFW = !!fw && lossMethod !== 'static';
-            let an = null;
+            // Galerkin H-projection of the eigenmode, computed ONCE per frequency and
+            // shared by every plating group's SIBC evaluation (solveConductorLoss used
+            // to re-project per group). Replaces the analyzeTriMode call whose only
+            // consumed output was the Poynting power — and whose voltage-path contour
+            // walk could crash on geometries without a node at its hardcoded ground.
+            let projH = null, Pfw = 0;
             if (useFW) {
-                const k2 = (omega / c0) ** 2;
-                an = analyzeTriMode(fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, mesh, fm, k2, f, mesh.epsMap, cr);
+                let gamma = csqrt(fw.g2Re, fw.g2Im);
+                if (gamma.im < 0) gamma = { re: -gamma.re, im: -gamma.im };
+                try {
+                    projH = projectH(mesh, fm, fw.vRe, fw.vIm, gamma, f, this.ctx.wasmSolver);
+                    Pfw = Math.abs(computePoyntingFromProjectedH(mesh, fm, fw.vRe, fw.vIm,
+                        projH.htRe, projH.htIm, omu, projH.hDofs));
+                } catch { projH = null; Pfw = 0; }
             }
-            const haveFW = useFW && an && Math.abs(an.P) > 1e-30 && minDim > 0;
+            const haveFW = useFW && projH && Pfw > 1e-30 && minDim > 0;
             const wFW = haveFW ? Math.max(0, Math.min(1, (0.15 - deltaRef / minDim) / (0.15 - 0.08))) : 0;
 
-            let R_ac = 0, R_dc = 0;
+            // A differential drive carries TWICE the transmitted power of the
+            // single-conductor normalization the static estimator uses (two ±1 V
+            // traces), while its loss integral covers both traces — so its R_ac is
+            // reported per drive pair and must be halved to the per-trace mode R
+            // (same convention as the MQS mqs.R_total/2 above and the FDM backend).
+            // The SIBC estimator self-normalizes by the eigenmode's own Poynting
+            // power, so it needs no correction.
+            const driveScale = s.is_differential ? 0.5 : 1;
+            let R_ac = 0;
             for (const g of groups) {
                 const fRg = RsRef > 0 ? g.Zs.re / RsRef : 1;
                 const lossS = staticConductorLoss(cr.rects, f, sigmaRef, mesh, fm, phiEps,
                     Z0, eps_eff_static, eps_d, g.mask);
-                R_dc = lossS.R_dc;   // mask-independent (full cross-section at sigmaRef)
-                let racg = lossS.R_ac * fRg;
+                let racg = lossS.R_ac * driveScale * fRg;
                 if (haveFW && wFW > 0) {
                     const lossW = solveConductorLoss(cr.rects, f, sigmaRef, mesh, fm, fw.vRe, fw.vIm,
-                        fw.g2Re, fw.g2Im, Math.abs(an.P), Z0, mesh.epsMap, g.mask, null, this.ctx.wasmSolver);
+                        fw.g2Re, fw.g2Im, Pfw, Z0, mesh.epsMap, g.mask, projH, this.ctx.wasmSolver);
                     racg = (1 - wFW) * racg + wFW * (lossW.R_ac * fRg);
                 }
                 R_ac += racg;

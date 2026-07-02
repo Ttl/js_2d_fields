@@ -499,11 +499,16 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
             let fitNode = ce.other;
             let walkDist = ce.dist;
             const fitEdges = []; // {e, r1, r2} — non-corner edges on this surface
+            // Track every traversed edge: an edge just walked still touches fitNode
+            // and passes all filters, so without this the walk can step BACKWARD onto
+            // it (mesh-numbering dependent) and fit the same edge twice — degenerating
+            // the 2×2 singular+regular fit to the flat single-edge model.
+            const visited = new Set([ce.e]);
 
             for (let step = 0; step < 4; step++) {
                 let foundNext = false;
                 for (let e = 0; e < nEdges; e++) {
-                    if (!isLossEdge[e] || !isCondEdge[e] || e === ce.e) continue;
+                    if (!isLossEdge[e] || !isCondEdge[e] || visited.has(e)) continue;
                     const en0 = edges[2*e], en1 = edges[2*e+1];
                     if (en0 !== fitNode && en1 !== fitNode) continue;
                     const enOther = en0 === fitNode ? en1 : en0;
@@ -512,6 +517,7 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
                     if (surfKey.startsWith('x=') && Math.abs(eox - nodes[2*fitNode]) > TOL) continue;
                     const eL = Math.sqrt((eox-nodes[2*fitNode])**2 + (eoy-nodes[2*fitNode+1])**2);
                     if (edgeH2dl[e] > 0) fitEdges.push({ e, r1: walkDist, r2: walkDist + eL });
+                    visited.add(e);
                     walkDist += eL;
                     fitNode = enOther;
                     foundNext = true;
@@ -630,7 +636,12 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
     // Use corner-corrected h2dl: analytically corrects corner-adjacent edges using a
     // two-parameter model (singular + regular) fitted from neighboring edges.
     // Derive hSub and epsR from condRects/epsMap for dielectric-aware corner correction.
+    // Pass ALL rects (a wrapper mirroring the condRect container shape) so every
+    // trace of a multi-conductor line gets its corners corrected — passing only
+    // rects[0] skipped the second trace of a full-domain differential pair.
     const condRect0 = condRects && condRects[0];
+    const cornerCtx = condRect0 ? { rects: condRects, symmetry: condRect0.symmetry,
+                                    xmin_domain: condRect0.xmin_domain } : null;
     const hSub_loss = condRect0 ? condRect0.ymin : undefined;
     let epsR_loss = 1;
     if (epsMap) for (const e of epsMap) if (e.re > epsR_loss) epsR_loss = e.re;
@@ -640,22 +651,29 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
     // limit, which overestimates the true (SIBC) loss. κ calibrated against the
     // QEP SIBC eigenvalue (validated to −0.03% on analytic circular coax).
     const h2dl = evalH2dlCorrected(extMesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossEdge,
-        hDofs, condRect0, hSub_loss, epsR_loss, SAT_KAPPA * delta);
+        hDofs, cornerCtx, hSub_loss, epsR_loss, SAT_KAPPA * delta);
     const Pproj = computePoyntingFromProjectedH(extMesh, fm, vecRe, vecIm, htRe, htIm, omu, hDofs);
     const Peff = Math.abs(Pproj) > 1e-30 ? Math.abs(Pproj) : P;
 
     const alpha_c_ac = Peff>1e-30 ? Rs*h2dl/(4*Peff) : 0;
 
-    // For half-domain, signal_area from condRects is half the physical conductor area
+    // For half-domain, signal_area from condRects is half the physical conductor
+    // area. Only SIGNAL rects carry the drive current — coplanar ground rects are
+    // return path, not parallel signal metal (counting them made GCPW R_dc ~10× low).
     const sym = (condRects && condRects[0] && condRects[0].symmetry) || 1;
     let signal_area=0;
-    if (condRects) for(const cr of condRects) signal_area+=Math.abs((cr.xmax-cr.xmin)*(cr.ymax-cr.ymin));
+    if (condRects) for(const cr of condRects) {
+        if (cr.is_signal === false) continue;
+        signal_area+=Math.abs((cr.xmax-cr.xmin)*(cr.ymax-cr.ymin));
+    }
     signal_area *= sym;
     const R_dc = signal_area>0 ? 1/(sigma*signal_area) : 0;
     const R_ac = 2*alpha_c_ac*Z0;
     const R_combined = Math.sqrt(R_dc*R_dc+R_ac*R_ac);
     const alpha_c = Z0>0 ? R_combined/(2*Z0) : 0;
-    const L_int = Peff>1e-30 ? Rs*h2dl/(4*Peff*omega) : 0;
+    // Internal inductance in the skin regime: Zs = Rs(1+j) ⇒ X_int = R_ac ⇒
+    // L_int = R_ac/ω. (Was α_c/ω — Np·s/m, missing the 2·Z0 to resistance units.)
+    const L_int = omega > 0 ? R_ac/omega : 0;
 
     globalThis.__TRI_DEBUG__ && console.log(`  Conductor loss: Rs=${Rs.toFixed(4)} Ohm/sq, delta=${(delta*1e6).toFixed(2)} um, P=${P.toExponential(3)}`);
     globalThis.__TRI_DEBUG__ && console.log(`    h2dl=${h2dl.toExponential(3)}, alpha_c_ac=${(alpha_c_ac*8.686).toFixed(4)} dB/m`);
@@ -877,16 +895,23 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
     // Quasi-TEM: |Ht| = √ε_eff/η₀ · |∇φ_eps| where η₀ = √(μ₀/ε₀) ≈ 377Ω.
     // Uses the ε-weighted static potential φ_eps (not φ_air).
     // ∮|Ht|²dl = ε_eff/η₀² · ∮|∇φ_eps|²dl. Power: P = V²/(2Z₀).
-    // α_c = Rs · ε_eff · Z₀ · ∮|∇φ_eps|²dl / (2η₀²)
-    // Frequency correction: use ε_eff(mode) and Z₀(f).
+    // α_c = Rs · ε_eff(mode) · Z₀(f) · ∮|∇φ_eps|²dl / (2η₀²)
+    // The caller passes the ALREADY-dispersed Z0(f) (= 1/(c·C0·√ε_mode)), so it is
+    // used as-is. (This used to apply √(ε_static/ε_mode) on top — the dispersion
+    // correction for a STATIC Z0 — dispersing twice and under-reporting R by
+    // ε_static/ε_mode at frequencies where the mode ε has risen.)
     const EPS0 = 8.854187817e-12;
     const ETA0 = Math.sqrt(MU0 / EPS0); // ~376.73 Ω
     const ee = (epsEffMode && epsEff) ? epsEffMode : (epsEff || 1);
-    const Z0f = (epsEffMode && epsEff) ? Z0 * Math.sqrt(epsEff / epsEffMode) : Z0;
+    const Z0f = Z0;
     const alpha_c_static = Rs * ee * Z0f * gradPhi2dl / (2 * ETA0 * ETA0);
 
+    // Only SIGNAL rects carry the drive current (see solveConductorLoss).
     let signal_area=0;
-    if (condRects) for(const cr of condRects) signal_area+=Math.abs((cr.xmax-cr.xmin)*(cr.ymax-cr.ymin));
+    if (condRects) for(const cr of condRects) {
+        if (cr.is_signal === false) continue;
+        signal_area+=Math.abs((cr.xmax-cr.xmin)*(cr.ymax-cr.ymin));
+    }
     signal_area *= sym;
     const R_dc = signal_area>0 ? 1/(sigma*signal_area) : 0;
     const R_ac = 2*alpha_c_static*Z0f;

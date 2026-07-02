@@ -41,7 +41,7 @@ function inAnyRect(rects, x, y, tol) {
 // (coarse initial meshes: triangles touching the surface always qualify).
 // Element size roughly halves per pass. If `targetH` is given, refinement stops
 // early once the smallest conductor-surface edge is ≤ targetH.
-export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0) {
+export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity) {
     const rects = condRect.rects || [condRect];
     const bw = band * delta;
     function distToRectBoundary(r, x, y) {
@@ -55,38 +55,39 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
         for (const r of rects) if (Math.abs(distToRectBoundary(r, x, y)) < bw) return true;
         return false;
     }
-    function onSurface(x, y) {
-        for (const r of rects) {
-            const T = 1e-12;
-            const onX = (Math.abs(x-r.xmin)<T || Math.abs(x-r.xmax)<T) && y>r.ymin-T && y<r.ymax+T;
-            const onY = (Math.abs(y-r.ymin)<T || Math.abs(y-r.ymax)<T) && x>r.xmin-T && x<r.xmax+T;
-            if (onX || onY) return true;
-        }
-        return false;
-    }
-    function minSurfaceEdge() {
-        let h = Infinity;
-        for (let e = 0; e < mesh.nEdges; e++) {
-            const n0 = mesh.edges[2*e], n1 = mesh.edges[2*e+1];
-            if (!onSurface(mesh.nodes[2*n0], mesh.nodes[2*n0+1])) continue;
-            if (!onSurface(mesh.nodes[2*n1], mesh.nodes[2*n1+1])) continue;
-            const L = Math.hypot(mesh.nodes[2*n1]-mesh.nodes[2*n0], mesh.nodes[2*n1+1]-mesh.nodes[2*n0+1]);
-            if (L < h) h = L;
-        }
-        return h;
-    }
+    // Size-aware marking: refine a band triangle only while it is still larger
+    // than targetH, and stop when nothing needs refining. (The previous early-stop
+    // keyed on the MINIMUM conductor-surface edge, which the main mesh's
+    // corner-concentrated adaptive refinement satisfies passes early — aborting
+    // while the face centers were still ≫ δ — and conversely kept refining
+    // already-fine corner elements on every pass.)
+    // maxTris bounds the growth: a large conductor perimeter at a tiny skin depth
+    // would otherwise refine without limit (band-tris ∝ perimeter/δ) and exhaust
+    // memory. Hitting the cap degrades gracefully to a partially-resolved band —
+    // the same accuracy compromise the old early-stop made.
     for (let p = 0; p < passes; p++) {
-        if (targetH > 0 && minSurfaceEdge() <= targetH) break;
         const marked = new Uint8Array(mesh.nTris);
+        let any = false, nMarked = 0;
         for (let t = 0; t < mesh.nTris; t++) {
             const v0 = mesh.tris[3*t], v1 = mesh.tris[3*t+1], v2 = mesh.tris[3*t+2];
-            const xc = (mesh.nodes[2*v0]+mesh.nodes[2*v1]+mesh.nodes[2*v2])/3;
-            const yc = (mesh.nodes[2*v0+1]+mesh.nodes[2*v1+1]+mesh.nodes[2*v2+1])/3;
-            if (nearSurface(xc, yc) ||
-                nearSurface(mesh.nodes[2*v0], mesh.nodes[2*v0+1]) ||
-                nearSurface(mesh.nodes[2*v1], mesh.nodes[2*v1+1]) ||
-                nearSurface(mesh.nodes[2*v2], mesh.nodes[2*v2+1])) marked[t] = 1;
+            const x0 = mesh.nodes[2*v0], y0 = mesh.nodes[2*v0+1];
+            const x1 = mesh.nodes[2*v1], y1 = mesh.nodes[2*v1+1];
+            const x2 = mesh.nodes[2*v2], y2 = mesh.nodes[2*v2+1];
+            const xc = (x0+x1+x2)/3, yc = (y0+y1+y2)/3;
+            if (!(nearSurface(xc, yc) || nearSurface(x0, y0) ||
+                  nearSurface(x1, y1) || nearSurface(x2, y2))) continue;
+            if (targetH > 0) {
+                const hMax = Math.max(Math.hypot(x1-x0, y1-y0),
+                                      Math.hypot(x2-x1, y2-y1),
+                                      Math.hypot(x0-x2, y0-y2));
+                if (hMax <= targetH) continue;   // this element already resolves the band
+            }
+            marked[t] = 1; any = true; nMarked++;
         }
+        if (!any) break;
+        // Refining splits each marked triangle ~1→4 (plus conformity closure);
+        // stop before the projected size blows the budget.
+        if (mesh.nTris + 3 * nMarked > maxTris) break;
         mesh = refineTriMesh(mesh, marked);
     }
     return mesh;
@@ -140,10 +141,13 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
 
     // DOFs: vertices + edge midpoints, Dirichlet at ground/outer walls.
     // The symmetry plane (x = xmin_domain when symmetry) gets the natural BC.
+    // The bottom ground wall is the DOMAIN bottom (ymin_domain — usually 0 after
+    // the ground slab is wall-absorbed, but not by construction).
     const xmin_d = condRect.xmin_domain, xmax_d = condRect.xmax_domain;
     const ymax_d = condRect.ymax_domain;
+    const ymin_d = condRect.ymin_domain ?? 0;
     function isDirichletPt(x, y) {
-        if (Math.abs(y) < 1e-9 || Math.abs(y - ymax_d) < 1e-9) return true;
+        if (Math.abs(y - ymin_d) < 1e-9 || Math.abs(y - ymax_d) < 1e-9) return true;
         if (Math.abs(x - xmax_d) < 1e-9) return true;
         if ((sym === 1 || opts.oddSymmetry) && Math.abs(x - xmin_d) < 1e-9) return true;
         return false;
@@ -273,7 +277,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     // conductor surfaces, used below to scale the smooth loss per face.
     let gndS = 0, gndZreS = 0, gndZimS = 0;
     function isGroundY(y) {
-        if (Math.abs(y) < 1e-9) return true;
+        if (Math.abs(y - ymin_d) < 1e-9) return true;
         if (opts.topGround && Math.abs(y - ymax_d) < 1e-9) return true;
         return false;
     }
@@ -384,23 +388,27 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     //   • uniform (opts.Rq): a single Ψ_R = Re(Z_rough)/Rs for the whole surface.
     let PsiR = 1;
     const Rq = opts.Rq || 0;
+    // For a differential pair (opts.diffPair) R_trace/R_gnd cover BOTH traces
+    // (the caller halves R_total to the per-trace mode R), while L_loop is
+    // per-trace — so the surface-reactance increment must use the per-trace R.
+    const perTrace = opts.diffPair ? 0.5 : 1;
     if (opts.surfaceZs) {
         if (trS > 0) {
             const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
-            L_loop += R_trace * (psiX - 1) / omega;
+            L_loop += perTrace * R_trace * (psiX - 1) / omega;
             R_trace *= psiR;
             PsiR = psiR;
         }
         if (gndS > 0) {
             const psiR = gndZreS / (Rs * gndS), psiX = gndZimS / (Rs * gndS);
-            L_loop += R_gnd * (psiX - 1) / omega;
+            L_loop += perTrace * R_gnd * (psiX - 1) / omega;
             R_gnd *= psiR;
         }
     } else if (Rq > 0) {
         const Zs = calculate_Zrough(freq, sigma, Rq);
         PsiR = Zs.re / Rs;
         const R_smooth = R_trace + R_gnd;
-        L_loop += R_smooth * (Zs.im / Rs - 1) / omega;
+        L_loop += perTrace * R_smooth * (Zs.im / Rs - 1) / omega;
         R_trace *= PsiR;
         R_gnd *= PsiR;
     }

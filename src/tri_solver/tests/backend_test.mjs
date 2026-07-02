@@ -13,9 +13,10 @@ async function fdm(opts) {
     return r;
 }
 
-function tri(opts) {
+async function tri(opts) {
     const s = new MicrostripSolver({ ...opts, freq: F });
     const b = new TriBackend(ctx, s);
+    await b.buildMesh();
     return b.solveAt(F);
 }
 
@@ -33,21 +34,21 @@ function cmpMode(name, t, f) {
 // --- single-ended microstrip ---
 const msOpts = { trace_width: 1.5e-3, substrate_height: 0.5e-3, trace_thickness: 35e-6, epsilon_r: 4.4, tan_delta: 0.02, sigma_cond: 5.8e7 };
 {
-    const t = tri(msOpts); const f = await fdm(msOpts);
+    const t = await tri(msOpts); const f = await fdm(msOpts);
     cmpMode('=== microstrip (single) ===', t.modes[0], f.modes[0]);
 }
 
 // --- microstrip with roughness ---
 const rqOpts = { ...msOpts, rq: 1e-6 };
 {
-    const t = tri(rqOpts); const f = await fdm(rqOpts);
+    const t = await tri(rqOpts); const f = await fdm(rqOpts);
     cmpMode('=== microstrip + roughness (Rq=1um) ===', t.modes[0], f.modes[0]);
 }
 
 // --- differential microstrip ---
 const diffOpts = { trace_width: 0.35e-3, substrate_height: 0.21e-3, trace_thickness: 35e-6, trace_spacing: 0.1e-3, epsilon_r: 4.4, tan_delta: 0.02, sigma_cond: 5.8e7 };
 {
-    const t = tri(diffOpts); const f = await fdm(diffOpts);
+    const t = await tri(diffOpts); const f = await fdm(diffOpts);
     console.log('=== differential microstrip ===');
     console.log(`  Z_diff   tri=${t.Z_diff.toFixed(2)}  fdm=${f.Z_diff.toFixed(2)}  Δ=${pct(t.Z_diff, f.Z_diff)}`);
     console.log(`  Z_common tri=${t.Z_common.toFixed(2)}  fdm=${f.Z_common.toFixed(2)}  Δ=${pct(t.Z_common, f.Z_common)}`);
