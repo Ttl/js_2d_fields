@@ -506,7 +506,10 @@ export class TriBackend {
     // onProgress({iteration, max_iterations, energy_error, param_error, nodes_x,
     // nodes_y}) is called once per adaptive refinement pass (same shape the
     // rectilinear backend reports, so the UI shows real passes for both).
-    async buildMesh(onProgress = null) {
+    // shouldStop: optional callback polled between refinement passes (the UI Stop
+    // button). Like the FDM backend, a stop request ends refinement gracefully —
+    // the current mesh is kept and the solve proceeds on it.
+    async buildMesh(onProgress = null, shouldStop = null) {
         const s = this.solver;
         const dom = { x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
                       y_min: -s.t_gnd, y_max: s.domain_height };
@@ -674,6 +677,10 @@ export class TriBackend {
             // size and stop now if it would blow the budget — keeps every SOLVED mesh within
             // the memory-parity budget rather than overshooting by a full pass.
             const projTris = Math.round(mesh.nTris * (1 + 3 * refineFrac));
+            if (shouldStop && shouldStop()) {
+                console.log('Adaptive refinement stopped by user');
+                break;
+            }
             if (it === maxIters || convergedCount >= minConvergedPasses || projTris > maxTris) break;
             const marked = markTrianglesForRefinement(metric, refineFrac);
             const refined = refineTriMesh(mesh, marked);

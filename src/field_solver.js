@@ -1685,7 +1685,7 @@ export class FieldSolver2D {
     // Lazily create the triangular FEM backend (and build its mesh + cached
     // static solve). The import is dynamic so the gmsh/eigen WASM is only loaded
     // when the user selects the triangular backend. Persists across the sweep.
-    async _ensureTriBackend(onProgress = null, extraOpts = null) {
+    async _ensureTriBackend(onProgress = null, extraOpts = null, shouldStop = null) {
         // Merge the solver-mode opts (lossMethod) with the UI adaptive controls.
         // A call WITH extraOpts (solve_adaptive) pins the effective opts: a cached
         // backend built with different opts (e.g. the user changed Max Nodes) is
@@ -1703,7 +1703,7 @@ export class FieldSolver2D {
         const tri = new TriBackend(ctx, this, opts);
         // Cache only AFTER the mesh builds: a throw here must not leave a broken
         // (mesh-less) backend behind for the next call to reuse.
-        await tri.buildMesh(onProgress);   // emits real adaptive-refinement passes (live)
+        await tri.buildMesh(onProgress, shouldStop);   // emits real adaptive-refinement passes (live)
         this._triBackend = tri;
         this._triBackendOptsKey = wantKey ?? JSON.stringify(opts);
         return this._triBackend;
@@ -1731,10 +1731,11 @@ export class FieldSolver2D {
         // spurious by the mesh-convergence test).
         // Mesh.Algorithm 1 (MeshAdapt) gives the cleanest eigenmode spectrum for the mode
         // viewer (fewer spurious low-ε_eff artifacts than the default frontal-Delaunay).
+        const { shouldStop = null, ...meshOpts } = refineOpts;
         const opts = { ...(this.tri_opts || {}), symmetry: false, modesFreq: freq,
-            gmshOptions: { 'Mesh.Algorithm': 1 }, ...refineOpts };
+            gmshOptions: { 'Mesh.Algorithm': 1 }, ...meshOpts };
         const tri = new TriBackend(ctx, this, opts);
-        await tri.buildMesh(onProgress);   // adaptive refinement passes, emitted via onProgress
+        await tri.buildMesh(onProgress, shouldStop);   // adaptive refinement passes, emitted via onProgress
         this._modesBackend = tri;
         return tri.solveModes(freq, nev);
     }
@@ -1789,7 +1790,7 @@ export class FieldSolver2D {
                 refineTol: options.energy_tol,
                 maxNodes: options.max_nodes,
                 minConvergedPasses: options.min_converged_passes,
-            });
+            }, options.shouldStop);
             return tri.solveAt(this.freq);
         }
 
