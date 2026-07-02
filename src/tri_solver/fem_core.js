@@ -351,30 +351,69 @@ export function computeElementMatricesP1(hx, hy) {
 
 // ==================== COO to CSR ====================
 
+// Counting sort into per-row buckets + dense-scratch dedup + per-row insertion
+// sort on the (small) unique column sets. O(nnz) overall vs the previous global
+// comparator sort over an index array, which dominated whole-sweep CPU profiles
+// (~44%) at FEM assembly sizes (millions of raw triplets).
 export function tripletsToCSR(rows, cols, valsRe, N, valsIm) {
     const hasIm = valsIm != null;
-    const idx = Array.from({ length: rows.length }, (_, i) => i);
-    idx.sort((a, b) => rows[a] - rows[b] || cols[a] - cols[b]);
-    const colIdx = [], valRe = [], valIm2 = [], sortedRows = [];
-    let pr = -1, pc = -1;
-    for (const k of idx) {
-        const r = rows[k], c = cols[k];
-        if (r === pr && c === pc) {
-            valRe[valRe.length - 1] += valsRe[k];
-            if (hasIm) valIm2[valIm2.length - 1] += valsIm[k];
-        } else {
-            colIdx.push(c); valRe.push(valsRe[k]); sortedRows.push(r); pr = r; pc = c;
-            if (hasIm) valIm2.push(valsIm[k]);
-        }
+    const nRaw = rows.length;
+    // Pass 1: raw entries per row → bucket offsets.
+    const rowStart = new Int32Array(N + 1);
+    for (let i = 0; i < nRaw; i++) rowStart[rows[i] + 1]++;
+    for (let r = 0; r < N; r++) rowStart[r + 1] += rowStart[r];
+    // Pass 2: scatter triplets into their row buckets.
+    const bCol = new Int32Array(nRaw);
+    const bRe = new Float64Array(nRaw);
+    const bIm = hasIm ? new Float64Array(nRaw) : null;
+    const fill = rowStart.slice(0, N);
+    for (let i = 0; i < nRaw; i++) {
+        const p = fill[rows[i]]++;
+        bCol[p] = cols[i]; bRe[p] = valsRe[i];
+        if (hasIm) bIm[p] = valsIm[i];
     }
-    const nnz = colIdx.length;
-    const rp = new Array(N + 1).fill(0);
-    for (const r of sortedRows) rp[r + 1]++;
-    for (let i = 0; i < N; i++) rp[i + 1] += rp[i];
+    // Pass 3: per row, sum duplicates via a dense col→slot scratch map (reset
+    // per row by walking only the row's own entries), then insertion-sort the
+    // unique columns (rows have tens of entries — insertion sort beats any
+    // general sort here and keeps colIdx ascending for the WASM consumers).
+    const outCol = new Int32Array(nRaw);
+    const outRe = new Float64Array(nRaw);
+    const outIm = new Float64Array(nRaw);   // stays zero when !hasIm
+    const rowPtr = new Int32Array(N + 1);
+    const colPos = new Int32Array(N).fill(-1);
+    let nnz = 0;
+    for (let r = 0; r < N; r++) {
+        const rowOut = nnz;
+        for (let p = rowStart[r]; p < rowStart[r + 1]; p++) {
+            const c = bCol[p];
+            let q = colPos[c];
+            if (q >= 0) {
+                outRe[q] += bRe[p];
+                if (hasIm) outIm[q] += bIm[p];
+            } else {
+                q = nnz++;
+                colPos[c] = q;
+                outCol[q] = c; outRe[q] = bRe[p];
+                if (hasIm) outIm[q] = bIm[p];
+            }
+        }
+        for (let q = rowOut; q < nnz; q++) colPos[outCol[q]] = -1;
+        for (let q = rowOut + 1; q < nnz; q++) {
+            const c = outCol[q], vr = outRe[q], vi = outIm[q];
+            let j = q - 1;
+            while (j >= rowOut && outCol[j] > c) {
+                outCol[j + 1] = outCol[j]; outRe[j + 1] = outRe[j]; outIm[j + 1] = outIm[j];
+                j--;
+            }
+            outCol[j + 1] = c; outRe[j + 1] = vr; outIm[j + 1] = vi;
+        }
+        rowPtr[r + 1] = nnz;
+    }
     return {
-        rowPtr: new Int32Array(rp), colIdx: new Int32Array(colIdx),
-        valRe: new Float64Array(valRe),
-        valIm: hasIm ? new Float64Array(valIm2) : new Float64Array(nnz)
+        rowPtr,
+        colIdx: outCol.slice(0, nnz),
+        valRe: outRe.slice(0, nnz),
+        valIm: outIm.slice(0, nnz),
     };
 }
 

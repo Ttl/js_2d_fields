@@ -90,7 +90,7 @@ const SAT_KAPPA = 1.0;
 // Hz: jωμ·Mz·Hz = curl_z(Et)          →  Mz·Hz_s = RHS_z  (Hz_s = jωμ·Hz)
 // ALL DOFs — H is not subject to PEC BCs.
 // Uses faceF from freedom map to identify conductor-interior triangles (geometry-independent).
-export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
+export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver, cache = null) {
     const { nodes, tris, triEdges, triSigns, nTris, nEdges, nNodes } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF } = fm;
     const omega = 2 * Math.PI * freq;
@@ -98,8 +98,15 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
     const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
     const edgeVerts = [[0, 1], [1, 2], [2, 0]];
 
+    // The Ht/Hz MASS matrices are purely geometric — on a repeated call for the
+    // same (mesh, fm) reuse the cached CSRs and only rebuild the eigenvector-
+    // dependent RHS (the mass accumulation and CSR conversion dominate the JS
+    // cost of this projection).
+    const cached = (cache && cache.mesh === mesh && cache.fm === fm) ? cache : null;
+    const needMass = !cached;
+
     // Full H DOF counts
-    const hDofs = computeHDofCounts(mesh, fm);
+    const hDofs = cached ? cached.hDofs : computeHDofCounts(mesh, fm);
     const { NH, NHz, htEdgeDofStart, htFaceDofStart } = hDofs;
 
     // Ht system
@@ -195,26 +202,26 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
             for (let i=0;i<nNed;i++){
                 rR[i]+=w*(Wx[i]*fxR+Wy[i]*fyR);
                 rI[i]+=w*(Wx[i]*fxI+Wy[i]*fyI);
-                for (let j=0;j<nNed;j++) MtEl[i*nNed+j]+=w*(Wx[i]*Wx[j]+Wy[i]*Wy[j]);
+                if (needMass) for (let j=0;j<nNed;j++) MtEl[i*nNed+j]+=w*(Wx[i]*Wx[j]+Wy[i]*Wy[j]);
             }
 
             // Hz mass matrix and RHS
             for (let i=0;i<nLag;i++){
                 rzR[i]+=w*Nz[i]*curlR;
                 rzI[i]+=w*Nz[i]*curlI;
-                for (let j=0;j<nLag;j++) MzEl[i*nLag+j]+=w*Nz[i]*Nz[j];
+                if (needMass) for (let j=0;j<nLag;j++) MzEl[i*nLag+j]+=w*Nz[i]*Nz[j];
             }
         }
-        for (let k=0;k<nNed*nNed;k++) MtEl[k]*=Area;
+        if (needMass) for (let k=0;k<nNed*nNed;k++) MtEl[k]*=Area;
         for (let k=0;k<nNed;k++){rR[k]*=Area; rI[k]*=Area;}
-        for (let k=0;k<nLag*nLag;k++) MzEl[k]*=Area;
+        if (needMass) for (let k=0;k<nLag*nLag;k++) MzEl[k]*=Area;
         for (let k=0;k<nLag;k++){rzR[k]*=Area; rzI[k]*=Area;}
 
         // Assemble Ht system
         for (let li=0;li<nNed;li++){
             const gi=hD[li], si=hS[li];
             rhsRe[gi]+=si*rR[li]; rhsIm[gi]+=si*rI[li];
-            for (let lj=0;lj<nNed;lj++){
+            if (needMass) for (let lj=0;lj<nNed;lj++){
                 const gj=hD[lj], v=si*hS[lj]*MtEl[li*nNed+lj];
                 if(v!==0){MtR.push(gi);MtC.push(gj);MtV.push(v);}
             }
@@ -225,29 +232,33 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver) {
         for (let li=0;li<nLag;li++){
             const gi=hzD[li];
             rhsHzRe[gi]+=hzS[li]*rzR[li]; rhsHzIm[gi]+=hzS[li]*rzI[li];
-            for (let lj=0;lj<nLag;lj++){
+            if (needMass) for (let lj=0;lj<nLag;lj++){
                 const gj=hzD[lj], v=hzS[li]*hzS[lj]*MzEl[li*nLag+lj];
                 if(v!==0){MzR.push(gi);MzC.push(gj);MzV.push(v);}
             }
         }
     }
 
-    // H DOFs are allocated for ALL edges/faces/nodes, but conductor-interior
-    // triangles are skipped in the assembly. On meshes with conductor interiors
-    // (meshConductorInterior), interior-only DOFs would leave empty rows →
-    // structurally singular mass matrices. Pin them with unit diagonals (rhs is
-    // zero there, so H = 0 inside the conductor — physically correct).
-    {
+    let csrHt, csrHz;
+    if (needMass) {
+        // H DOFs are allocated for ALL edges/faces/nodes, but conductor-interior
+        // triangles are skipped in the assembly. On meshes with conductor interiors
+        // (meshConductorInterior), interior-only DOFs would leave empty rows →
+        // structurally singular mass matrices. Pin them with unit diagonals (rhs is
+        // zero there, so H = 0 inside the conductor — physically correct).
         const touchedT = new Uint8Array(NH);
         for (const r of MtR) touchedT[r] = 1;
         for (let i = 0; i < NH; i++) if (!touchedT[i]) { MtR.push(i); MtC.push(i); MtV.push(1); }
         const touchedZ = new Uint8Array(NHz);
         for (const r of MzR) touchedZ[r] = 1;
         for (let i = 0; i < NHz; i++) if (!touchedZ[i]) { MzR.push(i); MzC.push(i); MzV.push(1); }
+        csrHt = tripletsToCSR(MtR, MtC, MtV, NH);
+        csrHz = tripletsToCSR(MzR, MzC, MzV, NHz);
+        if (cache) { cache.mesh = mesh; cache.fm = fm; cache.hDofs = hDofs; cache.csrHt = csrHt; cache.csrHz = csrHz; }
+    } else {
+        csrHt = cached.csrHt;
+        csrHz = cached.csrHz;
     }
-
-    const csrHt = tripletsToCSR(MtR, MtC, MtV, NH);
-    const csrHz = tripletsToCSR(MzR, MzC, MzV, NHz);
 
     const [hR, hI] = wasmSolver(NH, csrHt, [rhsRe, rhsIm]);
     const [hzR, hzI] = wasmSolver(NHz, csrHz, [rhsHzRe, rhsHzIm]);

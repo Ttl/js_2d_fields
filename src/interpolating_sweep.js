@@ -217,6 +217,9 @@ class InterpolatingSweep {
      */
     async run(fMin, fMax, callbacks = {}) {
         const { onProgress, shouldStop } = callbacks;
+        // Sweep-max hint for the triangular backend (see solve_sweep): sizes the
+        // MQS skin band for the whole sweep so every sample reuses one skin mesh.
+        this.solver._sweepFmax = fMax;
         const tMin = Math.log10(fMin);
         const tMax = Math.log10(fMax);
 

@@ -26,7 +26,8 @@ import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh } from './occ_to_mesh.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
-         staticToEdgeDofs, assembleTriFEM } from './tri_fem.js';
+         staticToEdgeDofs, assembleTriFEM, assembleTriFEMDecomposed,
+         femFromDecomposition } from './tri_fem.js';
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
          projectH, computePoyntingFromProjectedH } from './conductor_loss.js';
 import { csqrt } from './fem_core.js';
@@ -229,33 +230,42 @@ function buildFaceZs(solver, condRect, freq) {
     };
 }
 
-function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
+function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = null) {
     const { nodes, edges, nEdges } = mesh;
     const rects = condRect.rects || [];
     const tol = platingTol(condRect);
     const { Zbare, zForFace } = makePlatingZs(solver, condRect, freq);
+    const FACES = ['top', 'bottom', 'sides'];
 
-    // Surface impedance for one loss edge. Conductor edges resolve to the face of
-    // the conductor rect they lie on; everything else (grounded walls) is bare.
-    const zOfEdge = (e) => {
-        if (!(fm.isCondEdge && fm.isCondEdge[e])) return Zbare;
-        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
-        const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1];
-        const x1 = nodes[2 * n1], y1 = nodes[2 * n1 + 1];
-        for (let ri = 0; ri < rects.length; ri++) {
-            const r = rects[ri];
-            if (x0 < r.xmin - tol || x0 > r.xmax + tol || x1 < r.xmin - tol || x1 > r.xmax + tol) continue;
-            if (y0 < r.ymin - tol || y0 > r.ymax + tol || y1 < r.ymin - tol || y1 > r.ymax + tol) continue;
-            let face = null;
-            if (Math.abs(y0 - r.ymax) < tol && Math.abs(y1 - r.ymax) < tol) face = 'top';
-            else if (Math.abs(y0 - r.ymin) < tol && Math.abs(y1 - r.ymin) < tol) face = 'bottom';
-            else if ((Math.abs(x0 - r.xmin) < tol && Math.abs(x1 - r.xmin) < tol) ||
-                     (Math.abs(x0 - r.xmax) < tol && Math.abs(x1 - r.xmax) < tol)) face = 'sides';
-            if (!face) continue;
-            return zForFace(ri, face);
+    // Geometric classification: loss edge → (rectIndex, face) or bare (−1).
+    // Frequency-INVARIANT, so it's cached per (mesh, fm, baseMask); only the
+    // Zs values (and thus the grouping) are re-evaluated per frequency.
+    let edgeFace = (cache && cache.clsMesh === mesh && cache.clsFm === fm &&
+                    cache.clsMask === baseMask) ? cache.edgeFace : null;
+    if (!edgeFace) {
+        edgeFace = new Int32Array(nEdges).fill(-1);
+        for (let e = 0; e < nEdges; e++) {
+            if (!baseMask[e]) continue;
+            if (!(fm.isCondEdge && fm.isCondEdge[e])) continue;   // grounded walls → bare
+            const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+            const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1];
+            const x1 = nodes[2 * n1], y1 = nodes[2 * n1 + 1];
+            for (let ri = 0; ri < rects.length; ri++) {
+                const r = rects[ri];
+                if (x0 < r.xmin - tol || x0 > r.xmax + tol || x1 < r.xmin - tol || x1 > r.xmax + tol) continue;
+                if (y0 < r.ymin - tol || y0 > r.ymax + tol || y1 < r.ymin - tol || y1 > r.ymax + tol) continue;
+                let face = -1;
+                if (Math.abs(y0 - r.ymax) < tol && Math.abs(y1 - r.ymax) < tol) face = 0;         // top
+                else if (Math.abs(y0 - r.ymin) < tol && Math.abs(y1 - r.ymin) < tol) face = 1;    // bottom
+                else if ((Math.abs(x0 - r.xmin) < tol && Math.abs(x1 - r.xmin) < tol) ||
+                         (Math.abs(x0 - r.xmax) < tol && Math.abs(x1 - r.xmax) < tol)) face = 2;  // sides
+                if (face < 0) continue;
+                edgeFace[e] = ri * 3 + face;
+                break;
+            }
         }
-        return Zbare;
-    };
+        if (cache) { cache.clsMesh = mesh; cache.clsFm = fm; cache.clsMask = baseMask; cache.edgeFace = edgeFace; }
+    }
 
     const keyOf = (z) => `${z.re.toExponential(6)}|${z.im.toExponential(6)}`;
     const groupIdx = new Map();
@@ -263,7 +273,8 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq) {
     const edgeGroup = new Int32Array(nEdges).fill(-1);
     for (let e = 0; e < nEdges; e++) {
         if (!baseMask[e]) continue;
-        const z = zOfEdge(e);
+        const fid = edgeFace[e];
+        const z = fid < 0 ? Zbare : zForFace((fid / 3) | 0, FACES[fid % 3]);
         const k = keyOf(z);
         let gi = groupIdx.get(k);
         if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); }
@@ -328,9 +339,26 @@ function perElementEnergy(phi, mesh, epsMap) {
 // Throws on assembly/eigensolver failure (callers catch and surface a warning);
 // returns null when the eigensolve converged but no quasi-TEM candidate passed
 // the physicality gates.
-function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static) {
+function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static, cache = null) {
     const k2 = (2 * Math.PI * f / c0) ** 2;
-    const fem = assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect, null);
+    // The system is affine in k² with the ABC term linear in k₀, so the expensive
+    // quadrature assembly is done ONCE per (mesh, fm, epsMap, abc) as a
+    // decomposition A0 + k²·A1 + j·k0·Ar and combined per frequency in O(nnz).
+    // The cache self-validates on object identity (a refinement pass or a causal
+    // epsMap rebuild changes the objects → clean recompute).
+    let dec;
+    const abcKey = JSON.stringify(abc);
+    if (cache && cache.mesh === mesh && cache.fm === fm && cache.epsMap === epsMap &&
+        cache.abcKey === abcKey) {
+        dec = cache.dec;
+    } else {
+        dec = assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect);
+        if (cache) {
+            cache.mesh = mesh; cache.fm = fm; cache.epsMap = epsMap;
+            cache.abcKey = abcKey; cache.dec = dec;
+        }
+    }
+    const fem = femFromDecomposition(dec, k2);
     if (!fem) return null;
     const N = fem.N;
     // Seed the Arnoldi from the static-field projection (the quasi-TEM shape). The
@@ -888,8 +916,9 @@ export class TriBackend {
             // 'pmc' (even/single) / PEC (odd, absent). Validated reference 16/16, output
             // byte-identical to the old 'pmc' pick. Lossy ε was tried too but only removed one
             // more false-positive flag for no accuracy gain, so it's not used. The FEM is
-            // re-assembled per frequency (the ABC's √k² boundary term is non-affine in k², so
-            // an a0+k²·a1 reuse is not possible) — the deliberate cost for the robustness.
+            // NOT re-assembled per frequency: the system is affine in k² and the ABC Robin
+            // term is linear in k₀ = √k², so fullwaveMode combines a cached decomposition
+            // A0 + k²·A1 + j·k0·Ar per point (st.femCache).
             const pickAbc = {};
             for (const k of ['left', 'right', 'top', 'bottom']) {
                 const v = st.abc[k];
@@ -898,7 +927,8 @@ export class TriBackend {
             }
             let fwErr = null;
             try {
-                fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static);
+                fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
+                    st.femCache || (st.femCache = {}));
             } catch (e) { fw = null; fwErr = e; }
             if (fw && fw.eps > 0) eps_d = fw.eps;
             // The eigensolve failed (or converged to no physical quasi-TEM) at this
@@ -955,8 +985,17 @@ export class TriBackend {
         // and sum the loss per group; >1 group (e.g. top/sides plated, bottom bare)
         // means a face-dependent impedance. (MQS handles per-face plating itself via
         // surfaceZs, so plating no longer forces the perturbation path.)
-        const lossEdgeMask = f > 0 ? buildLossEdges(mesh, fm, cr) : null;
-        const surf = lossEdgeMask ? buildSurfaceGroups(s, mesh, fm, cr, lossEdgeMask, f) : { uniform: true, groups: [] };
+        // The loss-edge mask and the surface-group face classification are purely
+        // geometric — cache them per mode (validated against mesh/fm identity);
+        // only the per-frequency Zs grouping is re-evaluated each point.
+        const lc = st.lossCache || (st.lossCache = {});
+        if (lc.mesh !== mesh || lc.fm !== fm) {
+            lc.mesh = mesh; lc.fm = fm;
+            lc.mask = buildLossEdges(mesh, fm, cr);
+            lc.clsMask = null;   // invalidate the surface-group classification too
+        }
+        const lossEdgeMask = f > 0 ? lc.mask : null;
+        const surf = lossEdgeMask ? buildSurfaceGroups(s, mesh, fm, cr, lossEdgeMask, f, lc) : { uniform: true, groups: [] };
         const platingPerSide = !surf.uniform;
 
         // MQS (reference) applies when grounds are wall-absorbed (signal-only rects)
@@ -1015,23 +1054,36 @@ export class TriBackend {
             // is narrow), unlike a whole-range mesh which over-resolves the low-f band.
             // opts.mqsCacheMesh === false falls back to a per-frequency remesh (marginally
             // faster on wide sweeps, but can show a small non-monotonic wiggle).
+            // Band-sizing skin depth: when a sweep announces its maximum frequency
+            // (solver._sweepFmax, set by solve_sweep / InterpolatingSweep), size the
+            // band for the WHOLE sweep up front — an ascending discrete sweep then
+            // builds ONE skin mesh at the first point and every later point reuses
+            // it (plus its cached MQS assembly), instead of re-refining per point.
+            // Without the hint this reduces to the current frequency (old behavior:
+            // rebuild whenever a higher frequency appears).
+            const fBand = Math.max(f, this.solver._sweepFmax || 0);
+            const deltaBand = fBand > f ? Math.sqrt(2 / (2 * Math.PI * fBand * MU0 * mqsSigma)) : mqsDelta;
             let mqsMesh;
-            if (mqsDelta >= minDim) {
+            if (deltaBand >= minDim) {
                 mqsMesh = mesh;
             } else if (this.opts.mqsCacheMesh === false) {
                 mqsMesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta, mqsMaxTris);
             } else {
                 const sc = st.skinCache || (st.skinCache = { dB: Infinity, mesh: null });
-                if (!sc.mesh || mqsDelta < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
-                    sc.dB = mqsDelta;
-                    sc.mesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta, mqsMaxTris);
+                if (!sc.mesh || deltaBand < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
+                    sc.dB = deltaBand;
+                    sc.mesh = refineSkinBand(mesh, cr, deltaBand, 12, mqsBand, bandDelta * deltaBand, mqsMaxTris);
                 }
                 mqsMesh = sc.mesh;
             }
             // Per-face plating ⇒ weight each face's smooth current by its own surface
             // impedance (surfaceZs); otherwise the uniform roughness factor (Rq).
             const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: mode === 'odd',
-                              diffPair: !!s.is_differential };
+                              diffPair: !!s.is_differential,
+                              // Frequency-invariant assembly cache (per mode; validated
+                              // against the mesh object inside mqsConductorLoss, so a
+                              // skin-mesh rebuild invalidates it automatically).
+                              cache: st.mqsCache || (st.mqsCache = {}) };
             if (anyPlating) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
             else mqsOpts.Rq = rq;
             let mqs = null;
@@ -1109,7 +1161,8 @@ export class TriBackend {
                 let gamma = csqrt(fw.g2Re, fw.g2Im);
                 if (gamma.im < 0) gamma = { re: -gamma.re, im: -gamma.im };
                 try {
-                    projH = projectH(mesh, fm, fw.vRe, fw.vIm, gamma, f, this.ctx.wasmSolver);
+                    projH = projectH(mesh, fm, fw.vRe, fw.vIm, gamma, f, this.ctx.wasmSolver,
+                        st.projCache || (st.projCache = {}));
                     Pfw = Math.abs(computePoyntingFromProjectedH(mesh, fm, fw.vRe, fw.vIm,
                         projH.htRe, projH.htIm, omu, projH.hDofs));
                 } catch { projH = null; Pfw = 0; }
@@ -1181,7 +1234,7 @@ export class TriBackend {
     // the static field so eps_eff (below F_STATIC_MAX), the full-wave eigensolve (which
     // reads mesh.epsMap), C, and the dielectric-loss energy W_loss all track the causal
     // model. The k2 eigensolve cache is bypassed separately in _modeAtFreq.
-    _applyCausal(f) {
+    _applyCausal(f, skipFields = false) {
         const s = this.solver;
         const fref = this.opts.causalFref ?? 1e9;
         const causalDiel = s.dielectrics.map(d => {
@@ -1210,15 +1263,20 @@ export class TriBackend {
             st.eps_eff_static = computeTriEnergy(phiEps, this.mesh, epsMap) / W_air;
             st.W_loss = computeTriEnergy(phiEps, this.mesh, lossMap);
             // Refresh the resampled plot fields so contour plots track the causal ε.
-            const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
-            st.fields = resampleStatic(this.mesh, phiEps, this.domain,
-                { resolution: this.opts.resolution, parity, grid: this._staticGrid });
+            // Skipped on mid-sweep calls (skipFields): each sweep point's resample
+            // is immediately overwritten by the next, and the plot the user sees
+            // comes from the main solve — the physics above never depends on it.
+            if (!skipFields) {
+                const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
+                st.fields = resampleStatic(this.mesh, phiEps, this.domain,
+                    { resolution: this.opts.resolution, parity, grid: this._staticGrid });
+            }
         }
     }
 
-    solveAt(f) {
+    solveAt(f, opts = {}) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
-        if (this.solver.use_causal_materials) this._applyCausal(f);
+        if (this.solver.use_causal_materials) this._applyCausal(f, opts.skipFieldResample === true);
         this._modeWarnings = [];
         const modes = this.modeNames.map(m => this._modeAtFreq(m, f));
         const result = { modes };

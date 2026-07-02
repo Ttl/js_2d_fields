@@ -354,7 +354,7 @@ export function computeTriP2Matrices(nodes, v0, v1, v2, epsRe, epsIm, k0) {
     // For now, skip Ls scaling and use raw DOF values. The eigenvalues are
     // independent of DOF scaling; only conditioning is affected.
 
-    return { ARe, AIm, BRe, BIm, Area, coeff, Dzz1, Dzz2Re, Dzz2Im, Att, Dtt, Dzt };
+    return { ARe, AIm, BRe, BIm, Area, coeff, Dzz1, Dzz2Re, Dzz2Im, Att, Dtt, Dzt, BttRe, BttIm };
 }
 
 // --- P2 static element matrices (6x6 nodal only) ---
@@ -549,6 +549,180 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
 }
 
 // --- Assembly ---
+
+// Decomposed assembly. The Lee–Jin system is AFFINE in k² with a Robin (ABC)
+// boundary term LINEAR in k₀ = √k²:
+//   A(k) = A0 + k²·A1 + j·k0·Ar        (A0 = Att block, A1 = −Btt, Ar = ABC template)
+//   B(k) = B0 + k²·B1                  (B0 = Dtt/Dzt/Dzz1 blocks, B1 = −Dzz2)
+// This builds the five value templates ONCE on fixed CSR patterns (one pattern
+// for A including the ABC entries, one for B); femFromDecomposition() then
+// produces the matrices for any frequency in O(nnz). Per-frequency quadrature
+// reassembly used to be a dominant sweep cost.
+export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
+    const { tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
+    const { edgeF, faceF, nodeF, edgeNodeF } = fm;
+    const N = fm.nFreeTransverse + fm.nFreeLongitudinal;
+    const nodes = mesh.nodes;
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
+    const nLocal = 14;
+
+    // Pre-allocate COO arrays: max 196 nonzeros per P2 element (14×14)
+    const maxNnz = nTris * 196;
+    const eAr = new Int32Array(maxNnz), eAc = new Int32Array(maxNnz);
+    const eA0 = new Float64Array(maxNnz);
+    const eA1Re = new Float64Array(maxNnz), eA1Im = new Float64Array(maxNnz);
+    const eBr = new Int32Array(maxNnz), eBc = new Int32Array(maxNnz);
+    const eB0 = new Float64Array(maxNnz);
+    const eB1Re = new Float64Array(maxNnz), eB1Im = new Float64Array(maxNnz);
+    let aNnz = 0, bNnz = 0;
+
+    // Element templates in the 14×14 local DOF layout
+    const A0el = new Float64Array(196);
+    const A1elRe = new Float64Array(196), A1elIm = new Float64Array(196);
+    const B0el = new Float64Array(196);
+    const B1elRe = new Float64Array(196), B1elIm = new Float64Array(196);
+    const globalDof = new Int32Array(nLocal);
+    const signs = new Float64Array(nLocal);
+
+    for (let t = 0; t < nTris; t++) {
+        const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
+        const eps = epsMap[t];
+        const m = computeTriP2Matrices(nodes, v0, v1, v2, eps.re, eps.im, 0);
+
+        A0el.fill(0); A1elRe.fill(0); A1elIm.fill(0);
+        B0el.fill(0); B1elRe.fill(0); B1elIm.fill(0);
+        for (let i = 0; i < 8; i++) {
+            for (let j = 0; j < 8; j++) {
+                A0el[i*14+j] = m.Att[i*8+j];
+                A1elRe[i*14+j] = -m.BttRe[i*8+j];
+                A1elIm[i*14+j] = -m.BttIm[i*8+j];
+                B0el[i*14+j] = m.Dtt[i*8+j];
+            }
+        }
+        for (let i = 0; i < 6; i++) {
+            for (let j = 0; j < 8; j++) {
+                B0el[(i+8)*14+j] = m.Dzt[i*8+j];     // B[8:14,0:8] = Dzt
+                B0el[j*14+(i+8)] = m.Dzt[i*8+j];     // B[0:8,8:14] = Dzt^T
+            }
+            for (let j = 0; j < 6; j++) {
+                B0el[(i+8)*14+(j+8)] = m.Dzz1[i*6+j];
+                B1elRe[(i+8)*14+(j+8)] = -m.Dzz2Re[i*6+j];
+                B1elIm[(i+8)*14+(j+8)] = -m.Dzz2Im[i*6+j];
+            }
+        }
+
+        // Local-to-global DOF mapping (identical to assembleTriFEM)
+        signs.fill(1);
+        for (let le = 0; le < 3; le++) {
+            const eIdx = triEdges[3*t + le];
+            globalDof[le] = edgeF[2*eIdx];
+            signs[le] = triSigns[3*t + le];
+            globalDof[le+4] = edgeF[2*eIdx+1];
+            const enf = edgeNodeF[eIdx];
+            globalDof[le+11] = enf >= 0 ? lzEdgeMidOff + enf : -1;
+        }
+        globalDof[3] = faceF[2*t];
+        globalDof[7] = faceF[2*t+1];
+        const verts = [v0, v1, v2];
+        for (let k = 0; k < 3; k++) {
+            const nf = nodeF[verts[k]];
+            globalDof[8 + k] = nf >= 0 ? lzOff + nf : -1;
+        }
+
+        for (let li = 0; li < nLocal; li++) {
+            const gi = globalDof[li]; if (gi < 0) continue;
+            for (let lj = 0; lj < nLocal; lj++) {
+                const gj = globalDof[lj]; if (gj < 0) continue;
+                const s = signs[li] * signs[lj];
+                const idx = li * nLocal + lj;
+                const a0 = s * A0el[idx], a1re = s * A1elRe[idx], a1im = s * A1elIm[idx];
+                if (a0 !== 0 || a1re !== 0 || a1im !== 0) {
+                    eAr[aNnz] = gi; eAc[aNnz] = gj;
+                    eA0[aNnz] = a0; eA1Re[aNnz] = a1re; eA1Im[aNnz] = a1im; aNnz++;
+                }
+                const b0 = s * B0el[idx], b1re = s * B1elRe[idx], b1im = s * B1elIm[idx];
+                if (b0 !== 0 || b1re !== 0 || b1im !== 0) {
+                    eBr[bNnz] = gi; eBc[bNnz] = gj;
+                    eB0[bNnz] = b0; eB1Re[bNnz] = b1re; eB1Im[bNnz] = b1im; bNnz++;
+                }
+            }
+        }
+    }
+
+    // Robin ABC entries: A += j·k₀·(1/L or 1/(3L)) on boundary edge DOFs — a
+    // pure per-unit-k₀ imaginary template (see assembleTriFEM for the derivation).
+    const rR = [], rC = [], rV = [];
+    if (abc.top === true || abc.left === true || abc.right === true || abc.bottom === true) {
+        const ymax = condRect.ymax_domain, ymin = condRect.ymin_domain;
+        const xmin = condRect.xmin_domain, xmax = condRect.xmax_domain;
+        const TOL = 1e-12;
+        for (let e = 0; e < nEdges; e++) {
+            const n0 = edges[2*e], n1 = edges[2*e+1];
+            const x0 = nodes[2*n0], y0 = nodes[2*n0+1];
+            const x1 = nodes[2*n1], y1 = nodes[2*n1+1];
+            let isBoundary = false;
+            if (abc.top === true && Math.abs(y0 - ymax) < TOL && Math.abs(y1 - ymax) < TOL) isBoundary = true;
+            if (abc.bottom === true && Math.abs(y0 - ymin) < TOL && Math.abs(y1 - ymin) < TOL) isBoundary = true;
+            if (abc.left === true && Math.abs(x0 - xmin) < TOL && Math.abs(x1 - xmin) < TOL) isBoundary = true;
+            if (abc.right === true && Math.abs(x0 - xmax) < TOL && Math.abs(x1 - xmax) < TOL) isBoundary = true;
+            if (!isBoundary) continue;
+            const L = Math.sqrt((x1-x0)**2 + (y1-y0)**2);
+            const ef1 = edgeF[2*e];
+            if (ef1 >= 0) { rR.push(ef1); rC.push(ef1); rV.push(1 / L); }
+            const ef2 = edgeF[2*e+1];
+            if (ef2 >= 0) { rR.push(ef2); rC.push(ef2); rV.push(1 / (3 * L)); }
+        }
+    }
+
+    // Combined A pattern = element entries + ABC entries. The SAME (row, col)
+    // sequence is converted for each value template, so the dedup produces an
+    // identical pattern and the templates line up entry-for-entry.
+    const nAe = aNnz, nR = rR.length, nA = nAe + nR;
+    const rowsA = new Int32Array(nA), colsA = new Int32Array(nA);
+    rowsA.set(eAr.subarray(0, nAe)); colsA.set(eAc.subarray(0, nAe));
+    const v0A = new Float64Array(nA), v1ReA = new Float64Array(nA), v1ImA = new Float64Array(nA);
+    const vrA = new Float64Array(nA);
+    v0A.set(eA0.subarray(0, nAe)); v1ReA.set(eA1Re.subarray(0, nAe)); v1ImA.set(eA1Im.subarray(0, nAe));
+    for (let i = 0; i < nR; i++) {
+        rowsA[nAe + i] = rR[i]; colsA[nAe + i] = rC[i];
+        vrA[nAe + i] = rV[i];
+    }
+    const csrA0 = tripletsToCSR(rowsA, colsA, v0A, N);
+    const csrA1 = tripletsToCSR(rowsA, colsA, v1ReA, N, v1ImA);
+    const csrAr = tripletsToCSR(rowsA, colsA, new Float64Array(nA), N, vrA);
+    const csrB0 = tripletsToCSR(eBr.subarray(0, bNnz), eBc.subarray(0, bNnz), eB0.subarray(0, bNnz), N);
+    const csrB1 = tripletsToCSR(eBr.subarray(0, bNnz), eBc.subarray(0, bNnz), eB1Re.subarray(0, bNnz), N, eB1Im.subarray(0, bNnz));
+
+    return {
+        N,
+        A: { rowPtr: csrA0.rowPtr, colIdx: csrA0.colIdx,
+             v0Re: csrA0.valRe, v1Re: csrA1.valRe, v1Im: csrA1.valIm, vrIm: csrAr.valIm },
+        B: { rowPtr: csrB0.rowPtr, colIdx: csrB0.colIdx,
+             v0Re: csrB0.valRe, v1Re: csrB1.valRe, v1Im: csrB1.valIm },
+    };
+}
+
+// Combine a decomposition into the concrete A(k), B(k) CSR pair for one k².
+export function femFromDecomposition(dec, k2) {
+    const k0 = Math.sqrt(k2);
+    const A = dec.A, nA = A.v0Re.length;
+    const aRe = new Float64Array(nA), aIm = new Float64Array(nA);
+    for (let i = 0; i < nA; i++) {
+        aRe[i] = A.v0Re[i] + k2 * A.v1Re[i];
+        aIm[i] = k2 * A.v1Im[i] + k0 * A.vrIm[i];
+    }
+    const B = dec.B, nB = B.v0Re.length;
+    const bRe = new Float64Array(nB), bIm = new Float64Array(nB);
+    for (let i = 0; i < nB; i++) {
+        bRe[i] = B.v0Re[i] + k2 * B.v1Re[i];
+        bIm[i] = k2 * B.v1Im[i];
+    }
+    return {
+        csrA: { rowPtr: A.rowPtr, colIdx: A.colIdx, valRe: aRe, valIm: aIm },
+        csrB: { rowPtr: B.rowPtr, colIdx: B.colIdx, valRe: bRe, valIm: bIm },
+        N: dec.N,
+    };
+}
 
 export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
     const { tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;

@@ -121,13 +121,18 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 // Returns { R_trace, R_gnd, R_total, L_loop, alpha_c, alpha_c_dBm, delta, nDofs }
 // L_loop is the series inductance from Im(Z_pul) = ωL — includes trace internal
 // inductance and ground-current spreading (ground itself is PEC here).
-export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, Z0 = 0, opts = {}) {
+// Frequency-INVARIANT part of the MQS solve on a given mesh: conductor
+// classification, DOF map, the S (everywhere) / M, Fc (conductor) assembly, and
+// the symbolic block-CSR with separate S / M value templates. The block system
+// is [[S, −βM], [−βM, −S]] with β = ωμ₀σ the ONLY frequency-dependent piece, so
+// per frequency the values are just valS + β·valM on a fixed pattern. Cached by
+// the caller (opts.cache) per (mesh, oddSymmetry) — the skin mesh is reused
+// across sweep points (f_max-reuse), and re-assembling it every point used to
+// dominate the MQS path's JS time.
+export function mqsPrecompute(mesh, condRect, opts = {}) {
     const { nodes, edges, tris, triEdges, nNodes, nEdges, nTris } = mesh;
     const rects = condRect.rects || [condRect];
     const sym = condRect.symmetry > 1 ? 2 : 1;
-    const omega = 2 * Math.PI * freq;
-    const delta = Math.sqrt(2 / (omega * MU0 * sigma));
-    const Rs = 1 / (sigma * delta);
     const TOL = 1e-12;
 
     // Conductor triangles by centroid
@@ -209,21 +214,65 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         }
     }
 
-    // Symmetric real block system, C=1 solve
-    const beta = omega * MU0 * sigma;
+    // Symbolic block system with separate S / M value templates. The SAME
+    // (row, col) sequence is converted twice, so the dedup produces an identical
+    // pattern for both — valS and valM line up entry-for-entry.
     const Nb = 2 * nF;
-    const R = [], Cc = [], V = [];
+    const R = [], Cc = [], VS = [], VM = [];
     for (let k = 0; k < sR.length; k++) {
-        R.push(sR[k]); Cc.push(sC[k]); V.push(sV[k]);
-        R.push(nF + sR[k]); Cc.push(nF + sC[k]); V.push(-sV[k]);
+        R.push(sR[k]); Cc.push(sC[k]); VS.push(sV[k]); VM.push(0);
+        R.push(nF + sR[k]); Cc.push(nF + sC[k]); VS.push(-sV[k]); VM.push(0);
     }
     for (let k = 0; k < mR.length; k++) {
-        R.push(mR[k]); Cc.push(nF + mC[k]); V.push(-beta * mV[k]);
-        R.push(nF + mR[k]); Cc.push(mC[k]); V.push(-beta * mV[k]);
+        R.push(mR[k]); Cc.push(nF + mC[k]); VS.push(0); VM.push(-mV[k]);
+        R.push(nF + mR[k]); Cc.push(mC[k]); VS.push(0); VM.push(-mV[k]);
     }
+    const csrS = tripletsToCSR(R, Cc, VS, Nb);
+    const csrM = tripletsToCSR(R, Cc, VM, Nb);
+
+    // edge → one adjacent triangle (for the ground-loss surface integral)
+    const edgeToTri = new Int32Array(nEdges).fill(-1);
+    for (let t = 0; t < nTris; t++)
+        for (let k = 0; k < 3; k++)
+            if (edgeToTri[triEdges[3*t+k]] === -1) edgeToTri[triEdges[3*t+k]] = t;
+
+    return {
+        isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri,
+        rowPtr: csrS.rowPtr, colIdx: csrS.colIdx,
+        valS: csrS.valRe, valM: csrM.valRe, valIm: csrS.valIm,   // valIm stays zero
+    };
+}
+
+export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, Z0 = 0, opts = {}) {
+    const { nodes, edges, tris, triEdges, nNodes, nEdges, nTris } = mesh;
+    const rects = condRect.rects || [condRect];
+    const sym = condRect.symmetry > 1 ? 2 : 1;
+    const omega = 2 * Math.PI * freq;
+    const delta = Math.sqrt(2 / (omega * MU0 * sigma));
+    const Rs = 1 / (sigma * delta);
+    const TOL = 1e-12;
+    const xmin_d = condRect.xmin_domain;
+    const ymax_d = condRect.ymax_domain;
+    const ymin_d = condRect.ymin_domain ?? 0;
+
+    // Frequency-invariant assembly: reuse the caller's cache when it matches
+    // this exact mesh (identity) and symmetry mode; else recompute (and store).
+    const cc = opts.cache;
+    let pre = (cc && cc.mesh === mesh && cc.odd === !!opts.oddSymmetry) ? cc.pre : null;
+    if (!pre) {
+        pre = mqsPrecompute(mesh, condRect, opts);
+        if (cc) { cc.mesh = mesh; cc.odd = !!opts.oddSymmetry; cc.pre = pre; }
+    }
+    const { isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri } = pre;
+    const lg = new Int32Array(6);
+
+    // Per-frequency system: values = valS + β·valM on the cached pattern.
+    const beta = omega * MU0 * sigma;
+    const val = new Float64Array(pre.valS.length);
+    for (let k = 0; k < val.length; k++) val[k] = pre.valS[k] + beta * pre.valM[k];
+    const csr = { rowPtr: pre.rowPtr, colIdx: pre.colIdx, valRe: val, valIm: pre.valIm };
     const rhs = new Float64Array(Nb);
     for (let i = 0; i < nF; i++) rhs[i] = MU0 * sigma * Fc[i];
-    const csr = tripletsToCSR(R, Cc, V, Nb);
     const [sol] = solveSparseMulti(Nb, csr, [rhs]);
 
     // Rescale C for trace current 1 A. When the conductor straddles the symmetry
@@ -267,11 +316,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     }
 
     // Ground loss: flat-surface skin formula on |Hx(y=0)| = |∂A/∂y|/μ₀
-    const edgeToTri = new Array(nEdges);
-    for (let e = 0; e < nEdges; e++) edgeToTri[e] = -1;
-    for (let t = 0; t < nTris; t++)
-        for (let k = 0; k < 3; k++)
-            if (edgeToTri[triEdges[3*t+k]] === -1) edgeToTri[triEdges[3*t+k]] = t;
+    // (edgeToTri comes precomputed from mqsPrecompute)
     let Pgnd = 0;
     // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
     // conductor surfaces, used below to scale the smooth loss per face.

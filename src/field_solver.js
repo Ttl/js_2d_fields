@@ -2037,6 +2037,10 @@ export class FieldSolver2D {
 
         // Set frequency to max for finest skin depth mesh
         this.freq = maxFreq;
+        // Sweep-max hint for the triangular backend: lets it size the MQS skin
+        // band for the WHOLE sweep up front, so an ascending sweep reuses one
+        // skin mesh (and its cached assembly) instead of rebuilding per point.
+        this._sweepFmax = maxFreq;
 
         // Fail fast (before building the FDM mesh below) if the geometry can't be meshed
         // finely enough to resolve features and the wavelength within the node budget.
@@ -2148,6 +2152,9 @@ export class FieldSolver2D {
             }
         }
 
+        // Drop the sweep-max hint: a later single-frequency solve on this same
+        // solver shouldn't keep building the whole-sweep skin band.
+        this._sweepFmax = null;
         return result;
     }
 
@@ -2165,10 +2172,12 @@ export class FieldSolver2D {
         this.freq = freq;
 
         // Triangular FEM backend: re-run the per-frequency solve (eigenmode +
-        // loss) on the cached mesh/static solution.
+        // loss) on the cached mesh/static solution. skipFieldResample: sweep
+        // points don't need the plot-field resample (the displayed fields come
+        // from the main solve; per-point resamples are overwritten anyway).
         if (this.mesh_backend === 'triangular') {
             const tri = await this._ensureTriBackend();
-            return tri.solveAt(freq);
+            return tri.solveAt(freq, { skipFieldResample: true });
         }
 
         // If causal materials are enabled, we must re-solve the Laplace equation
