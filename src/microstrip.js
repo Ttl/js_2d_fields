@@ -309,11 +309,12 @@ class MicrostripSolver extends FieldSolver2D {
             // Use enclosure height (distance from highest dielectric to top of domain)
             // Highest dielectric is y_top_start
             this.top_dielectric_h = this.enclosure_height;
-            this.has_top_gnd = (this.boundaries[2] === "gnd");
         } else {
             this.top_dielectric_h = (this.h + this.t) * 15;
-            this.has_top_gnd = false;
         }
+        // The top ground follows the boundary condition. With auto height the
+        // lid sits at the default auto-padded domain top instead.
+        this.has_top_gnd = (this.boundaries[2] === "gnd");
 
         this.y_top_end = this.y_top_start + this.top_dielectric_h;
 
