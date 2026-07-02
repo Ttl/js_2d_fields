@@ -19,25 +19,9 @@ int solve_sparse(
     int use_lu
 ) {
     try {
-        // Build Eigen sparse matrix from CSR format
-        SparseMatrix<double> A(N, N);
-        
-        std::vector<Triplet<double>> triplets;
-        triplets.reserve(nnz);
-        
-        for (int i = 0; i < N; i++) {
-            for (int p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
-                triplets.push_back(Triplet<double>(i, colIdx[p], values[p]));
-            }
-        }
-        
-        A.setFromTriplets(triplets.begin(), triplets.end());
-        A.makeCompressed();
-        
-        // Map input/output arrays
-        Map<VectorXd> b_vec(b, N);
-        Map<VectorXd> x_vec(x_out, N);
-
+        // Validate the CSR arrays BEFORE building the matrix — setFromTriplets
+        // performs the out-of-bounds writes a bad colIdx would cause, so the
+        // check must precede it.
         for (int i = 0; i < N; i++) {
             for (int p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
                 if (colIdx[p] >= N || colIdx[p] < 0) {
@@ -48,7 +32,26 @@ int solve_sparse(
                 }
             }
         }
-                
+
+        // Build Eigen sparse matrix from CSR format
+        SparseMatrix<double> A(N, N);
+
+        std::vector<Triplet<double>> triplets;
+        triplets.reserve(nnz);
+
+        for (int i = 0; i < N; i++) {
+            for (int p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
+                triplets.push_back(Triplet<double>(i, colIdx[p], values[p]));
+            }
+        }
+
+        A.setFromTriplets(triplets.begin(), triplets.end());
+        A.makeCompressed();
+
+        // Map input/output arrays
+        Map<VectorXd> b_vec(b, N);
+        Map<VectorXd> x_vec(x_out, N);
+
         if (use_lu) {
             SparseLU<SparseMatrix<double>> solver;
             solver.compute(A);

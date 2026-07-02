@@ -3,7 +3,6 @@
 #include <Eigen/SparseLU>
 #include <Eigen/SparseCholesky>
 #include <Eigen/Dense>
-#include <Spectra/SymEigsSolver.h>
 #include <complex>
 #include <vector>
 #include <cmath>
@@ -47,102 +46,6 @@ static RSpMat buildRealSparseMatrix(int N, int nnz,
     mat.setFromTriplets(triplets.begin(), triplets.end());
     mat.makeCompressed();
     return mat;
-}
-
-// Combined shift-invert-B operator: y = (A-σB)⁻¹ B x
-// This is a standard (non-generalized) operator for SymEigsSolver.
-// Eigenvalues of this operator are ν = 1/(λ-σ), so λ = σ + 1/ν.
-class ShiftInvertBOp {
-public:
-    using Scalar = double;
-private:
-    const RSpMat& m_B;
-    int m_n;
-    Eigen::SimplicialLDLT<RSpMat> m_solver;
-    bool m_factored = false;
-public:
-    ShiftInvertBOp(const RSpMat& A, const RSpMat& B, double sigma)
-        : m_B(B), m_n(A.rows())
-    {
-        RSpMat C = A - sigma * B;
-        m_solver.compute(C);
-        m_factored = (m_solver.info() == Eigen::Success);
-    }
-    bool factored() const { return m_factored; }
-    Eigen::Index rows() const { return m_n; }
-    Eigen::Index cols() const { return m_n; }
-    // y = (A - σB)⁻¹ B x
-    void perform_op(const double* x_in, double* y_out) const {
-        Eigen::Map<const RVector> x(x_in, m_n);
-        Eigen::Map<RVector> y(y_out, m_n);
-        RVector Bx = m_B * x;
-        y.noalias() = m_solver.solve(Bx);
-    }
-};
-
-// Real-valued shift-invert eigensolver using Spectra (implicit restart Lanczos).
-static int solve_real(
-    int N,
-    int nnz_a,
-    int* a_rowPtr, int* a_colIdx, double* a_vals_re,
-    int nnz_b,
-    int* b_rowPtr, int* b_colIdx, double* b_vals_re,
-    double sigma_re,
-    int num_eigenvalues, int krylov_size,
-    double* out_evals_re, double* out_evals_im,
-    double* out_evecs_re, double* out_evecs_im,
-    double* init_re
-) {
-    int n = N;
-    int nev = num_eigenvalues;
-    int ncv = krylov_size;
-
-    if (ncv <= nev) ncv = 2 * nev + 1;
-    if (ncv > n) ncv = n;
-
-    RSpMat A = buildRealSparseMatrix(n, nnz_a, a_rowPtr, a_colIdx, a_vals_re);
-    RSpMat B = buildRealSparseMatrix(n, nnz_b, b_rowPtr, b_colIdx, b_vals_re);
-
-    ShiftInvertBOp op(A, B, sigma_re);
-    if (!op.factored()) return -1;
-
-    Spectra::SymEigsSolver<ShiftInvertBOp> eigs(op, nev, ncv);
-
-    if (init_re != nullptr) {
-        double norm2 = 0;
-        for (int i = 0; i < n; i++) norm2 += init_re[i] * init_re[i];
-        if (norm2 > 1e-60) {
-            eigs.init(init_re);
-        } else {
-            eigs.init();
-        }
-    } else {
-        eigs.init();
-    }
-
-    int nconv = eigs.compute(Spectra::SortRule::LargestMagn, 1000, 1e-10);
-
-    if (eigs.info() != Spectra::CompInfo::Successful &&
-        eigs.info() != Spectra::CompInfo::NotConverging) {
-        return -1;
-    }
-
-    // Extract eigenvalues and transform back: λ = σ + 1/ν
-    RVector nu = eigs.eigenvalues();
-    RMatrix evecs = eigs.eigenvectors();
-
-    int nout = std::min(nconv, nev);
-    for (int k = 0; k < nout; k++) {
-        double lambda = sigma_re + 1.0 / nu(k);
-        out_evals_re[k] = lambda;
-        out_evals_im[k] = 0.0;
-        for (int j = 0; j < n; j++) {
-            out_evecs_re[k * n + j] = evecs(j, k);
-            out_evecs_im[k * n + j] = 0.0;
-        }
-    }
-
-    return nout;
 }
 
 // Complex-valued shift-invert Arnoldi for generalized Ax = λBx.
@@ -263,10 +166,11 @@ static int solve_complex(
         return std::abs(theta(a)) > std::abs(theta(b));
     });
 
-    int nout = std::min(nev, actual_m);
-
+    // Walk ALL Ritz pairs in closest-to-shift order and keep the converged ones,
+    // up to nev — a rejected (unconverged) pair's slot can be filled by a
+    // converged pair further from the shift.
     int nconv = 0;
-    for (int k = 0; k < nout; k++) {
+    for (int k = 0; k < actual_m && nconv < nev; k++) {
         int idx = indices[k];
         Complex th = theta(idx);
 
@@ -281,7 +185,11 @@ static int solve_complex(
         CVector residual = Ax - lambda * Bx;
         double rel_res = residual.norm() / (x.norm() * (Ax.norm() + std::abs(lambda) * Bx.norm()));
 
-        if (rel_res < 1e-4 || k < nev) {
+        // Accept only Ritz pairs that actually converged within the Krylov space.
+        // (This gate used to be `rel_res < 1e-4 || k < nev`, and since the loop is
+        // bounded by nout = min(nev, actual_m) the `k < nev` arm was always true —
+        // unconverged junk pairs were returned as converged modes.)
+        if (rel_res < 1e-4) {
             out_evals_re[nconv] = lambda.real();
             out_evals_im[nconv] = lambda.imag();
             for (int j = 0; j < n; j++) {
@@ -293,14 +201,6 @@ static int solve_complex(
     }
 
     return nconv;
-}
-
-// Dispatch: use real path when sigma_im == 0 and matrices have no imaginary parts
-static bool hasImaginaryParts(int nnz, const double* vals_im) {
-    for (int i = 0; i < nnz; i++) {
-        if (vals_im[i] != 0.0) return true;
-    }
-    return false;
 }
 
 static int solve_core(
@@ -315,17 +215,14 @@ static int solve_core(
     double* out_evecs_re, double* out_evecs_im,
     double* init_re, double* init_im
 ) {
-    // Use fast real path when shift is real and matrices are real
-    if (sigma_im == 0.0 &&
-        !hasImaginaryParts(nnz_a, a_vals_im) &&
-        !hasImaginaryParts(nnz_b, b_vals_im)) {
-        return solve_real(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re,
-                          nnz_b, b_rowPtr, b_colIdx, b_vals_re,
-                          sigma_re, num_eigenvalues, krylov_size,
-                          out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
-                          init_re);
-    }
-
+    // All problems go through the shift-invert Arnoldi. A real-specialized
+    // "fast path" used to run Spectra's SymEigsSolver on the (A-σB)⁻¹B operator,
+    // but that operator is self-adjoint only in the B-inner product and the FEM
+    // B here is INDEFINITE (zeroed face-face mass entries + the Dzt coupling
+    // blocks), so no symmetric Lanczos applies — Spectra's generalized solvers
+    // all assume B (or A) positive definite. Plain Arnoldi makes no symmetry
+    // assumption and is the correct algorithm; real input just runs with zero
+    // imaginary parts.
     return solve_complex(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
                          nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
                          sigma_re, sigma_im, num_eigenvalues, krylov_size,
@@ -354,6 +251,7 @@ int solve_rqi(
     double* out_eval_re, double* out_eval_im,
     double* out_evec_re, double* out_evec_im
 ) {
+  try {
     int n = N;
     SpMat A = buildSparseMatrix(n, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im);
     SpMat B = buildSparseMatrix(n, nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im);
@@ -405,6 +303,9 @@ int solve_rqi(
         out_evec_im[i] = x(i).imag();
     }
     return 1;
+  } catch (...) {
+    return -9;
+  }
 }
 
 // Quadratic eigenvalue problem RQI: refine eigenvalue of (A0 + λA1 + λ²A2)x = 0.
@@ -422,6 +323,7 @@ int solve_qep_rqi(
     double* out_eval_re, double* out_eval_im,
     double* out_evec_re, double* out_evec_im
 ) {
+  try {
     int n = N;
     SpMat A0 = buildSparseMatrix(n, nnz0, r0, c0, v0re, v0im);
     SpMat A1 = buildSparseMatrix(n, nnz1, r1, c1, v1re, v1im);
@@ -481,6 +383,9 @@ int solve_qep_rqi(
         out_evec_im[i] = x(i).imag();
     }
     return 1;
+  } catch (...) {
+    return -9;
+  }
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -495,11 +400,17 @@ int solve_generalized_eigen(
     double* out_evals_re, double* out_evals_im,
     double* out_evecs_re, double* out_evecs_im
 ) {
-    return solve_core(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
-                      nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
-                      sigma_re, sigma_im, num_eigenvalues, krylov_size,
-                      out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
-                      nullptr, nullptr);
+    // Catch everything (Spectra std::invalid_argument, Eigen std::bad_alloc, …):
+    // an uncaught exception would abort() and permanently poison the module.
+    try {
+        return solve_core(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
+                          nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
+                          sigma_re, sigma_im, num_eigenvalues, krylov_size,
+                          out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
+                          nullptr, nullptr);
+    } catch (...) {
+        return -9;
+    }
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -515,11 +426,15 @@ int solve_generalized_eigen_with_init(
     double* out_evecs_re, double* out_evecs_im,
     double* init_re, double* init_im
 ) {
-    return solve_core(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
-                      nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
-                      sigma_re, sigma_im, num_eigenvalues, krylov_size,
-                      out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
-                      init_re, init_im);
+    try {
+        return solve_core(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
+                          nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
+                          sigma_re, sigma_im, num_eigenvalues, krylov_size,
+                          out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
+                          init_re, init_im);
+    } catch (...) {
+        return -9;
+    }
 }
 
 // Direct sparse solver: factorize once, solve for nRhs right-hand sides.
@@ -532,6 +447,7 @@ int solve_sparse_multi(
     int* rowPtr, int* colIdx, double* values,
     int nRhs, double* rhs_arr, double* x_arr
 ) {
+  try {
     RSpMat A = buildRealSparseMatrix(N, nnz, rowPtr, colIdx, values);
 
     // SimplicialLDLT reads only the lower triangle: for a NONSYMMETRIC input it
@@ -569,6 +485,9 @@ int solve_sparse_multi(
         x = lu.solve(b);
     }
     return 0;
+  } catch (...) {
+    return -9;
+  }
 }
 
 } // extern "C"

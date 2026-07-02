@@ -18,7 +18,7 @@ all: solver eigen_solver
 # --- quasi-static solver -----------------------------------------------------
 solver: solver.js
 solver.js: solver.cpp | eigen
-	$(EMCC) solver.cpp -I eigen -O3 \
+	$(EMCC) solver.cpp -I eigen -O3 -fwasm-exceptions \
 	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,node \
 	  -s EXPORTED_FUNCTIONS='["_solve_sparse","_malloc","_free"]' \
 	  -s EXPORTED_RUNTIME_METHODS='["HEAP32","HEAPF64"]' \
@@ -26,9 +26,12 @@ solver.js: solver.cpp | eigen
 	  -o solver.js
 
 # --- full-wave eigen solver --------------------------------------------------
+# -fwasm-exceptions: C++ throws (Spectra invalid_argument, bad_alloc) must be
+# catchable inside the entry points' try/catch — without it any throw abort()s
+# and permanently poisons the module for the rest of the session.
 eigen_solver: eigen_solver.js
 eigen_solver.js: eigen_solver.cpp | eigen spectra
-	$(EMCC) eigen_solver.cpp -I eigen -I spectra/include -O3 \
+	$(EMCC) eigen_solver.cpp -I eigen -I spectra/include -O3 -fwasm-exceptions \
 	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,node \
 	  -s EXPORTED_FUNCTIONS='["_solve_generalized_eigen","_solve_generalized_eigen_with_init","_solve_sparse_multi","_solve_rqi","_solve_qep_rqi","_malloc","_free"]' \
 	  -s EXPORTED_RUNTIME_METHODS='["HEAP32","HEAPF64"]' \
