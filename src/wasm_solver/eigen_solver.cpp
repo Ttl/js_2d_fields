@@ -203,6 +203,145 @@ static int solve_complex(
     return nconv;
 }
 
+// Real-arithmetic shift-invert Arnoldi for generalized Ax = λBx with REAL A, B, σ.
+// This is the SAME algorithm as solve_complex — on real data with a real start
+// vector the complex Arnoldi stays exactly in the real subspace, so this twin
+// produces the same Krylov space and Ritz pairs while paying real-arithmetic
+// costs (the sparse LU alone is ~4× cheaper). Unlike the earlier removed "fast
+// path" (Spectra SymEigsSolver = Lanczos, which wrongly assumed the operator is
+// symmetric in the standard inner product — it is only B-self-adjoint, and B is
+// indefinite), plain Arnoldi makes NO symmetry assumption: complex-pair Ritz
+// values from the real Hessenberg are handled, and every returned pair passes
+// the explicit residual gate against the true pencil.
+static int solve_real(
+    int N,
+    int nnz_a, int* a_rowPtr, int* a_colIdx, double* a_vals_re,
+    int nnz_b, int* b_rowPtr, int* b_colIdx, double* b_vals_re,
+    double sigma_re,
+    int num_eigenvalues, int krylov_size,
+    double* out_evals_re, double* out_evals_im,
+    double* out_evecs_re, double* out_evecs_im,
+    double* init_re
+) {
+    int n = N;
+    int nev = num_eigenvalues;
+    int m = krylov_size;
+    if (m <= nev) m = 2 * nev + 1;
+    if (m > n) m = n;
+
+    RSpMat A = buildRealSparseMatrix(n, nnz_a, a_rowPtr, a_colIdx, a_vals_re);
+    RSpMat B = buildRealSparseMatrix(n, nnz_b, b_rowPtr, b_colIdx, b_vals_re);
+
+    // Factor C = A - σB (real general LU — pivoted, safe for the indefinite pencil)
+    RSpMat C = A - sigma_re * B;
+    Eigen::SparseLU<RSpMat> solver;
+    solver.compute(C);
+    if (solver.info() != Eigen::Success) {
+        return -1;
+    }
+
+    RMatrix V(n, m + 1);
+    RMatrix H = RMatrix::Zero(m + 1, m);
+
+    RVector v0(n);
+    if (init_re != nullptr) {
+        for (int i = 0; i < n; i++) v0(i) = init_re[i];
+        if (v0.norm() < 1e-30) v0.setConstant(1.0 / std::sqrt((double)n));
+    } else {
+        v0.setConstant(1.0 / std::sqrt((double)n));
+    }
+    V.col(0) = v0 / v0.norm();
+
+    int actual_m = m;
+    for (int j = 0; j < m; j++) {
+        RVector Bv = B * V.col(j);
+        RVector w = solver.solve(Bv);
+        if (!w.allFinite()) { actual_m = j; break; }
+        // Modified Gram-Schmidt with double orthogonalization
+        for (int i = 0; i <= j; i++) {
+            double h = V.col(i).dot(w);
+            H(i, j) = h;
+            w -= h * V.col(i);
+        }
+        for (int i = 0; i <= j; i++) {
+            double h = V.col(i).dot(w);
+            H(i, j) += h;
+            w -= h * V.col(i);
+        }
+        double wnorm = w.norm();
+        H(j + 1, j) = wnorm;
+        if (wnorm < 1e-14 || !std::isfinite(wnorm)) { actual_m = j + 1; break; }
+        if (j + 1 < m) V.col(j + 1) = w / wnorm;
+    }
+
+    if (actual_m < 1) return 0;
+
+    RMatrix Hm = H.topLeftCorner(actual_m, actual_m);
+    if (!Hm.allFinite()) return -2;
+
+    // Real Schur eigendecomposition — Ritz values may come in complex-conjugate
+    // pairs (the real indefinite pencil admits them); they are handled like any
+    // other candidate and must pass the residual gate below.
+    Eigen::EigenSolver<RMatrix> eig_solver;
+    eig_solver.compute(Hm);
+    if (eig_solver.info() != Eigen::Success) return -2;
+
+    CVector theta = eig_solver.eigenvalues();
+    CMatrix Y = eig_solver.eigenvectors();
+
+    std::vector<int> indices(actual_m);
+    for (int i = 0; i < actual_m; i++) indices[i] = i;
+    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+        return std::abs(theta(a)) > std::abs(theta(b));
+    });
+
+    int nconv = 0;
+    for (int k = 0; k < actual_m && nconv < nev; k++) {
+        int idx = indices[k];
+        Complex th = theta(idx);
+        if (std::abs(th) < 1e-15) continue;
+        Complex lambda = sigma_re + 1.0 / th;
+
+        // Ritz vector: complex combination of the REAL basis
+        RVector xr = V.leftCols(actual_m) * Y.col(idx).real();
+        RVector xi = V.leftCols(actual_m) * Y.col(idx).imag();
+
+        // Residual ‖Ax − λBx‖ with real A, B and complex λ, x (componentwise)
+        RVector Axr = A * xr, Axi = A * xi;
+        RVector Bxr = B * xr, Bxi = B * xi;
+        double lr = lambda.real(), li = lambda.imag();
+        double res2 = 0, xn2 = 0, Axn2 = 0, Bxn2 = 0;
+        for (int i2 = 0; i2 < n; i2++) {
+            const double rr = Axr(i2) - (lr * Bxr(i2) - li * Bxi(i2));
+            const double ri = Axi(i2) - (lr * Bxi(i2) + li * Bxr(i2));
+            res2 += rr * rr + ri * ri;
+            xn2 += xr(i2) * xr(i2) + xi(i2) * xi(i2);
+            Axn2 += Axr(i2) * Axr(i2) + Axi(i2) * Axi(i2);
+            Bxn2 += Bxr(i2) * Bxr(i2) + Bxi(i2) * Bxi(i2);
+        }
+        double rel_res = std::sqrt(res2) /
+            (std::sqrt(xn2) * (std::sqrt(Axn2) + std::abs(lambda) * std::sqrt(Bxn2)));
+
+        if (rel_res < 1e-4) {
+            out_evals_re[nconv] = lambda.real();
+            out_evals_im[nconv] = lambda.imag();
+            for (int j = 0; j < n; j++) {
+                out_evecs_re[nconv * n + j] = xr(j);
+                out_evecs_im[nconv * n + j] = xi(j);
+            }
+            nconv++;
+        }
+    }
+
+    return nconv;
+}
+
+static bool allZero(int nnz, const double* v) {
+    if (v == nullptr) return true;
+    for (int i = 0; i < nnz; i++) if (v[i] != 0.0) return false;
+    return true;
+}
+
 static int solve_core(
     int N,
     int nnz_a,
@@ -215,14 +354,25 @@ static int solve_core(
     double* out_evecs_re, double* out_evecs_im,
     double* init_re, double* init_im
 ) {
-    // All problems go through the shift-invert Arnoldi. A real-specialized
-    // "fast path" used to run Spectra's SymEigsSolver on the (A-σB)⁻¹B operator,
-    // but that operator is self-adjoint only in the B-inner product and the FEM
-    // B here is INDEFINITE (zeroed face-face mass entries + the Dzt coupling
-    // blocks), so no symmetric Lanczos applies — Spectra's generalized solvers
-    // all assume B (or A) positive definite. Plain Arnoldi makes no symmetry
-    // assumption and is the correct algorithm; real input just runs with zero
-    // imaginary parts.
+    // Fully real problem (closed PEC/PMC boundaries, lossless ε, real shift and
+    // seed): run the real-arithmetic Arnoldi twin — the same iteration the
+    // complex path would perform (a real start keeps the complex Arnoldi exactly
+    // real), at real-arithmetic cost. Anything imaginary anywhere (radiating-ABC
+    // Robin term, lossy ε, complex shift/seed) goes through the complex path.
+    // If the real path fails outright (factorization/decomposition failure or
+    // zero converged pairs) the complex path is retried as a safety net before
+    // reporting failure.
+    const bool realProblem = sigma_im == 0.0 &&
+        allZero(nnz_a, a_vals_im) && allZero(nnz_b, b_vals_im) &&
+        (init_re == nullptr || init_im == nullptr || allZero(N, init_im));
+    if (realProblem) {
+        int nconv = solve_real(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re,
+                               nnz_b, b_rowPtr, b_colIdx, b_vals_re,
+                               sigma_re, num_eigenvalues, krylov_size,
+                               out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
+                               init_re);
+        if (nconv > 0) return nconv;
+    }
     return solve_complex(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
                          nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
                          sigma_re, sigma_im, num_eigenvalues, krylov_size,
