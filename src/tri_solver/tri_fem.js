@@ -445,9 +445,28 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
         }
     }
 
+    // An edge is a conductor (PEC) edge only if BOTH endpoints are on metal AND
+    // its midpoint lies on/in a conductor rect. Endpoints alone are not enough:
+    // an air edge bridging TWO conductors across a one-element gap would be
+    // marked PEC and short the gap. The midpoint test also gives the edge its
+    // own conductor group (an endpoint shared between touching rects can carry
+    // the wrong group).
     const isCondEdge = new Uint8Array(nEdges);
+    const condEdgeGroup = new Int8Array(nEdges);
     for (let e = 0; e < nEdges; e++) {
-        if (isCondNode[edges[2*e]] && isCondNode[edges[2*e+1]]) isCondEdge[e] = 1;
+        const n0 = edges[2*e], n1 = edges[2*e+1];
+        if (!(isCondNode[n0] && isCondNode[n1])) continue;
+        const xm = (nodes[2*n0] + nodes[2*n1]) / 2;
+        const ym = (nodes[2*n0+1] + nodes[2*n1+1]) / 2;
+        for (let ci = 0; ci < condRects.length; ci++) {
+            const cr = condRects[ci];
+            if (xm >= cr.xmin - TOL && xm <= cr.xmax + TOL &&
+                ym >= cr.ymin - TOL && ym <= cr.ymax + TOL) {
+                isCondEdge[e] = 1;
+                condEdgeGroup[e] = ci + 1;
+                break;
+            }
+        }
     }
 
     // Helper: check if edge is on a PEC boundary (ground, conductor, walls)
@@ -512,7 +531,7 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
         const ym = (nodes[2*n0+1]+nodes[2*n1+1])/2;
         const xm = (nodes[2*n0]+nodes[2*n1])/2;
         if (!abc.bottom && Math.abs(ym-ymin) < TOL) continue;
-        if (isCondNode[n0] && isCondNode[n1]) continue;
+        if (isCondEdge[e]) continue;
         if (!abc.left && Math.abs(xm-xmin)<TOL) continue;
         if (!abc.right && Math.abs(xm-xmax)<TOL) continue;
         if (!abc.top && Math.abs(ym-ymax)<TOL) continue;
@@ -525,7 +544,7 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
         edgeF, faceF, nodeF, edgeNodeF,
         nFreeEdgeDof, nFreeFaceDof, nFreeTransverse,
         nFreeVertexDof, nFreeEdgeNodeDof, nFreeLongitudinal,
-        isCondNode, isCondEdge, condNodeGroup,
+        isCondNode, isCondEdge, condNodeGroup, condEdgeGroup,
     };
 }
 
@@ -683,7 +702,7 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
     // If null, all conductors get V=1.0.
     const { nodes, tris, nTris } = mesh;
     const { nodeF, edgeNodeF, nFreeVertexDof, nFreeEdgeNodeDof,
-            isCondNode, isCondEdge, condNodeGroup } = fm;
+            isCondNode, isCondEdge, condNodeGroup, condEdgeGroup } = fm;
     const nFreeDof = nFreeVertexDof + nFreeEdgeNodeDof;
 
     // Longitudinal DOF offsets (within the static system, lzOff=0)
@@ -730,7 +749,8 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
             } else if (isCondEdge[eIdx]) {
                 globalDof[k+3] = -1;
                 isDirichlet[k+3] = 1;
-                const eg = condNodeGroup ? condNodeGroup[mesh.edges[2*eIdx]] : 1;
+                const eg = condEdgeGroup ? condEdgeGroup[eIdx]
+                         : (condNodeGroup ? condNodeGroup[mesh.edges[2*eIdx]] : 1);
                 dirichletVal[k+3] = condPotentials ? condPotentials[eg - 1] : 1.0;
             } else {
                 globalDof[k+3] = -1;
@@ -755,8 +775,11 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
 
 
     const csrS = tripletsToCSR(Rows, Cols, Vals, nFreeDof);
-    const { x: phiFree, iters, residual } = solveCG(csrS, rhs, nFreeDof);
-    //globalThis.__TRI_DEBUG__ && console.log(`  Static CG: ${iters} iters, residual=${residual.toExponential(2)}`);
+    const { x: phiFree, iters, residual, converged } = solveCG(csrS, rhs, nFreeDof);
+    if (!converged) {
+        console.warn(`Static CG did not converge in ${iters} iterations ` +
+            `(residual ${residual.toExponential(2)}) — static C/Z0 may be inaccurate.`);
+    }
 
     // Reconstruct full potential vector
     const phiVertex = new Float64Array(mesh.nNodes);
@@ -770,7 +793,8 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
     const phiEdge = new Float64Array(mesh.nEdges);
     for (let e = 0; e < mesh.nEdges; e++) {
         if (isCondEdge[e]) {
-            const eg = condNodeGroup ? condNodeGroup[mesh.edges[2*e]] : 1;
+            const eg = condEdgeGroup ? condEdgeGroup[e]
+                     : (condNodeGroup ? condNodeGroup[mesh.edges[2*e]] : 1);
             phiEdge[e] = condPotentials ? condPotentials[eg - 1] : 1.0;
         } else if (edgeNodeF[e] >= 0) phiEdge[e] = phiFree[edgeMidOff + edgeNodeF[e]];
     }
@@ -822,11 +846,13 @@ export function staticToEdgeDofs(phi, mesh, fm) {
         initVec[ef] = -(phiVertex[n1] - phiVertex[n0]);
     }
 
-    // ne2 DOFs: ∫ E·t*(λ_p-λ_q) dl = (2/3)(φ_p+φ_q) - (4/3)*φ_pq
+    // ne2 DOFs: the ne2 basis is ne1·(λ_p−λ_q), whose tangential trace gives
+    // ∫ ne2·t (λ_p−λ_q) dl = 1/3 — so the DOF dual to it is
+    // 3·∫ E·t (λ_p−λ_q) dl = 3·[(2/3)(φ_p+φ_q) − (4/3)φ_pq].
     for (let e = 0; e < nEdges; e++) {
         const ef = edgeF[2*e+1]; if (ef < 0) continue;
         const n0 = edges[2*e], n1 = edges[2*e+1];
-        initVec[ef] = (2/3)*(phiVertex[n0] + phiVertex[n1]) - (4/3)*phiEdge[e];
+        initVec[ef] = 2*(phiVertex[n0] + phiVertex[n1]) - 4*phiEdge[e];
     }
     // Face DOFs: set to 0 (interior bubbles, small for quasi-TEM)
 
@@ -998,8 +1024,29 @@ export function refineTriMesh(mesh, marked) {
     // --- Laplacian smoothing ---
     // Phase 1: smooth new midpoints (as before).
     // Phase 2: quality-targeted smoothing of old vertices adjacent to slivers.
-    const constraintYs = Object.keys(mesh.constraintYRanges || {}).map(Number);
-    const constraintXs = mesh.constraintXs || [];
+    const cyRanges = mesh.constraintYRanges || {};
+    const cxRanges = mesh.constraintXRanges || null;
+    const constraintYs = Object.keys(cyRanges).map(Number);
+    const constraintXs = cxRanges ? Object.keys(cxRanges).map(Number) : (mesh.constraintXs || []);
+    // A point is on a constraint line only within the line's extent (a conductor
+    // side wall constrains only over the conductor's height, not the whole
+    // domain column at that x). Ranges absent → whole line (legacy meshes).
+    const onYLine = (x, y) => {
+        for (const cy of constraintYs) {
+            if (Math.abs(y - cy) >= 1e-10) continue;
+            const r = cyRanges[cy];
+            if (!r || (x >= r[0] - 1e-10 && x <= r[1] + 1e-10)) return true;
+        }
+        return false;
+    };
+    const onXLine = (x, y) => {
+        for (const cx of constraintXs) {
+            if (Math.abs(x - cx) >= 1e-10) continue;
+            const r = cxRanges ? cxRanges[cx] : null;
+            if (!r || (y >= r[0] - 1e-10 && y <= r[1] + 1e-10)) return true;
+        }
+        return false;
+    };
     // Domain bounds
     let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
     for (let n = 0; n < newNodeCount; n++) {
@@ -1013,8 +1060,8 @@ export function refineTriMesh(mesh, marked) {
         let onX = 0, onY = 0;
         if (Math.abs(mx - xMin) < 1e-10 || Math.abs(mx - xMax) < 1e-10) onX = 1;
         if (Math.abs(my - yMin) < 1e-10 || Math.abs(my - yMax) < 1e-10) onY = 1;
-        for (const cy of constraintYs) { if (Math.abs(my - cy) < 1e-10) onY = 1; }
-        for (const cx of constraintXs) { if (Math.abs(mx - cx) < 1e-10) onX = 1; }
+        if (onYLine(mx, my)) onY = 1;
+        if (onXLine(mx, my)) onX = 1;
         if (onX && onY) canMove[n] = 0;
         else if (onY) canMove[n] = 3;
         else if (onX) canMove[n] = 2;
@@ -1056,9 +1103,7 @@ export function refineTriMesh(mesh, marked) {
                 let ny = canMove[n] === 3 ? newNodes[2*n+1] : avgY;
                 // Don't let free vertices land on constraint lines (breaks constraint edge check)
                 if (canMove[n] === 1) {
-                    let snap = false;
-                    for (const cy of constraintYs) { if (Math.abs(ny - cy) < 1e-10) { snap = true; break; } }
-                    if (!snap) for (const cx of constraintXs) { if (Math.abs(nx - cx) < 1e-10) { snap = true; break; } }
+                    let snap = onYLine(nx, ny) || onXLine(nx, ny);
                     if (!snap) { if (Math.abs(nx - xMin) < 1e-10 || Math.abs(nx - xMax) < 1e-10) snap = true; }
                     if (!snap) { if (Math.abs(ny - yMin) < 1e-10 || Math.abs(ny - yMax) < 1e-10) snap = true; }
                     if (snap) continue;
@@ -1101,12 +1146,8 @@ export function refineTriMesh(mesh, marked) {
     function isOnConstraint(na, nb) {
         const ax = newNodes[2*na], ay = newNodes[2*na+1];
         const bx = newNodes[2*nb], by = newNodes[2*nb+1];
-        for (const cy of constraintYs) {
-            if (Math.abs(ay - cy) < 1e-10 && Math.abs(by - cy) < 1e-10) return true;
-        }
-        for (const cx of constraintXs) {
-            if (Math.abs(ax - cx) < 1e-10 && Math.abs(bx - cx) < 1e-10) return true;
-        }
+        if (onYLine(ax, ay) && onYLine(bx, by) && Math.abs(ay - by) < 1e-10) return true;
+        if (onXLine(ax, ay) && onXLine(bx, by) && Math.abs(ax - bx) < 1e-10) return true;
         if (Math.abs(ax - bx) < 1e-10 && (Math.abs(ax - xMin) < 1e-10 || Math.abs(ax - xMax) < 1e-10)) return true;
         if (Math.abs(ay - by) < 1e-10 && (Math.abs(ay - yMin) < 1e-10 || Math.abs(ay - yMax) < 1e-10)) return true;
         return false;
@@ -1126,9 +1167,15 @@ export function refineTriMesh(mesh, marked) {
             }
         }
         let nSwaps = 0;
+        // A swap changes BOTH triangles' edge sets, so map entries built at pass
+        // start go stale: a later entry referencing a swapped triangle would
+        // rewrite triangles that no longer share the edge (mesh corruption).
+        // Skip entries touching swapped triangles; the next pass rebuilds the map.
+        const dirty = new Uint8Array(nNewTris);
         for (const [key, tris2] of tmpEdgeMap) {
             if (tris2.length !== 2) continue;
             const [t0, t1] = tris2;
+            if (dirty[t0] || dirty[t1]) continue;
             const n0 = Math.floor(key / newNodeCount), n1 = key % newNodeCount;
             if (isOnConstraint(n0, n1)) continue;
             let opp0 = -1, opp1 = -1;
@@ -1166,6 +1213,7 @@ export function refineTriMesh(mesh, marked) {
                 newTriArr[3*t1] = s1[0]; newTriArr[3*t1+1] = s1[1]; newTriArr[3*t1+2] = s1[2];
             } else {
                 nSwaps++;
+                dirty[t0] = dirty[t1] = 1;
             }
         }
         return nSwaps;
@@ -1265,6 +1313,7 @@ export function refineTriMesh(mesh, marked) {
         nNodes: newNodeCount, nTris: nNewTris, nEdges: nNewEdges,
         Nx: 0, Ny: 0,
         constraintYRanges: mesh.constraintYRanges || {},
+        constraintXRanges: mesh.constraintXRanges || null,
         constraintXs: mesh.constraintXs || []
     };
 }

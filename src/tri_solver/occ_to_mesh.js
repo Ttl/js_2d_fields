@@ -200,13 +200,27 @@ export function buildOccMeshFromGeometry(G, opts) {
         G._gmshModelGetEntities(fe, feN, 2, ierr); check('GetEntities(2)');
         const faces = _readIntArray(G, fe, feN);   // (dim,tag) pairs
         const bb = [G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8)];
-        const inCond = (x, y) => condRects.some(c => x > c.xmin - tol && x < c.xmax + tol && y > c.ymin - tol && y < c.ymax + tol);
+        // A conductor sub-face's bounding box is CONTAINED in its conductor rect.
+        // Testing only the bbox CENTER misclassifies a face-with-hole: the air
+        // face surrounding a centered conductor (e.g. symmetric stripline) has
+        // its bbox center inside the conductor rect, so the whole domain outline
+        // would be collected as "conductor" curves and refined at sizeMin.
+        // OCC enlarges bounding boxes by Precision::Confusion (1e-7 in model
+        // units, verified empirically) — the containment pad must absorb that,
+        // capped per rect so a very thin conductor can't false-positive.
+        const OCC_BBOX_PAD = 2e-7;
+        const inCond = (x0, y0, x1, y1) => condRects.some(c => {
+            const pad = Math.max(tol, Math.min(OCC_BBOX_PAD,
+                0.4 * Math.min(c.xmax - c.xmin, c.ymax - c.ymin)));
+            return x0 > c.xmin - pad && x1 < c.xmax + pad &&
+                   y0 > c.ymin - pad && y1 < c.ymax + pad;
+        });
         for (let i = 0; i < faces.length; i += 2) {
             const ftag = faces[i + 1];
             G._gmshModelGetBoundingBox(2, ftag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr); check('GetBoundingBox');
-            const cx = (G.getValue(bb[0], 'double') + G.getValue(bb[3], 'double')) / 2;
-            const cy = (G.getValue(bb[1], 'double') + G.getValue(bb[4], 'double')) / 2;
-            if (!inCond(cx, cy)) continue;
+            const bx0 = G.getValue(bb[0], 'double'), by0 = G.getValue(bb[1], 'double');
+            const bx1 = G.getValue(bb[3], 'double'), by1 = G.getValue(bb[4], 'double');
+            if (!inCond(bx0, by0, bx1, by1)) continue;
             const fbuf = G.stackAlloc(8); G.setValue(fbuf, 2, 'i32'); G.setValue(fbuf + 4, ftag, 'i32');
             const cb = G.stackAlloc(4), cbN = G.stackAlloc(4);
             G._gmshModelGetBoundary(fbuf, 2, cb, cbN, 0, 0, 0, ierr); check('GetBoundary');
@@ -344,16 +358,30 @@ export function buildOccMeshFromGeometry(G, opts) {
     };
     condRect.rects.forEach(r => { r.symmetry = condRect.symmetry; });
 
-    // Constraint metadata (checkMeshQuality / refinement): conductor edges span their own
-    // x-range; full-width dielectric interfaces span the width.
+    // Constraint metadata (checkMeshQuality / refinement smoothing): a node on
+    // one of these lines may only move ALONG it. Constrained lines are the
+    // CONDUCTOR faces (all four sides, over the rect's own extent — the freedom
+    // map classifies PEC nodes/edges by the exact rect coordinates, and the
+    // loss/MQS surface integrals live there) plus the symmetry plane.
+    // Dielectric interfaces are deliberately NOT constrained: epsMap is re-tagged
+    // by centroid after every refinement pass, so a node sliding off a dielectric
+    // line only displaces that interface locally by ~one element (second-order),
+    // while forbidding the move can leave unfixable slivers that ill-condition
+    // the whole solve (fuzzer: Qmax 183 on solder-mask cases when constrained).
     const constraintYRanges = {};
     const addYR = (y, lo, hi) => { const e = constraintYRanges[y]; constraintYRanges[y] = e ? [Math.min(e[0], lo), Math.max(e[1], hi)] : [lo, hi]; };
-    for (const c of condRects) { addYR(c.ymin, c.xmin, c.xmax); addYR(c.ymax, c.xmin, c.xmax); }
-    const constraintXs = symmetry ? [X0] : [];
+    const constraintXRanges = {};
+    const addXR = (x, lo, hi) => { const e = constraintXRanges[x]; constraintXRanges[x] = e ? [Math.min(e[0], lo), Math.max(e[1], hi)] : [lo, hi]; };
+    for (const c of condRects) {
+        addYR(c.ymin, c.xmin, c.xmax); addYR(c.ymax, c.xmin, c.xmax);
+        addXR(c.xmin, c.ymin, c.ymax); addXR(c.xmax, c.ymin, c.ymax);
+    }
+    if (symmetry) addXR(X0, Y0, Y1);
+    const constraintXs = Object.keys(constraintXRanges).map(Number);
 
     return {
         nodes, tris, edges, triEdges, triSigns, nNodes, nTris, nEdges,
-        constraintYRanges, constraintXs,
+        constraintYRanges, constraintXRanges, constraintXs,
         condRect, epsMap, lossMap,
         meshedDomain: { X0, X1, Y0, Y1, wallPEC },
     };

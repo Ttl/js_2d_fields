@@ -274,8 +274,11 @@ export class FieldSolver2D {
      * the budget; returns silently when it can or when the domain isn't known yet.
      *
      * @param {number} maxNodes - The node budget (UI "Max Nodes"), default 20000.
+     * @param {number} [freqOverride] - Frequency to evaluate the wavelength term at
+     *     (solveModes solves at its own frequency, not this.freq).
      */
-    _check_meshability(maxNodes = 20000) {
+    _check_meshability(maxNodes = 20000, freqOverride = undefined) {
+        const freq = freqOverride ?? this.freq;
         const W = this.domain_width;
         const yBottom = -(this.t_gnd ?? 0);
         const H = (this.domain_height ?? NaN) - yBottom;
@@ -333,8 +336,8 @@ export class FieldSolver2D {
         const geomCoarse = Math.max(Math.min(W, H) / 5, hFine);  // mesher bulk target
         let hWave = geomCoarse;                                   // active-region cell size
         let lambdaLimited = false;
-        if (this.freq > 0) {
-            const lambdaMin = CONSTANTS.C / (this.freq * Math.sqrt(epsMax));
+        if (freq > 0) {
+            const lambdaMin = CONSTANTS.C / (freq * Math.sqrt(epsMax));
             // ~3 cells per wavelength — just above the Nyquist floor. These quasi-TEM
             // backends solve bound modes on much coarser meshes than a full-wave λ/10
             // rule would demand, so this only flags structures so electrically large that
@@ -346,9 +349,9 @@ export class FieldSolver2D {
 
         // --- 4. Estimate the mesh size for the active backend and compare to budget ---
         const fmtL = (m) => m >= 1e-3 ? `${(m * 1e3).toFixed(3)} mm` : `${(m * 1e6).toFixed(1)} µm`;
-        const lambdaMm = this.freq > 0 ? fmtL(CONSTANTS.C / (this.freq * Math.sqrt(epsMax))) : '';
+        const lambdaMm = freq > 0 ? fmtL(CONSTANTS.C / (freq * Math.sqrt(epsMax))) : '';
         const cause = lambdaLimited
-            ? `the ${fmtL(Lx)}×${fmtL(Ly)} field region is electrically large at ${(this.freq / 1e9).toFixed(2)} GHz ` +
+            ? `the ${fmtL(Lx)}×${fmtL(Ly)} field region is electrically large at ${(freq / 1e9).toFixed(2)} GHz ` +
               `(λ≈${lambdaMm} in ε_r=${epsMax.toFixed(1)}), needing ~${fmtL(hWave)} cells to resolve the wavelength`
             : `resolving the ${fmtL(dMin)} feature across the ${fmtL(W)}×${fmtL(H)} domain`;
         const remedy = lambdaLimited
@@ -1683,13 +1686,26 @@ export class FieldSolver2D {
     // static solve). The import is dynamic so the gmsh/eigen WASM is only loaded
     // when the user selects the triangular backend. Persists across the sweep.
     async _ensureTriBackend(onProgress = null, extraOpts = null) {
-        if (this._triBackend) return this._triBackend;
+        // Merge the solver-mode opts (lossMethod) with the UI adaptive controls.
+        // A call WITH extraOpts (solve_adaptive) pins the effective opts: a cached
+        // backend built with different opts (e.g. the user changed Max Nodes) is
+        // discarded and rebuilt. A call WITHOUT extraOpts (mid-sweep
+        // computeAtFrequency) reuses whatever the initial solve built.
+        const wantOpts = extraOpts ? { ...(this.tri_opts || {}), ...extraOpts } : null;
+        const wantKey = wantOpts ? JSON.stringify(wantOpts) : null;
+        if (this._triBackend &&
+            (wantKey === null || wantKey === this._triBackendOptsKey)) {
+            return this._triBackend;
+        }
         const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
         const ctx = await initTriBackend();
-        // Merge the solver-mode opts (lossMethod) with the UI adaptive controls.
-        const opts = { ...(this.tri_opts || {}), ...(extraOpts || {}) };
-        this._triBackend = new TriBackend(ctx, this, opts);
-        await this._triBackend.buildMesh(onProgress);   // emits real adaptive-refinement passes (live)
+        const opts = wantOpts ?? { ...(this.tri_opts || {}) };
+        const tri = new TriBackend(ctx, this, opts);
+        // Cache only AFTER the mesh builds: a throw here must not leave a broken
+        // (mesh-less) backend behind for the next call to reuse.
+        await tri.buildMesh(onProgress);   // emits real adaptive-refinement passes (live)
+        this._triBackend = tri;
+        this._triBackendOptsKey = wantKey ?? JSON.stringify(opts);
         return this._triBackend;
     }
 
@@ -1703,6 +1719,11 @@ export class FieldSolver2D {
     // Iterations, refineTol ← Tolerance, maxNodes ← Max Nodes) into buildMesh's
     // refinement loop, exactly like solve_adaptive does for the main solve.
     async solveModes(freq, nev = 4, onProgress = null, refineOpts = {}) {
+        // Same pre-mesh guard as solve_adaptive, evaluated at the MODES frequency
+        // (the modes mesher really does wavelength-cap the bulk, so an electrically
+        // huge domain at high freq should be rejected cleanly here rather than
+        // degrade through the triangle-budget coarsening loop).
+        this._check_meshability(refineOpts.maxNodes ?? 20000, freq);
         const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
         const ctx = await initTriBackend();
         // modesFreq lets buildMesh size the bulk to the wavelength at this frequency, so

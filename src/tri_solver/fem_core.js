@@ -394,6 +394,10 @@ export function csrSpMV(csr, x, N) {
 export function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
 
 export function solveCG(csr, rhs, N, tol = 1e-10, maxIter = 5000) {
+    // Convergence is RELATIVE to ‖b‖ (an absolute floor is scale-fragile: the
+    // Dirichlet-lift rhs magnitude depends on mesh scale and ε).
+    const normB = Math.sqrt(dot(rhs, rhs));
+    const stopTol = tol * Math.max(normB, 1e-300);
     // Jacobi (diagonal) preconditioner: M^{-1} where M = diag(A)
     const invDiag = new Float64Array(N);
     for (let i = 0; i < N; i++) {
@@ -415,14 +419,14 @@ export function solveCG(csr, rhs, N, tol = 1e-10, maxIter = 5000) {
         for (let i = 0; i < N; i++) x[i] += alpha * p[i];
         for (let i = 0; i < N; i++) r[i] -= alpha * Ap[i];
         const rnorm = Math.sqrt(dot(r, r));
-        if (rnorm < tol) return { x, iters: iter + 1, residual: rnorm };
+        if (rnorm < stopTol) return { x, iters: iter + 1, residual: rnorm, converged: true };
         for (let i = 0; i < N; i++) z[i] = invDiag[i] * r[i];
         const rz_new = dot(r, z);
         const beta = rz_new / rz;
         for (let i = 0; i < N; i++) p[i] = z[i] + beta * p[i];
         rz = rz_new;
     }
-    return { x, iters: maxIter, residual: Math.sqrt(dot(r, r)) };
+    return { x, iters: maxIter, residual: Math.sqrt(dot(r, r)), converged: false };
 }
 
 export function csrSpMVcomplex(csr, x, N) {
@@ -761,8 +765,11 @@ export function modeOverlap(staticEdge, evecRe, evecIm, nFreeEdge) {
 // ==================== Shared geometric / quadrature constants ====================
 
 // 3-point Gauss-Legendre rule on [0,1] (for edge / line-contour integrals).
-export const GL3p = [0.11270, 0.50000, 0.88730];
-export const GL3w = [0.27778, 0.44444, 0.27778];
+// Points (1 ∓ √(3/5))/2, weights 5/18, 8/18, 5/18 (full double precision —
+// 5-digit constants cost ~1e-5 relative error on every contour integral).
+const GL3_A = Math.sqrt(3 / 5) / 2;
+export const GL3p = [0.5 - GL3_A, 0.5, 0.5 + GL3_A];
+export const GL3w = [5 / 18, 8 / 18, 5 / 18];
 
 // Triangle quality metric (∝ circumradius / inradius; ≈1 for an equilateral triangle,
 // larger is worse). Returns 1e10 for a degenerate (near-zero-area) triangle. Inputs are

@@ -388,9 +388,15 @@ function restoreSettings(settings) {
 
         const meshBackendSelect = document.getElementById('mesh_backend');
         if (meshBackendSelect && fullSettings.mesh_backend) {
-            // Map the legacy 'triangular' value onto the new full-wave (MQS) option.
-            const v = fullSettings.mesh_backend === 'triangular' ? 'fullwave_mqs' : fullSettings.mesh_backend;
+            // Map legacy saved values onto current options ('triangular' and
+            // 'fullwave_occ' predate the current dropdown).
+            const legacy = { triangular: 'fullwave_mqs', fullwave_occ: 'fullwave_mqs' };
+            const v = legacy[fullSettings.mesh_backend] ?? fullSettings.mesh_backend;
             meshBackendSelect.value = v;
+            // An unknown value leaves the select EMPTY (selectedIndex -1) and
+            // getParams() would then silently fall back to rectilinear — pin to
+            // the first (default) option instead.
+            if (meshBackendSelect.value !== v) meshBackendSelect.selectedIndex = 0;
             // Fire change so dependent UI (e.g. thick-plating availability) updates.
             meshBackendSelect.dispatchEvent(new Event('change', { bubbles: true }));
         }
