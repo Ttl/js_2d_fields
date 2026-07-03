@@ -39,7 +39,7 @@ import { checkMeshQuality } from './tri_mesh.js';
 // the dispersive effective permittivity.
 const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
-import { resampleStatic, resampleModeField } from './resample.js';
+import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
 import { Complex } from '../complex.js';
 import { mat2Mul, mat2Inv, eig2x2 } from '../matrix.js';
 import { conductorSwapSymmetric } from '../geometry_symmetry.js';
@@ -741,20 +741,41 @@ export class TriBackend {
         const { mesh } = this;
         const s = this.solver;
         this._static = {};
-        // Resample fields onto the FDM mesher's graded grid (fine near conductors and
-        // the ground surface) so contour plots match the rectilinear backend. A uniform
-        // grid aliases sub-grid-thickness traces/grounds into spurious contour bands and
-        // a step line above the ground. Fall back to a uniform grid if no mesher exists.
-        let grid = null;
-        try {
-            if (s.mesher && typeof s.mesher.generate_mesh === 'function') {
-                const [gx, gy] = s.mesher.generate_mesh();
-                if (gx && gy && gx.length && gy.length) grid = { x: gx, y: gy };
-            }
-        } catch { grid = null; }
+        // Resample fields onto a graded grid derived from the triangle mesh itself:
+        // grid-line density follows the adaptively refined mesh (fine at corners,
+        // surfaces and gaps — exactly where the solution needed resolution), with the
+        // conductor/dielectric interface lines forced in so sub-grid-thickness features
+        // keep crisp plateaus instead of aliasing into spurious contour bands. This
+        // replaces the FDM mesher's geometry-heuristic grid, which knew nothing about
+        // where the field actually concentrates.
+        const forcedX = [], forcedY = [];
+        for (const r of [...(s.conductors || []), ...(s.dielectrics || [])]) {
+            forcedX.push(r.x_min, r.x_max);
+            forcedY.push(r.y_min, r.y_max);
+        }
+        // Near-surface companion lines (the FDM mesher's "boundary line" trick): one
+        // grid line a conductor-dimension/20 outside each face. The row ON a face
+        // carries the one-sided surface gradient; without a nearby second row the
+        // segment down to it spans the whole first (coarse-mesh) cell and any surface
+        // bias shows as a visible kink where contours meet the ground. With the
+        // companion line the segment is ~µm-scale and the join renders clean.
+        for (const r of (s.conductors || [])) {
+            const off = Math.min(r.x_max - r.x_min, r.y_max - r.y_min) / 20;
+            if (!(off > 0)) continue;
+            forcedX.push(r.x_min - off, r.x_max + off);
+            forcedY.push(r.y_min - off, r.y_max + off);
+        }
+        const grid = buildGridFromMesh(mesh, this.domain, {
+            resolution: this.opts.resolution, forcedX, forcedY, mirrorX: this.symmetry,
+        });
         // Cached for the per-frequency causal-materials rebuild (_applyCausal), which re-runs
         // the same static preparation under the updated permittivity.
         this._staticGrid = grid;
+        // Conductor rects in full-domain coordinates for the resampler's E-baseline
+        // clamping — taken from the solver geometry because it includes the ground
+        // planes (mesh.condRect.rects only carries the non-wall conductors).
+        this._plotRects = (s.conductors || []).map(c =>
+            ({ xmin: c.x_min, xmax: c.x_max, ymin: c.y_min, ymax: c.y_max }));
         // Asymmetric differential pair on the full domain: the odd/even excitation basis is
         // NOT the modal basis (the two traces sit in different environments), so driving
         // odd/even and picking one eigenmode per drive can return the SAME eigenmode twice
@@ -774,7 +795,7 @@ export class TriBackend {
             const eps_eff_static = W_eps / W_air;
             const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
             const fields = resampleStatic(mesh, phiEps, this.domain,
-                { resolution: this.opts.resolution, parity, grid });
+                { resolution: this.opts.resolution, parity, grid, rects: this._plotRects });
             this._static[mode] = {
                 fm, abc, kC, phiEps, C0, W_loss, eps_eff_static,
                 Z_static: 1 / (c0 * Math.sqrt(C0 * eps_eff_static * C0)),
@@ -861,7 +882,7 @@ export class TriBackend {
             const C0 = kC * eps0 * W_air;
             const eps_eff_static = We(phiEps) / W_air;
             const fields = resampleStatic(mesh, phiEps, this.domain,
-                { resolution: this.opts.resolution, parity: null, grid });
+                { resolution: this.opts.resolution, parity: null, grid, rects: this._plotRects });
             this._static[label] = {
                 fm, abc, kC, phiEps, C0, W_loss: computeTriEnergy(phiEps, mesh, mesh.lossMap),
                 eps_eff_static,
@@ -1269,7 +1290,7 @@ export class TriBackend {
             if (!skipFields) {
                 const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
                 st.fields = resampleStatic(this.mesh, phiEps, this.domain,
-                    { resolution: this.opts.resolution, parity, grid: this._staticGrid });
+                    { resolution: this.opts.resolution, parity, grid: this._staticGrid, rects: this._plotRects });
             }
         }
     }
