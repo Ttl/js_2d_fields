@@ -108,36 +108,60 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
     const nx = x.length, ny = y.length;
 
     // For a half-domain (symmetry) solve, mirror x<0 from the meshed x>0 half.
-    // parity: 'even' → V even, Ex odd, Ey even; 'odd' → V odd, Ex even, Ey odd.
+    // parity: 'even' → V even; 'odd' → V odd. E-field parity follows automatically
+    // from differentiating the mirrored V grid below.
     const parity = opts.parity || null;
     const { locate, coeffOf } = buildLocator(mesh);
-    // E = −∇φ is evaluated DIRECTLY from the P2 element at each grid point — the same kind of
-    // local gradient the quasi-static FDM backend computes, with no smoothing. We deliberately
-    // do NOT node-average: averaging biases the field low right at the conductor surfaces (where
-    // it is largest, since each node's patch reaches away from the surface into weaker field),
-    // which pulls the |E| contours outward and makes them visibly wider than the FDM plot.
-    // Direct evaluation matches the FDM field on the conductor faces and, being single-valued
-    // per grid point, has no cross/kink artifacts. The located triangle carries its own
-    // material, so the dielectric-interface E_n jump is automatic. The only cost is faint
-    // faceting where the mesh is coarse (the P2 gradient is discontinuous across element edges).
+    // Sample only V (the P2 potential — continuous, and conductor interiors carry
+    // their exact Dirichlet potential since they are meshed), then compute
+    // E = −∇V with the SAME non-uniform central-difference stencil the FDM
+    // backend uses for its plots (compute_fields in field_solver.js). This makes
+    // the two backends' field plots share the differentiation and rendering
+    // characteristics by construction. Evaluating ∇φ per P2 element instead
+    // (tried) leaves the element-boundary gradient discontinuities in the data —
+    // faceted/kinked |E| contours on coarse elements, and a hard one-sided jump
+    // along material-interface rows where the FDM's centered stencil blends the
+    // two sides.
     const V = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ex = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ey = Array.from({ length: ny }, () => new Float64Array(nx));
+    // Deterministic side selection for on-edge samples (grid rows sit exactly on
+    // mesh lines): nudge the LOCATE query by a tiny NE bias; V is continuous so
+    // the evaluated value is side-independent, this only makes degenerate
+    // on-vertex lookups deterministic.
+    const eps = 1e-9 * Math.hypot(
+        (domain.x_max ?? 0) - (domain.x_min ?? 0),
+        (domain.y_max ?? 0) - (domain.y_min ?? 0)) || 1e-15;
     for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
-            let qx = x[i], sV = 1, sEx = 1, sEy = 1;
+            let qx = x[i], sV = 1;
             if (parity && qx < 0) {
                 qx = -qx;
-                if (parity === 'odd') { sV = -1; sEy = -1; }
-                else { sEx = -1; }
+                if (parity === 'odd') sV = -1;
             }
-            const t = locate(qx, y[j]);
+            let t = locate(qx + eps, y[j] + eps);
+            if (t < 0) t = locate(qx, y[j]);   // domain edge: fall back to the exact point
             if (t < 0) continue;
-            const coeff = coeffOf(t);
-            // V (C0-smooth, continuous across the interface) and the direct local gradient E
-            // from the P2 element containing the point.
-            const r = evalPhi(phi, mesh, coeff, t, qx, y[j]);
-            V[j][i] = sV * r.V; Ex[j][i] = sEx * r.Ex; Ey[j][i] = sEy * r.Ey;
+            const r = evalPhi(phi, mesh, coeffOf(t), t, qx, y[j]);
+            V[j][i] = sV * r.V;
+        }
+    }
+    // E = −∇V by non-uniform central differences (FDM compute_fields stencil).
+    // Boundary rows/columns stay 0, exactly like the FDM plot arrays.
+    for (let j = 1; j < ny - 1; j++) {
+        const dyd = y[j] - y[j - 1], dyu = y[j + 1] - y[j];
+        for (let i = 1; i < nx - 1; i++) {
+            const dxl = x[i] - x[i - 1], dxr = x[i + 1] - x[i];
+            Ex[j][i] = -(
+                (dxl / (dxr * (dxl + dxr))) * V[j][i + 1] +
+                ((dxr - dxl) / (dxl * dxr)) * V[j][i] -
+                (dxr / (dxl * (dxl + dxr))) * V[j][i - 1]
+            );
+            Ey[j][i] = -(
+                (dyd / (dyu * (dyd + dyu))) * V[j + 1][i] +
+                ((dyu - dyd) / (dyd * dyu)) * V[j][i] -
+                (dyu / (dyd * (dyd + dyu))) * V[j - 1][i]
+            );
         }
     }
     return { x, y, V, Ex, Ey };

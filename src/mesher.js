@@ -424,18 +424,27 @@ class Mesher {
                     beta_val = 2.0;
                 }
 
-                // Check proximity to conductors
+                // Grade toward adjacent conductors. Signal conductors outrank
+                // grounds: a region between the trace and a grounded wall grades
+                // fine at the trace only — the field at the far ground is weak
+                // and smooth, so it needs no fine grading. Equal rank at both
+                // ends (e.g. between a differential pair) grades both ends.
+                let fine_start = 0, fine_end = 0;   // 0 none, 1 ground, 2 signal
                 for (const cond of this.conductors) {
                     const cond_min = axis === 'x' ? cond.x_min : cond.y_min;
                     const cond_max = axis === 'x' ? cond.x_max : cond.y_max;
+                    const rank = cond.is_signal ? 2 : 1;
 
                     if (Math.abs(i1 - cond_min) < 1e-12) {
-                        end_curve = 'end';
-                        beta_val = 2.0;
+                        fine_end = Math.max(fine_end, rank);
                     } else if (Math.abs(i0 - cond_max) < 1e-12) {
-                        end_curve = 'start';
-                        beta_val = 2.0;
+                        fine_start = Math.max(fine_start, rank);
                     }
+                }
+                if (fine_start || fine_end) {
+                    beta_val = 2.0;
+                    end_curve = fine_start === fine_end ? 'both' :
+                        (fine_start > fine_end ? 'start' : 'end');
                 }
 
                 seg = this._smooth_transition(i0, i1, npts, end_curve, beta_val);
