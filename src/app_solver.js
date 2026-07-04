@@ -866,12 +866,6 @@ function updateModesNotice() {
     notice.style.display = 'block';
 }
 
-function formatG2(re) {
-    const a = Math.abs(re);
-    if (a !== 0 && (a >= 1e5 || a < 1e-2)) return re.toExponential(2);
-    return re.toFixed(2);
-}
-
 function renderModesTable() {
     const container = document.getElementById('modes-list');
     if (!container) return;
@@ -880,7 +874,7 @@ function renderModesTable() {
         return;
     }
     const STATUS_LABEL = { propagating: 'PROP', near_cutoff: 'evan?', evanescent: 'evan', spurious: 'spurious', nullspace: 'null' };
-    let html = '<table><thead><tr><th>#</th><th>status</th><th>&epsilon;<sub>eff</sub></th><th>&gamma;&sup2;</th><th>overlap</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>#</th><th>status</th><th>&epsilon;<sub>eff</sub></th><th>overlap</th></tr></thead><tbody>';
     modesResult.modes.forEach((m, i) => {
         const eeff = m.eps_eff != null ? m.eps_eff.toFixed(4) : '–';
         const star = m.overlap > 0.5 ? ' *' : '';
@@ -888,7 +882,7 @@ function renderModesTable() {
         // the raw eigensolve index (m.idx) is not meaningful to the user.
         html += `<tr class="${m.status}" data-idx="${i}">` +
             `<td>${i}</td><td class="status">${STATUS_LABEL[m.status] || m.status}${star}</td>` +
-            `<td>${eeff}</td><td>${formatG2(m.g2Re)}</td><td>${m.overlap.toFixed(3)}</td></tr>`;
+            `<td>${eeff}</td><td>${m.overlap.toFixed(3)}</td></tr>`;
     });
     html += '</tbody></table>';
     container.innerHTML = html;
