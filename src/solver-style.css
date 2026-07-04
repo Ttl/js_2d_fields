@@ -163,6 +163,16 @@ button.stop-mode:hover {
     width: 0%;
     transition: width 0.1s;
 }
+.progress-text {
+    font-size: 0.75em;
+    line-height: 1.4;
+    height: 1.4em; /* reserve one line so the layout never shifts */
+    color: var(--text-muted);
+    margin-top: 5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 
 /* Tab Bar */
 .tab-bar {

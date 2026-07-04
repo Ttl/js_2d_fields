@@ -1421,14 +1421,25 @@ async function runSimulation() {
     const pbar = document.getElementById('progress_bar');
     const ptext = document.getElementById('progress_text');
 
+    // Monotonic progress bar: the interpolating sweep's completion is only
+    // estimated, so different estimators can disagree frame-to-frame. Clamp the
+    // displayed width so it only ever increases within a run.
+    let displayedProgress = 0;
+    const setProgress = (frac) => {
+        frac = Math.max(0, Math.min(1, frac));
+        if (frac > displayedProgress) displayedProgress = frac;
+        pbar.style.width = (displayedProgress * 100) + '%';
+    };
+
     // Change button to "Stop" mode
     btn.textContent = 'Stop';
     btn.classList.add('stop-mode');
     stopRequested = false;
     isSimulating = true;
     updateResultNotices();
+    displayedProgress = 0;
     pbar.style.width = '0%';
-    if (ptext) ptext.style.display = 'block';
+    if (ptext) ptext.textContent = '';
     log("Starting simulation...");
 
     try {
@@ -1474,6 +1485,17 @@ async function runSimulation() {
         // Note: Causal materials will be applied during frequency sweep in computeAtFrequency()
         log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes}k nodes, tolerance ${p.tolerance})...`);
 
+        // Progress-bar work model. Mesh refinement is a handful of passes on a
+        // coarse-until-the-end mesh and is MUCH faster than the frequency sweep,
+        // which runs ~EST_SWEEP_POINTS full-mesh solves. Split the bar by estimated
+        // work so it tracks wall-clock rather than 50/50: mesh owns only the small
+        // MESH_FRACTION early slice, the sweep owns the rest [MESH_FRACTION, 1].
+        const EST_MESH_PASSES = 4;    // typical adaptive passes before convergence
+        const EST_SWEEP_POINTS = 30;  // typical interpolating-sweep exact solves
+        const MESH_PASS_COST = 0.5;   // a coarse mesh pass ≈ half a full-mesh solve
+        const MESH_FRACTION = (EST_MESH_PASSES * MESH_PASS_COST) /
+            (EST_MESH_PASSES * MESH_PASS_COST + EST_SWEEP_POINTS); // ≈ 0.063
+
         let results = await solver.solve_adaptive({
             max_iters: p.max_iters,
             energy_tol: p.tolerance,
@@ -1481,13 +1503,16 @@ async function runSimulation() {
             max_nodes: p.max_nodes*1000,
             min_converged_passes: p.min_converged_passes,
             onProgress: (info) => {
-                const progress = info.iteration / p.max_iters * 0.5;  // First half is for mesh refinement
-                pbar.style.width = (progress * 100) + "%";
+                // Mesh usually converges in ~EST_MESH_PASSES passes (far fewer than
+                // p.max_iters), so estimate completion from that. Mesh owns only the
+                // small MESH_FRACTION early slice of the bar (it is fast + coarse).
+                const progress = Math.min(info.iteration / EST_MESH_PASSES, 1) * MESH_FRACTION;
+                setProgress(progress);
                 // Triangular backend reports a triangle count (n_tris); the rectilinear
                 // backend reports a structured node grid (nodes_x × nodes_y).
                 const meshStr = info.n_tris != null ? `Tris=${info.n_tris}` : `Grid=${info.nodes_x}x${info.nodes_y}`;
-                if (ptext) ptext.textContent = `Mesh refinement ${info.iteration}/${p.max_iters}: ` +
-                                   `Energy err=${info.energy_error.toExponential(2)}, ${meshStr}`;
+                if (ptext) ptext.textContent =
+                    `Pass ${info.iteration}/${p.max_iters} · error ${info.energy_error.toExponential(2)}`;
                 log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, ${meshStr}`);
             },
             shouldStop: () => stopRequested
@@ -1566,12 +1591,72 @@ async function runSimulation() {
             log(`Interpolating sweep (tolerance ${tolPercent}%)...`);
 
             const sweep = new InterpolatingSweep(solver, cachedResults, { tolerance });
+
+            // Progress mapping for the sweep portion of the bar. The sweep runs after
+            // mesh refinement (which owns [0, MESH_FRACTION]); it owns the rest,
+            // [MESH_FRACTION, 1.0] — the bulk of the bar, matching its dominant cost.
+            // A converged interpolating sweep typically needs ~EST_SWEEP_POINTS exact
+            // solves, so the point count gives a decent completion estimate from the
+            // very first (initial) point — well before any error data exists. It is
+            // capped at POINT_CAP so the last stretch is owned by error convergence,
+            // which knows when the sweep is actually done.
+            const SWEEP_START = MESH_FRACTION, EST_TOTAL_POINTS = EST_SWEEP_POINTS, POINT_CAP = 0.9;
+            const setSweep = (frac) =>
+                setProgress(SWEEP_START + (1 - SWEEP_START) * Math.max(0, Math.min(1, frac)));
+            // Refinement completion is estimated from how far the log-error has
+            // travelled from its starting value toward the tolerance. refineErr0
+            // is the first finalized iteration error; lastErrFrac caches the last
+            // computed fraction so per-midpoint reports (no finalized error) can
+            // still drive the bar.
+            let refineErr0 = null, lastErrFrac = 0, lastFinalErr = null;
+
             const nSamples = await sweep.run(fMinNonZero, fMax, {
                 onProgress: (info) => {
-                    const progress = 0.5 + 0.5 * Math.min(info.iteration / 4, 0.9);
-                    pbar.style.width = (progress * 100) + "%";
-                    if (ptext) ptext.textContent = `Interpolating sweep: ${info.totalSamples} samples, ` +
-                        `error=${(info.maxError * 100).toFixed(3)}%`;
+                    // Point-count estimate (assumes ~EST_TOTAL_POINTS total solves).
+                    const pointFloor = Math.min(POINT_CAP, info.totalSamples / EST_TOTAL_POINTS);
+
+                    if (info.phase === 'initial') {
+                        setSweep(pointFloor);
+                        if (ptext) ptext.textContent =
+                            `Solving initial points ${info.pointsComputed}/${info.initialPoints}`;
+                    } else {
+                        const tol = info.tolerance;
+                        const err = info.maxError;
+                        // Update the error-convergence fraction only from finalized
+                        // iteration errors (running mid-iteration maxima are noisy).
+                        if (info.final && isFinite(err)) {
+                            lastFinalErr = err;
+                            if (refineErr0 === null && err > tol) refineErr0 = err;
+                            if (err <= tol) {
+                                lastErrFrac = 1;
+                            } else if (refineErr0 !== null && refineErr0 > tol) {
+                                const num = Math.log10(refineErr0) - Math.log10(err);
+                                const den = Math.log10(refineErr0) - Math.log10(tol);
+                                if (den > 0) lastErrFrac = Math.max(0, Math.min(1, num / den));
+                            }
+                        }
+                        // Iteration-based floor: guarantees forward motion even when
+                        // the error is stubborn, and creeps within an iteration as its
+                        // midpoints are solved. This is the "estimated iterations" driver.
+                        const maxIt = info.maxIterations || 8;
+                        const within = info.midpointsTotal > 0
+                            ? Math.min(1, info.midpointsDone / info.midpointsTotal) : 1;
+                        const bandLo = Math.min(1, (info.iteration - 1) / maxIt);
+                        const bandHi = Math.min(1, info.iteration / maxIt);
+                        const iterFloor = bandLo + (bandHi - bandLo) * within;
+                        // Error-convergence fraction (0..1), scaled to leave a little
+                        // headroom so the bar only reaches full on real completion.
+                        const convFrac = Math.max(lastErrFrac, iterFloor * 0.9) * 0.98;
+                        setSweep(Math.max(pointFloor, convFrac));
+
+                        // Show only the last finalized iteration error — the value that
+                        // actually decides whether the sweep keeps going. Reporting the
+                        // running mid-iteration error would sometimes read below target
+                        // while the sweep is still refining, which looks contradictory.
+                        const errPart = lastFinalErr !== null
+                            ? ` · error ${(lastFinalErr * 100).toFixed(3)}%` : '';
+                        if (ptext) ptext.textContent = `${info.totalSamples} points solved${errPart}`;
+                    }
 
                     // Update plots in real-time from current interpolation
                     if (info.iteration > 0) {
@@ -1626,9 +1711,10 @@ async function runSimulation() {
                 logModeWarnings(result && result.warnings);
                 frequencySweepResults.push({ freq, result });
 
-                // Update progress (second half is for frequency sweep)
-                const progress = 0.5 + (i + 1) / frequencies.length * 0.5;
-                pbar.style.width = (progress * 100) + "%";
+                // Update progress: the discrete sweep owns [MESH_FRACTION, 1.0], the
+                // same band as the interpolating sweep (both are full-mesh solves).
+                const progress = MESH_FRACTION + (i + 1) / frequencies.length * (1 - MESH_FRACTION);
+                setProgress(progress);
                 if (ptext) ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
 
                 // Yield to event loop periodically and update plots in real time
@@ -1713,7 +1799,7 @@ async function runSimulation() {
         btn.textContent = 'Solve';
         btn.classList.remove('stop-mode');
         pbar.style.width = '100%';
-        if (ptext) ptext.style.display = 'none';
+        if (ptext) ptext.textContent = '';
         stopRequested = false;
         isSimulating = false;
     }

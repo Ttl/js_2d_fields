@@ -211,7 +211,11 @@ class InterpolatingSweep {
      * @param {number} fMin - Minimum frequency in Hz (must be > 0)
      * @param {number} fMax - Maximum frequency in Hz
      * @param {object} [callbacks]
-     * @param {function} [callbacks.onProgress] - Called with {iteration, totalSamples, maxError}
+     * @param {function} [callbacks.onProgress] - Called with progress info:
+     *   {phase:'initial'|'refine', iteration, totalSamples, maxError, tolerance,
+     *    maxIterations, pointsComputed, initialPoints, midpointsDone, midpointsTotal, final}.
+     *   maxError is Infinity during the initial phase; during refinement it is the
+     *   running max until final:true, when it is the iteration's finalized error.
      * @param {function} [callbacks.shouldStop] - Returns true to abort
      * @returns {number} - Number of exact solves performed
      */
@@ -230,16 +234,27 @@ class InterpolatingSweep {
             initialTs.push(tMin + (tMax - tMin) * i / (nInit - 1));
         }
 
-        // Compute exact RLGC at initial points
-        for (const t of initialTs) {
+        // Compute exact RLGC at initial points. Each of these is a full exact
+        // solve (potentially slow for the full-wave backend), so report progress
+        // after every one — otherwise the bar sits still through the whole
+        // initial phase.
+        for (let i = 0; i < initialTs.length; i++) {
             if (shouldStop && shouldStop()) return this.samplePoints.size;
-            const freq = Math.pow(10, t);
+            const freq = Math.pow(10, initialTs[i]);
             await this._computeExact(freq);
+            if (onProgress) {
+                onProgress({
+                    phase: 'initial',
+                    iteration: 0,
+                    pointsComputed: i + 1,
+                    initialPoints: initialTs.length,
+                    totalSamples: this.samplePoints.size,
+                    maxError: Infinity,
+                    tolerance: this.tolerance,
+                    maxIterations: this.maxIterations,
+                });
+            }
             await new Promise(resolve => setTimeout(resolve, 0)); // Yield to UI
-        }
-
-        if (onProgress) {
-            onProgress({ iteration: 0, totalSamples: this.samplePoints.size, maxError: Infinity });
         }
 
         // Step 2: Adaptive refinement with selective midpoint computation
@@ -283,8 +298,10 @@ class InterpolatingSweep {
             // Compute exact RLGC at needed midpoints and check against current spline
             let maxError = 0;
             const failedIntervals = [];
+            const nMidpoints = midpointsToCompute.length;
 
-            for (const tMid of midpointsToCompute) {
+            for (let mp = 0; mp < midpointsToCompute.length; mp++) {
+                const tMid = midpointsToCompute[mp];
                 if (shouldStop && shouldStop()) return this.samplePoints.size;
                 // Enforce the safety cap DURING the loop, not just between iterations:
                 // an iteration starting below the cap can otherwise queue hundreds of
@@ -302,6 +319,24 @@ class InterpolatingSweep {
                 const exact = this.samplePoints.get(tMid);
                 const err = this._computeError(exact, interpolated);
                 if (err > maxError) maxError = err;
+
+                // Per-midpoint progress: keeps the bar and sample count moving during
+                // a long iteration. maxError here is the running max so far this
+                // iteration (not yet finalized), hence final: false.
+                if (onProgress) {
+                    onProgress({
+                        phase: 'refine',
+                        iteration: iter + 1,
+                        totalSamples: this.samplePoints.size,
+                        maxError,
+                        tolerance: this.tolerance,
+                        maxIterations: this.maxIterations,
+                        midpointsDone: mp + 1,
+                        midpointsTotal: nMidpoints,
+                        final: false,
+                    });
+                }
+
                 if (err > this.tolerance) {
                     // Find the interval boundaries around this midpoint
                     const sortedNow = [...this.samplePoints.keys()].sort((a, b) => a - b);
@@ -317,7 +352,18 @@ class InterpolatingSweep {
             }
 
             if (onProgress) {
-                onProgress({ iteration: iter + 1, totalSamples: this.samplePoints.size, maxError });
+                // Finalized error for this iteration (max over all its midpoints).
+                onProgress({
+                    phase: 'refine',
+                    iteration: iter + 1,
+                    totalSamples: this.samplePoints.size,
+                    maxError,
+                    tolerance: this.tolerance,
+                    maxIterations: this.maxIterations,
+                    midpointsDone: nMidpoints,
+                    midpointsTotal: nMidpoints,
+                    final: true,
+                });
             }
 
             // Check convergence
