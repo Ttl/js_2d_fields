@@ -1717,7 +1717,9 @@ export class FieldSolver2D {
     // does not disturb the main (possibly half-domain) solve in `_triBackend`.
     // refineOpts wires the sidebar adaptive-mesh controls (maxRefineIters ← Max
     // Iterations, refineTol ← Tolerance, maxNodes ← Max Nodes) into buildMesh's
-    // refinement loop, exactly like solve_adaptive does for the main solve.
+    // refinement loop, exactly like solve_adaptive does for the main solve, plus
+    // wavelengthDensity ← the Modes tab's Mesh density (cells/λ for the bulk
+    // wavelength cap — see TriBackend._wavelengthCap).
     async solveModes(freq, nev = 4, onProgress = null, refineOpts = {}) {
         // Same pre-mesh guard as solve_adaptive, evaluated at the MODES frequency
         // (the modes mesher really does wavelength-cap the bulk, so an electrically

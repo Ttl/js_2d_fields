@@ -181,6 +181,7 @@ const DEFAULT_SETTINGS = {
     // Modes tab (eigenmode viewer)
     modes_freq: 10,    // GHz
     modes_nev: 6,
+    modes_mesh_density: 12,   // bulk cells per wavelength (TriBackend wavelengthDensity)
     // Broadside coupled stripline (display units: mm, μm)
     bs_w: 0.2,           // mm
     bs_t: 35,            // μm
@@ -274,6 +275,7 @@ function getUISettings() {
         interp_tolerance: parseFloat(document.getElementById('interp_tolerance').value),
         modes_freq: getDisplayValue('modes-freq'),
         modes_nev: parseInt(document.getElementById('modes-nev').value),
+        modes_mesh_density: parseInt(document.getElementById('modes-mesh-density').value),
         bs_w: getDisplayValue('inp_bs_w'),
         bs_t: getDisplayValue('inp_bs_t'),
         bs_x_offset: getDisplayValue('inp_bs_x_offset'),
@@ -463,6 +465,7 @@ function restoreSettings(settings) {
 
         setValueWithUnit('modes-freq', fullSettings.modes_freq);
         document.getElementById('modes-nev').value = fullSettings.modes_nev;
+        document.getElementById('modes-mesh-density').value = fullSettings.modes_mesh_density;
 
         setValueWithUnit('sparam-length', fullSettings.sparam_length);
         document.getElementById('sparam-z-ref').value = fullSettings.sparam_z_ref;
@@ -775,6 +778,10 @@ async function runModesSolve() {
     if (!isFinite(freq) || freq <= 0) { setModesStatus('Enter a valid frequency.'); return; }
     if (!isFinite(nev) || nev < 1) { nev = 1; document.getElementById('modes-nev').value = '1'; }
     nev = Math.min(nev, 30);
+    let meshDensity = parseInt(document.getElementById('modes-mesh-density').value);
+    if (!isFinite(meshDensity)) meshDensity = 12;
+    meshDensity = Math.min(Math.max(meshDensity, 3), 40);
+    document.getElementById('modes-mesh-density').value = String(meshDensity);
 
     // Build an INDEPENDENT solver from the current sidebar geometry. The Modes tab keeps its
     // own solver so solving modes never disturbs the main solve (Geometry field plot, Results,
@@ -797,6 +804,7 @@ async function runModesSolve() {
         refineTol: p.tolerance,
         maxNodes: p.max_nodes * 1000,
         minConvergedPasses: p.min_converged_passes,
+        wavelengthDensity: meshDensity,
     };
 
     try {

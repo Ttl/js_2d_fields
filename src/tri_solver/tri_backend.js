@@ -520,13 +520,16 @@ export class TriBackend {
     // mode-viewer frequency (opts.modesFreq), so high-frequency cavity / higher-order modes
     // are actually resolved. Without this, a genuine high-f mode is under-resolved on the
     // geometry-scale mesh, drifts between the fine and coarse solves, and the mesh-convergence
-    // test mis-flags it as spurious. No effect in the quasi-TEM regime (λ/12 ≫ geometry hCoarse).
+    // test mis-flags it as spurious. No effect in the quasi-TEM regime (λ/N ≫ geometry hCoarse).
+    // opts.wavelengthDensity sets the cells-per-wavelength N (default 12); lower values trade
+    // higher-order-mode reliability for a much smaller mesh (nTris ∝ N²).
     _wavelengthCap(h) {
         const f = this.opts.modesFreq;
         if (!f) return h;
+        const nLambda = this.opts.wavelengthDensity > 0 ? this.opts.wavelengthDensity : 12;
         const epsMax = Math.max(1, ...this.solver.dielectrics.map(d => d.epsilon_r || 1));
         const lamMin = c0 / (f * Math.sqrt(epsMax));
-        return Math.min(h, lamMin / 12);
+        return Math.min(h, lamMin / nLambda);
     }
 
     // Build mesh (with symmetry + adaptive refinement), then solve & cache the
