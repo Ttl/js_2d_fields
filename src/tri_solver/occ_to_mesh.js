@@ -101,8 +101,10 @@ function _rectOf(o) {
 }
 
 // Absorb full-span boundary ground slabs into wall PEC BCs + clip the meshed domain
-// (identical logic to geom_to_mesh._clipDomain).
-function _clipDomain(domain, conductors, boundaries, tol) {
+// (identical logic to geom_to_mesh._clipDomain). Exported for tests/test_geometry.js —
+// the wall-absorption rule defines the effective cavity that the analytic mode tests
+// (box_modes_test.mjs) compute their truth from.
+export function _clipDomain(domain, conductors, boundaries, tol) {
     let { x_min: X0, x_max: X1, y_min: Y0, y_max: Y1 } = domain;
     const b = boundaries || ['open', 'open', 'open', 'gnd'];
     const wallPEC = { left: b[0] === 'gnd', right: b[1] === 'gnd', top: b[2] === 'gnd', bottom: b[3] === 'gnd' };
