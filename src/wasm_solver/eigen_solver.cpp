@@ -50,6 +50,16 @@ static RSpMat buildRealSparseMatrix(int N, int nnz,
 
 // Complex-valued shift-invert Arnoldi for generalized Ax = λBx.
 // Uses complex Arnoldi with (A-σB)⁻¹B operator and NaN-safe Hessenberg decomposition.
+//
+// If krylov_max > krylov_size, the SAME Krylov sequence is extended (subspace
+// doubled, re-extracting Ritz pairs each time) until `nev` pairs pass the residual
+// gate or the cap is reached. A single fixed-size pass converges only the Ritz
+// pairs closest to the shift, and the strict gate below then silently DROPPED
+// genuine far-from-shift modes (enclosure cavity modes with the shift at the
+// quasi-TEM ε: only the quasi-TEM survived). Extension reuses the sparse LU (the
+// dominant cost), so growing 20→80 vectors costs far less than a second solve.
+// Callers that only need near-shift modes pass krylov_max == krylov_size and get
+// the old single-pass behavior and cost.
 static int solve_complex(
     int N,
     int nnz_a,
@@ -57,7 +67,7 @@ static int solve_complex(
     int nnz_b,
     int* b_rowPtr, int* b_colIdx, double* b_vals_re, double* b_vals_im,
     double sigma_re, double sigma_im,
-    int num_eigenvalues, int krylov_size,
+    int num_eigenvalues, int krylov_size, int krylov_max,
     double* out_evals_re, double* out_evals_im,
     double* out_evecs_re, double* out_evecs_im,
     double* init_re, double* init_im
@@ -68,6 +78,11 @@ static int solve_complex(
 
     if (m <= nev) m = 2 * nev + 1;
     if (m > n) m = n;
+
+    // Subspace growth ceiling: caller's krylov_max, floored at m, capped by the
+    // problem size and by keeping the basis V under ~128 MB for very large N.
+    const int memCols = (int)(128.0e6 / (16.0 * n));
+    const int mMax = std::min(n, std::max(m, std::min(krylov_max, memCols)));
 
     Complex sigma(sigma_re, sigma_im);
 
@@ -82,9 +97,10 @@ static int solve_complex(
         return -1; // Factorization failed
     }
 
-    // Arnoldi iteration with modified Gram-Schmidt (double orthogonalization)
+    // Arnoldi iteration with modified Gram-Schmidt (double orthogonalization).
+    // V grows column-blocks on demand; H is small, allocate the ceiling up front.
     CMatrix V(n, m + 1);
-    CMatrix H = CMatrix::Zero(m + 1, m);
+    CMatrix H = CMatrix::Zero(mMax + 1, mMax);
 
     // Initial vector
     CVector v0(n);
@@ -105,102 +121,113 @@ static int solve_complex(
     }
     V.col(0) = v0 / v0.norm();
 
-    int actual_m = m;
+    // Extract the Ritz pairs of the leading actual_m×actual_m Hessenberg block,
+    // walk them closest-to-shift first, and emit into the out arrays those whose
+    // TRUE pencil residual passes the gate — up to nev. A rejected (unconverged)
+    // pair's slot can be filled by a converged pair further from the shift. Only
+    // the nearest 3·nev+8 candidates are residual-tested (each test is a V·y and
+    // two spmv): anything further from the shift than that is junk.
+    // Returns the converged count, or -2 on a failed dense decomposition.
+    auto extract = [&](int actual_m) -> int {
+        CMatrix Hm = H.topLeftCorner(actual_m, actual_m);
+        if (!Hm.allFinite()) return -2;
+        Eigen::ComplexEigenSolver<CMatrix> eig_solver;
+        eig_solver.compute(Hm);
+        if (eig_solver.info() != Eigen::Success) return -2;
 
-    for (int j = 0; j < m; j++) {
-        CVector Bv = B * V.col(j);
-        CVector w = solver.solve(Bv);
+        CVector theta = eig_solver.eigenvalues();
+        CMatrix Y = eig_solver.eigenvectors();
 
-        // Check for NaN/Inf from solver
-        if (!w.allFinite()) {
-            actual_m = j;
-            break;
+        std::vector<int> indices(actual_m);
+        for (int i = 0; i < actual_m; i++) indices[i] = i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+            return std::abs(theta(a)) > std::abs(theta(b));
+        });
+
+        const int kmax = std::min(actual_m, 3 * nev + 8);
+        int nconv = 0;
+        for (int k = 0; k < kmax && nconv < nev; k++) {
+            int idx = indices[k];
+            Complex th = theta(idx);
+
+            if (std::abs(th) < 1e-15) continue;
+
+            Complex lambda = sigma + 1.0 / th;
+
+            CVector x = V.leftCols(actual_m) * Y.col(idx);
+
+            CVector Ax = A * x;
+            CVector Bx = B * x;
+            CVector residual = Ax - lambda * Bx;
+            double rel_res = residual.norm() / (x.norm() * (Ax.norm() + std::abs(lambda) * Bx.norm()));
+
+            // Accept only Ritz pairs that actually converged within the Krylov
+            // space. (This gate used to be `rel_res < 1e-4 || k < nev`, which
+            // returned unconverged junk pairs as converged modes.)
+            if (rel_res < 1e-4) {
+                out_evals_re[nconv] = lambda.real();
+                out_evals_im[nconv] = lambda.imag();
+                for (int j = 0; j < n; j++) {
+                    out_evecs_re[nconv * n + j] = x(j).real();
+                    out_evecs_im[nconv * n + j] = x(j).imag();
+                }
+                nconv++;
+            }
         }
+        return nconv;
+    };
 
-        // Modified Gram-Schmidt with double orthogonalization
-        for (int i = 0; i <= j; i++) {
-            Complex h = V.col(i).dot(w);
-            H(i, j) = h;
-            w -= h * V.col(i);
-        }
-        for (int i = 0; i <= j; i++) {
-            Complex h = V.col(i).dot(w);
-            H(i, j) += h;
-            w -= h * V.col(i);
-        }
+    int mCur = m;
+    int j = 0;
+    while (true) {
+        int actual_m = mCur;
+        bool breakdown = false;
+        for (; j < mCur; j++) {
+            CVector Bv = B * V.col(j);
+            CVector w = solver.solve(Bv);
 
-        double wnorm = w.norm();
-        H(j + 1, j) = Complex(wnorm, 0.0);
+            // Check for NaN/Inf from solver
+            if (!w.allFinite()) {
+                actual_m = j;
+                breakdown = true;
+                break;
+            }
 
-        if (wnorm < 1e-14 || !std::isfinite(wnorm)) {
-            actual_m = j + 1;
-            break;
-        }
+            // Modified Gram-Schmidt with double orthogonalization
+            for (int i = 0; i <= j; i++) {
+                Complex h = V.col(i).dot(w);
+                H(i, j) = h;
+                w -= h * V.col(i);
+            }
+            for (int i = 0; i <= j; i++) {
+                Complex h = V.col(i).dot(w);
+                H(i, j) += h;
+                w -= h * V.col(i);
+            }
 
-        if (j + 1 < m) {
+            double wnorm = w.norm();
+            H(j + 1, j) = Complex(wnorm, 0.0);
+
+            // Invariant subspace reached (happy breakdown) — every mode the
+            // Krylov space can represent is already in it; nothing to extend.
+            if (wnorm < 1e-14 || !std::isfinite(wnorm)) {
+                actual_m = j + 1;
+                breakdown = true;
+                break;
+            }
+
             V.col(j + 1) = w / wnorm;
         }
+
+        if (actual_m < 1) return 0;
+
+        int nconv = extract(actual_m);
+        if (nconv < 0) return nconv;
+        if (nconv >= nev || breakdown || mCur >= mMax) return nconv;
+
+        mCur = std::min(2 * mCur, mMax);
+        V.conservativeResize(Eigen::NoChange, mCur + 1);
     }
-
-    if (actual_m < 1) return 0;
-
-    CMatrix Hm = H.topLeftCorner(actual_m, actual_m);
-
-    // Check Hessenberg matrix for NaN before eigendecomposition
-    if (!Hm.allFinite()) return -2;
-
-    Eigen::ComplexEigenSolver<CMatrix> eig_solver;
-    eig_solver.compute(Hm);
-
-    if (eig_solver.info() != Eigen::Success) {
-        return -2;
-    }
-
-    CVector theta = eig_solver.eigenvalues();
-    CMatrix Y = eig_solver.eigenvectors();
-
-    std::vector<int> indices(actual_m);
-    for (int i = 0; i < actual_m; i++) indices[i] = i;
-
-    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-        return std::abs(theta(a)) > std::abs(theta(b));
-    });
-
-    // Walk ALL Ritz pairs in closest-to-shift order and keep the converged ones,
-    // up to nev — a rejected (unconverged) pair's slot can be filled by a
-    // converged pair further from the shift.
-    int nconv = 0;
-    for (int k = 0; k < actual_m && nconv < nev; k++) {
-        int idx = indices[k];
-        Complex th = theta(idx);
-
-        if (std::abs(th) < 1e-15) continue;
-
-        Complex lambda = sigma + 1.0 / th;
-
-        CVector x = V.leftCols(actual_m) * Y.col(idx);
-
-        CVector Ax = A * x;
-        CVector Bx = B * x;
-        CVector residual = Ax - lambda * Bx;
-        double rel_res = residual.norm() / (x.norm() * (Ax.norm() + std::abs(lambda) * Bx.norm()));
-
-        // Accept only Ritz pairs that actually converged within the Krylov space.
-        // (This gate used to be `rel_res < 1e-4 || k < nev`, and since the loop is
-        // bounded by nout = min(nev, actual_m) the `k < nev` arm was always true —
-        // unconverged junk pairs were returned as converged modes.)
-        if (rel_res < 1e-4) {
-            out_evals_re[nconv] = lambda.real();
-            out_evals_im[nconv] = lambda.imag();
-            for (int j = 0; j < n; j++) {
-                out_evecs_re[nconv * n + j] = x(j).real();
-                out_evecs_im[nconv * n + j] = x(j).imag();
-            }
-            nconv++;
-        }
-    }
-
-    return nconv;
 }
 
 // Real-arithmetic shift-invert Arnoldi for generalized Ax = λBx with REAL A, B, σ.
@@ -218,7 +245,7 @@ static int solve_real(
     int nnz_a, int* a_rowPtr, int* a_colIdx, double* a_vals_re,
     int nnz_b, int* b_rowPtr, int* b_colIdx, double* b_vals_re,
     double sigma_re,
-    int num_eigenvalues, int krylov_size,
+    int num_eigenvalues, int krylov_size, int krylov_max,
     double* out_evals_re, double* out_evals_im,
     double* out_evecs_re, double* out_evecs_im,
     double* init_re
@@ -228,6 +255,10 @@ static int solve_real(
     int m = krylov_size;
     if (m <= nev) m = 2 * nev + 1;
     if (m > n) m = n;
+
+    // Subspace growth ceiling (see solve_complex): real basis is 8 bytes/entry.
+    const int memCols = (int)(128.0e6 / (8.0 * n));
+    const int mMax = std::min(n, std::max(m, std::min(krylov_max, memCols)));
 
     RSpMat A = buildRealSparseMatrix(n, nnz_a, a_rowPtr, a_colIdx, a_vals_re);
     RSpMat B = buildRealSparseMatrix(n, nnz_b, b_rowPtr, b_colIdx, b_vals_re);
@@ -241,7 +272,7 @@ static int solve_real(
     }
 
     RMatrix V(n, m + 1);
-    RMatrix H = RMatrix::Zero(m + 1, m);
+    RMatrix H = RMatrix::Zero(mMax + 1, mMax);
 
     RVector v0(n);
     if (init_re != nullptr) {
@@ -252,88 +283,103 @@ static int solve_real(
     }
     V.col(0) = v0 / v0.norm();
 
-    int actual_m = m;
-    for (int j = 0; j < m; j++) {
-        RVector Bv = B * V.col(j);
-        RVector w = solver.solve(Bv);
-        if (!w.allFinite()) { actual_m = j; break; }
-        // Modified Gram-Schmidt with double orthogonalization
-        for (int i = 0; i <= j; i++) {
-            double h = V.col(i).dot(w);
-            H(i, j) = h;
-            w -= h * V.col(i);
-        }
-        for (int i = 0; i <= j; i++) {
-            double h = V.col(i).dot(w);
-            H(i, j) += h;
-            w -= h * V.col(i);
-        }
-        double wnorm = w.norm();
-        H(j + 1, j) = wnorm;
-        if (wnorm < 1e-14 || !std::isfinite(wnorm)) { actual_m = j + 1; break; }
-        if (j + 1 < m) V.col(j + 1) = w / wnorm;
-    }
+    // Residual-gated Ritz extraction — the real twin of solve_complex's extract.
+    auto extract = [&](int actual_m) -> int {
+        RMatrix Hm = H.topLeftCorner(actual_m, actual_m);
+        if (!Hm.allFinite()) return -2;
 
-    if (actual_m < 1) return 0;
+        // Real Schur eigendecomposition — Ritz values may come in complex-conjugate
+        // pairs (the real indefinite pencil admits them); they are handled like any
+        // other candidate and must pass the residual gate below.
+        Eigen::EigenSolver<RMatrix> eig_solver;
+        eig_solver.compute(Hm);
+        if (eig_solver.info() != Eigen::Success) return -2;
 
-    RMatrix Hm = H.topLeftCorner(actual_m, actual_m);
-    if (!Hm.allFinite()) return -2;
+        CVector theta = eig_solver.eigenvalues();
+        CMatrix Y = eig_solver.eigenvectors();
 
-    // Real Schur eigendecomposition — Ritz values may come in complex-conjugate
-    // pairs (the real indefinite pencil admits them); they are handled like any
-    // other candidate and must pass the residual gate below.
-    Eigen::EigenSolver<RMatrix> eig_solver;
-    eig_solver.compute(Hm);
-    if (eig_solver.info() != Eigen::Success) return -2;
+        std::vector<int> indices(actual_m);
+        for (int i = 0; i < actual_m; i++) indices[i] = i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+            return std::abs(theta(a)) > std::abs(theta(b));
+        });
 
-    CVector theta = eig_solver.eigenvalues();
-    CMatrix Y = eig_solver.eigenvectors();
+        const int kmax = std::min(actual_m, 3 * nev + 8);
+        int nconv = 0;
+        for (int k = 0; k < kmax && nconv < nev; k++) {
+            int idx = indices[k];
+            Complex th = theta(idx);
+            if (std::abs(th) < 1e-15) continue;
+            Complex lambda = sigma_re + 1.0 / th;
 
-    std::vector<int> indices(actual_m);
-    for (int i = 0; i < actual_m; i++) indices[i] = i;
-    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-        return std::abs(theta(a)) > std::abs(theta(b));
-    });
+            // Ritz vector: complex combination of the REAL basis
+            RVector xr = V.leftCols(actual_m) * Y.col(idx).real();
+            RVector xi = V.leftCols(actual_m) * Y.col(idx).imag();
 
-    int nconv = 0;
-    for (int k = 0; k < actual_m && nconv < nev; k++) {
-        int idx = indices[k];
-        Complex th = theta(idx);
-        if (std::abs(th) < 1e-15) continue;
-        Complex lambda = sigma_re + 1.0 / th;
-
-        // Ritz vector: complex combination of the REAL basis
-        RVector xr = V.leftCols(actual_m) * Y.col(idx).real();
-        RVector xi = V.leftCols(actual_m) * Y.col(idx).imag();
-
-        // Residual ‖Ax − λBx‖ with real A, B and complex λ, x (componentwise)
-        RVector Axr = A * xr, Axi = A * xi;
-        RVector Bxr = B * xr, Bxi = B * xi;
-        double lr = lambda.real(), li = lambda.imag();
-        double res2 = 0, xn2 = 0, Axn2 = 0, Bxn2 = 0;
-        for (int i2 = 0; i2 < n; i2++) {
-            const double rr = Axr(i2) - (lr * Bxr(i2) - li * Bxi(i2));
-            const double ri = Axi(i2) - (lr * Bxi(i2) + li * Bxr(i2));
-            res2 += rr * rr + ri * ri;
-            xn2 += xr(i2) * xr(i2) + xi(i2) * xi(i2);
-            Axn2 += Axr(i2) * Axr(i2) + Axi(i2) * Axi(i2);
-            Bxn2 += Bxr(i2) * Bxr(i2) + Bxi(i2) * Bxi(i2);
-        }
-        double rel_res = std::sqrt(res2) /
-            (std::sqrt(xn2) * (std::sqrt(Axn2) + std::abs(lambda) * std::sqrt(Bxn2)));
-
-        if (rel_res < 1e-4) {
-            out_evals_re[nconv] = lambda.real();
-            out_evals_im[nconv] = lambda.imag();
-            for (int j = 0; j < n; j++) {
-                out_evecs_re[nconv * n + j] = xr(j);
-                out_evecs_im[nconv * n + j] = xi(j);
+            // Residual ‖Ax − λBx‖ with real A, B and complex λ, x (componentwise)
+            RVector Axr = A * xr, Axi = A * xi;
+            RVector Bxr = B * xr, Bxi = B * xi;
+            double lr = lambda.real(), li = lambda.imag();
+            double res2 = 0, xn2 = 0, Axn2 = 0, Bxn2 = 0;
+            for (int i2 = 0; i2 < n; i2++) {
+                const double rr = Axr(i2) - (lr * Bxr(i2) - li * Bxi(i2));
+                const double ri = Axi(i2) - (lr * Bxi(i2) + li * Bxr(i2));
+                res2 += rr * rr + ri * ri;
+                xn2 += xr(i2) * xr(i2) + xi(i2) * xi(i2);
+                Axn2 += Axr(i2) * Axr(i2) + Axi(i2) * Axi(i2);
+                Bxn2 += Bxr(i2) * Bxr(i2) + Bxi(i2) * Bxi(i2);
             }
-            nconv++;
-        }
-    }
+            double rel_res = std::sqrt(res2) /
+                (std::sqrt(xn2) * (std::sqrt(Axn2) + std::abs(lambda) * std::sqrt(Bxn2)));
 
-    return nconv;
+            if (rel_res < 1e-4) {
+                out_evals_re[nconv] = lambda.real();
+                out_evals_im[nconv] = lambda.imag();
+                for (int j = 0; j < n; j++) {
+                    out_evecs_re[nconv * n + j] = xr(j);
+                    out_evecs_im[nconv * n + j] = xi(j);
+                }
+                nconv++;
+            }
+        }
+        return nconv;
+    };
+
+    int mCur = m;
+    int j = 0;
+    while (true) {
+        int actual_m = mCur;
+        bool breakdown = false;
+        for (; j < mCur; j++) {
+            RVector Bv = B * V.col(j);
+            RVector w = solver.solve(Bv);
+            if (!w.allFinite()) { actual_m = j; breakdown = true; break; }
+            // Modified Gram-Schmidt with double orthogonalization
+            for (int i = 0; i <= j; i++) {
+                double h = V.col(i).dot(w);
+                H(i, j) = h;
+                w -= h * V.col(i);
+            }
+            for (int i = 0; i <= j; i++) {
+                double h = V.col(i).dot(w);
+                H(i, j) += h;
+                w -= h * V.col(i);
+            }
+            double wnorm = w.norm();
+            H(j + 1, j) = wnorm;
+            if (wnorm < 1e-14 || !std::isfinite(wnorm)) { actual_m = j + 1; breakdown = true; break; }
+            V.col(j + 1) = w / wnorm;
+        }
+
+        if (actual_m < 1) return 0;
+
+        int nconv = extract(actual_m);
+        if (nconv < 0) return nconv;
+        if (nconv >= nev || breakdown || mCur >= mMax) return nconv;
+
+        mCur = std::min(2 * mCur, mMax);
+        V.conservativeResize(Eigen::NoChange, mCur + 1);
+    }
 }
 
 static bool allZero(int nnz, const double* v) {
@@ -349,7 +395,7 @@ static int solve_core(
     int nnz_b,
     int* b_rowPtr, int* b_colIdx, double* b_vals_re, double* b_vals_im,
     double sigma_re, double sigma_im,
-    int num_eigenvalues, int krylov_size,
+    int num_eigenvalues, int krylov_size, int krylov_max,
     double* out_evals_re, double* out_evals_im,
     double* out_evecs_re, double* out_evecs_im,
     double* init_re, double* init_im
@@ -368,14 +414,14 @@ static int solve_core(
     if (realProblem) {
         int nconv = solve_real(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re,
                                nnz_b, b_rowPtr, b_colIdx, b_vals_re,
-                               sigma_re, num_eigenvalues, krylov_size,
+                               sigma_re, num_eigenvalues, krylov_size, krylov_max,
                                out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
                                init_re);
         if (nconv > 0) return nconv;
     }
     return solve_complex(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
                          nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
-                         sigma_re, sigma_im, num_eigenvalues, krylov_size,
+                         sigma_re, sigma_im, num_eigenvalues, krylov_size, krylov_max,
                          out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
                          init_re, init_im);
 }
@@ -538,6 +584,9 @@ int solve_qep_rqi(
   }
 }
 
+// krylov_max ≤ krylov_size → single fixed-size pass (old behavior). Larger →
+// the Krylov subspace doubles (reusing the factorization) until num_eigenvalues
+// pairs pass the residual gate or krylov_max columns are reached.
 EMSCRIPTEN_KEEPALIVE
 int solve_generalized_eigen(
     int N,
@@ -546,7 +595,7 @@ int solve_generalized_eigen(
     int nnz_b,
     int* b_rowPtr, int* b_colIdx, double* b_vals_re, double* b_vals_im,
     double sigma_re, double sigma_im,
-    int num_eigenvalues, int krylov_size,
+    int num_eigenvalues, int krylov_size, int krylov_max,
     double* out_evals_re, double* out_evals_im,
     double* out_evecs_re, double* out_evecs_im
 ) {
@@ -555,7 +604,7 @@ int solve_generalized_eigen(
     try {
         return solve_core(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
                           nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
-                          sigma_re, sigma_im, num_eigenvalues, krylov_size,
+                          sigma_re, sigma_im, num_eigenvalues, krylov_size, krylov_max,
                           out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
                           nullptr, nullptr);
     } catch (...) {
@@ -571,7 +620,7 @@ int solve_generalized_eigen_with_init(
     int nnz_b,
     int* b_rowPtr, int* b_colIdx, double* b_vals_re, double* b_vals_im,
     double sigma_re, double sigma_im,
-    int num_eigenvalues, int krylov_size,
+    int num_eigenvalues, int krylov_size, int krylov_max,
     double* out_evals_re, double* out_evals_im,
     double* out_evecs_re, double* out_evecs_im,
     double* init_re, double* init_im
@@ -579,7 +628,7 @@ int solve_generalized_eigen_with_init(
     try {
         return solve_core(N, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im,
                           nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im,
-                          sigma_re, sigma_im, num_eigenvalues, krylov_size,
+                          sigma_re, sigma_im, num_eigenvalues, krylov_size, krylov_max,
                           out_evals_re, out_evals_im, out_evecs_re, out_evecs_im,
                           init_re, init_im);
     } catch (...) {

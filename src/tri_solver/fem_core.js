@@ -522,7 +522,11 @@ export function createWasmHelpers(M) {
     function freeAll(ptrs) {
         for (const p of ptrs) { try { M._free(p); } catch { /* module aborted */ } }
     }
-    function solveGeneralized(N, csrA, csrB, sigma, nev, ncv, initVec) {
+    // ncvMax > ncv lets the WASM solver GROW the Krylov subspace (doubling, reusing
+    // the factorization) until nev pairs pass its residual gate or ncvMax columns
+    // are reached — needed when wanted modes sit far from the shift (mode viewer).
+    // The default (0 → clamped to ncv in C++) keeps the single fixed-size pass.
+    function solveGeneralized(N, csrA, csrB, sigma, nev, ncv, initVec, ncvMax = 0) {
         const ptrs = [];
         function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
         function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
@@ -540,14 +544,14 @@ export function createWasmHelpers(M) {
                 nc = M._solve_generalized_eigen_with_init(
                     N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
                     csrB.colIdx.length, pBr, pBc, pBre, pBim,
-                    sigma[0], sigma[1], nev, ncv, pEvRe, pEvIm, pVRe, pVIm,
+                    sigma[0], sigma[1], nev, ncv, ncvMax, pEvRe, pEvIm, pVRe, pVIm,
                     pInitRe, pInitIm
                 );
             } else {
                 nc = M._solve_generalized_eigen(
                     N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
                     csrB.colIdx.length, pBr, pBc, pBre, pBim,
-                    sigma[0], sigma[1], nev, ncv, pEvRe, pEvIm, pVRe, pVIm
+                    sigma[0], sigma[1], nev, ncv, ncvMax, pEvRe, pEvIm, pVRe, pVIm
                 );
             }
             // Negative nc = solver-reported failure (factorization failed,

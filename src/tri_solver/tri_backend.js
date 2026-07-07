@@ -1383,10 +1383,15 @@ export class TriBackend {
         const seed = seeds[0];
         // Shift-invert centered on the quasi-TEM eigenvalue (-k²·eps_static) converges the
         // fundamental and the nearby higher-order modes first. Widen the Krylov subspace so
-        // several modes resolve at once.
+        // several modes resolve at once. ncvMax lets the eigensolver keep DOUBLING the
+        // subspace (reusing its factorization) until nev pairs truly converge: cavity /
+        // higher-order modes sit far from the quasi-TEM shift (e.g. ε_eff≈0.5 vs a shift at
+        // 3.4 on an enclosed εr=4.4 line) and need a much larger subspace than the
+        // fixed 20-vector pass, whose strict residual gate silently dropped them.
         const ncv = Math.min(Math.max(2 * nev + 1, 20), N - 1);
+        const ncvMax = Math.min(320, N - 1);
         let res;
-        try { res = this.ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_eff_static, 0], nev, ncv, seed); }
+        try { res = this.ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_eff_static, 0], nev, ncv, seed, ncvMax); }
         catch (e) { return { modes: [], nconv: 0, error: String(e && e.message || e) }; }
         if (!res || !res.nconv) return { modes: [], nconv: 0 };
 
