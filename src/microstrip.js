@@ -61,6 +61,14 @@ class MicrostripSolver extends FieldSolver2D {
         // Surface plating (single layer on top of bulk)
         this.plating = options.plating ?? null;
 
+        this.boundaries = options.boundaries ?? ["open", "open", "open", "gnd"];
+
+        // Determine if side grounds are present based on boundaries. Must be set
+        // BEFORE the domain sizing below reads it (it used to be assigned after,
+        // so the enclosure never got the +2·t_gnd side-wall widening and the walls
+        // ate into the specified inner width).
+        this.has_side_gnd = (this.boundaries[0] === "gnd" || this.boundaries[1] === "gnd");
+
         // Domain sizing
         if (this.enclosure_width !== null) {
             // Use explicit enclosure width
@@ -93,11 +101,6 @@ class MicrostripSolver extends FieldSolver2D {
                 this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
             }
         }
-
-        this.boundaries = options.boundaries ?? ["open", "open", "open", "gnd"];
-
-        // Determine if side grounds are present based on boundaries
-        this.has_side_gnd = (this.boundaries[0] === "gnd" || this.boundaries[1] === "gnd");
 
         // Calculate physical coordinates
         this._calculate_coordinates();
