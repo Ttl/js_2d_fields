@@ -208,12 +208,37 @@ static int solve_complex(
             double wnorm = w.norm();
             H(j + 1, j) = Complex(wnorm, 0.0);
 
-            // Invariant subspace reached (happy breakdown) — every mode the
-            // Krylov space can represent is already in it; nothing to extend.
-            if (wnorm < 1e-14 || !std::isfinite(wnorm)) {
+            if (!std::isfinite(wnorm)) {
                 actual_m = j + 1;
                 breakdown = true;
                 break;
+            }
+
+            // Happy breakdown: V spans an invariant subspace (e.g. the start
+            // vector was an exact eigenvector — the mode viewer's static seed is
+            // nearly one). The wanted pairs OUTSIDE that subspace are not in it,
+            // so deflate and continue: zero the subdiagonal (Hm becomes block
+            // triangular, preserving the invariant block's exact Ritz pairs) and
+            // restart the basis with a fresh vector orthogonal to everything so
+            // the iteration can reach the rest of the spectrum.
+            if (wnorm < 1e-14) {
+                H(j + 1, j) = Complex(0.0, 0.0);
+                CVector r(n);
+                uint64_t st = 0x9E3779B97F4A7C15ull + (uint64_t)j;
+                for (int i = 0; i < n; i++) {
+                    st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+                    r(i) = Complex((double)(st & 0xFFFFFFull) / (double)0xFFFFFFull - 0.5, 0.0);
+                }
+                for (int pass = 0; pass < 2; pass++)
+                    for (int i = 0; i <= j; i++) r -= V.col(i).dot(r) * V.col(i);
+                double rn = r.norm();
+                if (rn < 1e-12) {   // subspace genuinely exhausted
+                    actual_m = j + 1;
+                    breakdown = true;
+                    break;
+                }
+                V.col(j + 1) = r / rn;
+                continue;
             }
 
             V.col(j + 1) = w / wnorm;
@@ -367,7 +392,24 @@ static int solve_real(
             }
             double wnorm = w.norm();
             H(j + 1, j) = wnorm;
-            if (wnorm < 1e-14 || !std::isfinite(wnorm)) { actual_m = j + 1; breakdown = true; break; }
+            if (!std::isfinite(wnorm)) { actual_m = j + 1; breakdown = true; break; }
+            // Happy breakdown → deflate and continue with a fresh orthogonal
+            // vector (see solve_complex for the rationale).
+            if (wnorm < 1e-14) {
+                H(j + 1, j) = 0.0;
+                RVector r(n);
+                uint64_t st = 0x9E3779B97F4A7C15ull + (uint64_t)j;
+                for (int i = 0; i < n; i++) {
+                    st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+                    r(i) = (double)(st & 0xFFFFFFull) / (double)0xFFFFFFull - 0.5;
+                }
+                for (int pass = 0; pass < 2; pass++)
+                    for (int i = 0; i <= j; i++) r -= V.col(i).dot(r) * V.col(i);
+                double rn = r.norm();
+                if (rn < 1e-12) { actual_m = j + 1; breakdown = true; break; }
+                V.col(j + 1) = r / rn;
+                continue;
+            }
             V.col(j + 1) = w / wnorm;
         }
 
