@@ -34,9 +34,18 @@ Try it online: https://hforsten.com/field_solver.html
 
 ### Run Tests
 
+Tests are organized into tiers and run through `tests/run.mjs`:
+
 ```bash
-node tests/test_vs_ref.js
+npm run test:fast   # ~1 min, run before every commit
+npm run test:slow   # full solver validation, ~5 min
+npm test            # fast + slow
+npm run test:e2e    # browser tests (see below)
 ```
+
+Fast tier: Tests small parts of the solver.
+Slow tier: Test against reference structures.
+Browser (e2e) tier, needs `playwright-core` (`npm install`).
 
 ### Build WASM Solvers
 
