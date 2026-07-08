@@ -359,14 +359,22 @@ export class FieldSolver2D {
             : 'enlarge the smallest feature, shrink the domain, or raise Max Nodes';
 
         if (this.mesh_backend === 'triangular') {
-            // Triangles grade in 2D, so a fine FEATURE only costs a small LOCAL patch — never
-            // enough on its own to be "surely unsolvable" (the suite meshes 16–35 µm features
+            // Triangles grade in 2D, so a fine feature only costs a small local patch, never
+            // enough on its own to be "surely unsolvable" (the suite meshes few µm features
             // in cm-scale domains fine). The only triangular blow-up that is genuinely
             // unsolvable is an electrically-large field region: a coarse background plus a
             // wavelength-resolved active patch that exceeds the triangle budget.
             const FW_NODES_PER_TRI = 4;
             const triBudget = Math.max(800, maxNodes / FW_NODES_PER_TRI);
-            let tris = 2 * (W / geomCoarse) * (H / geomCoarse);   // coarse background
+            // Background floor is optimistic (cells ~half the thin domain dimension):
+            // the mesher grades field-free air far coarser than the geomCoarse used for
+            // the FDM line estimate, so min(W,H)/5 falsely rejected high-aspect (wide,
+            // thin) domains the real mesher handles within budget (e.g. a 38 mm×0.27 mm
+            // stripline meshes in ~4.1k tris vs the ~6.8k that formula claimed). Reject
+            // only surely-unsolvable cases; the backend's coarsen-and-rebuild loop and
+            // the eigenSolveBytes guard catch anything the estimate misses, cleanly.
+            const triCoarse = Math.max(Math.min(W, H) / 2, hFine);
+            let tris = 2 * (W / triCoarse) * (H / triCoarse);     // coarse background
             if (lambdaLimited) tris += 2 * (Lx / hWave) * (Ly / hWave);   // active wavelength patch
             if (tris > triBudget) {
                 throw new Error(
@@ -2192,6 +2200,17 @@ export class FieldSolver2D {
             const modeResults = [];
 
             if (this.is_differential) {
+                // ASYMMETRIC pair: the odd/even drive fields are mode MIXTURES, not the
+                // line's modes — use the modal decomposition under the causal materials,
+                // exactly as solve_adaptive does on the converged mesh (it also refreshes
+                // _modalPhys, so the 4-port S-matrix tracks the causal ε). Returns null
+                // for a velocity-degenerate pair → keep the drive results. Gated on
+                // _modalPhys from the initial solve: a symmetric pair (null) skips the
+                // four extra Laplace solves — its odd/even drives are exact.
+                const modal = this._modalPhys ? await this._solve_modal_differential() : null;
+                if (modal) {
+                    modeResults.push(...modal);
+                } else {
                 // Solve both odd and even modes
                 const oddMode = await this._solve_single_mode('odd', false);
                 const evenMode = await this._solve_single_mode('even', false);
@@ -2225,6 +2244,7 @@ export class FieldSolver2D {
                 recalc(evenMode);
 
                 modeResults.push(oddMode, evenMode);
+                }
             } else {
                 // Solve single mode
                 const result = await this._solve_single_mode('single', false);
