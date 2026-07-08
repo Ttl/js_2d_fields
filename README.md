@@ -41,6 +41,7 @@ npm run test:fast   # ~1 min, run before every commit
 npm run test:slow   # full solver validation, ~5 min
 npm test            # fast + slow
 npm run test:e2e    # browser tests (see below)
+npm run test:fuzz   # QS-vs-fullwave fuzzer (~10 min, deterministic seed)
 ```
 
 Fast tier: Tests small parts of the solver.

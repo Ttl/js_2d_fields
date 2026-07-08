@@ -1,15 +1,17 @@
 // Test runner: runs every test in a tier (no early stop), prints a one-line status
 // per test, shows the output of failing tests only, and exits nonzero if any failed.
 //
-//   node tests/run.mjs [fast|slow|e2e|all]     (default: fast)
+//   node tests/run.mjs [fast|slow|e2e|fuzz|all]     (default: fast)
 //
 // Tiers:
 //   fast — run before every commit (~1.5 min): geometry construction, eigensolver
 //          pencil, enclosed-box analytic modes.
 //   slow — full solver validation: tri-backend correctness suite, mode viewer,
-//          per-side plating, and the reference suite on BOTH backends
+//          per-side plating, plating behavior invariants, a pinned-seed
+//          QS-vs-fullwave fuzzer smoke, and the reference suite on BOTH backends
 //          (the MESH_BACKEND=triangular pass is the longest single entry).
 //   e2e  — browser tests; need the dev server on localhost:8731 and chromium.
+//   fuzz — the full 40-case QS-vs-fullwave fuzzer run (~10 min, deterministic seed).
 import { spawnSync } from 'child_process';
 
 const TIERS = {
@@ -21,6 +23,8 @@ const TIERS = {
         'tests/test_djordjevic_sarkar.js',
         'tests/test_meshability.js',
         'tests/test_causal_effect.js',
+        'tests/test_layered_roughness.js',
+        'tests/test_interpolating_sweep.js',
     ],
     slow: [
         'tests/test_fullwave_correctness.js',
@@ -33,11 +37,21 @@ const TIERS = {
         { file: 'tests/test_modal_continuity.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_modal_continuity.js [triangular]' },
         'tests/test_asym_sparam_export.js',
         { file: 'tests/test_asym_sparam_export.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_asym_sparam_export.js [triangular]' },
+        'tests/test_thick_plating.js',
+        'tests/test_top_only_plating.js',
+        'tests/test_poor_side_plating.js',
+        'tests/test_plating_thicker_than_trace.js',
+        'tests/test_corner_plating.js',
+        'tests/test_corner_roughness.js',
+        { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['6', '3', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [smoke N=6 seed=3]' },
     ],
     e2e: [
         'src/tri_solver/tests/e2e.mjs',
         'src/tri_solver/tests/e2e_occ.mjs',
         'src/tri_solver/tests/e2e_modes.mjs',
+    ],
+    fuzz: [
+        { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['40', '1', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [N=40 seed=1]' },
     ],
 };
 
@@ -50,9 +64,9 @@ if (!tests) {
 
 const results = [];
 for (const t of tests) {
-    const { file, env = {}, label = file } = typeof t === 'string' ? { file: t } : t;
+    const { file, args = [], env = {}, label = file } = typeof t === 'string' ? { file: t } : t;
     const t0 = Date.now();
-    const r = spawnSync('node', [file], {
+    const r = spawnSync('node', [file, ...args], {
         encoding: 'utf8', timeout: 15 * 60 * 1000, env: { ...process.env, ...env },
     });
     const dt = ((Date.now() - t0) / 1000).toFixed(1);

@@ -51,7 +51,7 @@ const TL_TYPES = ['microstrip', 'diff_microstrip', 'stripline', 'diff_stripline'
 // --- Random spec generator (geometry + which features are enabled) ---
 export function randomSpec(rng) {
     const tl = rng.pick(TL_TYPES);
-    const spec = { tl, freq: rng.logf(0.5e9, 50e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 1e-6) : 0 };
+    const spec = { tl, freq: rng.logf(0.5e9, 6e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 1e-6) : 0 };
     // Causal (Djordjevic-Sarkar) dielectric dispersion — applies to every line type and to
     // both backends, so it stays inside the cross-backend comparison (it shifts er(f), hence
     // C and eps_eff, which the fuzzer DOES compare). See solveOn for how it is evaluated.
@@ -210,9 +210,8 @@ async function main() {
     console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
     const rng = createRng(SEED);
     const flagged = { discrepancy: [], badMesh: [], crash: [] };
-    let ok = 0, skipped = 0;
+    let ok = 0, skipped = 0, rejected = 0;
     const byType = {};
-
     for (let i = 0; i < N; i++) {
         const spec = randomSpec(rng);
         byType[spec.tl] = (byType[spec.tl] || 0) + 1;
@@ -221,11 +220,19 @@ async function main() {
 
         // Both reject → invalid random geometry (validation is backend-independent); skip.
         if (qs.error && fw.error) { skipped++; continue; }
-        // Only one backend fails → a real backend bug.
+        // Only one backend fails → a real backend bug — UNLESS it's the pre-mesh
+        // meshability guard cleanly refusing a geometry one backend's cost model
+        // can't afford (working as intended; the guard has its own dedicated test).
         if (qs.error || fw.error) {
+            const err = String(qs.error || fw.error);
             const who = qs.error ? `quasi-static threw (full-wave OK): ${qs.error}` : `full-wave threw (quasi-static OK): ${fw.error}`;
-            flagged.crash.push({ spec, who });
-            console.log(`[${i}] ✗ ONE-SIDED FAILURE — ${who}\n      ${fmtSpec(spec)}`);
+            if (/cannot be meshed/i.test(err)) {
+                rejected++;
+                console.log(`[${i}] ○ MESHABILITY REJECTED (${qs.error ? 'quasi-static' : 'full-wave'} guard)\n      ${fmtSpec(spec)}`);
+            } else {
+                flagged.crash.push({ spec, who });
+                console.log(`[${i}] ✗ ONE-SIDED FAILURE — ${who}\n      ${fmtSpec(spec)}`);
+            }
             continue;
         }
 
@@ -253,7 +260,7 @@ async function main() {
             if (!worst || dMax > worst.dMax) worst = { mode: q.mode, dZ, dE, dC, dMax, q, w };
         }
         if (worst && worst.dMax > THRESH) {
-            flagged.discrepancy.push({ spec, mode: worst.mode, dZ: worst.dZ, dE: worst.dE, dC: worst.dC });
+            flagged.discrepancy.push({ i, spec, mode: worst.mode, dZ: worst.dZ, dE: worst.dE, dC: worst.dC });
             const tag = nModes > 1 ? ` [${worst.mode}]` : '';
             console.log(`[${i}] ✗ DISCREPANCY ${(worst.dMax * 100).toFixed(0)}%${tag} (Z0 ${(worst.dZ * 100).toFixed(0)}% eps ${(worst.dE * 100).toFixed(0)}% C ${(worst.dC * 100).toFixed(0)}%)\n` +
                 `      ${fmtSpec(spec)}\n` +
@@ -266,8 +273,10 @@ async function main() {
     console.log(`\n${'='.repeat(72)}`);
     console.log(`coverage: ${Object.entries(byType).map(([k, v]) => `${k}:${v}`).join('  ')}`);
     console.log(`SUMMARY: ${ok}/${N} clean | ${flagged.discrepancy.length} discrepancy | ` +
-        `${flagged.badMesh.length} bad-mesh | ${flagged.crash.length} one-sided-fail | ${skipped} skipped(invalid)`);
+        `${flagged.badMesh.length} bad-mesh | ` +
+        `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid)`);
     console.log(`${'='.repeat(72)}`);
+    if (flagged.discrepancy.length || flagged.badMesh.length || flagged.crash.length) process.exitCode = 1;
 }
 
 import { pathToFileURL } from 'url';

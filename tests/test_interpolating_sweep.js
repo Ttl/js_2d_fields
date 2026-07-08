@@ -6,6 +6,9 @@
 import { MicrostripSolver } from '../src/microstrip.js';
 import { CubicSpline, InterpolatingSweep } from '../src/interpolating_sweep.js';
 
+let failed = false;
+const verdict = ok => { if (!ok) failed = true; return ok ? 'PASS' : 'FAIL'; };
+
 // --- CubicSpline unit tests ---
 
 console.log('Testing CubicSpline');
@@ -23,7 +26,7 @@ console.log('====================\n');
         const interp = spline.evaluate(xv);
         maxErr = Math.max(maxErr, Math.abs(exact - interp));
     }
-    console.log(`  Linear function max error: ${maxErr.toExponential(2)} ${maxErr < 1e-10 ? 'PASS' : 'FAIL'}`);
+    console.log(`  Linear function max error: ${maxErr.toExponential(2)} ${verdict(maxErr < 1e-10)}`);
 }
 
 // Test 2: Quadratic function
@@ -38,7 +41,7 @@ console.log('====================\n');
         const interp = spline.evaluate(xv);
         maxErr = Math.max(maxErr, Math.abs(exact - interp));
     }
-    console.log(`  Quadratic function max error: ${maxErr.toExponential(2)} ${maxErr < 0.15 ? 'PASS' : 'FAIL'}`);
+    console.log(`  Quadratic function max error: ${maxErr.toExponential(2)} ${verdict(maxErr < 0.15)}`);
 }
 
 // Test 3: sin(x) with 10 points - should be quite accurate
@@ -59,14 +62,14 @@ console.log('====================\n');
         const interp = spline.evaluate(xv);
         maxErr = Math.max(maxErr, Math.abs(exact - interp));
     }
-    console.log(`  sin(x) with ${n} points max error: ${maxErr.toExponential(2)} ${maxErr < 1e-4 ? 'PASS' : 'FAIL'}`);
+    console.log(`  sin(x) with ${n} points max error: ${maxErr.toExponential(2)} ${verdict(maxErr < 1e-4)}`);
 }
 
 // Test 4: Two points (linear fallback)
 {
     const spline = new CubicSpline([0, 1], [0, 1]);
     const val = spline.evaluate(0.5);
-    console.log(`  Two-point linear: ${Math.abs(val - 0.5) < 1e-10 ? 'PASS' : 'FAIL'}`);
+    console.log(`  Two-point linear: ${verdict(Math.abs(val - 0.5) < 1e-10)}`);
 }
 
 // --- InterpolatingSweep test ---
@@ -147,9 +150,9 @@ const solver = new MicrostripSolver(options);
     console.log('\n  Max relative errors:');
     for (const key of ['R', 'L', 'G', 'C']) {
         const pct = (maxRelErr[key] * 100).toFixed(4);
-        console.log(`    ${key}: ${pct}% ${maxRelErr[key] < 0.01 ? 'PASS' : 'FAIL'}`);
+        console.log(`    ${key}: ${pct}% ${verdict(maxRelErr[key] < 0.01)}`);
     }
-    console.log(`\n  Overall max relative error: ${(maxRelErrOverall * 100).toFixed(4)}% ${maxRelErrOverall < 0.01 ? 'PASS' : 'FAIL'}`);
+    console.log(`\n  Overall max relative error: ${(maxRelErrOverall * 100).toFixed(4)}% ${verdict(maxRelErrOverall < 0.01)}`);
 
     // Compare derived quantities
     let maxZcErr = 0;
@@ -164,8 +167,9 @@ const solver = new MicrostripSolver(options);
         if (epsErr > maxEpsErr) maxEpsErr = epsErr;
     }
 
-    console.log(`\n  Zc(re) max relative error: ${(maxZcErr * 100).toFixed(4)}% ${maxZcErr < 0.01 ? 'PASS' : 'FAIL'}`);
-    console.log(`  eps_eff max relative error: ${(maxEpsErr * 100).toFixed(4)}% ${maxEpsErr < 0.01 ? 'PASS' : 'FAIL'}`);
+    console.log(`\n  Zc(re) max relative error: ${(maxZcErr * 100).toFixed(4)}% ${verdict(maxZcErr < 0.01)}`);
+    console.log(`  eps_eff max relative error: ${(maxEpsErr * 100).toFixed(4)}% ${verdict(maxEpsErr < 0.01)}`);
 
-    console.log('\nDone.');
+    console.log(failed ? '\nDone — FAILURES above.' : '\nDone.');
+    if (failed) process.exitCode = 1;
 })();
