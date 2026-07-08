@@ -31,6 +31,8 @@ const TIERS = {
         { file: 'tests/test_causal_effect.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_causal_effect.js [triangular]' },
         'tests/test_modal_continuity.js',
         { file: 'tests/test_modal_continuity.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_modal_continuity.js [triangular]' },
+        'tests/test_asym_sparam_export.js',
+        { file: 'tests/test_asym_sparam_export.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_asym_sparam_export.js [triangular]' },
     ],
     e2e: [
         'src/tri_solver/tests/e2e.mjs',
