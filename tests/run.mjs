@@ -18,6 +18,9 @@ const TIERS = {
         'src/tri_solver/tests/eigen_pencil_test.mjs',
         'src/tri_solver/tests/box_modes_test.mjs',
         'tests/test_parallel_plate.js',
+        'tests/test_djordjevic_sarkar.js',
+        'tests/test_meshability.js',
+        'tests/test_causal_effect.js',
     ],
     slow: [
         'tests/test_fullwave_correctness.js',
@@ -25,6 +28,9 @@ const TIERS = {
         'src/tri_solver/tests/plating_perside_test.mjs',
         'tests/test_vs_ref.js',
         { file: 'tests/test_vs_ref.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_vs_ref.js [triangular]' },
+        { file: 'tests/test_causal_effect.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_causal_effect.js [triangular]' },
+        'tests/test_modal_continuity.js',
+        { file: 'tests/test_modal_continuity.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_modal_continuity.js [triangular]' },
     ],
     e2e: [
         'src/tri_solver/tests/e2e.mjs',
