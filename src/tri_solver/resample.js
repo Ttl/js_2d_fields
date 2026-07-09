@@ -359,33 +359,74 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
     return { x, y, V, Ex, Ey };
 }
 
-// Recover a CONTINUOUS nodal transverse field by area-weighted averaging of the
-// per-element Nedelec field at each node. The Lee–Jin edge-element field e_t is
-// DISCONTINUOUS across triangle edges, so sampling it directly at grid points gives
-// faceted/discontinuous artifacts (worst near the trace, where the mesh is fine and the
-// field is strong). Averaging the four complex components (Ex, Ey × re, im) to nodes and
-// interpolating linearly within each triangle yields a smooth field — the same recovery
-// resampleStatic uses for the static E-field.
+// Per-triangle material region for the nodal recovery. Averaging must never cross a
+// dielectric interface (the normal E component genuinely jumps by the permittivity
+// ratio) or a conductor surface (the field is identically zero inside the metal):
+// cross-region averaging smears the physical discontinuity over one element, which at
+// wavelength-scale bulk element sizes renders as jagged element-shaped blobs along the
+// substrate and around the trace. Triangles are grouped by their epsMap permittivity,
+// with conductor interiors (centroid inside a conductor rect) as their own region.
+function buildTriRegions(mesh) {
+    const { nodes, tris, nTris, epsMap, condRect } = mesh;
+    const regionOf = new Int32Array(nTris);
+    if (!epsMap || epsMap.length !== nTris) return { regionOf, nRegions: 1 };
+    const rects = (condRect && condRect.rects) || [];
+    const ids = new Map();
+    for (let t = 0; t < nTris; t++) {
+        const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
+        const xc = (nodes[2*v0] + nodes[2*v1] + nodes[2*v2]) / 3;
+        const yc = (nodes[2*v0+1] + nodes[2*v1+1] + nodes[2*v2+1]) / 3;
+        let key = 'cond';
+        let inCond = false;
+        for (const r of rects) {
+            if (xc >= r.xmin && xc <= r.xmax && yc >= r.ymin && yc <= r.ymax) { inCond = true; break; }
+        }
+        if (!inCond) {
+            const e = epsMap[t];
+            key = e.re.toPrecision(6) + ',' + (e.im ? e.im.toPrecision(6) : '0');
+        }
+        let id = ids.get(key);
+        if (id === undefined) { id = ids.size; ids.set(key, id); }
+        regionOf[t] = id;
+    }
+    return { regionOf, nRegions: ids.size };
+}
+
+// Recover a nodal transverse field, CONTINUOUS within each material region, by
+// area-weighted averaging of the per-element Nedelec field at each node. The Lee–Jin
+// edge-element field e_t is DISCONTINUOUS across triangle edges, so sampling it directly
+// at grid points gives faceted/discontinuity artifacts (worst near the trace, where the
+// mesh is fine and the field is strong). Averaging the four complex components
+// (Ex, Ey × re, im) to nodes and interpolating linearly within each triangle yields a
+// smooth field — the same recovery resampleStatic used for the static E-field before it
+// switched to FD-of-V. The averages are kept PER REGION (node slot = node·nRegions +
+// region), so the genuine field jumps at dielectric interfaces and conductor surfaces
+// stay sharp; a triangle always contributes to its own region's slots, so every
+// (vertex, region-of-containing-triangle) slot an interpolation reads is populated.
 function recoverNodalModeField(mesh, fm, vRe, vIm) {
     const { nodes, tris, nTris, nNodes } = mesh;
-    const exr = new Float64Array(nNodes), exi = new Float64Array(nNodes);
-    const eyr = new Float64Array(nNodes), eyi = new Float64Array(nNodes);
-    const w = new Float64Array(nNodes);
+    const { regionOf, nRegions } = buildTriRegions(mesh);
+    const nSlots = nNodes * nRegions;
+    const exr = new Float64Array(nSlots), exi = new Float64Array(nSlots);
+    const eyr = new Float64Array(nSlots), eyi = new Float64Array(nSlots);
+    const w = new Float64Array(nSlots);
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
         const ax = nodes[2*v0], ay = nodes[2*v0+1], bx = nodes[2*v1], by = nodes[2*v1+1], cx = nodes[2*v2], cy = nodes[2*v2+1];
         const area = Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2;
         if (!(area > 0)) continue;
+        const reg = regionOf[t];
         for (const vk of [v0, v1, v2]) {
             const f = evalFieldsAtPoint(t, nodes[2 * vk], nodes[2 * vk + 1], mesh, fm, vRe, vIm);
-            exr[vk] += area * f.exr; exi[vk] += area * f.exi;
-            eyr[vk] += area * f.eyr; eyi[vk] += area * f.eyi; w[vk] += area;
+            const s = vk * nRegions + reg;
+            exr[s] += area * f.exr; exi[s] += area * f.exi;
+            eyr[s] += area * f.eyr; eyi[s] += area * f.eyi; w[s] += area;
         }
     }
-    for (let i = 0; i < nNodes; i++) {
+    for (let i = 0; i < nSlots; i++) {
         if (w[i] > 0) { exr[i] /= w[i]; exi[i] /= w[i]; eyr[i] /= w[i]; eyi[i] /= w[i]; }
     }
-    return { exr, exi, eyr, eyi };
+    return { exr, exi, eyr, eyi, regionOf, nRegions };
 }
 
 // Resample a full-wave eigenmode's transverse E-field onto a regular grid.
@@ -411,12 +452,15 @@ export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
             const l0 = coeff[0][0] + coeff[0][1] * x[i] + coeff[0][2] * y[j];
             const l1 = coeff[1][0] + coeff[1][1] * x[i] + coeff[1][2] * y[j];
             const l2 = coeff[2][0] + coeff[2][1] * x[i] + coeff[2][2] * y[j];
-            const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
-            // Barycentric interpolation of the recovered nodal field → continuous.
-            const exr = l0 * nodal.exr[v0] + l1 * nodal.exr[v1] + l2 * nodal.exr[v2];
-            const exi = l0 * nodal.exi[v0] + l1 * nodal.exi[v1] + l2 * nodal.exi[v2];
-            const eyr = l0 * nodal.eyr[v0] + l1 * nodal.eyr[v1] + l2 * nodal.eyr[v2];
-            const eyi = l0 * nodal.eyi[v0] + l1 * nodal.eyi[v1] + l2 * nodal.eyi[v2];
+            // Barycentric interpolation of the recovered nodal field, reading the nodal
+            // slots of the containing triangle's material region → continuous within a
+            // region, sharp at interfaces.
+            const nr = nodal.nRegions, reg = nodal.regionOf[t];
+            const s0 = tris[3 * t] * nr + reg, s1 = tris[3 * t + 1] * nr + reg, s2 = tris[3 * t + 2] * nr + reg;
+            const exr = l0 * nodal.exr[s0] + l1 * nodal.exr[s1] + l2 * nodal.exr[s2];
+            const exi = l0 * nodal.exi[s0] + l1 * nodal.exi[s1] + l2 * nodal.exi[s2];
+            const eyr = l0 * nodal.eyr[s0] + l1 * nodal.eyr[s1] + l2 * nodal.eyr[s2];
+            const eyi = l0 * nodal.eyi[s0] + l1 * nodal.eyi[s1] + l2 * nodal.eyi[s2];
             E[j][i] = Math.hypot(Math.hypot(exr, exi), Math.hypot(eyr, eyi));
             Ex[j][i] = exr; Ey[j][i] = eyr;
         }
