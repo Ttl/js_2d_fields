@@ -92,6 +92,22 @@ class CubicSpline {
 }
 
 /**
+ * Cubic spline fit to log(y): evaluates to exp(spline(x)).
+ * For near-power-law quantities (y ≈ a*f^k), log(y) is near-linear in the
+ * sweep's log(f) axis, so a handful of samples nails the curve.
+ * Requires y > 0 for all samples.
+ */
+class LogSpline {
+    constructor(x, y) {
+        this.spline = new CubicSpline(x, y.map(Math.log));
+    }
+
+    evaluate(xv) {
+        return Math.exp(this.spline.evaluate(xv));
+    }
+}
+
+/**
  * Interpolating frequency sweep.
  *
  * Adaptively samples exact RLGC at a small number of frequencies,
@@ -106,7 +122,9 @@ class InterpolatingSweep {
      * @param {number} [options.tolerance=0.001] - Max relative error tolerance
      * @param {number} [options.maxPoints=200] - Safety cap on number of sample points
      * @param {number} [options.maxIterations=8] - Max refinement iterations
-     * @param {number} [options.initialPoints=12] - Initial number of sample points
+     * @param {number} [options.initialPoints] - Initial number of sample points.
+     *   Default scales with the sweep's decade span (see run()); pass a number
+     *   to force a fixed count.
      */
     constructor(solver, cachedResults, options = {}) {
         this.solver = solver;
@@ -114,7 +132,7 @@ class InterpolatingSweep {
         this.tolerance = options.tolerance ?? 0.001;
         this.maxPoints = options.maxPoints ?? 200;
         this.maxIterations = options.maxIterations ?? 8;
-        this.initialPoints = options.initialPoints ?? 12;
+        this.initialPoints = options.initialPoints ?? null;
 
         // Map from log10(freq) -> { modes: [{ mode, R, L, G, C }] }
         this.samplePoints = new Map();
@@ -162,7 +180,14 @@ class InterpolatingSweep {
             const modeSplines = {};
             for (const key of ['R', 'L', 'G', 'C']) {
                 const values = entries.map(e => e[1][mi][key]);
-                modeSplines[key] = new CubicSpline(ts, values);
+                // R and G are near power laws of frequency (R ~ sqrt(f) in the skin
+                // regime, G ~ ω·C·tanδ ~ f), so spline them in log space where
+                // they are near-linear. In linear space their exponential
+                // curvature drives essentially all adaptive refinement.
+                const useLog = (key === 'R' || key === 'G') && values.every(v => v > 0);
+                modeSplines[key] = useLog
+                    ? new LogSpline(ts, values)
+                    : new CubicSpline(ts, values);
             }
             modeSplines.mode = entries[0][1][mi].mode;
             this.splines.push(modeSplines);
@@ -227,8 +252,15 @@ class InterpolatingSweep {
         const tMin = Math.log10(fMin);
         const tMax = Math.log10(fMax);
 
-        // Step 1: Initial geometrically spaced points
-        const nInit = Math.min(this.initialPoints, this.maxPoints);
+        // Step 1: Initial geometrically spaced points. The default count scales
+        // with the sweep's decade span: with the log-space R/G splines the fit
+        // converges at ~2.5 samples/decade for smooth quasi-TEM RLGC curves-
+        // The first refinement iteration still verifies every interval
+        // midpoint, an under-sampled feature fails its midpoint check and gets
+        // refined, so the error control is unchanged. Capped at 
+        // 12 so wide (4+ decade) sweeps don't get more expensive.
+        const defaultInit = Math.min(12, Math.max(6, 1 + Math.ceil(2.5 * (tMax - tMin))));
+        const nInit = Math.min(this.initialPoints ?? defaultInit, this.maxPoints);
         const initialTs = [];
         for (let i = 0; i < nInit; i++) {
             initialTs.push(tMin + (tMax - tMin) * i / (nInit - 1));
