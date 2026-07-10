@@ -84,6 +84,61 @@ function conductorFillShapes(solver, maxY) {
     return out;
 }
 
+// Dielectric rect shapes, colored by ε_r (air ≈1 → white/transparent, higher ε_r → green
+// shades). Shared by the geometry view (opaque, below the contours) and the Modes tab
+// (faint, above the field heatmap) so the two tabs use the same color mapping.
+function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, layer = 'below',
+    lineColor = 'rgba(128, 128, 128, 0.3)' } = {}) {
+    const out = [];
+    for (const diel of (solver.dielectrics || [])) {
+        if (diel.y_min > maxY) continue;
+        const yMax = Math.min(diel.y_max, maxY);
+        const er = diel.epsilon_r;
+        let fillcolor;
+        if (er <= 1.01) {
+            fillcolor = `rgba(255, 255, 255, ${airAlpha})`;
+        } else {
+            const intensity = Math.min(255, 100 + (er - 1) * 30);
+            fillcolor = `rgba(100, ${intensity}, 100, ${alpha})`;
+        }
+        out.push({
+            type: 'rect',
+            x0: diel.x_min * 1000, y0: diel.y_min * 1000,
+            x1: diel.x_max * 1000, y1: yMax * 1000,
+            fillcolor, line: { color: lineColor, width: 0.5 }, layer
+        });
+    }
+    return out;
+}
+
+// Focused view (mm) around the signal conductors: the signal cluster fills `fraction` of
+// the x-axis; with a top ground the full stack height is shown, otherwise the conductors
+// sit in the bottom `fraction` of the view. Shared by the geometry tab's initial zoom and
+// the Modes tab so both frame the structure identically. Returns null when there are no
+// signal conductors to frame (caller picks its own fallback).
+function computeGeometryView(solver, maxY, fraction = SIGNAL_CONDUCTOR_VIEW_FRACTION) {
+    const signal = solver.conductors.filter(c => c.is_signal);
+    const grounds = solver.conductors.filter(c => !c.is_signal);
+    if (!signal.length) return null;
+    const xl = Math.min(...signal.map(c => c.x_min));
+    const xr = Math.max(...signal.map(c => c.x_max));
+    const center = (xl + xr) / 2;
+    const viewWidth = (xr - xl) / fraction;
+    const xRange = [(center - viewWidth / 2) * 1000, (center + viewWidth / 2) * 1000];
+
+    const bottomY = grounds.length ? Math.min(...grounds.map(g => g.y_min)) : 0;
+    const hasTopGround = grounds.some(c => c.y_max >= maxY * 0.9);
+    let yRange;
+    if (hasTopGround) {
+        yRange = [bottomY * 1000, maxY * 1000];
+    } else {
+        const topOfConductors = Math.max(...solver.conductors.map(c => c.y_max));
+        const viewHeight = (topOfConductors - bottomY) / fraction;
+        yRange = [bottomY * 1000, (bottomY + viewHeight) * 1000];
+    }
+    return { xRange, yRange };
+}
+
 // The log-spaced |E| contour-LINE trace (lines only, no fill), shared by the geometry overlay and
 // the |E| field view so their contours are identical. z = log10(|E|) with log-spaced levels keeps
 // the lines evenly spaced instead of crowding at the singular trace corners. Named "E-field
@@ -184,74 +239,12 @@ function draw(resetZoom = false) {
 
         // Calculate intelligent zoom ranges for initial view (only if no current view exists)
         if (!currentXRange || resetZoom) {
-            // Find signal conductors to determine interesting region
-            const signalConductors = solver.conductors.filter(c => c.is_signal);
-
-            if (signalConductors.length > 0) {
-                // Find leftmost and rightmost signal conductor edges
-                const xl = Math.min(...signalConductors.map(c => c.x_min));
-                const xr = Math.max(...signalConductors.map(c => c.x_max));
-                const signalWidth = xr - xl;
-                const signalCenter = (xl + xr) / 2;
-
-                // Calculate X-axis range so signal conductors take up SIGNAL_CONDUCTOR_VIEW_FRACTION
-                const viewWidth = signalWidth / SIGNAL_CONDUCTOR_VIEW_FRACTION;
-                const xMin = (signalCenter - viewWidth / 2) * 1000;  // Convert to mm
-                const xMax = (signalCenter + viewWidth / 2) * 1000;
-                currentXRange = [xMin, xMax];
-
-                // Calculate Y-axis range
-                const groundConductors = solver.conductors.filter(c => !c.is_signal);
-                const bottomGround = groundConductors.find(c => c.y_min === Math.min(...groundConductors.map(g => g.y_min)));
-                const hasTopGround = groundConductors.some(c => c.y_max >= maxY * 0.9);
-
-                if (hasTopGround) {
-                    // Show full domain height if top ground exists
-                    const yMin = bottomGround ? bottomGround.y_min * 1000 : 0;
-                    const yMax = maxY * 1000;
-                    currentYRange = [yMin, yMax];
-                } else {
-                    // No top ground: scale so conductors are 1/3 from bottom, 2/3 is air
-                    const topOfConductors = Math.max(...solver.conductors.map(c => c.y_max));
-                    const bottomY = bottomGround ? bottomGround.y_min : 0;
-                    const yMin = bottomY * 1000;
-                    const conductorHeight = topOfConductors - bottomY;
-                    const viewHeight = conductorHeight / (1/3);  // Conductors are 1/3 of view
-                    const yMax = (bottomY + viewHeight) * 1000;
-                    currentYRange = [yMin, yMax];
-                }
-            }
+            const view = computeGeometryView(solver, maxY);
+            if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
         }
 
-        // Draw dielectrics as rectangles (color by epsilon_r)
-        for (const diel of solver.dielectrics) {
-            if (diel.y_min > maxY) continue;
-
-            const yMax = Math.min(diel.y_max, maxY);
-            const er = diel.epsilon_r;
-
-            // Color mapping: air (1.0) = white, higher er = green shades
-            let fillcolor;
-            if (er <= 1.01) {
-                fillcolor = 'rgba(255, 255, 255, 0.8)';
-            } else {
-                // Green shades for dielectrics
-                const intensity = Math.min(255, 100 + (er - 1) * 30);
-                fillcolor = `rgba(100, ${intensity}, 100, 0.8)`;
-            }
-
-            shapes.push({
-                type: 'rect',
-                x0: diel.x_min * 1000,
-                y0: diel.y_min * 1000,
-                x1: diel.x_max * 1000,
-                y1: yMax * 1000,
-                fillcolor: fillcolor,
-                line: { color: 'rgba(128, 128, 128, 0.3)', width: 0.5 },
-                layer: 'below'
-            });
-        }
-
+        // Dielectrics (opaque, below the field contours) + conductors above.
+        shapes.push(...dielectricFillShapes(solver, maxY));
         shapes.push(...conductorFillShapes(solver, maxY));
 
         // If solution available, overlay E-field contours
@@ -1275,4 +1268,4 @@ function unfreeze() {
 function isFrozen() { return frozenResultsData !== null; }
 
 export { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen };
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView };

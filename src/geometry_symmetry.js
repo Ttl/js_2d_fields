@@ -1,4 +1,4 @@
-// Geometric symmetry test for a differential conductor pair.
+// Geometric symmetry test + modal-decomposition classifier for a differential pair.
 //
 // Decides whether swapping the two signal conductors is an exact symmetry of the whole
 // cross-section (conductor geometry + dielectric stack). That is precisely the condition
@@ -18,6 +18,8 @@
 //   false — asymmetric: no such swap symmetry exists
 //   null  — cannot decide from geometry (not exactly two signals, or missing data);
 //           the caller should fall back to the numeric capacitance test.
+
+import { eig2x2, mat2Mul, mat2Inv } from './matrix.js';
 
 // All conductors/dielectrics are axis-aligned rectangles exposing x_min/x_max/y_min/y_max.
 // A swap symmetry must be a mirror across an axis-aligned plane (vertical for an edge-coupled
@@ -90,4 +92,58 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
     const dielKey = d => `${(d.epsilon_r ?? 0).toFixed(6)}:${(d.tan_delta ?? 0).toFixed(6)}`;
     return mirrorInvariant(conductors, condKey, axis, coord, tol)
         && mirrorInvariant(dielectrics, dielKey, axis, coord, tol);
+}
+
+// Modal-decomposition classifier for a differential pair, shared by BOTH backends
+// (FieldSolver2D._solve_modal_differential and TriBackend._prepareStaticModal) so the
+// symmetric/asymmetric decision, thresholds, and odd/even mode ordering can never drift
+// between them — the same geometry must get the same 4-port S-matrix shape from either
+// solver.
+//
+// Inputs: the physical 2×2 Maxwell capacitance matrices [C] (dielectric) and [C0]
+// (vacuum), BOTH in F/m, plus the geometry lists for the exact swap-symmetry test.
+// Diagonalises [C0]⁻¹[C] (eps_eff = eigenvalues, modal voltage ratios = eigenvectors)
+// and applies the guard chain:
+//
+//   1. SYMMETRIC — swap symmetry from the geometry (exact, mesh-independent); when the
+//      geometric test cannot decide (null: not exactly two signals / missing data) fall
+//      back to the |C11−C22| capacitance imbalance against a mesh-noise floor (≈3e-6
+//      fine … ≈1.3e-3 coarse; a 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2;
+//      5e-3 separates the two). The odd/even decomposition is exact: no physMatrix.
+//   2. DEGENERATE — asymmetric but velocity-degenerate modes (homogeneous dielectric,
+//      relative eigenvalue separation < 2%): the eigenvectors of [C0]⁻¹[C] are
+//      arbitrary, so no per-mode rebuild is possible (modalVecs null, physMatrix
+//      without Tv). The asymmetric [C]/[L] still drive the MTL 4-port S-matrix; the
+//      caller keeps its odd/even per-mode results (loss [R]/[G] use the symmetric
+//      reconstruction).
+//   3. MODAL — non-degenerate asymmetric pair: physMatrix {C, L, Tv} plus
+//      modalVecs = [v_odd, v_even], ordered by differential character
+//      ((v0·v1)/|v|² — opposite-sign components → odd), for the caller to rebuild
+//      per-mode fields from the eigenvector combination of its per-trace solves.
+//
+// globalThis.__MODAL_FORCE__ = 'on' | 'off' is a test override: 'off' forces SYMMETRIC,
+// 'on' skips the symmetry AND degeneracy gates.
+//
+// Returns { physMatrix, modalVecs }:
+//   physMatrix — null (symmetric) or {C, L: (1/c²)[C0]⁻¹, Tv?: [v_odd, v_even]}
+//   modalVecs  — null (symmetric or degenerate) or [v_odd, v_even]
+export function classifyModalDecomposition(C, C0, conductors, dielectrics) {
+    const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(C0), C));
+    const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
+    const force = globalThis.__MODAL_FORCE__;
+    const symGeo = conductorSwapSymmetric(conductors, dielectrics);
+    const asym = Math.abs(C[0][0] - C[1][1]) / (Math.abs(C[0][0]) + Math.abs(C[1][1]) + 1e-30);
+    const isSymmetric = force === 'off'
+        || (force !== 'on' && (symGeo === null ? asym < 5e-3 : symGeo));
+    if (isSymmetric) return { physMatrix: null, modalVecs: null };
+    const C_LIGHT = 299792458;
+    const kL = 1 / (C_LIGHT * C_LIGHT);
+    const C0inv = mat2Inv(C0);
+    const physMatrix = { C, L: [[C0inv[0][0] * kL, C0inv[0][1] * kL], [C0inv[1][0] * kL, C0inv[1][1] * kL]] };
+    if (force !== 'on' && sep < 0.02) return { physMatrix, modalVecs: null };
+    const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
+    const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
+    const modalVecs = [vecs[order[0]], vecs[order[1]]];
+    physMatrix.Tv = modalVecs;
+    return { physMatrix, modalVecs };
 }

@@ -41,8 +41,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
 import { Complex } from '../complex.js';
-import { mat2Mul, mat2Inv, eig2x2 } from '../matrix.js';
-import { conductorSwapSymmetric } from '../geometry_symmetry.js';
+import { classifyModalDecomposition } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
 
@@ -826,7 +825,7 @@ export class TriBackend {
         const potB = roles.map(r => (r.is_signal && (r.polarity || 1) < 0) ? 1 : 0);
         // Both polarities must actually be present in the meshed domain — a missing
         // group (both traces tagged +, or one clipped out) makes phiB ≡ 0 and C0m
-        // singular, and mat2Inv would silently produce a NaN cascade. Fall back to
+        // singular, producing a silent NaN cascade in the classifier. Fall back to
         // the odd/even drive instead.
         if (!potA.some(v => v) || !potB.some(v => v)) { this._modalPhys = null; return false; }
         const phiA = solveTriStatic(mesh, fm, mesh.epsMap, potA);
@@ -840,45 +839,21 @@ export class TriBackend {
         const aaa = Wa(phiAa), abb = Wa(phiBa), aab = Wa(combineStatic(1, phiAa, 1, phiBa));
         const C = [[2 * eaa, eab - eaa - ebb], [eab - eaa - ebb, 2 * ebb]];
         const C0m = [[2 * aaa, aab - aaa - abb], [aab - aaa - abb, 2 * abb]];
-        const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(C0m), C));
-        // A symmetric pair (C11≈C22) is exactly the odd/even decomposition — return false and let
-        // _prepareStatic do the odd/even prep, with no physMatrix (the symmetric S-parameter
-        // combination is exact).
-        const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
-        const force = globalThis.__MODAL_FORCE__;   // 'on'|'off' test override; undefined = guard
-        // Symmetry is a property of the input geometry, not the discretised solve: read it from
-        // the conductor/dielectric layout (exact, mesh-independent) rather than from the noisy
-        // capacitance imbalance. A symmetric pair is exactly the odd/even decomposition — return
-        // false and let _prepareStatic do the odd/even prep, with no physMatrix (the symmetric
-        // S-parameter combination is exact). When the geometric test cannot decide (e.g. an
-        // imported mesh) fall back to the |C11−C22| capacitance imbalance against a mesh-noise
-        // floor (≈1e-3 worst case; 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2; 5e-3 splits;
-        // kept in sync with field_solver.js's rectilinear guard).
-        const symGeo = conductorSwapSymmetric(s.conductors, s.dielectrics);
-        const asym = Math.abs(C[0][0] - C[1][1]) / (Math.abs(C[0][0]) + Math.abs(C[1][1]) + 1e-30);
-        const isSymmetric = force === 'off'
-            || (force !== 'on' && (symGeo === null ? asym < 5e-3 : symGeo));
-        if (isSymmetric) { this._modalPhys = null; return false; }
-        // Genuinely asymmetric pair: expose the true physical p.u.l. matrices for the MTL 4-port
-        // S-parameter path (yields S11≠S22 etc.). The energy-form C is scaled to F/m by kC·ε0 (same
-        // factor as the per-mode C0 = kC·ε0·W_air); [L] = (1/c²)[C0]⁻¹. These are well-defined even
-        // for a velocity-degenerate (homogeneous-εr) pair, where the modal eigenvectors are not.
-        const ksc = kC * eps0, kL = 1 / (c0 * c0);
+        // Shared symmetric/degenerate/modal decision (thresholds, ordering — see
+        // classifyModalDecomposition; the rectilinear backend uses the identical guard).
+        // The energy-form matrices are scaled to physical F/m by kC·ε0 first (same factor
+        // as the per-mode C0 = kC·ε0·W_air), so physMatrix comes out in SI units.
+        // Symmetric: return false and let _prepareStatic do the odd/even prep, with no
+        // physMatrix. Degenerate: physMatrix without Tv still drives the asymmetric
+        // 4-port S-matrix while _prepareStatic builds the odd/even per-mode static.
+        const ksc = kC * eps0;
         const sc2 = (M, s) => [[M[0][0] * s, M[0][1] * s], [M[1][0] * s, M[1][1] * s]];
-        const C0pInv = mat2Inv(sc2(C0m, ksc));
-        this._modalPhys = { C: sc2(C, ksc), L: sc2(C0pInv, kL) };
-        // When the two modes are velocity-degenerate (homogeneous εr, e.g. a uniform-εr broadside
-        // stripline with unequal heights) the eigenvectors of [C0]⁻¹[C] are arbitrary, so we cannot
-        // build meaningful per-mode fields or hand a Tv to the loss reconstruction. Return false so
-        // _prepareStatic builds the odd/even per-mode static; the asymmetric [C]/[L] above still
-        // drives the asymmetric 4-port S-matrix (loss [R]/[G] use the symmetric reconstruction).
-        if (force !== 'on' && sep < 0.02) return false;
-        // Non-degenerate modes: differential character (v0·v1)/|v|² < 0 ⇒ opposite-sign ⇒ "odd".
-        const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
-        const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
-        this._modalPhys.Tv = [vecs[order[0]], vecs[order[1]]];   // [v_odd, v_even] for the loss reconstruction
+        const { physMatrix, modalVecs } = classifyModalDecomposition(
+            sc2(C, ksc), sc2(C0m, ksc), s.conductors, s.dielectrics);
+        this._modalPhys = physMatrix;
+        if (!modalVecs) return false;
         ['odd', 'even'].forEach((label, li) => {
-            const v = vecs[order[li]];
+            const v = modalVecs[li];
             const phiEps = combineStatic(v[0], phiA, v[1], phiB);
             const phiAir = combineStatic(v[0], phiAa, v[1], phiBa);
             const W_air = Wa(phiAir);
@@ -1019,8 +994,6 @@ export class TriBackend {
             lc.clsMask = null;   // invalidate the surface-group classification too
         }
         const lossEdgeMask = f > 0 ? lc.mask : null;
-        const surf = lossEdgeMask ? buildSurfaceGroups(s, mesh, fm, cr, lossEdgeMask, f, lc) : { uniform: true, groups: [] };
-        const platingPerSide = !surf.uniform;
 
         // MQS (reference) applies when grounds are wall-absorbed (signal-only rects)
         // and the domain is symmetric (mode set by the BC). Else H-field perturbation.
@@ -1160,11 +1133,15 @@ export class TriBackend {
             L_internal = 0;
         }
         if (f > 0 && R_total === 0) {
-            // Per-edge surface groups (one group = one surface impedance). The groups
-            // from buildSurfaceGroups are used even when uniform: a fully-plated
-            // surface then correctly keeps the LAYERED plating-over-bulk impedance
-            // (substituting effectiveSurface's solid-plating-metal Zs here used to
-            // lose the bulk underneath).
+            // Per-edge surface groups (one group = one surface impedance), evaluated
+            // only HERE — the MQS path above never reads them (it handles per-face
+            // plating itself via surfaceZs), so grouping per sweep point up front
+            // wasted an O(nEdges) classification plus surface-impedance evaluations.
+            // The groups from buildSurfaceGroups are used even when uniform: a
+            // fully-plated surface then correctly keeps the LAYERED plating-over-bulk
+            // impedance (substituting effectiveSurface's solid-plating-metal Zs here
+            // used to lose the bulk underneath).
+            const surf = buildSurfaceGroups(s, mesh, fm, cr, lossEdgeMask, f, lc);
             const groups = surf.groups.length ? surf.groups
                 : [{ Zs: { re: Zr.re, im: Zr.im }, mask: lossEdgeMask }];
             // The loss routines run at the base bulk σ; plating/roughness enter only

@@ -3,7 +3,7 @@ import { BroadsideStriplineSolver } from './broadside_stripline.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen } from './plot.js';
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView } from './plot.js';
 import { InterpolatingSweep } from './interpolating_sweep.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
@@ -968,17 +968,8 @@ function plotModesField(grid, mode, idx, resetView = false) {
         hoverinfo: 'skip',
     }];
 
-    const layout = {
-        title: { text: title, font: { color: '#fff' } },
-        xaxis: { title: { text: 'Width (mm)', font: { color: '#aaa' } }, scaleanchor: 'y', scaleratio: 1, range: view.xRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
-        yaxis: { title: { text: 'Height (mm)', font: { color: '#aaa' } }, range: view.yRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
-        margin: { l: 70, r: 90, t: 50, b: 60 },
-        showlegend: false, hovermode: 'closest', dragmode: 'pan',
-        paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' },
-        shapes,
-    };
-
-    Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+    Plotly.react(container, traces, modesPlotLayout(title, view, shapes),
+        { responsive: true, displayModeBar: true, scrollZoom: true });
 }
 
 // Draw a geometry-only preview into the mode plot (before any solve), so the tab shows
@@ -994,70 +985,39 @@ function plotModesGeometry() {
     // Invisible scatter spanning the view so the axes (and shapes) scale correctly.
     const traces = [{ type: 'scatter', x: [view.xRange[0], view.xRange[1]], y: [view.yRange[0], view.yRange[1]],
         mode: 'markers', marker: { size: 0, opacity: 0 }, hoverinfo: 'skip', showlegend: false }];
-    const layout = {
-        title: { text: 'Geometry — click Solve Modes to compute fields', font: { color: '#fff' } },
+    const layout = modesPlotLayout('Geometry — click Solve Modes to compute fields', view, buildGeometryShapes(maxY));
+    Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+}
+
+// Focused view (mm) around the signal conductors — the geometry tab's zoom
+// (computeGeometryView) with a whole-domain fallback when there are no signals.
+function computeModesView(maxY) {
+    return computeGeometryView(modesSolver, maxY)
+        ?? { xRange: [-modesSolver.domain_width * 500, modesSolver.domain_width * 500], yRange: [0, maxY * 1000] };
+}
+
+// Plotly rectangle shapes for the geometry, reusing the geometry tab's shape builders so
+// the two tabs render identically (incl. plated-edge markers). Everything sits ABOVE the
+// heatmap: dielectrics faint (the field shows through), conductors opaque on top.
+function buildGeometryShapes(maxY) {
+    return [
+        ...dielectricFillShapes(modesSolver, maxY,
+            { alpha: 0.12, airAlpha: 0, layer: 'above', lineColor: 'rgba(160,160,160,0.25)' }),
+        ...conductorFillShapes(modesSolver, maxY),
+    ];
+}
+
+// Shared Plotly layout for the Modes tab (field render and geometry-only preview).
+function modesPlotLayout(title, view, shapes) {
+    return {
+        title: { text: title, font: { color: '#fff' } },
         xaxis: { title: { text: 'Width (mm)', font: { color: '#aaa' } }, scaleanchor: 'y', scaleratio: 1, range: view.xRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
         yaxis: { title: { text: 'Height (mm)', font: { color: '#aaa' } }, range: view.yRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
         margin: { l: 70, r: 90, t: 50, b: 60 },
         showlegend: false, hovermode: 'closest', dragmode: 'pan',
         paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' },
-        shapes: buildGeometryShapes(maxY),
+        shapes,
     };
-    Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
-}
-
-// Focused view (mm) around the signal conductors, mirroring the geometry tab's zoom
-// (signal conductors fill MODES_VIEW_FRACTION of the x-axis) so the field isn't lost in
-// the wide simulation domain.
-const MODES_VIEW_FRACTION = 1 / 3;
-function computeModesView(maxY) {
-    const signal = modesSolver.conductors.filter(c => c.is_signal);
-    const grounds = modesSolver.conductors.filter(c => !c.is_signal);
-    if (!signal.length) {
-        return { xRange: [-modesSolver.domain_width * 500, modesSolver.domain_width * 500], yRange: [0, maxY * 1000] };
-    }
-    const xl = Math.min(...signal.map(c => c.x_min));
-    const xr = Math.max(...signal.map(c => c.x_max));
-    const center = (xl + xr) / 2;
-    const viewWidth = (xr - xl) / MODES_VIEW_FRACTION;
-    const xRange = [(center - viewWidth / 2) * 1000, (center + viewWidth / 2) * 1000];
-
-    const bottomY = grounds.length ? Math.min(...grounds.map(g => g.y_min)) : 0;
-    const hasTopGround = grounds.some(c => c.y_max >= maxY * 0.9);
-    let yRange;
-    if (hasTopGround) {
-        yRange = [bottomY * 1000, maxY * 1000];
-    } else {
-        const topOfConductors = Math.max(...modesSolver.conductors.map(c => c.y_max));
-        const viewHeight = (topOfConductors - bottomY) / MODES_VIEW_FRACTION;
-        yRange = [bottomY * 1000, (bottomY + viewHeight) * 1000];
-    }
-    return { xRange, yRange };
-}
-
-// Plotly rectangle shapes for the geometry (dielectrics faint, conductors solid),
-// drawn above the heatmap so the mode field is shown over the structure.
-function buildGeometryShapes(maxY) {
-    const shapes = [];
-    for (const diel of modesSolver.dielectrics) {
-        if (diel.y_min > maxY) continue;
-        const yMax = Math.min(diel.y_max, maxY);
-        const er = diel.epsilon_r;
-        let fillcolor = 'rgba(255,255,255,0.0)';
-        if (er > 1.01) {
-            const intensity = Math.min(255, 100 + (er - 1) * 30);
-            fillcolor = `rgba(100, ${intensity}, 100, 0.12)`;
-        }
-        shapes.push({ type: 'rect', x0: diel.x_min * 1000, y0: diel.y_min * 1000, x1: diel.x_max * 1000, y1: yMax * 1000,
-            fillcolor, line: { color: 'rgba(160,160,160,0.25)', width: 0.5 }, layer: 'above' });
-    }
-    for (const cond of modesSolver.conductors) {
-        if (cond.y_min > maxY) continue;
-        const yMax = Math.min(cond.y_max, maxY);
-        shapes.push({ type: 'rect', x0: cond.x_min * 1000, y0: cond.y_min * 1000, x1: cond.x_max * 1000, y1: yMax * 1000,
-            fillcolor: 'rgba(217,119,6,1.0)', line: { color: 'rgba(0,0,0,0.6)', width: 1 }, layer: 'above' });
-    }
-    return shapes;
 }
 
 // Translate the "Solver" dropdown value into the backend + triangular loss options.

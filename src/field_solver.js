@@ -2,8 +2,7 @@ import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
 import { calculate_Zrough, calculate_Zrough_layered } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
-import { mat2Mul, mat2Inv, eig2x2 } from './matrix.js';
-import { conductorSwapSymmetric } from './geometry_symmetry.js';
+import { classifyModalDecomposition } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
 
 export const CONSTANTS = {
@@ -1563,46 +1562,18 @@ export class FieldSolver2D {
         };
         const Cm = maxwell(A, B, false), Cm0 = maxwell(Av, Bv, true);
         const quad = (M, v) => 0.5 * (v[0] * v[0] * M[0][0] + 2 * v[0] * v[1] * M[0][1] + v[1] * v[1] * M[1][1]);
-        const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(Cm0), Cm));
-        // A symmetric pair (C11≈C22) is exactly the odd/even drives — keep them and expose no
-        // physMatrix (the symmetric S-parameter combination is exact). Returning null signals the
-        // caller to keep the odd/even drive results.
-        const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
-        const force = globalThis.__MODAL_FORCE__;   // 'on'|'off' test override; undefined = guard
-        // Symmetry is a property of the input geometry, not the discretised solve: read it from
-        // the conductor/dielectric layout (exact, mesh-independent) rather than from the noisy
-        // capacitance imbalance. A symmetric pair is exactly the odd/even drives — keep them and
-        // expose no physMatrix (the symmetric S-parameter combination is exact). Returning null
-        // signals the caller to keep the odd/even drive results. When the geometric test cannot
-        // decide (e.g. an imported mesh with no clean rect decomposition) fall back to the
-        // |C11−C22| capacitance imbalance against a mesh-noise floor (≈3e-6 fine … ≈1.3e-3 coarse;
-        // a 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2; 5e-3 separates the two).
-        const symGeo = conductorSwapSymmetric(this.conductors, this.dielectrics);
-        const asym = Math.abs(Cm[0][0] - Cm[1][1]) / (Math.abs(Cm[0][0]) + Math.abs(Cm[1][1]) + 1e-30);
-        const isSymmetric = force === 'off'
-            || (force !== 'on' && (symGeo === null ? asym < 5e-3 : symGeo));
-        if (isSymmetric) { this._modalPhys = null; return null; }
-        // Genuinely asymmetric pair: expose the true physical p.u.l. matrices for the MTL 4-port
-        // S-parameter path (yields S11≠S22 etc.). [C] = Maxwell matrix, [L] = μ0·ε0·[C0]⁻¹ =
-        // (1/c²)·[C0]⁻¹. These are well-defined even for a velocity-degenerate (homogeneous-
-        // dielectric) pair, where the modal eigenvectors are arbitrary.
-        const Cm0inv = mat2Inv(Cm0), kL = 1 / (CONSTANTS.C * CONSTANTS.C);
-        this._modalPhys = { C: Cm, L: [[Cm0inv[0][0] * kL, Cm0inv[0][1] * kL], [Cm0inv[1][0] * kL, Cm0inv[1][1] * kL]] };
-        // When the two modes are velocity-degenerate (homogeneous dielectric, e.g. a uniform-εr
-        // broadside stripline) the eigenvectors of [C0]⁻¹[C] are arbitrary, so we cannot rebuild
-        // per-mode fields or hand a meaningful Tv to the loss reconstruction. Keep the odd/even
-        // drive results for the per-mode quantities; the asymmetric [C]/[L] above still drives the
-        // asymmetric 4-port S-matrix (loss [R]/[G] use the symmetric reconstruction). Returning
-        // null leaves modeResults as odd/even while _modalPhys (without Tv) is picked up downstream.
-        if (force !== 'on' && sep < 0.02) { return null; }
-        // Non-degenerate modes: assign to odd/even by differential character (opposite-sign → odd).
-        const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
-        const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
-        this._modalPhys.Tv = [vecs[order[0]], vecs[order[1]]];   // [v_odd, v_even] for the loss reconstruction
+        // Shared symmetric/degenerate/modal decision (thresholds, ordering — see
+        // classifyModalDecomposition; the triangular backend uses the identical guard).
+        // Symmetric: null physMatrix, keep the odd/even drive results (returning null
+        // signals the caller). Degenerate: physMatrix without Tv still drives the
+        // asymmetric 4-port S-matrix while the odd/even per-mode results are kept.
+        const { physMatrix, modalVecs } = classifyModalDecomposition(Cm, Cm0, this.conductors, this.dielectrics);
+        this._modalPhys = physMatrix;
+        if (!modalVecs) return null;
         const comb = (a, P, b, Q) => P.map((row, i) => row.map((val, j) => a * val + b * Q[i][j]));
         const results = [];
         ['odd', 'even'].forEach((label, li) => {
-            const v = vecs[order[li]];
+            const v = modalVecs[li];
             const V = comb(v[0], A.V, v[1], B.V);
             const Ex = comb(v[0], A.Ex, v[1], B.Ex), Ey = comb(v[0], A.Ey, v[1], B.Ey);
             const Ck = quad(Cm, v);          // ½·vᵀ·Cm·v  (mode capacitance, matches C_odd/C_even)

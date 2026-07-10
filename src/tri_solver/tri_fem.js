@@ -611,7 +611,7 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
             }
         }
 
-        // Local-to-global DOF mapping (identical to assembleTriFEM)
+        // Local-to-global DOF mapping
         signs.fill(1);
         for (let le = 0; le < 3; le++) {
             const eIdx = triEdges[3*t + le];
@@ -649,8 +649,13 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
         }
     }
 
-    // Robin ABC entries: A += j·k₀·(1/L or 1/(3L)) on boundary edge DOFs — a
-    // pure per-unit-k₀ imaginary template (see assembleTriFEM for the derivation).
+    // Robin ABC entries: A += j·k₀·(1/L or 1/(3L)) on boundary edge DOFs — a pure
+    // per-unit-k₀ imaginary template. On edge (p,q) parameterized by s∈[0,1] the
+    // transverse tangential basis is ne1_tang(s) = 1/L (constant), ne2_tang(s) =
+    // (1/L)(1−2s), giving self-integrals ∫ne1²dl = 1/L, ∫ne2²dl = 1/(3L),
+    // ∫ne1·ne2 dl = 0. (Strict === true: 'pmc' walls skip the Robin terms. The P2
+    // NODAL Robin on Ez is deliberately absent — forcing ∂Ez/∂n + jk₀Ez = 0 distorts
+    // quasi-TEM eigenvectors; the transverse ABC alone suppresses cavity modes.)
     const rR = [], rC = [], rV = [];
     if (abc.top === true || abc.left === true || abc.right === true || abc.bottom === true) {
         const ymax = condRect.ymax_domain, ymin = condRect.ymin_domain;
@@ -724,147 +729,11 @@ export function femFromDecomposition(dec, k2) {
     };
 }
 
+// Concrete A(k), B(k) CSR pair at a single k² — a thin wrapper over the decomposed
+// assembly (verified equivalent to machine precision), for one-shot callers (the
+// mode viewer, tests) that don't reuse the templates across frequencies.
 export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
-    const { tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
-    const { edgeF, faceF, nodeF, edgeNodeF, nFreeTransverse, nFreeVertexDof,
-            nFreeEdgeNodeDof } = fm;
-    const N = fm.nFreeTransverse + fm.nFreeLongitudinal;
-
-    const nodes = mesh.nodes;
-    const k0 = Math.sqrt(k2);
-
-    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
-
-    // Pre-allocate COO arrays: max 196 nonzeros per P2 element (14×14)
-    const maxNnz = nTris * 196;
-    const Ar = new Int32Array(maxNnz), Ac = new Int32Array(maxNnz);
-    const AvRe = new Float64Array(maxNnz), AvIm = new Float64Array(maxNnz);
-    const Br = new Int32Array(maxNnz), Bc = new Int32Array(maxNnz);
-    const BvRe = new Float64Array(maxNnz), BvIm = new Float64Array(maxNnz);
-    let aNnz = 0, bNnz = 0;
-    const RBr = [], RBc = [], RBvRe = [], RBvIm = [];
-    const RAr = [], RAc = [], RAvRe = [], RAvIm = [];
-
-    for (let t = 0; t < nTris; t++) {
-        const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const eps = epsMap[t];
-
-        const m = computeTriP2Matrices(nodes, v0, v1, v2, eps.re, eps.im, k0);
-        const ARe = m.ARe, AIm = m.AIm, BRe = m.BRe, BIm = m.BIm, Att = m.Att, Dtt = m.Dtt;
-        const nLocal = 14;
-
-        if (t === 0 && globalThis.__TRI_DEBUG__) {
-            const ntrans = 8;
-            let attMax = 0, dttMax = 0;
-            for (let i = 0; i < ntrans*ntrans; i++) { attMax = Math.max(attMax, Math.abs(Att[i])); dttMax = Math.max(dttMax, Math.abs(Dtt[i])); }
-            let areMax = 0, breMax = 0;
-            for (let i = 0; i < nLocal*nLocal; i++) { areMax = Math.max(areMax, Math.abs(ARe[i])); breMax = Math.max(breMax, Math.abs(BRe[i])); }
-            globalThis.__TRI_DEBUG__ && console.log(`  Elem 0: Area=${triCoefficients(nodes,v0,v1,v2).Area.toExponential(3)}, |Att|=${attMax.toExponential(3)}, |Dtt|=${dttMax.toExponential(3)}, |A|=${areMax.toExponential(3)}, |B|=${breMax.toExponential(3)}`);
-        }
-
-        // Build local-to-global DOF mapping
-        const globalDof = new Int32Array(nLocal);
-        const signs = new Float64Array(nLocal).fill(1);
-
-        for (let le = 0; le < 3; le++) {
-            const eIdx = triEdges[3*t + le];
-            const s = triSigns[3*t + le];
-
-            // ne1 DOF (antisymmetric)
-            globalDof[le] = edgeF[2*eIdx];
-            signs[le] = s;
-
-            // ne2 DOF (symmetric — no sign flip)
-            globalDof[le+4] = edgeF[2*eIdx+1];
-
-            // le DOF (edge midpoint nodal)
-            // P2 local: [ne1_0..2, nf1, ne2_0..2, nf2, lv_0..2, le_0..2]
-            const enf = edgeNodeF[eIdx];
-            globalDof[le+11] = enf >= 0 ? lzEdgeMidOff + enf : -1;
-        }
-
-        // Face DOFs
-        globalDof[3] = faceF[2*t];   // nf1
-        globalDof[7] = faceF[2*t+1]; // nf2
-
-        // Vertex DOFs (lv)
-        const verts = [v0, v1, v2];
-        for (let k = 0; k < 3; k++) {
-            const nf = nodeF[verts[k]];
-            globalDof[8 + k] = nf >= 0 ? lzOff + nf : -1;
-        }
-        // le DOFs already set above
-
-        // Assemble element matrices into global COO
-        for (let li = 0; li < nLocal; li++) {
-            const gi = globalDof[li]; if (gi < 0) continue;
-            for (let lj = 0; lj < nLocal; lj++) {
-                const gj = globalDof[lj]; if (gj < 0) continue;
-                const s = signs[li] * signs[lj];
-                const idx = li * nLocal + lj;
-                const are = s * ARe[idx], aim = s * AIm[idx];
-                if (are !== 0 || aim !== 0) {
-                    Ar[aNnz] = gi; Ac[aNnz] = gj; AvRe[aNnz] = are; AvIm[aNnz] = aim; aNnz++;
-                }
-                const bre = s * BRe[idx], bim = s * BIm[idx];
-                if (bre !== 0 || bim !== 0) {
-                    Br[bNnz] = gi; Bc[bNnz] = gj; BvRe[bNnz] = bre; BvIm[bNnz] = bim; bNnz++;
-                }
-            }
-        }
-    }
-
-    // Robin ABC: boundary edges with P2 DOFs (strict equality: 'pmc' skips Robin terms)
-    if (abc.top === true || abc.left === true || abc.right === true || abc.bottom === true) {
-        const ymax = condRect.ymax_domain, ymin = condRect.ymin_domain;
-        const xmin = condRect.xmin_domain, xmax = condRect.xmax_domain;
-        const TOL = 1e-12;
-        for (let e = 0; e < nEdges; e++) {
-            const n0 = edges[2*e], n1 = edges[2*e+1];
-            const x0 = nodes[2*n0], y0 = nodes[2*n0+1];
-            const x1 = nodes[2*n1], y1 = nodes[2*n1+1];
-            const L = Math.sqrt((x1-x0)**2 + (y1-y0)**2);
-            let isBoundary = false;
-            if (abc.top === true && Math.abs(y0 - ymax) < TOL && Math.abs(y1 - ymax) < TOL) isBoundary = true;
-            if (abc.bottom === true && Math.abs(y0 - ymin) < TOL && Math.abs(y1 - ymin) < TOL) isBoundary = true;
-            if (abc.left === true && Math.abs(x0 - xmin) < TOL && Math.abs(x1 - xmin) < TOL) isBoundary = true;
-            if (abc.right === true && Math.abs(x0 - xmax) < TOL && Math.abs(x1 - xmax) < TOL) isBoundary = true;
-            if (!isBoundary) continue;
-
-            // Robin ABC for transverse edge DOFs: A += jk₀ ∫ W_tang · W_tang dl
-            // On edge (p,q) parameterized by s∈[0,1]:
-            //   ne1_tang(s) = 1/L (constant), ne2_tang(s) = (1/L)(1-2s)
-            // Self-integrals: ∫ne1²dl = 1/L, ∫ne2²dl = 1/(3L), ∫ne1·ne2 dl = 0
-            const ef1 = edgeF[2*e];
-            if (ef1 >= 0) { RAr.push(ef1); RAc.push(ef1); RAvRe.push(0); RAvIm.push(k0 / L); }
-
-            const ef2 = edgeF[2*e+1];
-            if (ef2 >= 0) { RAr.push(ef2); RAc.push(ef2); RAvRe.push(0); RAvIm.push(k0 / (3 * L)); }
-
-            // P2 nodal Robin on boundary: DISABLED — the Ez ABC distorts the
-            // eigenvector by forcing ∂Ez/∂n + jk₀Ez = 0, which is a poor approximation
-            // for quasi-TEM modes. The transverse ABC alone suppresses cavity modes.
-        }
-    }
-
-    // Merge pre-allocated element arrays with Robin BC dynamic arrays
-    const totalA = aNnz + RAr.length;
-    const fAr = new Int32Array(totalA), fAc = new Int32Array(totalA);
-    const fAvRe = new Float64Array(totalA), fAvIm = new Float64Array(totalA);
-    for (let i = 0; i < aNnz; i++) { fAr[i] = Ar[i]; fAc[i] = Ac[i]; fAvRe[i] = AvRe[i]; fAvIm[i] = AvIm[i]; }
-    for (let i = 0; i < RAr.length; i++) { fAr[aNnz+i] = RAr[i]; fAc[aNnz+i] = RAc[i]; fAvRe[aNnz+i] = RAvRe[i]; fAvIm[aNnz+i] = RAvIm[i]; }
-
-    const totalB = bNnz + RBr.length;
-    const fBr = new Int32Array(totalB), fBc = new Int32Array(totalB);
-    const fBvRe = new Float64Array(totalB), fBvIm = new Float64Array(totalB);
-    for (let i = 0; i < bNnz; i++) { fBr[i] = Br[i]; fBc[i] = Bc[i]; fBvRe[i] = BvRe[i]; fBvIm[i] = BvIm[i]; }
-    for (let i = 0; i < RBr.length; i++) { fBr[bNnz+i] = RBr[i]; fBc[bNnz+i] = RBc[i]; fBvRe[bNnz+i] = RBvRe[i]; fBvIm[bNnz+i] = RBvIm[i]; }
-
-    return {
-        csrA: tripletsToCSR(fAr, fAc, fAvRe, N, fAvIm),
-        csrB: tripletsToCSR(fBr, fBc, fBvRe, N, fBvIm),
-        N
-    };
+    return femFromDecomposition(assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect), k2);
 }
 
 // --- P2 Static solver ---
