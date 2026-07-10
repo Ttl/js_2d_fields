@@ -49,5 +49,53 @@ console.log('\nPathological geometries should be rejected:');
 check('rectilinear 1 m @ 100 GHz', () => expectsReject(huge('rectilinear'), 'rect-huge'));
 check('triangular 1 m @ 100 GHz', () => expectsReject(huge('triangular'), 'tri-huge'));
 
+// --- Modes-tab guard: ALWAYS the triangular estimate, whatever the Solver dropdown ---
+// The Modes solve runs the triangular backend unconditionally, and its mesher
+// wavelength-caps the bulk of the WHOLE domain at the Modes mesh density.
+const MODES = { wavelengthDensity: 12 };
+const modesOk = (s, freq) => s._check_meshability(20000, freq, MODES);
+const modesReject = (s, freq, label) => {
+    try { s._check_meshability(20000, freq, MODES); throw new Error(`${label}: expected rejection, got none`); }
+    catch (e) {
+        if (/expected rejection/.test(e.message)) throw e;
+        if (!/cannot be meshed for the full-wave \(triangular\)/.test(e.message))
+            throw new Error(`${label}: wrong error: ${e.message}`);
+        console.log(`        rejected as expected: ${e.message.slice(0, 120)}…`);
+    }
+};
+
+// Wide, thin domain with a fine feature: the FDM tensor-grid estimate rejects it
+// (graded lines × wide axis blow the node budget) but the triangular mesher grades
+// locally and handles it easily — the modes guard must use the latter even with
+// 'rectilinear' selected in the sidebar.
+function wideThin(backend) {
+    return new MicrostripSolver({
+        substrate_height: 0.2e-3, trace_width: 0.2e-3, trace_thickness: 1e-6,
+        gnd_thickness: 35e-6, epsilon_r: 4.3, tan_delta: 0.02, freq: 1e9,
+        enclosure_width: 100e-3, enclosure_height: 0.5e-3,
+        mesh_backend: backend, boundaries: ["gnd", "gnd", "gnd", "gnd"],
+    });
+}
+// Electrically large box at the modes frequency: fits the main-solve budget (the
+// active region is small) but the whole-domain 12 cells/λ modes mesh does not.
+function bigBox(backend) {
+    return new MicrostripSolver({
+        substrate_height: 0.5e-3, trace_width: 0.5e-3, trace_thickness: 35e-6,
+        gnd_thickness: 35e-6, epsilon_r: 4.3, tan_delta: 0.02, freq: 100e9,
+        enclosure_width: 20e-3, enclosure_height: 20e-3,
+        mesh_backend: backend, boundaries: ["gnd", "gnd", "gnd", "gnd"],
+    });
+}
+
+console.log('\nModes-tab guard (triangular estimate regardless of Solver selection):');
+check('normal microstrip modes @ 50 GHz passes', () => modesOk(normal('rectilinear', 50e9), 50e9));
+check('fine feature in wide domain: FDM main guard rejects it (premise)',
+    () => expectsReject(wideThin('rectilinear'), 'wide-thin-fdm'));
+check('…but the modes guard passes it (rectilinear selected)', () => modesOk(wideThin('rectilinear'), 1e9));
+check('electrically large box: triangular main guard passes it (premise)',
+    () => expectsOk(bigBox('triangular')));
+check('…but the modes guard rejects it @ 100 GHz (rectilinear selected)',
+    () => modesReject(bigBox('rectilinear'), 100e9, 'bigbox-modes'));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

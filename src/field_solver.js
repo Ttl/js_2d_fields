@@ -277,7 +277,11 @@ export class FieldSolver2D {
      * @param {number} [freqOverride] - Frequency to evaluate the wavelength term at
      *     (solveModes solves at its own frequency, not this.freq).
      */
-    _check_meshability(maxNodes = 20000, freqOverride = undefined) {
+    // modesOpts (truthy = guarding a Modes-tab solve, which ALWAYS runs the triangular
+    // backend regardless of the Solver dropdown): {wavelengthDensity} — the Modes mesh
+    // density, because that solve wavelength-caps the bulk of the WHOLE domain (see
+    // TriBackend._wavelengthCap) rather than just the active patch.
+    _check_meshability(maxNodes = 20000, freqOverride = undefined, modesOpts = null) {
         const freq = freqOverride ?? this.freq;
         const W = this.domain_width;
         const yBottom = -(this.t_gnd ?? 0);
@@ -358,7 +362,7 @@ export class FieldSolver2D {
             ? 'reduce the structure/enclosure size, lower the maximum frequency, or raise Max Nodes'
             : 'enlarge the smallest feature, shrink the domain, or raise Max Nodes';
 
-        if (this.mesh_backend === 'triangular') {
+        if (this.mesh_backend === 'triangular' || modesOpts) {
             // Triangles grade in 2D, so a fine feature only costs a small local patch, never
             // enough on its own to be "surely unsolvable" (the suite meshes few µm features
             // in cm-scale domains fine). The only triangular blow-up that is genuinely
@@ -373,14 +377,35 @@ export class FieldSolver2D {
             // stripline meshes in ~4.1k tris vs the ~6.8k that formula claimed). Reject
             // only surely-unsolvable cases; the backend's coarsen-and-rebuild loop and
             // the eigenSolveBytes guard catch anything the estimate misses, cleanly.
-            const triCoarse = Math.max(Math.min(W, H) / 2, hFine);
-            let tris = 2 * (W / triCoarse) * (H / triCoarse);     // coarse background
-            if (lambdaLimited) tris += 2 * (Lx / hWave) * (Ly / hWave);   // active wavelength patch
+            let triCoarse = Math.max(Math.min(W, H) / 2, hFine);
+            let tris, triCause = cause, triRemedy = remedy;
+            if (modesOpts && freq > 0) {
+                // Modes solve: the bulk of the WHOLE domain is wavelength-capped at the
+                // Modes mesh density (default 12 cells/λ) so cavity/higher-order modes
+                // stay resolved — coarsening below that mis-classifies them, so an
+                // electrically huge domain must be rejected here rather than degraded
+                // through the coarsen-and-rebuild loop (whose FIRST gmsh build would
+                // also be enormous).
+                const nLambda = modesOpts.wavelengthDensity > 0 ? modesOpts.wavelengthDensity : 12;
+                const hBulk = CONSTANTS.C / (freq * Math.sqrt(epsMax)) / nLambda;
+                if (hBulk < triCoarse) {
+                    triCoarse = Math.max(hBulk, hFine);
+                    triCause = `the ${fmtL(W)}×${fmtL(H)} domain is electrically large at ` +
+                        `${(freq / 1e9).toFixed(2)} GHz (λ≈${lambdaMm} in ε_r=${epsMax.toFixed(1)}); ` +
+                        `the Modes solve resolves the whole domain at ${nLambda} cells/λ ` +
+                        `(~${fmtL(triCoarse)} cells) to keep cavity/higher-order modes trustworthy`;
+                    triRemedy = 'lower the Modes frequency or Mesh density, shrink the enclosure, or raise Max Nodes';
+                }
+                tris = 2 * (W / triCoarse) * (H / triCoarse);
+            } else {
+                tris = 2 * (W / triCoarse) * (H / triCoarse);     // coarse background
+                if (lambdaLimited) tris += 2 * (Lx / hWave) * (Ly / hWave);   // active wavelength patch
+            }
             if (tris > triBudget) {
                 throw new Error(
                     `Geometry cannot be meshed for the full-wave (triangular) solver within the node budget: ` +
-                    `${cause}, needing ~${Math.round(tris).toLocaleString()} triangles vs a budget of ` +
-                    `${Math.round(triBudget).toLocaleString()} (Max Nodes ${maxNodes.toLocaleString()}). To proceed, ${remedy}.`);
+                    `${triCause}, needing ~${Math.round(tris).toLocaleString()} triangles vs a budget of ` +
+                    `${Math.round(triBudget).toLocaleString()} (Max Nodes ${maxNodes.toLocaleString()}). To proceed, ${triRemedy}.`);
             }
         } else {
             // Rectilinear tensor grid: nodes = nx·ny. The coarse geometric cell sets the
@@ -1729,11 +1754,14 @@ export class FieldSolver2D {
     // wavelengthDensity ← the Modes tab's Mesh density (cells/λ for the bulk
     // wavelength cap — see TriBackend._wavelengthCap).
     async solveModes(freq, nev = 4, onProgress = null, refineOpts = {}) {
-        // Same pre-mesh guard as solve_adaptive, evaluated at the MODES frequency
-        // (the modes mesher really does wavelength-cap the bulk, so an electrically
-        // huge domain at high freq should be rejected cleanly here rather than
-        // degrade through the triangle-budget coarsening loop).
-        this._check_meshability(refineOpts.maxNodes ?? 20000, freq);
+        // Same pre-mesh guard as solve_adaptive, evaluated at the MODES frequency and
+        // ALWAYS on the triangular estimate — this solve runs the triangular backend
+        // regardless of the sidebar Solver selection, so branching on this.mesh_backend
+        // here would apply the FDM tensor-grid rules (falsely rejecting fine features
+        // the tri mesher grades locally, and skipping the whole-domain wavelength check
+        // that stops an electrically huge modes mesh from hanging gmsh).
+        this._check_meshability(refineOpts.maxNodes ?? 20000, freq,
+            { wavelengthDensity: refineOpts.wavelengthDensity });
         const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
         const ctx = await initTriBackend();
         // modesFreq lets buildMesh size the bulk to the wavelength at this frequency, so
