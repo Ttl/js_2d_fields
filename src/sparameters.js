@@ -272,7 +272,7 @@ function mComplex(re, im) {
  * asymmetric pair: it yields S11≠S22 and non-zero mode-conversion SDC/SCD.
  *
  * Method: [Z]=[R]+jω[L], [Y]=[G]+jω[C]; [γ]=√([Z][Y]); chain blocks A=cosh(γℓ),
- * B=[Z]·γ⁻¹sinh(γℓ), C=[Y]·γ⁻¹sinh(γℓ), D=Aᵀ (reciprocal); block ABCD→4-port S; mixed-mode
+ * B=γ⁻¹sinh(γℓ)·[Z], C=[Y]·γ⁻¹sinh(γℓ), D=Aᵀ (reciprocal); block ABCD→4-port S; mixed-mode
  * transform → SDD/SCC/SDC/SCD. Port order: {1,2}=near ends of trace1/2, {3,4}=far ends.
  *
  * @param {number} freq Hz; @param {number[][]} R2,L2,G2,C2 physical 2×2 p.u.l. matrices (SI)
@@ -286,18 +286,20 @@ function computeSParamsDifferentialMTL(freq, R2, L2, G2, C2, length, Z_ref) {
     const gl = gamma.mul(length);
     const sinch = gamma.inv().mul(gl.sinh());                          // γ⁻¹·sinh(γℓ)
     const A = gl.cosh();
-    const B = Z.mul(sinch);
+    const B = sinch.mul(Z);   // γ⁻¹sinh(γℓ)·[Z] — γ and [Z] do NOT commute for an asymmetric pair
     const Cb = Y.mul(sinch);
     const D = A.transpose();                                           // reciprocal: D = Aᵀ
-    // Block ABCD → S (post-multiply by den⁻¹), Z_ref·I on every port.
+    // Block ABCD → S, Z_ref·I on every port. Operand order matters for the non-commuting
+    // blocks: from the wave equations, S11 = (A+BY−CZ−D)·den⁻¹ (den⁻¹ on the RIGHT) while
+    // S22 = den⁻¹·(−A+BY−CZ+D) (den⁻¹ on the LEFT), with den = A+BY+CZ+D.
     const Y0 = 1 / Z_ref;
     const BY = B.mul(Y0), CZ = Cb.mul(Z_ref);
     const den = A.add(BY).add(CZ).add(D);
     const denI = den.inv();
     const S11 = A.add(BY).sub(CZ).sub(D).mul(denI);                   // near-near
-    const S22 = A.mul(-1).add(BY).sub(CZ).add(D).mul(denI);          // far-far
-    const S21 = denI.mul(2);                                           // far-near (reciprocal, det≈1)
-    const S12 = S21;
+    const S22 = denI.mul(A.mul(-1).add(BY).sub(CZ).add(D));          // far-far
+    const S21 = denI.mul(2);                                           // far-near: 2·den⁻¹
+    const S12 = S21;   // = S21ᵀ by reciprocity; den is symmetric (A+Aᵀ, B, C all symmetric)
     // Assemble single-ended 4×4 (ports 1,2 near; 3,4 far), then mixed-mode transform.
     const blk = (m) => [[m.a, m.b], [m.c, m.d]];
     const b11 = blk(S11), b12 = blk(S12), b21 = blk(S21), b22 = blk(S22);

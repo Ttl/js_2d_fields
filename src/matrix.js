@@ -101,10 +101,18 @@ class Matrix2x2 {
         // where s = sqrt(trace(A) + 2*sqrt(det(A)))
 
         const det = this.det();
-        const sqrtDet = det.sqrt();
+        let sqrtDet = det.sqrt();
         const tr = this.trace();
 
-        // s^2 = trace + 2*sqrt(det)
+        // s^2 = trace + 2*sqrt(det). With eigenvalues λ1, λ2 this is (√λ1 ± √λ2)²
+        // depending on the branch of sqrt(det); the principal branch can land on the
+        // CANCELLING combination (s² ≈ 0 when λ1 ≈ λ2, e.g. velocity-degenerate modes
+        // in √(ZY)), which turns the formula into 0/0. Either branch yields a valid
+        // square root (the eigenvalue signs differ, which even functions of the result
+        // don't see), so pick the one that maximizes |s²| for conditioning.
+        const s2p = tr.add(sqrtDet.mul(2));
+        const s2m = tr.sub(sqrtDet.mul(2));
+        if (s2m.abs() > s2p.abs()) sqrtDet = sqrtDet.neg();
         const s2 = tr.add(sqrtDet.mul(2));
         const s = s2.sqrt();
 

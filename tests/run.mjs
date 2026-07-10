@@ -25,6 +25,7 @@ const TIERS = {
         'tests/test_causal_effect.js',
         'tests/test_layered_roughness.js',
         'tests/test_interpolating_sweep.js',
+        'tests/test_mtl_sparams.js',
     ],
     slow: [
         'tests/test_fullwave_correctness.js',
@@ -37,6 +38,8 @@ const TIERS = {
         { file: 'tests/test_modal_continuity.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_modal_continuity.js [triangular]' },
         'tests/test_asym_sparam_export.js',
         { file: 'tests/test_asym_sparam_export.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_asym_sparam_export.js [triangular]' },
+        'tests/test_interp_asym_sparams.js',
+        { file: 'tests/test_interp_asym_sparams.js', env: { MESH_BACKEND: 'triangular' }, label: 'tests/test_interp_asym_sparams.js [triangular]' },
         'tests/test_thick_plating.js',
         'tests/test_top_only_plating.js',
         'tests/test_poor_side_plating.js',

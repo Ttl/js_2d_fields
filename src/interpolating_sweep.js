@@ -1,4 +1,5 @@
 import { Complex } from './complex.js';
+import { buildPhysicalRLGC } from './sparameters.js';
 
 /**
  * Natural cubic spline interpolation.
@@ -153,6 +154,11 @@ class InterpolatingSweep {
             if (!this.warnings) this.warnings = [];
             this.warnings.push(...result.warnings);
         }
+        // Asymmetric pair: keep the physical 2×2 {C, L, Tv} so buildResults() can carry it
+        // into every interpolated entry — the MTL 4-port S-parameter path keys on it, and
+        // interpolated results would otherwise silently fall back to the symmetric odd/even
+        // combination. The matrices are static (mesh-level), so any sample's copy is valid.
+        if (result && result.physMatrix) this.physMatrix = result.physMatrix;
         const t = Math.log10(freq);
         const modeData = result.modes.map(m => ({
             mode: m.mode,
@@ -482,6 +488,11 @@ class InterpolatingSweep {
                 if (odd && even) {
                     result.Z_diff = 2 * odd.Z0;
                     result.Z_common = even.Z0 / 2;
+                    // Mirror FieldSolver2D._build_results: the physical 2×2 RLGC (from the
+                    // interpolated per-mode scalars) and, for an asymmetric pair, the
+                    // physMatrix that routes exports/plots onto the MTL 4-port path.
+                    result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, this.physMatrix ?? null);
+                    if (this.physMatrix) result.physMatrix = this.physMatrix;
                 }
             }
 
