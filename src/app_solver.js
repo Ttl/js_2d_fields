@@ -795,6 +795,8 @@ async function runModesSolve() {
     modesResult = null; modesSelectedIdx = -1;
     setModesStatus('Meshing…');
     log(`Solving ${nev} modes at ${formatValueWithUnit(freq, 'GHz')}…`);
+    // The modes solve treats open walls as radiating ABCs — same clearance concern.
+    for (const w of modesSolver.openBoundaryWarnings()) log(`⚠ Warning: ${w}`);
 
     // Drive the adaptive mesh refinement with the sidebar Solver Settings, same as the
     // main solve (Max Nodes is entered in thousands).
@@ -1403,6 +1405,7 @@ async function runSimulation() {
     pbar.style.width = '0%';
     if (ptext) ptext.textContent = '';
     log("Starting simulation...");
+    for (const w of solver.openBoundaryWarnings()) log(`⚠ Warning: ${w}`);
 
     try {
 

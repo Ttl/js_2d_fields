@@ -276,6 +276,75 @@ export class FieldSolver2D {
      * @param {number} [freqOverride] - Frequency to evaluate the wavelength term at
      *     (solveModes solves at its own frequency, not this.freq).
      */
+    // Warnings for 'open' boundaries that sit too close to the conductors. The open
+    // boundary conditions (the FDM open stencil, the triangular backend's first-order
+    // radiating ABC) approximate an unbounded exterior, which only holds where the
+    // fringing field has mostly decayed — and its decay scale is the substrate
+    // thickness. Require OPEN_CLEARANCE (3) substrate heights between each open wall
+    // and the nearest conductor (this covers all line types: for a microstrip it is
+    // ≥3·h from the trace to a side wall, and ≥3·h of air above the substrate
+    // interface). Conductors touching a wall (coplanar ground pours, full-width
+    // ground planes) are part of the boundary structure and are ignored.
+    // Returns an array of human-readable warning strings (empty when fine).
+    openBoundaryWarnings() {
+        const out = [];
+        const b = this.boundaries;
+        if (!b || !this.conductors || !this.conductors.length) return out;
+        const xMin = -this.domain_width / 2, xMax = this.domain_width / 2;
+        const yMin = -(this.t_gnd ?? 0), yMax = this.domain_height;
+        if (!(xMax > xMin) || !(yMax > yMin)) return out;
+        // Decay scale: substrate stack thickness (non-air dielectrics); if there is
+        // none (all-air line), fall back to the conductor stack height.
+        let lo = Infinity, hi = -Infinity;
+        for (const d of (this.dielectrics || [])) {
+            if ((d.epsilon_r || 1) <= 1.001) continue;
+            lo = Math.min(lo, d.y_min); hi = Math.max(hi, d.y_max);
+        }
+        if (!(hi > lo)) {
+            for (const c of this.conductors) { lo = Math.min(lo, c.y_min); hi = Math.max(hi, c.y_max); }
+        }
+        const h = hi - lo;
+        if (!(h > 0)) return out;
+        const OPEN_CLEARANCE = 3;
+        const tol = Math.max(xMax - xMin, yMax - yMin) * 1e-9;
+        const walls = [
+            ['left', b[0], c => c.x_min - xMin],
+            ['right', b[1], c => xMax - c.x_max],
+            ['top', b[2], c => yMax - c.y_max],
+            ['bottom', b[3], c => c.y_min - yMin],
+        ];
+        const mm = (v) => `${(v * 1000).toPrecision(3)} mm`;
+        const close = new Map();   // wall name → distance of nearest (non-touching) conductor
+        for (const [name, bc, dist] of walls) {
+            if (bc !== 'open') continue;
+            let dMin = Infinity;
+            for (const c of this.conductors) {
+                const d = dist(c);
+                if (d > tol && d < dMin) dMin = d;   // ≤ tol: touches this wall — intentional
+            }
+            if (dMin < OPEN_CLEARANCE * h) close.set(name, dMin);
+        }
+        if (!close.size) return out;
+        // One combined warning for everything that tripped: left+right merge into
+        // "sides" (a symmetric line trips both together), and the remaining wall
+        // names are listed in one sentence ("sides and top", "left and top", …)
+        // with the smallest clearance reported.
+        if (close.has('left') && close.has('right')) {
+            close.set('sides', Math.min(close.get('left'), close.get('right')));
+            close.delete('left'); close.delete('right');
+        }
+        const parts = ['sides', 'left', 'right', 'top', 'bottom'].filter(n => close.has(n));
+        const list = parts.length > 1
+            ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1]
+            : parts[0];
+        const dMin = Math.min(...close.values());
+        out.push(`The open boundary is too close to the conductors on the ${list}: only ${mm(dMin)} ` +
+            `to the nearest conductor, less than ${OPEN_CLEARANCE}× the ${mm(h)} substrate height. ` +
+            `The open-boundary approximation may be inaccurate this close to the fields; enlarge the ` +
+            `enclosure or use grounded walls there.`);
+        return out;
+    }
+
     // modesOpts (truthy = guarding a Modes-tab solve, which ALWAYS runs the triangular
     // backend regardless of the Solver dropdown): {wavelengthDensity} — the Modes mesh
     // density, because that solve wavelength-caps the bulk of the WHOLE domain (see

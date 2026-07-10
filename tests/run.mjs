@@ -26,6 +26,7 @@ const TIERS = {
         'tests/test_layered_roughness.js',
         'tests/test_interpolating_sweep.js',
         'tests/test_mtl_sparams.js',
+        'tests/test_open_boundary_warning.js',
     ],
     slow: [
         'tests/test_fullwave_correctness.js',
