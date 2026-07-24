@@ -6,6 +6,8 @@
 #include <complex>
 #include <vector>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
 using Complex = std::complex<double>;
 using SpMat = Eigen::SparseMatrix<Complex>;
@@ -14,6 +16,84 @@ using CVector = Eigen::VectorXcd;
 using RVector = Eigen::VectorXd;
 using CMatrix = Eigen::MatrixXcd;
 using RMatrix = Eigen::MatrixXd;
+
+// ---- Sparse pattern cache ----------------------------------------------------
+// A frequency sweep re-solves systems with the SAME sparsity pattern and
+// different VALUES at every point (the MQS block system: only β = ωμσ changes;
+// the eigensolver's C = A − k²·(…): only k² changes). All the pattern-dependent
+// work — the transpose-partner map for the value-symmetry check, the AMD
+// ordering and the symbolic elimination analysis of SimplicialLDLT — is reused
+// across calls; only the numeric factorization and the triangular solves run
+// per call. Entries are keyed on the EXACT pattern (N + pointers + indices
+// compared in full, no hashing) and kept in small per-call-site LRU stores (the
+// odd and even differential modes alternate every sweep point, so a store needs
+// at least two slots to avoid thrashing).
+struct SparsePatternCache {
+    int N = 0;
+    std::vector<int> rowPtr, colIdx;      // the pattern this entry serves
+    std::vector<int> transposeIdx;        // index of entry (j,i) for each entry k=(i,j)
+    bool patternSymmetric = false;
+    Eigen::SimplicialLDLT<RSpMat>* ldlt = nullptr;   // analyzePattern() already done
+    // Largest |σ| at which the unpivoted LDLT failed the accuracy probe for this
+    // pattern (the FEM pencil's curl null-space clusters eigenvalues near 0, so
+    // LDLT reliably fails at SMALL |σ| and works at large |σ|). Future calls with
+    // |σ| in the failed region skip straight to LU instead of paying a doomed
+    // factorize+probe first.
+    double ldltFailSigmaMax = 0.0;
+    unsigned long lastUse = 0;
+    ~SparsePatternCache() { delete ldlt; }
+};
+
+static SparsePatternCache* findPatternCache(std::vector<SparsePatternCache*>& cache,
+                                            int N, int nnz, const int* rowPtr, const int* colIdx) {
+    static unsigned long useCounter = 0;
+    const size_t MAX_ENTRIES = 4;
+    useCounter++;
+    for (SparsePatternCache* e : cache) {
+        if (e->N == N && (int)e->colIdx.size() == nnz
+            && std::equal(e->rowPtr.begin(), e->rowPtr.end(), rowPtr)
+            && std::equal(e->colIdx.begin(), e->colIdx.end(), colIdx)) {
+            e->lastUse = useCounter;
+            return e;
+        }
+    }
+    // Miss: build a new entry (transpose map + pattern-symmetry classification).
+    // The arrays may be CSR or CSC — the logic is storage-order agnostic.
+    SparsePatternCache* e = new SparsePatternCache();
+    e->N = N;
+    e->rowPtr.assign(rowPtr, rowPtr + N + 1);
+    e->colIdx.assign(colIdx, colIdx + nnz);
+    e->lastUse = useCounter;
+    // CSC of A == CSR of Aᵀ, built by a counting pass. The pattern is symmetric
+    // iff CSC pointers/indices equal the CSR ones (requires ascending indices per
+    // row, which every producer in this codebase emits; a violation only demotes
+    // the matrix to the un-cached LU path — never wrong results).
+    std::vector<int> cscPtr(N + 1, 0), cscRow(nnz), cscK(nnz);
+    for (int k = 0; k < nnz; k++) cscPtr[colIdx[k] + 1]++;
+    for (int j = 0; j < N; j++) cscPtr[j + 1] += cscPtr[j];
+    {
+        std::vector<int> fill(cscPtr.begin(), cscPtr.end() - 1);
+        for (int i = 0; i < N; i++)
+            for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
+                int p = fill[colIdx[k]]++;
+                cscRow[p] = i; cscK[p] = k;
+            }
+    }
+    e->patternSymmetric =
+        std::equal(cscPtr.begin(), cscPtr.end(), e->rowPtr.begin())
+        && std::equal(cscRow.begin(), cscRow.end(), e->colIdx.begin());
+    if (e->patternSymmetric) e->transposeIdx = std::move(cscK);
+    // LRU-evict beyond the cap (the factor objects hold real memory).
+    if (cache.size() >= MAX_ENTRIES) {
+        size_t victim = 0;
+        for (size_t i = 1; i < cache.size(); i++)
+            if (cache[i]->lastUse < cache[victim]->lastUse) victim = i;
+        delete cache[victim];
+        cache.erase(cache.begin() + victim);
+    }
+    cache.push_back(e);
+    return e;
+}
 
 // Build complex sparse matrix from CSR arrays
 static SpMat buildSparseMatrix(int N, int nnz,
@@ -288,13 +368,91 @@ static int solve_real(
     RSpMat A = buildRealSparseMatrix(n, nnz_a, a_rowPtr, a_colIdx, a_vals_re);
     RSpMat B = buildRealSparseMatrix(n, nnz_b, b_rowPtr, b_colIdx, b_vals_re);
 
-    // Factor C = A - σB (real general LU — pivoted, safe for the indefinite pencil)
+    // Factor C = A - σB. The FEM pencil is SYMMETRIC (indefinite), so the primary
+    // factorization is SimplicialLDLT with the symbolic analysis cached across
+    // calls (a frequency sweep re-factors the same pattern at every point — only
+    // k² changes the values): considerably cheaper than general LU in both
+    // factorize and the m Arnoldi back-solves. LDLT is unpivoted and can lose
+    // accuracy on an indefinite matrix, so the factorization is verified with a
+    // random-RHS residual probe; any doubt falls back to the pivoted SparseLU
+    // (the previous always-on path). The final residual gate below checks every
+    // returned Ritz pair against the TRUE pencil either way.
     RSpMat C = A - sigma_re * B;
-    Eigen::SparseLU<RSpMat> solver;
-    solver.compute(C);
-    if (solver.info() != Eigen::Success) {
-        return -1;
+    C.makeCompressed();
+    bool ldltOK = false;
+    SparsePatternCache* pc = nullptr;
+    {
+        static std::vector<SparsePatternCache*> store;
+        pc = findPatternCache(store, n, (int)C.nonZeros(), C.outerIndexPtr(), C.innerIndexPtr());
+        if (pc->patternSymmetric && std::abs(sigma_re) > 1.5 * pc->ldltFailSigmaMax) {
+            const double* cv = C.valuePtr();
+            const int cnnz = (int)C.nonZeros();
+            double scale = 0;
+            for (int k = 0; k < cnnz; k++) scale = std::max(scale, std::abs(cv[k]));
+            const double tol = 1e-12 * scale;
+            bool valueSym = true;
+            for (int k = 0; k < cnnz; k++) {
+                if (std::abs(cv[k] - cv[pc->transposeIdx[k]]) > tol) { valueSym = false; break; }
+            }
+            if (valueSym) {
+                if (!pc->ldlt) {
+                    pc->ldlt = new Eigen::SimplicialLDLT<RSpMat>();
+                    pc->ldlt->analyzePattern(C);
+                }
+                pc->ldlt->factorize(C);
+                if (pc->ldlt->info() == Eigen::Success) {
+                    // Probe with the same solve+iterative-refinement procedure the
+                    // Arnoldi will use: a mildly inaccurate unpivoted factor (moderate
+                    // element growth at an unlucky shift) is fully rescued by one or
+                    // two refinement steps; only genuine breakdown falls back to LU.
+                    RVector bp(n);
+                    uint64_t st = 0xDA3E39CB94B95BDBull;
+                    for (int i = 0; i < n; i++) {
+                        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+                        bp(i) = (double)(st & 0xFFFFFFull) / (double)0xFFFFFFull - 0.5;
+                    }
+                    RVector xp = pc->ldlt->solve(bp);
+                    if (xp.allFinite()) {
+                        double bn = bp.norm(), rn = 0;
+                        for (int it = 0; it < 3; it++) {
+                            RVector r = bp - C * xp;
+                            rn = r.norm() / bn;
+                            if (!std::isfinite(rn) || rn < 1e-11) break;
+                            xp += pc->ldlt->solve(r);
+                        }
+                        rn = (C * xp - bp).norm() / bn;
+                        // Same 1e-8 operator accuracy the plain-LU probe historically
+                        // required — refinement just gets marginal factors there.
+                        if (std::isfinite(rn) && rn < 1e-8) ldltOK = true;
+                    }
+                }
+                if (!ldltOK)
+                    pc->ldltFailSigmaMax = std::max(pc->ldltFailSigmaMax, std::abs(sigma_re));
+            }
+        }
     }
+    Eigen::SparseLU<RSpMat> solver;
+    if (!ldltOK) {
+        solver.compute(C);
+        if (solver.info() != Eigen::Success) {
+            return -1;
+        }
+    }
+    // Operator solve: LDLT + iterative refinement to LU-grade accuracy, or LU.
+    auto solveC = [&](const RVector& v) -> RVector {
+        if (!ldltOK) return RVector(solver.solve(v));
+        RVector x = pc->ldlt->solve(v);
+        const double vn = v.norm();
+        double prev = std::numeric_limits<double>::infinity();
+        for (int it = 0; it < 2; it++) {
+            RVector r = v - C * x;
+            const double rn = r.norm();
+            if (!(rn > 1e-10 * vn) || !(rn < 0.5 * prev)) break;  // done / stagnated / NaN
+            prev = rn;
+            x += pc->ldlt->solve(r);
+        }
+        return x;
+    };
 
     RMatrix V(n, m + 1);
     RMatrix H = RMatrix::Zero(mMax + 1, mMax);
@@ -377,7 +535,7 @@ static int solve_real(
         bool breakdown = false;
         for (; j < mCur; j++) {
             RVector Bv = B * V.col(j);
-            RVector w = solver.solve(Bv);
+            RVector w = solveC(Bv);
             if (!w.allFinite()) { actual_m = j; breakdown = true; break; }
             // Modified Gram-Schmidt with double orthogonalization
             for (int i = 0; i <= j; i++) {
@@ -679,7 +837,7 @@ int solve_generalized_eigen_with_init(
 }
 
 // Direct sparse solver: factorize once, solve for nRhs right-hand sides.
-// Uses SimplicialLDLT for SPD matrices, falls back to SparseLU.
+// Uses SimplicialLDLT for symmetric matrices, falls back to SparseLU.
 // rhs_arr and x_arr are nRhs×N column-major (each RHS is contiguous N doubles).
 // Returns 0 on success, negative on error.
 EMSCRIPTEN_KEEPALIVE
@@ -689,31 +847,43 @@ int solve_sparse_multi(
     int nRhs, double* rhs_arr, double* x_arr
 ) {
   try {
-    RSpMat A = buildRealSparseMatrix(N, nnz, rowPtr, colIdx, values);
+    static std::vector<SparsePatternCache*> store;
+    SparsePatternCache* pc = findPatternCache(store, N, nnz, rowPtr, colIdx);
 
     // SimplicialLDLT reads only the lower triangle: for a NONSYMMETRIC input it
     // silently solves the wrong (symmetrized) system while reporting Success.
-    // Only take the fast path when the matrix is actually symmetric.
-    bool symmetric = true;
-    {
+    // Only take the fast path when the matrix is actually symmetric — the
+    // structural transpose map is cached with the pattern, so the per-call check
+    // is a single O(nnz) value comparison (no sparse transpose/subtraction).
+    bool symmetric = pc->patternSymmetric;
+    if (symmetric) {
         double scale = 0;
-        for (int k = 0; k < A.nonZeros(); k++) scale = std::max(scale, std::abs(A.valuePtr()[k]));
-        RSpMat D = RSpMat(A - RSpMat(A.transpose()));
-        for (int k = 0; k < D.nonZeros(); k++) {
-            if (std::abs(D.valuePtr()[k]) > 1e-12 * scale) { symmetric = false; break; }
+        for (int k = 0; k < nnz; k++) scale = std::max(scale, std::abs(values[k]));
+        const double tol = 1e-12 * scale;
+        for (int k = 0; k < nnz; k++) {
+            if (std::abs(values[k] - values[pc->transposeIdx[k]]) > tol) { symmetric = false; break; }
         }
     }
 
-    // Try LDLT first (fast for SPD/symmetric indefinite)
-    Eigen::SimplicialLDLT<RSpMat> ldlt;
-    if (symmetric) ldlt.compute(A);
-    if (symmetric && ldlt.info() == Eigen::Success) {
-        for (int r = 0; r < nRhs; r++) {
-            Eigen::Map<RVector> b(rhs_arr + r * N, N);
-            Eigen::Map<RVector> x(x_arr + r * N, N);
-            x = ldlt.solve(b);
+    RSpMat A = buildRealSparseMatrix(N, nnz, rowPtr, colIdx, values);
+
+    // LDLT first (fast for SPD/symmetric indefinite), reusing the cached
+    // symbolic analysis: analyzePattern() runs once per pattern, factorize()
+    // (numeric only) per call.
+    if (symmetric) {
+        if (!pc->ldlt) {
+            pc->ldlt = new Eigen::SimplicialLDLT<RSpMat>();
+            pc->ldlt->analyzePattern(A);
         }
-        return 0;
+        pc->ldlt->factorize(A);
+        if (pc->ldlt->info() == Eigen::Success) {
+            for (int r = 0; r < nRhs; r++) {
+                Eigen::Map<RVector> b(rhs_arr + r * N, N);
+                Eigen::Map<RVector> x(x_arr + r * N, N);
+                x = pc->ldlt->solve(b);
+            }
+            return 0;
+        }
     }
 
     // Fallback to SparseLU

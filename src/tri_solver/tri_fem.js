@@ -740,7 +740,7 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
 // Uses 6 nodal DOFs per triangle: 3 vertex (lv) + 3 edge midpoint (le)
 
 // Returns { phiVertex, phiEdge }.
-export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
+export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSolver = null) {
     // condPotentials: array of potentials per conductor group [V1, V2, ...].
     // If null, all conductors get V=1.0.
     const { nodes, tris, nTris } = mesh;
@@ -818,10 +818,22 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null) {
 
 
     const csrS = tripletsToCSR(Rows, Cols, Vals, nFreeDof);
-    const { x: phiFree, iters, residual, converged } = solveCG(csrS, rhs, nFreeDof);
-    if (!converged) {
-        console.warn(`Static CG did not converge in ${iters} iterations ` +
-            `(residual ${residual.toExponential(2)}) — static C/Z0 may be inaccurate.`);
+    // Direct WASM solve (SPD → LDLT, pattern-cached across the eps/air pair on the
+    // same freedom map) when a solver is supplied; JS CG otherwise / on failure.
+    let phiFree = null;
+    if (directSolver && nFreeDof > 0) {
+        try {
+            const sol = directSolver(nFreeDof, csrS, [rhs])[0];
+            if (sol && sol.every(Number.isFinite)) phiFree = sol;
+        } catch { phiFree = null; }
+    }
+    if (!phiFree) {
+        const { x, iters, residual, converged } = solveCG(csrS, rhs, nFreeDof);
+        if (!converged) {
+            console.warn(`Static CG did not converge in ${iters} iterations ` +
+                `(residual ${residual.toExponential(2)}) — static C/Z0 may be inaccurate.`);
+        }
+        phiFree = x;
     }
 
     // Reconstruct full potential vector

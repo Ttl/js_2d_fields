@@ -449,6 +449,74 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     };
 }
 
+// ---- Dispersion cache (eps_d(f) interpolation between exact eigensolve anchors) ----
+// The full-wave eps_d(f) is a smooth, slowly-varying scalar (quasi-TEM dispersion).
+// On the MQS loss path the eigensolve contributes ONLY this scalar, so sweep points
+// between exact anchors can interpolate it — monotone piecewise-cubic (PCHIP, no
+// overshoot) over x = ln f — once a leave-one-out check proves the local
+// interpolation error is within tolerance. Fritsch–Carlson slopes.
+function pchipEval(xs, ys, x) {
+    const n = xs.length;
+    if (n < 2 || x < xs[0] || x > xs[n - 1]) return null;
+    // slopes
+    const h = new Array(n - 1), del = new Array(n - 1);
+    for (let i = 0; i < n - 1; i++) { h[i] = xs[i + 1] - xs[i]; del[i] = (ys[i + 1] - ys[i]) / h[i]; }
+    const d = new Array(n).fill(0);
+    for (let i = 1; i < n - 1; i++) {
+        if (del[i - 1] * del[i] > 0) {
+            const w1 = 2 * h[i] + h[i - 1], w2 = h[i] + 2 * h[i - 1];
+            d[i] = (w1 + w2) / (w1 / del[i - 1] + w2 / del[i]);
+        }
+    }
+    const endSlope = (h0, h1, d0, d1) => {
+        let dd = ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+        if (dd * d0 <= 0) dd = 0;
+        else if (d0 * d1 <= 0 && Math.abs(dd) > 3 * Math.abs(d0)) dd = 3 * d0;
+        return dd;
+    };
+    if (n >= 3) {
+        d[0] = endSlope(h[0], h[1], del[0], del[1]);
+        d[n - 1] = endSlope(h[n - 2], h[n - 3], del[n - 2], del[n - 3]);
+    } else { d[0] = d[1] = del[0]; }
+    // bracket + cubic Hermite
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] <= x) lo = m; else hi = m; }
+    const hh = xs[lo + 1] - xs[lo], t = (x - xs[lo]) / hh;
+    const t2 = t * t, t3 = t2 * t;
+    return ys[lo] * (2 * t3 - 3 * t2 + 1) + hh * d[lo] * (t3 - 2 * t2 + t)
+         + ys[lo + 1] * (-2 * t3 + 3 * t2) + hh * d[lo + 1] * (t3 - t2);
+}
+
+// Insert an exact anchor (keeps xs ascending; ignores duplicate frequencies).
+function dispersionInsert(dc, f, eps) {
+    const x = Math.log(f);
+    let lo = 0, hi = dc.xs.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (dc.xs[m] < x) lo = m + 1; else hi = m; }
+    if (lo < dc.xs.length && Math.abs(dc.xs[lo] - x) < 1e-12) return;
+    dc.xs.splice(lo, 0, x); dc.eps.splice(lo, 0, eps);
+}
+
+// Interpolate eps_d at f, or null when not (yet) trustworthy. Trust requires:
+// ≥5 anchors, f strictly interior, and a leave-one-out check on the interior
+// anchors bracketing f: removing that anchor and predicting it from the rest
+// must land within tol (relative). The LOO gap (~2 intervals) is wider than any
+// interpolation gap actually bridged, so passing it is a conservative bound.
+function dispersionInterp(dc, f, tol) {
+    const n = dc.xs.length;
+    if (n < 5) return null;
+    const x = Math.log(f);
+    if (x <= dc.xs[0] || x >= dc.xs[n - 1]) return null;
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (dc.xs[m] <= x) lo = m; else hi = m; }
+    for (const j of new Set([Math.max(1, lo), Math.min(n - 2, hi)])) {
+        const xsL = dc.xs.slice(0, j).concat(dc.xs.slice(j + 1));
+        const epL = dc.eps.slice(0, j).concat(dc.eps.slice(j + 1));
+        const pred = pchipEval(xsL, epL, dc.xs[j]);
+        if (pred === null || Math.abs(pred - dc.eps[j]) > tol * Math.abs(dc.eps[j])) return null;
+    }
+    return pchipEval(dc.xs, dc.eps, x);
+}
+
 // Per-mode solve config: wall boundary conditions + energy→capacitance factor kC.
 //   full domain : single kC=2, diff kC=1 (even=[1,1], odd=[1,-1] drives)
 //   half domain : single kC=4, diff kC=2 (even/odd via abc.left; signal=1)
@@ -641,8 +709,8 @@ export class TriBackend {
                 const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
                 const pot = drivePotentials(this.condRect, rm, this.symmetry);
                 const fm = buildTriFreedomMap(mesh, this.condRect, abc);
-                const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot);
-                const phiAir = solveTriStatic(mesh, fm, null, pot);
+                const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
+                const phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
                 const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
                 const W_air = computeTriEnergy(phiAir, mesh, null);
                 const eps_static = W_eps / W_air;
@@ -788,8 +856,8 @@ export class TriBackend {
             const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry, this.condRect.wallPEC);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
             const pot = drivePotentials(this.condRect, mode, this.symmetry);
-            const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot);
-            const phiAir = solveTriStatic(mesh, fm, null, pot);
+            const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
+            const phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
             const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
             const W_air = computeTriEnergy(phiAir, mesh, null);
             const W_loss = computeTriEnergy(phiEps, mesh, mesh.lossMap);
@@ -828,10 +896,10 @@ export class TriBackend {
         // singular, producing a silent NaN cascade in the classifier. Fall back to
         // the odd/even drive instead.
         if (!potA.some(v => v) || !potB.some(v => v)) { this._modalPhys = null; return false; }
-        const phiA = solveTriStatic(mesh, fm, mesh.epsMap, potA);
-        const phiB = solveTriStatic(mesh, fm, mesh.epsMap, potB);
-        const phiAa = solveTriStatic(mesh, fm, null, potA);
-        const phiBa = solveTriStatic(mesh, fm, null, potB);
+        const phiA = solveTriStatic(mesh, fm, mesh.epsMap, potA, this.ctx.wasmSolver);
+        const phiB = solveTriStatic(mesh, fm, mesh.epsMap, potB, this.ctx.wasmSolver);
+        const phiAa = solveTriStatic(mesh, fm, null, potA, this.ctx.wasmSolver);
+        const phiBa = solveTriStatic(mesh, fm, null, potB, this.ctx.wasmSolver);
         // 2×2 capacitance matrices via the energy form W = ½·vᵀ·C·v.
         const We = X => computeTriEnergy(X, mesh, mesh.epsMap);
         const Wa = X => computeTriEnergy(X, mesh, null);
@@ -893,6 +961,28 @@ export class TriBackend {
         //                    point, smooth across frequency. ("Full-wave (perturbation)").
         //   'static'       — static-field perturbation only (no SIBC blend).
         const lossMethod = this.opts.lossMethod ?? 'auto';
+        // MQS applicability, hoisted ABOVE the eigensolve: the MQS loss path consumes
+        // only the scalar eps_d from the full-wave solve (never the eigenvector), which
+        // is what makes the dispersion-cache fast path below safe on that path. MQS
+        // (reference) applies when grounds are wall-absorbed (signal-only rects) and
+        // the domain is symmetric (mode set by the BC); else H-field perturbation.
+        // Per-face plating is handled INSIDE MQS (surfaceZs weights each face's smooth
+        // current by its own impedance), so plating doesn't force perturbation.
+        const hasGroundRect = cr.rectRoles.some(r => !r.is_signal);
+        const anyPlating = cr.rectRoles.some(r => r.plating && r.plating.sigma > 0
+            && (r.plating.top || r.plating.sides || r.plating.bottom));
+        // MQS drives every meshed conductor rect with the same source current, so
+        // explicit ground rects (coplanar GCPW grounds etc.) would carry FORWARD
+        // current instead of return current — nonsense R. Refuse the forced 'mqs'
+        // override there (with a warning) rather than produce garbage.
+        if (lossMethod === 'mqs' && hasGroundRect && this._modeWarnings
+            && !this._modeWarnings.some(w => w.type === 'mqs-grounds')) {
+            this._modeWarnings.push({ type: 'mqs-grounds', mode, freq: f,
+                message: 'MQS conductor loss is not applicable with explicit ground conductors ' +
+                         '(they would be driven as signal); using the perturbation method instead.' });
+        }
+        const useMQS = (lossMethod === 'mqs' && !hasGroundRect)
+            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
         let eps_d = eps_eff_static, fw = null;
         if (f >= F_STATIC_MAX) {
             // Seed the eigensolve with the STATIC field (frequency-deterministic), NOT a
@@ -904,32 +994,69 @@ export class TriBackend {
             // ran last — so the out-of-order interpolating sweep produced order-dependent
             // conductor loss → ripple + non-convergent interpolant (excess solves).
             //
-            // Pick the quasi-TEM with a radiating first-order ABC (=== true) on the OPEN
-            // walls, REAL ε. The radiation term absorbs outgoing waves so an open structure
-            // has no closed-box cavity resonances to compete with the quasi-TEM — the closed
-            // 'pmc' box instead manufactured spurious near-degenerate modes that tripped the
-            // ambiguity detector on ~9/40 fuzzer geometries (all false positives: the pick
-            // was right, eps smooth). PEC ('gnd') walls stay PEC, so a fully ENCLOSED
-            // structure is byte-identical to the old closed solve and correctly keeps its
-            // real box modes; ABC only changes genuinely open walls. The symmetry plane stays
-            // 'pmc' (even/single) / PEC (odd, absent). Validated reference 16/16, output
-            // byte-identical to the old 'pmc' pick. Lossy ε was tried too but only removed one
-            // more false-positive flag for no accuracy gain, so it's not used. The FEM is
-            // NOT re-assembled per frequency: the system is affine in k² and the ABC Robin
-            // term is linear in k₀ = √k², so fullwaveMode combines a cached decomposition
-            // A0 + k²·A1 + j·k0·Ar per point (st.femCache).
-            const pickAbc = {};
-            for (const k of ['left', 'right', 'top', 'bottom']) {
-                const v = st.abc[k];
-                if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
-                pickAbc[k] = (this.symmetry && k === 'left') ? 'pmc' : true;
-            }
+            // TWO-STAGE quasi-TEM pick:
+            //   1. Closed-wall pick ('pmc' naturals, st.abc): all-real matrices, so the
+            //      WASM real-arithmetic Arnoldi fast path applies — the complex SparseLU
+            //      factorization dominates the sweep at these problem sizes, and the real
+            //      factorization is several times cheaper.
+            //   2. Only when the closed pick FAILS or is AMBIGUOUS (a competing mode with
+            //      comparable overlap but different ε — the closed box manufacturing
+            //      near-degenerate cavity modes next to the quasi-TEM), ESCALATE to the
+            //      radiating first-order ABC pick (=== true on open walls, complex): the
+            //      radiation term absorbs outgoing waves, so the open structure's bound
+            //      quasi-TEM is found without box-mode competition. Reference output was
+            //      validated byte-identical between the closed and the ABC pick across the
+            //      whole suite — escalation only changes WHICH solve resolves the ambiguous
+            //      minority of points. PEC ('gnd') walls stay PEC either way; a fully
+            //      enclosed structure has no open wall and never escalates. The symmetry
+            //      plane stays 'pmc' (even/single) / PEC (odd, absent).
+            // The FEM is NOT re-assembled per frequency: the system is affine in k² and
+            // the ABC Robin term is linear in k₀ = √k², so fullwaveMode combines a cached
+            // decomposition A0 + k²·A1 + j·k0·Ar per point (st.femCache / st.femCacheAbc —
+            // one slot per BC set so escalation doesn't thrash the closed-pick cache).
+            //
+            // DISPERSION CACHE (MQS loss path only): there the eigensolve contributes just
+            // the scalar eps_d(f) — a very smooth dispersion curve — while the eigenvector
+            // is unused. Exact eigensolves fill st.disp with (f, eps_d) anchors; once a
+            // leave-one-out check on the neighbouring anchors proves the local PCHIP
+            // interpolation error ≤ dispTol, intermediate sweep points interpolate eps_d
+            // instead of paying a full eigensolve. Anchor points stay exact, and the
+            // interpolating sweep's own RLGC error control still verifies every reported
+            // quantity downstream. The perturbation path needs the eigenvector (SIBC
+            // projection), so it never interpolates.
+            const dispTol = this.opts.dispTol ?? 1e-3;
+            const dc = useMQS ? (st.disp || (st.disp = { xs: [], eps: [] })) : null;
+            const epsI = dc ? dispersionInterp(dc, f, dispTol) : null;
+            if (epsI !== null) {
+                eps_d = epsI;
+            } else {
             let fwErr = null;
             try {
-                fw = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
+                fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
                     st.femCache || (st.femCache = {}));
             } catch (e) { fw = null; fwErr = e; }
-            if (fw && fw.eps > 0) eps_d = fw.eps;
+            if (!fw || fw.ambiguous) {
+                const pickAbc = {};
+                let radiates = false;
+                for (const k of ['left', 'right', 'top', 'bottom']) {
+                    const v = st.abc[k];
+                    if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
+                    const rad = !(this.symmetry && k === 'left');
+                    pickAbc[k] = rad ? true : 'pmc';
+                    if (rad) radiates = true;
+                }
+                if (radiates) {
+                    try {
+                        const fw2 = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f,
+                            phiEps, eps_eff_static, st.femCacheAbc || (st.femCacheAbc = {}));
+                        if (fw2) { fw = fw2; fwErr = null; }
+                    } catch (e) { if (!fw) fwErr = e; }
+                }
+            }
+            if (fw && fw.eps > 0) {
+                eps_d = fw.eps;
+                if (dc) dispersionInsert(dc, f, fw.eps);
+            }
             // The eigensolve failed (or converged to no physical quasi-TEM) at this
             // frequency: the point silently degrades to the quasi-static ε, which
             // kinks the sweep. Surface it — one warning per mode, like the
@@ -959,6 +1086,7 @@ export class TriBackend {
                     globalThis.__TRI_DEBUG__ && console.warn('[tri full-wave] ' + msg);
                 }
             }
+            }   // end exact-eigensolve branch (dispersion-cache miss)
         }
         // Dielectric dispersion is a capacitance effect: C = eps_d·C0 (geometric
         // L_external = 1/(c²C0)). Reduces to the static result when eps_d = eps_static.
@@ -995,26 +1123,8 @@ export class TriBackend {
         }
         const lossEdgeMask = f > 0 ? lc.mask : null;
 
-        // MQS (reference) applies when grounds are wall-absorbed (signal-only rects)
-        // and the domain is symmetric (mode set by the BC). Else H-field perturbation.
-        // Per-face plating is handled INSIDE MQS (surfaceZs weights each face's smooth
-        // current by its own impedance), so plating no longer forces perturbation;
-        // when MQS doesn't apply, the perturbation path handles plating per-group.
-        const hasGroundRect = cr.rectRoles.some(r => !r.is_signal);
-        const anyPlating = cr.rectRoles.some(r => r.plating && r.plating.sigma > 0
-            && (r.plating.top || r.plating.sides || r.plating.bottom));
-        // MQS drives every meshed conductor rect with the same source current, so
-        // explicit ground rects (coplanar GCPW grounds etc.) would carry FORWARD
-        // current instead of return current — nonsense R. Refuse the forced 'mqs'
-        // override there (with a warning) rather than produce garbage.
-        if (lossMethod === 'mqs' && hasGroundRect && this._modeWarnings
-            && !this._modeWarnings.some(w => w.type === 'mqs-grounds')) {
-            this._modeWarnings.push({ type: 'mqs-grounds', mode, freq: f,
-                message: 'MQS conductor loss is not applicable with explicit ground conductors ' +
-                         '(they would be driven as signal); using the perturbation method instead.' });
-        }
-        const useMQS = (lossMethod === 'mqs' && !hasGroundRect)
-            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
+        // (hasGroundRect / anyPlating / useMQS are computed above the eigensolve —
+        // the dispersion-cache fast path there needs the MQS applicability.)
         let R_total = 0, L_internal = 0;
         // Smallest conductor cross-section dimension (gates the skin-band remesh and
         // the static/SIBC blend below).
@@ -1066,7 +1176,12 @@ export class TriBackend {
             } else if (this.opts.mqsCacheMesh === false) {
                 mqsMesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta, mqsMaxTris);
             } else {
-                const sc = st.skinCache || (st.skinCache = { dB: Infinity, mesh: null });
+                // The skin mesh depends only on the geometry and the band skin depth —
+                // NOT on the mode (the odd/even BC enters the MQS solve, not the mesh) —
+                // so one cache on the backend serves both modes: the band refinement
+                // runs once per sweep instead of once per mode.
+                const sc = (this._skinCache && this._skinCache.base === mesh) ? this._skinCache
+                    : (this._skinCache = { base: mesh, dB: Infinity, mesh: null });
                 if (!sc.mesh || deltaBand < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
                     sc.dB = deltaBand;
                     sc.mesh = refineSkinBand(mesh, cr, deltaBand, 12, mqsBand, bandDelta * deltaBand, mqsMaxTris);
@@ -1258,7 +1373,7 @@ export class TriBackend {
         for (const mode of this.modeNames) {
             const st = this._static[mode];
             const pot = drivePotentials(this.condRect, mode, this.symmetry);
-            const phiEps = solveTriStatic(this.mesh, st.fm, epsMap, pot);
+            const phiEps = solveTriStatic(this.mesh, st.fm, epsMap, pot, this.ctx.wasmSolver);
             const W_air = st.C0 / (st.kC * eps0);   // geometric, eps-independent
             st.phiEps = phiEps;
             st.eps_eff_static = computeTriEnergy(phiEps, this.mesh, epsMap) / W_air;
