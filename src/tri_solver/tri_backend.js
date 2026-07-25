@@ -634,7 +634,13 @@ export class TriBackend {
         // loss solve anyway, and eps/Z0 converge at a few hundred triangles. The
         // rough-stripline roughness loss is the binding constraint (it sits ~7% high vs
         // ref on any mesh); coarsening further than this eats its margin.
-        let hFine = this.opts.hFine ?? Math.min(tAbs, wRef / 4) * 1.5;
+        //
+        // The thickness term uses 2t, not t: the base mesh only needs ~one
+        // element across the conductor thickness, the skin-depth resolution for
+        // the loss solve comes from refineSkinBand, not from here. Coarser than
+        // that the sweep gets slower due to skin-band refinement from
+        // a too-coarse base.
+        let hFine = this.opts.hFine ?? Math.min(2 * tAbs, wRef / 4) * 1.5;
         let hCoarse = this._wavelengthCap(this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5);
         // Triangle budget derived from the Max Nodes setting (memory parity with the FDM
         // backend — see maxTrisForBudget). Cap the INITIAL mesh here: element count ∝ 1/h²,
@@ -649,6 +655,7 @@ export class TriBackend {
                 conductors: s.conductors, dielectrics: s.dielectrics,
                 domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
                 meshConductorInterior: true,   // conductor interiors meshed for the MQS loss solve
+                occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
                 gmshOptions: this.opts.gmshOptions,
             });
             if (mesh.nTris <= maxTris || attempt >= 4) break;
