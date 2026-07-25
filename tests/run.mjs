@@ -48,6 +48,7 @@ const TIERS = {
         'tests/test_corner_plating.js',
         'tests/test_corner_roughness.js',
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['6', '3', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [smoke N=6 seed=3]' },
+        { file: 'tests/fuzz_fullwave_interp.js', args: ['3', '1'], label: 'tests/fuzz_fullwave_interp.js [smoke N=3 seed=1]' },
     ],
     e2e: [
         'src/tri_solver/tests/e2e.mjs',
@@ -56,6 +57,7 @@ const TIERS = {
     ],
     fuzz: [
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['40', '1', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [N=40 seed=1]' },
+        { file: 'tests/fuzz_fullwave_interp.js', args: ['12', '1'], label: 'tests/fuzz_fullwave_interp.js [N=12 seed=1]' },
     ],
 };
 

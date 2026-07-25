@@ -23,7 +23,7 @@
 import createModule from '../wasm_solver/eigen_solver.js';
 import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
-import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh } from './occ_to_mesh.js';
+import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh, _clipDomain } from './occ_to_mesh.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
          staticToEdgeDofs, assembleTriFEM, assembleTriFEMDecomposed,
@@ -635,12 +635,25 @@ export class TriBackend {
         // rough-stripline roughness loss is the binding constraint (it sits ~7% high vs
         // ref on any mesh); coarsening further than this eats its margin.
         //
-        // The thickness term uses 2t, not t: the base mesh only needs ~one
-        // element across the conductor thickness, the skin-depth resolution for
-        // the loss solve comes from refineSkinBand, not from here. Coarser than
-        // that the sweep gets slower due to skin-band refinement from
-        // a too-coarse base.
-        let hFine = this.opts.hFine ?? Math.min(2 * tAbs, wRef / 4) * 1.5;
+        // The thickness term uses 2t, not t, when the MQS loss path applies:
+        // the base mesh then only needs ~one element across the conductor
+        // thickness, the skin-depth resolution for the loss solve comes from
+        // refineSkinBand, not from here. (Coarser than 2t the sweep gets
+        // slower, skin-band refinement from a too-coarse base grows a bigger
+        // skin mesh.) The perturbation/SIBC path integrates the eigenmode's
+        // surface |H|^2 on this mesh, and its corner-dominated R is
+        // mesh-sensitive, so replicate the useMQS gate (see _modeAtFreq)
+        // pre-mesh: wall-absorption via _clipDomain instead of cr.rectRoles,
+        // and keep the proven 1.5t sizing when MQS won't apply.
+        const lmPre = this.opts.lossMethod ?? 'auto';
+        const clip = _clipDomain(dom, s.conductors, s.boundaries, s.domain_width * 1e-9);
+        const survives = c => Math.min(c.x_max, clip.X1) - Math.max(c.x_min, clip.X0) > 0
+                          && Math.min(c.y_max, clip.Y1) - Math.max(c.y_min, clip.Y0) > 0;
+        const gndRectPre = s.conductors.some(c => !c.is_signal && survives(c));
+        const anyCondPre = s.conductors.some(c => survives(c));
+        const mqsPre = (lmPre === 'mqs' && !gndRectPre)
+            || (lmPre === 'auto' && this.symmetry && !gndRectPre && anyCondPre);
+        let hFine = this.opts.hFine ?? Math.min((mqsPre ? 2 : 1) * tAbs, wRef / 4) * 1.5;
         let hCoarse = this._wavelengthCap(this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5);
         // Triangle budget derived from the Max Nodes setting (memory parity with the FDM
         // backend — see maxTrisForBudget). Cap the INITIAL mesh here: element count ∝ 1/h²,
@@ -1195,6 +1208,20 @@ export class TriBackend {
                 }
                 mqsMesh = sc.mesh;
             }
+            // R(f) anchor cache: the sweep consumes ONLY the scalar R_total from this
+            // solve (L_internal is derived as R/ω below), and R(f) is smooth on the
+            // ln-f axis — so past the first few anchor frequencies, interpolate it the
+            // same way the eigensolve's ε_eff dispersion cache does (PCHIP + leave-one-
+            // out gate) and skip the ~1s block-LU entirely. Keyed to the skin mesh so
+            // a finer rebuild (higher f seen) discards anchors from the coarser mesh.
+            const rTol = this.opts.mqsInterpTol ?? 2e-3;
+            const rc = (st.mqsR && st.mqsR.mesh === mqsMesh) ? st.mqsR
+                : (st.mqsR = { mesh: mqsMesh, xs: [], eps: [] });
+            const rInterp = dispersionInterp(rc, f, rTol);
+            if (rInterp !== null && rInterp > 0) {
+                R_total = rInterp;
+                L_internal = (omega > 0) ? Math.max(0, Math.min(R_total / omega, 0.5 * L_external)) : 0;
+            } else {
             // Per-face plating ⇒ weight each face's smooth current by its own surface
             // impedance (surfaceZs); otherwise the uniform roughness factor (Rq).
             const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: mode === 'odd',
@@ -1220,7 +1247,9 @@ export class TriBackend {
                 // backends. The skin-regime closed form (Zs=Rs(1+j) ⇒ X_int=R_ac) is well
                 // conditioned and matches the perturbation path below + the FDM backend.
                 L_internal = (omega > 0) ? Math.max(0, Math.min(R_total / omega, 0.5 * L_external)) : 0;
+                dispersionInsert(rc, f, R_total);
             }
+            }   // end R-cache miss (exact MQS solve)
         }
         // Perturbation conductor loss (used for the 'perturbation' option and as the
         // 'auto' fallback when MQS doesn't apply). Two estimators are blended by the
