@@ -8,6 +8,7 @@
 // eigenvector. The triangle mesh itself is also returned for the mesh overlay.
 
 import { triCoefficients, lv, le, lvGrad, leGrad } from './tri_fem.js';
+import { shapeContains, distToShapeBoundary } from '../shapes.js';
 import { evalFieldsAtPoint } from './tri_ms_solver.js';
 
 const EDGE_VERTS = [[0, 1], [1, 2], [2, 0]];
@@ -300,6 +301,19 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
             let mxPlane = null, mxSide = 0, mxDist = Infinity;   // nearest x-face the baseline crosses
             let myPlane = null, mySide = 0, myDist = Infinity;   // nearest y-face the baseline crosses
             for (const c of rects) {
+                if (c.shape) {
+                    // Curved conductor: clamp the baseline inside it as for a rect, but
+                    // do NOT set up a mirror plane. The image-theory extension below is
+                    // derived for a FLAT Dirichlet face and does not hold on a curved
+                    // one; near a coax surface the grid is mesh-quantile dense anyway,
+                    // so the plain non-uniform stencil is accurate there.
+                    if (shapeContains(c, px, py, -tolC)) {
+                        const d = distToShapeBoundary(c, px, py);
+                        bx = Math.min(bx, d); by = Math.min(by, d);
+                        inside = true;
+                    }
+                    continue;
+                }
                 const inX = px > c.xmin + tolC && px < c.xmax - tolC;
                 const inY = py > c.ymin + tolC && py < c.ymax - tolC;
                 if (inX && inY) {
@@ -379,7 +393,7 @@ function buildTriRegions(mesh) {
         let key = 'cond';
         let inCond = false;
         for (const r of rects) {
-            if (xc >= r.xmin && xc <= r.xmax && yc >= r.ymin && yc <= r.ymax) { inCond = true; break; }
+            if (shapeContains(r, xc, yc, 0)) { inCond = true; break; }
         }
         if (!inCond) {
             const e = epsMap[t];

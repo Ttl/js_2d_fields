@@ -9,7 +9,8 @@ const TL_TYPE_SHORT_NAMES = {
     'diff_stripline': 'diff_sl',
     'gcpw': 'gcpw',
     'diff_gcpw': 'diff_gcpw',
-    'broadside_stripline': 'bs_sl'
+    'broadside_stripline': 'bs_sl',
+    'coax': 'coax'
 };
 
 /**
@@ -55,12 +56,18 @@ function generateParamComments(params) {
     lines.push('!');
     lines.push('! Transmission Line Parameters:');
     lines.push(`!   Type: ${params.tlType}`);
-    lines.push(`!   Trace width: ${(params.traceWidth * 1e6).toFixed(1)} um`);
-    lines.push(`!   Trace thickness: ${(params.traceThickness * 1e6).toFixed(2)} um`);
-    lines.push(`!   Substrate height: ${(params.substrateHeight * 1e6).toFixed(1)} um`);
-    lines.push(`!   Substrate permittivity: ${params.epsilonR}`);
-    lines.push(`!   Loss tangent: ${params.tanDelta}`);
-    lines.push(`!   Conductivity: ${params.sigma.toExponential(2)} S/m`);
+    // Line types whose geometry is not a trace-on-substrate stackup supply their own
+    // description instead of the trace-width/thickness/substrate-height trio.
+    if (params.geometryLines) {
+        for (const l of params.geometryLines) lines.push(l);
+    } else {
+        lines.push(`!   Trace width: ${(params.traceWidth * 1e6).toFixed(1)} um`);
+        lines.push(`!   Trace thickness: ${(params.traceThickness * 1e6).toFixed(2)} um`);
+        lines.push(`!   Substrate height: ${(params.substrateHeight * 1e6).toFixed(1)} um`);
+        lines.push(`!   Substrate permittivity: ${params.epsilonR}`);
+        lines.push(`!   Loss tangent: ${params.tanDelta}`);
+        lines.push(`!   Conductivity: ${params.sigma.toExponential(2)} S/m`);
+    }
     if (params.traceSpacing) {
         lines.push(`!   Trace spacing: ${(params.traceSpacing * 1e6).toFixed(1)} um`);
     }

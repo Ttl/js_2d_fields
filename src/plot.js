@@ -1,5 +1,6 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB } from './sparameters.js';
+import { isComplement, svgRingPath } from './shapes.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -59,7 +60,40 @@ function contourScaledB(min, max, n) {
 // this just masks the zsmooth/contour interpolation that spills the steep boundary field inward).
 function conductorFillShapes(solver, maxY) {
     const out = [];
+    const FILL = 'rgba(217, 119, 6, 1.0)';
+    const EDGE = { color: 'rgba(0, 0, 0, 0.5)', width: 1 };
+    const GOLD = { color: 'rgba(255, 215, 0, 1.0)', width: 3 };
     for (const cond of (solver.conductors || [])) {
+        const sh = cond.shape;
+        if (sh) {
+            // A round conductor is drawn with Plotly's ellipse shape. The enclosing
+            // shield is an annulus, which needs an SVG path because Plotly's shape path
+            // grammar has no arc command (M/L/H/V/Q/C/T/S/Z only), svgRingPath emits
+            // two polygonal loops filled with the evenodd rule.
+            const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
+            if (isComplement(sh)) {
+                out.push({
+                    type: 'path', path: svgRingPath(cx, cy, r, cond.x_max * 1000),
+                    fillrule: 'evenodd', fillcolor: FILL, line: EDGE, layer: 'above',
+                });
+            } else {
+                out.push({
+                    type: 'circle', xref: 'x', yref: 'y',
+                    x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r,
+                    fillcolor: FILL, line: EDGE, layer: 'above',
+                });
+            }
+            // Plating covers the whole circumference (a circle has no separate faces),
+            // so the indicator is a gold outline rather than per-face lines.
+            if (cond.plating) {
+                out.push({
+                    type: 'circle', xref: 'x', yref: 'y',
+                    x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r,
+                    fillcolor: 'rgba(0,0,0,0)', line: GOLD, layer: 'above',
+                });
+            }
+            continue;
+        }
         if (cond.y_min > maxY) continue;
         const yMax = Math.min(cond.y_max, maxY);
         out.push({
@@ -91,7 +125,7 @@ function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, lay
     lineColor = 'rgba(128, 128, 128, 0.3)' } = {}) {
     const out = [];
     for (const diel of (solver.dielectrics || [])) {
-        if (diel.y_min > maxY) continue;
+        if (!diel.shape && diel.y_min > maxY) continue;
         const yMax = Math.min(diel.y_max, maxY);
         const er = diel.epsilon_r;
         let fillcolor;
@@ -100,6 +134,16 @@ function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, lay
         } else {
             const intensity = Math.min(255, 100 + (er - 1) * 30);
             fillcolor = `rgba(100, ${intensity}, 100, ${alpha})`;
+        }
+        const sh = diel.shape;
+        if (sh && !isComplement(sh)) {
+            const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
+            out.push({
+                type: 'circle', xref: 'x', yref: 'y',
+                x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r,
+                fillcolor, line: { color: lineColor, width: 0.5 }, layer
+            });
+            continue;
         }
         out.push({
             type: 'rect',

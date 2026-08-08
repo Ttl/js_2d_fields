@@ -12,6 +12,17 @@
 // Output is the standard solver mesh object (nodes/tris/edges/condRect/epsMap/...) that
 // the rest of the tri backend consumes. Material/role tagging stays centroid-based
 // (tagMaterials + condRect.rects), so no per-face bookkeeping is needed.
+//
+// SHAPED GEOMETRY (coax): a conductor/dielectric may carry a `shape` descriptor (see
+// shapes.js) instead of being its own bounding box. Such objects are emitted as convex
+// polygons via AddPoint/AddLine/AddCurveLoop/AddPlaneSurface rather than AddRectangle,
+// and every containment test routes through shapeContains(). `opts.domainShape` further
+// replaces the background rectangle with a polygon, so the meshed domain can itself be
+// a disk. A complement shape ('outside_circle') emits no OCC geometry at all. Its
+// boundary is the domain outline, but still gets a condRects entry so the freedom map
+// makes that outline PEC and the loss integral finds its surface edges.
+
+import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, isComplement } from '../shapes.js';
 
 const REL_TOL = 1e-9;
 
@@ -21,16 +32,16 @@ export function tagMaterials(mesh, dielectrics, tol) {
     const { nodes, tris, nTris } = mesh;
     if (tol === undefined) tol = 1e-12;
     const epsMap = new Array(nTris), lossMap = new Array(nTris);
-    const rects = dielectrics.map(d => ({ r: _rectOf(d), er: d.epsilon_r, tand: d.tan_delta || 0 }));
+    // shapeContains() falls back to the literal bbox test when d.shape is absent, so
+    // shapeless dielectrics behave exactly as before.
+    const defs = dielectrics.map(d => ({ o: d, er: d.epsilon_r, tand: d.tan_delta || 0 }));
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
         const xc = (nodes[2 * v0] + nodes[2 * v1] + nodes[2 * v2]) / 3;
         const yc = (nodes[2 * v0 + 1] + nodes[2 * v1 + 1] + nodes[2 * v2 + 1]) / 3;
         let er = 1.0, tand = 0.0;
-        for (const d of rects) {
-            if (xc >= d.r.xmin - tol && xc <= d.r.xmax + tol && yc >= d.r.ymin - tol && yc <= d.r.ymax + tol) {
-                er = d.er; tand = d.tand;
-            }
+        for (const d of defs) {
+            if (shapeContains(d.o, xc, yc, tol)) { er = d.er; tand = d.tand; }
         }
         epsMap[t] = { re: er, im: 0 };
         lossMap[t] = { re: er * tand, im: 0 };
@@ -113,6 +124,10 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
         changed = false;
         for (const c of conductors) {
             if (c.is_signal) continue;
+            // Shaped grounds (e.g. a coax shield) are not full-span slabs and must not
+            // be absorbed into a wall: their bounding box spans the domain but their
+            // actual body does not fill it.
+            if (c.shape) continue;
             const r = _rectOf(c);
             const touchesL = r.xmin <= X0 + tol, touchesR = r.xmax >= X1 - tol;
             const touchesB = r.ymin <= Y0 + tol, touchesT = r.ymax >= Y1 - tol;
@@ -137,18 +152,51 @@ export function buildOccMeshFromGeometry(G, opts) {
     const hCoarse = opts.hCoarse;
     const gradeRate = opts.gradeRate ?? 0.35;
 
-    let { X0, X1, Y0, Y1, wallPEC } = _clipDomain(domain, conductors, boundaries, tol);
     const symmetry = !!opts.symmetry;
-    if (symmetry) { X0 = 0; wallPEC = { ...wallPEC, left: false }; }
+    const domainShape = opts.domainShape || null;
+    // Half-domain meshing of a shaped domain uses the x >= 0 half of every polygon.
+    // Containment, however, always tests the FULL polygon (see condRects below).
+    const meshOpts = { half: symmetry };
+
+    let X0, X1, Y0, Y1, wallPEC;
+    if (domainShape) {
+        // The meshed domain IS the shape, so there is no full-span slab to absorb and
+        // no rectangle to clip: the bounds are simply the materialized polygon's bbox.
+        ({ xmin: X0, xmax: X1, ymin: Y0, ymax: Y1 } = shapeBBox(domainShape, meshOpts));
+        const b = boundaries || ['gnd', 'gnd', 'gnd', 'gnd'];
+        wallPEC = { left: b[0] === 'gnd', right: b[1] === 'gnd', top: b[2] === 'gnd', bottom: b[3] === 'gnd' };
+        if (symmetry) { X0 = 0; wallPEC.left = false; }
+    } else {
+        ({ X0, X1, Y0, Y1, wallPEC } = _clipDomain(domain, conductors, boundaries, tol));
+        if (symmetry) { X0 = 0; wallPEC = { ...wallPEC, left: false }; }
+    }
 
     // Conductor rects clipped to the meshed domain (absorbed/outside ones dropped).
     const condRects = [], condRoles = [];
     for (const c of conductors) {
+        if (c.shape) {
+            // Bounds come from the shape's positive body. For a complement that is the
+            // hole it surrounds, which is exactly the extent of its boundary in the mesh
+            // (the shield itself has no meshed area). Downstream bbox prefilters stay
+            // meaningful, while every real test goes through `shape`.
+            //
+            // `shape` is the full polygon even in a half-domain solve: using the half
+            // would put the x=0 chord on the shield's boundary and make every symmetry
+            // -plane node PEC, shorting the plane. `meshArea` carries the half instead,
+            // because that is what the loss code multiplies back up by `symmetry`.
+            const bb = shapeBBox(c.shape);
+            condRects.push({
+                xmin: bb.xmin, xmax: bb.xmax, ymin: bb.ymin, ymax: bb.ymax,
+                shape: c.shape, meshArea: shapeArea(c, meshOpts),
+            });
+            condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null });
+            continue;
+        }
         const r = _rectOf(c);
         const xmin = Math.max(r.xmin, X0), xmax = Math.min(r.xmax, X1);
         const ymin = Math.max(r.ymin, Y0), ymax = Math.min(r.ymax, Y1);
         if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
-        condRects.push({ xmin, xmax, ymin, ymax });
+        condRects.push({ xmin, xmax, ymin, ymax, meshArea: (xmax - xmin) * (ymax - ymin) });
         condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null });
     }
 
@@ -163,19 +211,57 @@ export function buildOccMeshFromGeometry(G, opts) {
         const t = G._gmshModelOccAddRectangle(r.xmin, r.ymin, 0, r.xmax - r.xmin, r.ymax - r.ymin, -1, 0, ierr);
         check('AddRectangle'); return t;
     };
+    // Convex polygon as an OCC plane surface. The trimmed gmsh build exports no
+    // AddDisk/AddCircle, but a circle is meshed as a polygon regardless (gmsh
+    // discretizes curves, and refineTriMesh never revisits the CAD geometry), so the
+    // polygon is the geometry rather than an approximation of it (see shapes.js).
+    // meshSize 0 on every point: Mesh.MeshSizeFromPoints is disabled below, so sizing
+    // comes exclusively from the background field.
+    const addPolygon = (poly) => {
+        const n = poly.length >> 1;
+        const pts = new Array(n), lines = new Array(n);
+        for (let i = 0; i < n; i++) {
+            pts[i] = G._gmshModelOccAddPoint(poly[2 * i], poly[2 * i + 1], 0, 0, -1, ierr);
+            check('AddPoint');
+        }
+        for (let i = 0; i < n; i++) {
+            lines[i] = G._gmshModelOccAddLine(pts[i], pts[(i + 1) % n], -1, ierr);
+            check('AddLine');
+        }
+        const lb = G.stackAlloc(n * 4);
+        for (let i = 0; i < n; i++) G.setValue(lb + i * 4, lines[i], 'i32');
+        const loop = G._gmshModelOccAddCurveLoop(lb, n, -1, ierr); check('AddCurveLoop');
+        const wb = G.stackAlloc(4); G.setValue(wb, loop, 'i32');
+        const face = G._gmshModelOccAddPlaneSurface(wb, 1, -1, ierr); check('AddPlaneSurface');
+        return face;
+    };
     const clipToDomain = (r) => ({
         xmin: Math.max(r.xmin, X0), xmax: Math.min(r.xmax, X1),
         ymin: Math.max(r.ymin, Y0), ymax: Math.min(r.ymax, Y1),
     });
 
-    // Background "air" rectangle (object) + all dielectric & conductor rects (tools).
-    const domTag = addRect({ xmin: X0, xmax: X1, ymin: Y0, ymax: Y1 });
+    // Background "air" region (object) + all dielectric & conductor bodies (tools).
+    const domTag = domainShape
+        ? addPolygon(shapePoly(domainShape, meshOpts))
+        : addRect({ xmin: X0, xmax: X1, ymin: Y0, ymax: Y1 });
     const toolTags = [];
     for (const d of dielectrics) {
+        if (d.shape) {
+            // A dielectric that IS the domain needs no tool — the background face
+            // already covers it, and fragmenting a face against itself is degenerate.
+            if (domainShape && d.shape === domainShape) continue;
+            toolTags.push(addPolygon(shapePoly(d.shape, meshOpts)));
+            continue;
+        }
         const r = clipToDomain(_rectOf(d));
         if (r.xmax - r.xmin > tol && r.ymax - r.ymin > tol) toolTags.push(addRect(r));
     }
-    for (const c of condRects) toolTags.push(addRect(c));
+    for (const c of condRects) {
+        // A complement conductor is a zero-area PEC shell whose boundary is already the
+        // domain outline: it contributes no OCC geometry, only a condRects entry.
+        if (c.shape && isComplement(c.shape)) continue;
+        toolTags.push(c.shape ? addPolygon(shapePoly(c.shape, meshOpts)) : addRect(c));
+    }
 
     // fragment([(2,domTag)], [(2,tool)...]) → conforming arrangement (remove originals).
     const obj = G.stackAlloc(8); G.setValue(obj, 2, 'i32'); G.setValue(obj + 4, domTag, 'i32');
@@ -202,7 +288,13 @@ export function buildOccMeshFromGeometry(G, opts) {
         G._gmshModelGetEntities(fe, feN, 2, ierr); check('GetEntities(2)');
         const faces = _readIntArray(G, fe, feN);   // (dim,tag) pairs
         const bb = [G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8)];
-        // A conductor sub-face's bounding box is CONTAINED in its conductor rect.
+        // Only shapeless (non-rect) conductors take the face-bbox route below. A shaped
+        // conductor's bounding box is far larger than its body (a complement shield's
+        // spans the whole domain), so it would match the air face and collect the
+        // entire domain outline as "conductor" curves, refining everything at sizeMin.
+        const bboxRects = condRects.filter(c => !c.shape);
+        const shapedRects = condRects.filter(c => c.shape);
+        // A conductor sub-face's bounding box is contained in its conductor rect.
         // Testing only the bbox CENTER misclassifies a face-with-hole: the air
         // face surrounding a centered conductor (e.g. symmetric stripline) has
         // its bbox center inside the conductor rect, so the whole domain outline
@@ -211,7 +303,7 @@ export function buildOccMeshFromGeometry(G, opts) {
         // units, verified empirically) — the containment pad must absorb that,
         // capped per rect so a very thin conductor can't false-positive.
         const OCC_BBOX_PAD = 2e-7;
-        const inCond = (x0, y0, x1, y1) => condRects.some(c => {
+        const inCond = (x0, y0, x1, y1) => bboxRects.some(c => {
             const pad = Math.max(tol, Math.min(OCC_BBOX_PAD,
                 0.4 * Math.min(c.xmax - c.xmin, c.ymax - c.ymin)));
             return x0 > c.xmin - pad && x1 < c.xmax + pad &&
@@ -228,6 +320,105 @@ export function buildOccMeshFromGeometry(G, opts) {
             G._gmshModelGetBoundary(fbuf, 2, cb, cbN, 0, 0, 0, ierr); check('GetBoundary');
             const curves = _readIntArray(G, cb, cbN);
             for (let k = 1; k < curves.length; k += 2) condCurves.add(Math.abs(curves[k]));
+        }
+
+        // Shaped conductors are classified per CURVE instead of per face. This is what
+        // makes a complement shield's surface get refined at all: it has zero meshed
+        // area, so no face-based rule can ever find it, yet it is a real PEC surface
+        // carrying half the conductor loss (alpha_c goes as 1/a + 1/b).
+        //
+        // Every curve here is a straight sub-segment of a polygon side, so its bounding
+        // -box CENTRE is the segment midpoint and lies exactly on the shape boundary.
+        // (Testing bbox corners would not work — for a non-axis-aligned segment they
+        // are off the line.)
+        if (shapedRects.length) {
+            const ce = G.stackAlloc(4), ceN = G.stackAlloc(4);
+            G._gmshModelGetEntities(ce, ceN, 1, ierr); check('GetEntities(1)');
+            const curves = _readIntArray(G, ce, ceN);   // (dim,tag) pairs
+            for (let i = 0; i < curves.length; i += 2) {
+                const ctag = curves[i + 1];
+                G._gmshModelGetBoundingBox(1, ctag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
+                check('GetBoundingBox(1)');
+                const cx = (G.getValue(bb[0], 'double') + G.getValue(bb[3], 'double')) / 2;
+                const cy = (G.getValue(bb[1], 'double') + G.getValue(bb[4], 'double')) / 2;
+                for (const c of shapedRects) {
+                    if (Math.abs(shapeSignedDist(c.shape, cx, cy)) < tol) { condCurves.add(ctag); break; }
+                }
+            }
+        }
+
+        // ---- Optionally drop the conductor INTERIORS from the meshed model ----
+        // Only the MQS volume eddy-current solve ever looks inside the metal. On the
+        // perturbation path those elements carry NO degrees of freedom at all — every
+        // node and edge inside a conductor is PEC, and their triangles get no face DOFs
+        // — so they cost mesh generation, storage and refinement passes for nothing.
+        //
+        // Removing the face (recursive = 0) keeps its boundary curves, which the
+        // surrounding face already shares, so the conductor simply becomes a hole and
+        // the surface edges the loss integral needs are untouched.
+        //
+        // Must run AFTER the curve collection above (which finds conductor curves via
+        // their faces) and complements are skipped — they have no face to remove, and
+        // their bounding box would match the surrounding dielectric.
+        if (opts.meshConductorInterior === false && condRects.length) {
+            const holes = [];
+            for (let i = 0; i < faces.length; i += 2) {
+                const ftag = faces[i + 1];
+                G._gmshModelGetBoundingBox(2, ftag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
+                check('GetBoundingBox');
+                const bx0 = G.getValue(bb[0], 'double'), by0 = G.getValue(bb[1], 'double');
+                const bx1 = G.getValue(bb[3], 'double'), by1 = G.getValue(bb[4], 'double');
+                const hit = condRects.some(c => {
+                    if (c.shape && isComplement(c.shape)) return false;
+                    const pad = Math.max(tol, Math.min(2e-7,
+                        0.4 * Math.min(c.xmax - c.xmin, c.ymax - c.ymin)));
+                    return bx0 > c.xmin - pad && bx1 < c.xmax + pad &&
+                           by0 > c.ymin - pad && by1 < c.ymax + pad;
+                });
+                if (hit) holes.push(ftag);
+            }
+            let dangling = 0;
+            if (holes.length) {
+                const hb = G.stackAlloc(holes.length * 8);
+                holes.forEach((t, i) => { G.setValue(hb + i * 8, 2, 'i32'); G.setValue(hb + i * 8 + 4, t, 'i32'); });
+                G._gmshModelOccRemove(hb, holes.length * 2, 0, ierr); check('OccRemove(conductor faces)');
+                G._gmshModelOccSynchronize(ierr); check('Synchronize(after remove)');
+
+                // Removing a face non-recursively keeps ALL its curves, including any
+                // that ran through its interior — the fragment splits a line crossing a
+                // conductor into three, and the middle piece is now bounded by nothing.
+                // gmsh still meshes such a dangling curve, seeding stray nodes inside the
+                // metal that belong to no triangle (harmless for the solve — they get no
+                // DOFs — but they inflate the node count and show up in the mesh overlay).
+                // Recursive removal is not an option: these curves are shared with the
+                // surrounding face. Delete just the ones strictly inside a conductor.
+                const ce2 = G.stackAlloc(4), ceN2 = G.stackAlloc(4);
+                G._gmshModelGetEntities(ce2, ceN2, 1, ierr); check('GetEntities(1) post-remove');
+                const cs = _readIntArray(G, ce2, ceN2);
+                const kill = [];
+                for (let i = 0; i < cs.length; i += 2) {
+                    const ctag = cs[i + 1];
+                    G._gmshModelGetBoundingBox(1, ctag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
+                    check('GetBoundingBox(1) post-remove');
+                    const cx = (G.getValue(bb[0], 'double') + G.getValue(bb[3], 'double')) / 2;
+                    const cy = (G.getValue(bb[1], 'double') + G.getValue(bb[4], 'double')) / 2;
+                    for (const c of condRects) {
+                        if (c.shape && isComplement(c.shape)) continue;
+                        // STRICTLY inside (−tol): a curve ON the conductor boundary is a
+                        // real surface the loss integral needs, and must be kept.
+                        if (shapeContains(c, cx, cy, -tol)) { kill.push(ctag); break; }
+                    }
+                }
+                if (kill.length) {
+                    const kb = G.stackAlloc(kill.length * 8);
+                    kill.forEach((t, i) => { G.setValue(kb + i * 8, 1, 'i32'); G.setValue(kb + i * 8 + 4, t, 'i32'); });
+                    G._gmshModelOccRemove(kb, kill.length * 2, 0, ierr); check('OccRemove(dangling curves)');
+                    G._gmshModelOccSynchronize(ierr); check('Synchronize(after curve remove)');
+                }
+                dangling = kill.length;
+            }
+            if (globalThis.__OCC_DEBUG__)
+                console.error('[occ] removed', holes.length, 'conductor face(s),', dangling, 'dangling curve(s)');
         }
     }
 
@@ -352,6 +543,10 @@ export function buildOccMeshFromGeometry(G, opts) {
     const condRect = {
         rects: condRects, rectRoles: condRoles,
         xmin_domain: X0, xmax_domain: X1, ymin_domain: Y0, ymax_domain: Y1,
+        // Absolute geometric tolerance (domain-diagonal relative). Shaped containment
+        // tests need it: an exact-zero tolerance would reject boundary nodes that are
+        // one ULP off the polygon side after the mesher's own arithmetic.
+        geomTol: tol,
         wallPEC, symmetry: symmetry ? 2 : 1,
         xmin: condRects.length ? Math.min(...condRects.map(c => c.xmin)) : X0,
         xmax: condRects.length ? Math.max(...condRects.map(c => c.xmax)) : X1,
@@ -374,7 +569,13 @@ export function buildOccMeshFromGeometry(G, opts) {
     const addYR = (y, lo, hi) => { const e = constraintYRanges[y]; constraintYRanges[y] = e ? [Math.min(e[0], lo), Math.max(e[1], hi)] : [lo, hi]; };
     const constraintXRanges = {};
     const addXR = (x, lo, hi) => { const e = constraintXRanges[x]; constraintXRanges[x] = e ? [Math.min(e[0], lo), Math.max(e[1], hi)] : [lo, hi]; };
+    // Shaped conductors constrain arbitrary line SEGMENTS (their polygon sides) rather
+    // than axis-aligned lines. They must contribute no addXR/addYR: their bounding box
+    // is not a real surface, and for a complement it spans the whole domain, which
+    // would pin the domain walls for no reason.
+    const constraintSegments = [];
     for (const c of condRects) {
+        if (c.shape) { constraintSegments.push(...shapeSegments(c, meshOpts)); continue; }
         addYR(c.ymin, c.xmin, c.xmax); addYR(c.ymax, c.xmin, c.xmax);
         addXR(c.xmin, c.ymin, c.ymax); addXR(c.xmax, c.ymin, c.ymax);
     }
@@ -383,7 +584,7 @@ export function buildOccMeshFromGeometry(G, opts) {
 
     return {
         nodes, tris, edges, triEdges, triSigns, nNodes, nTris, nEdges,
-        constraintYRanges, constraintXRanges, constraintXs,
+        constraintYRanges, constraintXRanges, constraintXs, constraintSegments,
         condRect, epsMap, lossMap,
         meshedDomain: { X0, X1, Y0, Y1, wallPEC },
     };

@@ -1,5 +1,6 @@
 import { MicrostripSolver } from './microstrip.js';
 import { BroadsideStriplineSolver } from './broadside_stripline.js';
+import { CoaxSolver } from './coax.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
@@ -44,7 +45,17 @@ const SWEEP_PARAM_CONFIG = {
     er:                 { label: 'Permittivity',         inputId: 'inp_er',            group: 'always' },
     tand:               { label: 'Loss Tangent',         inputId: 'inp_tand',          group: 'always' },
     sigma:              { label: 'Conductivity',         inputId: 'inp_sigma',         fixedUnit: 'S/m', group: 'always' },
-    rq:                 { label: 'Surface Roughness',    inputId: 'inp_rq',            group: 'always' },
+    // 'shared' = applies to EVERY line type, including those (coax) whose own geometry
+    // block replaces the 'always' set above.
+    rq:                 { label: 'Surface Roughness',    inputId: 'inp_rq',            group: 'shared' },
+    // Coaxial only. No "(coax)" suffix: unlike the stripline entries below, these are
+    // never listed alongside the 'always' group (updateSweepParamList turns that group
+    // off for coax), so the same plain names as microstrip are unambiguous here.
+    coax_d:             { label: 'Inner Conductor Diameter', inputId: 'inp_coax_d',    group: 'coax' },
+    coax_D:             { label: 'Dielectric Diameter',      inputId: 'inp_coax_D',    group: 'coax' },
+    coax_er:            { label: 'Permittivity',             inputId: 'inp_coax_er',   group: 'coax' },
+    coax_tand:          { label: 'Loss Tangent',             inputId: 'inp_coax_tand', group: 'coax' },
+    coax_sigma:         { label: 'Conductivity',             inputId: 'inp_coax_sigma', fixedUnit: 'S/m', group: 'coax' },
     // Differential types only
     trace_spacing:      { label: 'Trace Spacing',        inputId: 'inp_trace_spacing', group: 'diff' },
     // GCPW types only
@@ -196,6 +207,13 @@ const DEFAULT_SETTINGS = {
     bs_h_top: 0.2,       // mm
     bs_er_top: 4.4,
     bs_tand_top: 0.02,
+
+    // Coaxial (display units: mm). Defaults are RG-402-like semi-rigid, ~48 ohm.
+    coax_d: 0.92,        // mm, inner conductor diameter
+    coax_D: 2.95,        // mm, dielectric diameter = shield inner diameter
+    coax_er: 2.1,
+    coax_tand: 0.0002,
+    coax_sigma: 5.8e7,
 };
 
 /**
@@ -289,6 +307,13 @@ function getUISettings() {
         bs_h_top: getDisplayValue('inp_bs_h_top'),
         bs_er_top: getInputValueUnitless('inp_bs_er_top'),
         bs_tand_top: getInputValueUnitless('inp_bs_tand_top'),
+
+        // Coaxial
+        coax_d: getDisplayValue('inp_coax_d'),
+        coax_D: getDisplayValue('inp_coax_D'),
+        coax_er: getInputValueUnitless('inp_coax_er'),
+        coax_tand: getInputValueUnitless('inp_coax_tand'),
+        coax_sigma: getInputValueUnitless('inp_coax_sigma'),
     };
 }
 
@@ -314,13 +339,39 @@ const BROADSIDE_EXCLUDED_KEYS = new Set([
     'use_top_gnd', 'enclosure_height',
 ]);
 
-function settingsToURL(settings) {
-    const isBroadside = settings.tl_type === 'broadside_stripline';
+// Coax: the shield IS the domain boundary, so no board-stackup option applies. Plating,
+// surface roughness, solver and frequency settings are shared and DO round-trip, so they
+// are deliberately absent here (as is mesh_backend — a coax link must carry it).
+const COAX_EXCLUDED_KEYS = new Set([
+    ...BROADSIDE_EXCLUDED_KEYS,
+    'use_enclosure', 'enclosure_width', 'use_side_gnd',
+]);
 
-    // Filter out default values (and, for broadside, the other types' geometry fields)
+// Each type's own geometry keys, so a link for one type never carries another's.
+const TYPE_ONLY_KEYS = {
+    broadside_stripline: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('bs_')),
+    coax: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('coax_')),
+};
+const EXCLUDED_BY_TYPE = {
+    broadside_stripline: BROADSIDE_EXCLUDED_KEYS,
+    coax: COAX_EXCLUDED_KEYS,
+};
+
+function settingsToURL(settings) {
+    // Exclusions only ever SHORTEN a newly generated URL; settingsFromURL merges over
+    // defaults and ignores unknown keys, so existing links are unaffected.
+    const excluded = EXCLUDED_BY_TYPE[settings.tl_type];
+    const otherTypeKeys = new Set();
+    for (const [type, keys] of Object.entries(TYPE_ONLY_KEYS)) {
+        if (type === settings.tl_type) continue;
+        for (const k of keys) otherTypeKeys.add(k);
+    }
+
+    // Filter out default values (and the other types' geometry fields)
     const nonDefaultSettings = {};
     for (const key in settings) {
-        if (isBroadside && BROADSIDE_EXCLUDED_KEYS.has(key)) continue;
+        if (excluded && excluded.has(key)) continue;
+        if (otherTypeKeys.has(key)) continue;
 
         const value = settings[key];
         const defaultValue = DEFAULT_SETTINGS[key];
@@ -485,6 +536,17 @@ function restoreSettings(settings) {
         document.getElementById('inp_bs_er_top').value = fullSettings.bs_er_top;
         document.getElementById('inp_bs_tand_top').value = fullSettings.bs_tand_top;
 
+        setValueWithUnit('inp_coax_d', fullSettings.coax_d);
+        setValueWithUnit('inp_coax_D', fullSettings.coax_D);
+        document.getElementById('inp_coax_er').value = fullSettings.coax_er;
+        document.getElementById('inp_coax_tand').value = fullSettings.coax_tand;
+        document.getElementById('inp_coax_sigma').value = fullSettings.coax_sigma;
+
+        // tl_type is restored ABOVE mesh_backend, so the backend lock has to run once
+        // both are in place — otherwise a stale or hand-edited link can leave coax
+        // selected with the quasi-static backend, which cannot mesh it.
+        if (window.enforceBackendForType) window.enforceBackendForType();
+
         return true;
     } catch (e) {
         console.error('Failed to restore settings:', e);
@@ -615,7 +677,12 @@ function getGeometryHash() {
         bs_tand_middle: p.bs_tand_middle,
         bs_h_top: p.bs_h_top,
         bs_er_top: p.bs_er_top,
-        bs_tand_top: p.bs_tand_top
+        bs_tand_top: p.bs_tand_top,
+        coax_d: p.coax_d,
+        coax_D: p.coax_D,
+        coax_er: p.coax_er,
+        coax_tand: p.coax_tand,
+        coax_sigma: p.coax_sigma
     });
 }
 
@@ -1112,6 +1179,13 @@ function getParams() {
         bs_h_top: getInputValue('inp_bs_h_top'),
         bs_er_top: getInputValueUnitless('inp_bs_er_top'),
         bs_tand_top: getInputValueUnitless('inp_bs_tand_top'),
+
+        // Coaxial (diameters in; CoaxSolver derives the radii)
+        coax_d: getInputValue('inp_coax_d'),
+        coax_D: getInputValue('inp_coax_D'),
+        coax_er: getInputValueUnitless('inp_coax_er'),
+        coax_tand: getInputValueUnitless('inp_coax_tand'),
+        coax_sigma: getInputValueUnitless('inp_coax_sigma'),
     };
 }
 
@@ -1155,17 +1229,23 @@ function addCommonOptions(options, p) {
     }
 
     // Surface plating
-    if (p.use_plating) {
-        options.plating = {
-            sigma: p.plating_sigma,
-            thickness: p.plating_t,
-            rq: p.plating_rq,
-            top: p.plating_top,
-            sides: p.plating_sides,
-            bottom: p.plating_bottom,
-            thick_corners: p.plating_thick_corners
-        };
-    }
+    const plating = platingOptions(p);
+    if (plating) options.plating = plating;
+}
+
+// The plating block on its own, so line types that take plating but none of the other
+// board-stackup options (coax) can reuse it instead of duplicating it.
+function platingOptions(p) {
+    if (!p.use_plating) return null;
+    return {
+        sigma: p.plating_sigma,
+        thickness: p.plating_t,
+        rq: p.plating_rq,
+        top: p.plating_top,
+        sides: p.plating_sides,
+        bottom: p.plating_bottom,
+        thick_corners: p.plating_thick_corners
+    };
 }
 
 function updateGeometry() {
@@ -1270,6 +1350,22 @@ function buildSolverFromParams(p) {
             };
             addCommonOptions(options, p);
             solver = new MicrostripSolver(options);
+        } else if (p.tl_type === 'coax') {
+            // Full-wave only; CoaxSolver throws on any other backend. addCommonOptions is
+            // deliberately NOT used — solder mask, top dielectric, ground cutout and the
+            // enclosure have no meaning inside a coax, where the shield IS the boundary.
+            // Plating and surface roughness do apply and are passed through.
+            solver = new CoaxSolver({
+                inner_diameter: p.coax_d,
+                dielectric_diameter: p.coax_D,
+                epsilon_r: p.coax_er,
+                tan_delta: p.coax_tand,
+                sigma_cond: p.coax_sigma,
+                rq: p.rq,
+                plating: platingOptions(p),
+                freq: p.freq,
+                mesh_backend: 'triangular',
+            });
         } else if (p.tl_type === 'broadside_stripline') {
             const options = {
                 trace_width: p.bs_w,
@@ -1355,11 +1451,15 @@ function buildSolverFromParams(p) {
         // Store causal materials option on solver
         if (solver) {
             solver.use_causal_materials = p.use_causal_materials;
+            // Coax has no quasi-static implementation (a rectilinear grid cannot mesh a
+            // circle), so force the full-wave backend. The UI disables the option and
+            // CoaxSolver throws, but a stale link can still arrive with 'rectilinear'.
+            const backend = p.tl_type === 'coax' ? 'fullwave_mqs' : p.mesh_backend;
             // Solver mode → numerical backend + triangular loss method:
             //   'rectilinear'   = quasi-static FDM (fastest)
             //   'fullwave_pert' = triangular full-wave, perturbation loss (~2× faster)
             //   'fullwave_mqs'  = triangular full-wave, MQS volume loss (most accurate)
-            const cfg = solverModeConfig(p.mesh_backend);
+            const cfg = solverModeConfig(backend);
             solver.mesh_backend = cfg.mesh_backend;
             solver.tri_opts = cfg.tri_opts;
         }
@@ -1823,6 +1923,7 @@ function updateSweepParamList() {
     const isDiff = tlType.startsWith('diff_');
     const isGcpw = tlType.includes('gcpw');
     const isStripline = tlType.includes('stripline');
+    const isCoax      = tlType === 'coax';
     const useSm       = document.getElementById('chk_solder_mask').checked;
     const useTopDiel  = document.getElementById('chk_top_diel').checked;
     const useGndCut   = document.getElementById('chk_gnd_cut').checked;
@@ -1830,14 +1931,19 @@ function updateSweepParamList() {
     const usePlating  = document.getElementById('chk_plating').checked;
 
     const groupEnabled = {
-        always: true,
+        shared: true,                    // surface roughness, applies to every type
+        // Coax has its own geometry block and none of the microstrip stackup inputs,
+        // so the 'always' set and the board-stackup groups are off for it. Plating
+        // still applies (all-around, on the centre conductor).
+        always: !isCoax,
         diff: isDiff,
         gcpw: isGcpw,
         stripline: isStripline,
-        sm: useSm,
-        top_diel: useTopDiel,
-        gnd_cut: useGndCut,
-        enclosure: useEnclosure,
+        coax: isCoax,
+        sm: useSm && !isCoax,
+        top_diel: useTopDiel && !isCoax,
+        gnd_cut: useGndCut && !isCoax,
+        enclosure: useEnclosure && !isCoax,
         plating: usePlating,
     };
 
@@ -2219,6 +2325,14 @@ function bindEvents() {
                 sigma: p.sigma,
                 traceSpacing: p.trace_spacing,
                 surfaceRoughness: p.rq,
+                // Coax is not a trace-on-substrate stackup, so it describes itself.
+                geometryLines: p.tl_type === 'coax' ? [
+                    `!   Inner conductor diameter: ${(p.coax_d * 1e6).toFixed(1)} um`,
+                    `!   Dielectric diameter (shield ID): ${(p.coax_D * 1e6).toFixed(1)} um`,
+                    `!   Dielectric permittivity: ${p.coax_er}`,
+                    `!   Loss tangent: ${p.coax_tand}`,
+                    `!   Conductivity: ${p.coax_sigma.toExponential(2)} S/m`,
+                ] : null,
                 plating: p.use_plating ? {
                     sigma: p.plating_sigma,
                     thickness: p.plating_t,
@@ -2359,6 +2473,7 @@ function bindEvents() {
         'inp_bs_h_bottom', 'inp_bs_er_bottom', 'inp_bs_tand_bottom',
         'inp_bs_h_middle', 'inp_bs_er_middle', 'inp_bs_tand_middle',
         'inp_bs_h_top', 'inp_bs_er_top', 'inp_bs_tand_top',
+        'inp_coax_d', 'inp_coax_D', 'inp_coax_er', 'inp_coax_tand', 'inp_coax_sigma',
         'freq-start'
     ];
 

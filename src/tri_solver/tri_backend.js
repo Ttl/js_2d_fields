@@ -24,6 +24,7 @@ import createModule from '../wasm_solver/eigen_solver.js';
 import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh, _clipDomain } from './occ_to_mesh.js';
+import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
          staticToEdgeDofs, assembleTriFEM, assembleTriFEMDecomposed,
@@ -183,6 +184,9 @@ function makePlatingZs(solver, condRect, freq) {
     const rqBase = solver.rq ?? 0;
     const Zbare = calculate_Zrough(freq, sigmaBase, rqBase);    // Complex (.re/.im)
     const layeredCache = new Map();
+    // face is 'top' | 'bottom' | 'sides' | 'all'. 'all' is the shaped-conductor case:
+    // a circle has ONE continuous surface, so there is nothing to select between and
+    // the plating covers the whole boundary (CoaxSolver sets pl.all).
     const zForFace = (ri, face) => {
         const pl = roles[ri] && roles[ri].plating;
         if (!(pl && pl[face] && pl.sigma > 0)) return Zbare;
@@ -214,6 +218,12 @@ function buildFaceZs(solver, condRect, freq) {
     return (x, y, orient) => {
         for (let ri = 0; ri < rects.length; ri++) {
             const r = rects[ri];
+            if (r.shape) {
+                // Curved surface: orientation carries no face information. A point on
+                // the boundary is on THE surface.
+                if (Math.abs(shapeSignedDist(r.shape, x, y)) > tol) continue;
+                return zForFace(ri, 'all');
+            }
             if (x < r.xmin - tol || x > r.xmax + tol || y < r.ymin - tol || y > r.ymax + tol) continue;
             let face = null;
             if (orient === 'h') {
@@ -234,7 +244,9 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
     const rects = condRect.rects || [];
     const tol = platingTol(condRect);
     const { Zbare, zForFace } = makePlatingZs(solver, condRect, freq);
-    const FACES = ['top', 'bottom', 'sides'];
+    // 4 slots, not 3: shaped conductors add 'all' (one continuous curved surface).
+    const FACES = ['top', 'bottom', 'sides', 'all'];
+    const NFACE = FACES.length;
 
     // Geometric classification: loss edge → (rectIndex, face) or bare (−1).
     // Frequency-INVARIANT, so it's cached per (mesh, fm, baseMask); only the
@@ -251,6 +263,14 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
             const x1 = nodes[2 * n1], y1 = nodes[2 * n1 + 1];
             for (let ri = 0; ri < rects.length; ri++) {
                 const r = rects[ri];
+                if (r.shape) {
+                    // Both endpoints on the curved boundary => a surface edge. There is
+                    // only one face, so no orientation test.
+                    if (Math.abs(shapeSignedDist(r.shape, x0, y0)) > tol) continue;
+                    if (Math.abs(shapeSignedDist(r.shape, x1, y1)) > tol) continue;
+                    edgeFace[e] = ri * NFACE + 3;                                        // all
+                    break;
+                }
                 if (x0 < r.xmin - tol || x0 > r.xmax + tol || x1 < r.xmin - tol || x1 > r.xmax + tol) continue;
                 if (y0 < r.ymin - tol || y0 > r.ymax + tol || y1 < r.ymin - tol || y1 > r.ymax + tol) continue;
                 let face = -1;
@@ -259,7 +279,7 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
                 else if ((Math.abs(x0 - r.xmin) < tol && Math.abs(x1 - r.xmin) < tol) ||
                          (Math.abs(x0 - r.xmax) < tol && Math.abs(x1 - r.xmax) < tol)) face = 2;  // sides
                 if (face < 0) continue;
-                edgeFace[e] = ri * 3 + face;
+                edgeFace[e] = ri * NFACE + face;
                 break;
             }
         }
@@ -273,7 +293,7 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
     for (let e = 0; e < nEdges; e++) {
         if (!baseMask[e]) continue;
         const fid = edgeFace[e];
-        const z = fid < 0 ? Zbare : zForFace((fid / 3) | 0, FACES[fid % 3]);
+        const z = fid < 0 ? Zbare : zForFace((fid / NFACE) | 0, FACES[fid % NFACE]);
         const k = keyOf(z);
         let gi = groupIdx.get(k);
         if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); }
@@ -290,6 +310,12 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
 // Is the geometry mirror-symmetric about x=0? (lets us mesh only the right half.)
 function isXSymmetric(conductors, dielectrics, domainW) {
     const tol = domainW * 1e-6;
+    // Shaped geometry can't be compared by rect spans. A shape declares its own mirror
+    // symmetry (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
+    // phase 0, which puts vertices exactly on the y axis so the x >= 0 half is an
+    // EXACT half). If any shape is present, all of them must qualify.
+    const shaped = [...conductors, ...dielectrics].filter(o => o.shape);
+    if (shaped.length) return shaped.every(o => o.shape.xSymmetric === true);
     const mirrorOf = (list, extra) => {
         // every rect must have a mirror partner (xmin↔-xmax) with same y + material
         const key = (r) => `${extra(r)}|${r.y_min.toFixed(12)}|${r.y_max.toFixed(12)}`;
@@ -653,8 +679,11 @@ export class TriBackend {
         const anyCondPre = s.conductors.some(c => survives(c));
         const mqsPre = (lmPre === 'mqs' && !gndRectPre)
             || (lmPre === 'auto' && this.symmetry && !gndRectPre && anyCondPre);
-        let hFine = this.opts.hFine ?? Math.min((mqsPre ? 2 : 1) * tAbs, wRef / 4) * 1.5;
-        let hCoarse = this._wavelengthCap(this.opts.hCoarse ?? (dom.y_max - dom.y_min) / 5);
+        // A medium may supply its own base sizing (coax: derived from the conductor
+        // radii, since w/t have no meaning for a round conductor).
+        const hints = s.tri_mesh_hints || {};
+        let hFine = this.opts.hFine ?? hints.hFine ?? Math.min((mqsPre ? 2 : 1) * tAbs, wRef / 4) * 1.5;
+        let hCoarse = this._wavelengthCap(this.opts.hCoarse ?? hints.hCoarse ?? (dom.y_max - dom.y_min) / 5);
         // Triangle budget derived from the Max Nodes setting (memory parity with the FDM
         // backend — see maxTrisForBudget). Cap the INITIAL mesh here: element count ∝ 1/h²,
         // so if the feature-/wavelength-sized start overshoots (thin trace → tiny hFine, or a
@@ -662,20 +691,54 @@ export class TriBackend {
         // The refinement loop below also stops at this budget; capping the initial mesh too is
         // what prevents the very first eigensolve from running on an unbounded mesh.
         const maxTris = maxTrisForBudget(this.opts.maxNodes ?? 18000);
-        let mesh;
+        let mesh, prevAtt = null;   // previous attempt's (h, nTris), for the scaling fit
         for (let attempt = 0; ; attempt++) {
             mesh = buildOccMeshFromGeometry(this.ctx.G, {
                 conductors: s.conductors, dielectrics: s.dielectrics,
                 domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
-                meshConductorInterior: true,   // conductor interiors meshed for the MQS loss solve
+                // Non-rectangular meshed domain (coax: the dielectric disk itself).
+                domainShape: s.domain_shape || null,
+                // Conductor interiors are meshed ONLY for the MQS volume eddy-current
+                // solve. mqsPre is the same applicability test _modeAtFreq uses, hoisted
+                // here (it already gates hFine above). On the perturbation path those
+                // elements carry no DOFs — every node/edge inside metal is PEC — so
+                // meshing them is pure cost. Coax always lands here: its shield is a
+                // ground role, which rules MQS out.
+                meshConductorInterior: mqsPre,
                 occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
                 gmshOptions: this.opts.gmshOptions,
             });
             if (mesh.nTris <= maxTris || attempt >= 4) break;
-            const factor = Math.sqrt(mesh.nTris / maxTris) * 1.05;   // +5% margin to land under
+            // Element count vs element size is NOT the uniform-fill nTris ∝ 1/h². The
+            // conductor-surface size field makes the mesh a graded band around the
+            // metal, so the true exponent is shallower — measured ~0.75 on coax, where
+            // assuming 2 under-coarsens so badly that the loop burns all 5 attempts,
+            // never reaches the budget, and ends up SLOWER with a SMALL "Max Nodes"
+            // than a large one (7.6 s vs 4.1 s). Learn the exponent from the last two
+            // attempts instead; the first step has no data and keeps the 1/h² guess.
+            let p = 2;
+            if (prevAtt) {
+                const e = Math.log(prevAtt.n / mesh.nTris) / Math.log(hFine / prevAtt.h);
+                if (Number.isFinite(e) && e > 0.3) p = Math.min(e, 3);
+            }
+            const factor = Math.pow(mesh.nTris / maxTris, 1 / p) * 1.05;   // +5% to land under
+            // Backstops: accept a mesh already within ~30% of budget rather than pay a
+            // whole gmsh run to shave it, and give up if coarsening has stopped paying
+            // (some geometries floor out — a shaped conductor forces one mesh edge per
+            // polygon side, which no coarsening gets under).
+            if (factor < 1.2 || mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
+            prevAtt = { h: hFine, n: mesh.nTris };
             hFine *= factor; hCoarse *= factor;
         }
         this.condRect = mesh.condRect;
+        // A shaped domain does not fill the solver's bounding box, so tighten the
+        // plotting/resample box onto the actual body. Taken from the FULL polygon, not
+        // mesh.meshedDomain — under symmetry the latter is only the x >= 0 half, while
+        // buildGridFromMesh(mirrorX) reconstructs the whole cross-section.
+        if (s.domain_shape) {
+            const bb = shapeBBox(s.domain_shape);
+            this.domain = { x_min: bb.xmin, x_max: bb.xmax, y_min: bb.ymin, y_max: bb.ymax };
+        }
 
         // Loss routines read per-rect metadata: .symmetry scales the half-domain
         // integral, .xmin_domain locates the symmetry plane (corner/edge exclusion —
@@ -840,6 +903,9 @@ export class TriBackend {
         // where the field actually concentrates.
         const forcedX = [], forcedY = [];
         for (const r of [...(s.conductors || []), ...(s.dielectrics || [])]) {
+            // A shaped body has no axis-aligned interfaces to force lines onto, and a
+            // complement's bbox lies outside the meshed domain entirely.
+            if (r.shape) continue;
             forcedX.push(r.x_min, r.x_max);
             forcedY.push(r.y_min, r.y_max);
         }
@@ -850,6 +916,7 @@ export class TriBackend {
         // bias shows as a visible kink where contours meet the ground. With the
         // companion line the segment is ~µm-scale and the join renders clean.
         for (const r of (s.conductors || [])) {
+            if (r.shape) continue;   // no flat faces to place a companion line beside
             const off = Math.min(r.x_max - r.x_min, r.y_max - r.y_min) / 20;
             if (!(off > 0)) continue;
             forcedX.push(r.x_min - off, r.x_max + off);
@@ -864,8 +931,13 @@ export class TriBackend {
         // Conductor rects in full-domain coordinates for the resampler's E-baseline
         // clamping — taken from the solver geometry because it includes the ground
         // planes (mesh.condRect.rects only carries the non-wall conductors).
-        this._plotRects = (s.conductors || []).map(c =>
-            ({ xmin: c.x_min, xmax: c.x_max, ymin: c.y_min, ymax: c.y_max }));
+        // A complement conductor (coax shield) is EXCLUDED: its bounding box spans the
+        // whole domain, so the resampler would treat every grid point as inside metal
+        // and clamp |E| to zero across the entire plot. Its surface is the domain
+        // outline, which the resampler already handles as a boundary.
+        this._plotRects = (s.conductors || [])
+            .filter(c => !(c.shape && isComplement(c.shape)))
+            .map(c => ({ xmin: c.x_min, xmax: c.x_max, ymin: c.y_min, ymax: c.y_max, shape: c.shape || null }));
         // Asymmetric differential pair on the full domain: the odd/even excitation basis is
         // NOT the modal basis (the two traces sit in different environments), so driving
         // odd/even and picking one eigenmode per drive can return the SAME eigenmode twice
@@ -1149,7 +1221,12 @@ export class TriBackend {
         // Smallest conductor cross-section dimension (gates the skin-band remesh and
         // the static/SIBC blend below).
         let minDim = Infinity;
-        for (const c of cr.rects) minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
+        for (const c of cr.rects) {
+            // A complement conductor (coax shield) is a zero-thickness PEC shell whose
+            // bbox is the whole cavity, it has no cross-section to gate anything on.
+            if (c.shape && isComplement(c.shape)) continue;
+            minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
+        }
         if (f > 0 && useMQS) {
             // The volume eddy solve runs the conductor BODY at the bulk metal σ;
             // plating is a SURFACE effect applied only through surfaceZs (relative to
@@ -1272,7 +1349,11 @@ export class TriBackend {
         const sigmaDC = s.sigma_cond ?? 5.8e7;
         let sigArea = 0, gndArea = 0;
         for (const c of s.conductors) {
-            const a = Math.abs((c.width ?? (c.x_max - c.x_min)) * (c.height ?? (c.y_max - c.y_min)));
+            // shapeArea is the bbox product for a plain rect (unchanged) but
+            // the true cross-section for a shaped one. A complement shell
+            // returns 0: the coax shield is modelled as infinitely thick, so it
+            // carries no DC resistance.
+            const a = shapeArea(c);
             if (c.is_signal) sigArea += a; else gndArea += a;
         }
         const R_dc = (sigArea > 0 ? 1 / (sigmaDC * sigArea) : 0)
@@ -1391,7 +1472,10 @@ export class TriBackend {
         const fref = this.opts.causalFref ?? 1e9;
         const causalDiel = s.dielectrics.map(d => {
             const er = d.epsilon_r, td = d.tan_delta || 0;
-            const rect = { x_min: d.x_min, x_max: d.x_max, y_min: d.y_min, y_max: d.y_max };
+            // `shape` must ride along: without it the rebuilt dielectric is only a
+            // bounding box, and the causal re-tag would label everything outside the
+            // real body (the polygon's vertex "horns") as air.
+            const rect = { x_min: d.x_min, x_max: d.x_max, y_min: d.y_min, y_max: d.y_max, shape: d.shape || null };
             if (Math.abs(er - 1) < 1e-6 || Math.abs(td) < 1e-10) return { ...rect, epsilon_r: er, tan_delta: td };
             const { eps_real, tand_actual } = djordjevic_sarkar(f, er, td, fref);
             return { ...rect, epsilon_r: eps_real, tan_delta: tand_actual };

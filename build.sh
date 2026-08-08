@@ -71,7 +71,7 @@ rm -f "$TRI_STAGE/tri_solver/_smoke_test.mjs"
 # in sync with those imports. (They are also inlined into the app bundle; the
 # external tree needs standalone copies.)
 cp src/complex.js src/surface_roughness.js src/djordjevic_sarkar.js src/matrix.js \
-   src/sparameters.js src/geometry_symmetry.js "$TRI_STAGE/"
+   src/sparameters.js src/geometry_symmetry.js src/shapes.js "$TRI_STAGE/"
 # Each emscripten module locates its .wasm next to its own .js.
 cp src/wasm_solver/eigen_solver.js src/wasm_solver/eigen_solver.wasm \
    src/wasm_solver/gmsh.js src/wasm_solver/gmsh.wasm "$TRI_STAGE/wasm_solver/"

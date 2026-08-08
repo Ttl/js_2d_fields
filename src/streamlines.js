@@ -1,5 +1,17 @@
+import { shapeContains, distToShapeBoundary, segShapeBoundaryHit,
+         shapePerimeter, shapePerimeterPoint } from './shapes.js';
+
+// NOTE ON SHAPED CONDUCTORS (coax): every helper below was written for axis-aligned
+// rectangles. A shaped conductor's bounding box is not its body. A coax shield's spans
+// the whole domain, so a bbox test would report every point as inside metal and kill
+// each streamline at its seed. Shaped conductors therefore route through shapeContains /
+// distToShapeBoundary / segShapeBoundaryHit.
 function isInsideConductor(x, y, conductors) {
     for (const c of conductors) {
+        if (c.shape) {
+            if (shapeContains(c, x, y, 0)) return true;
+            continue;
+        }
         if (
             x >= c.x_min &&
             x <= c.x_max &&
@@ -20,6 +32,14 @@ function findConductorIntersection(x1, y1, x2, y2, conductors) {
     let closestT = Infinity;
     
     for (const c of conductors) {
+        if (c.shape) {
+            const hit = segShapeBoundaryHit(x1, y1, x2, y2, c);
+            if (hit) {
+                const t = Math.hypot(hit.x - x1, hit.y - y1) / (Math.hypot(x2 - x1, y2 - y1) || 1);
+                if (t < closestT) { closestT = t; closestHit = hit; }
+            }
+            continue;
+        }
         // Check top edge (entering from above)
         if (y1 >= c.y_max && y2 < c.y_max) {
             const t = (c.y_max - y1) / (y2 - y1);
@@ -67,6 +87,7 @@ function findConductorIntersection(x1, y1, x2, y2, conductors) {
 function distToConductor(x, y, conductors) {
     let minDist = Infinity;
     for (const c of conductors) {
+        if (c.shape) { minDist = Math.min(minDist, distToShapeBoundary(c, x, y)); continue; }
         // Distance to nearest edge
         const dx = Math.max(c.x_min - x, 0, x - c.x_max);
         const dy = Math.max(c.y_min - y, 0, y - c.y_max);
@@ -89,7 +110,7 @@ function generateConductorSeedsWeighted(
     let totalPerimeter = 0;
     const signalConductors = conductors.filter(c => c.is_signal);
     for (const c of signalConductors) {
-        totalPerimeter += 2 * (c.width + c.height);
+        totalPerimeter += c.shape ? shapePerimeter(c) : 2 * (c.width + c.height);
     }
 
     for (const c of conductors) {
@@ -98,7 +119,7 @@ function generateConductorSeedsWeighted(
         const width = c.width;
         const height = c.height;
         const polarity = mode === 'odd' ? c.polarity : 1;
-        const perimeter = 2 * (width + height);
+        const perimeter = c.shape ? shapePerimeter(c) : 2 * (width + height);
 
         // Calculate sample counts based on dimensions
         const nSamplesH = Math.max(50, Math.floor(width / spacing) * 4);
@@ -118,8 +139,22 @@ function generateConductorSeedsWeighted(
             nSeedsV = Math.max(3, Math.floor(height / spacing));
         }
 
-        // Define all four edges
-        const edges = [
+        // A curved conductor has one continuous boundary instead of four flat faces, so
+        // it becomes a single "edge" walked by arc length, with the seed weight taken
+        // from the local normal field |E.n| (the flat faces below can use a fixed axis
+        // component because their normal is constant).
+        const edges = c.shape ? [{
+            length: perimeter,
+            sample: (t) => {
+                const p = shapePerimeterPoint(c, t);
+                return { x: p.x + p.nx * edgeOffset, y: p.y + p.ny * edgeOffset, nx: p.nx, ny: p.ny };
+            },
+            nSamples: Math.max(50, Math.floor(perimeter / spacing) * 4),
+            nSeeds: numStreamlines !== null
+                ? Math.max(4, Math.round(numStreamlines * (perimeter / totalPerimeter)))
+                : Math.max(12, Math.floor(perimeter / spacing)),
+            getField: (f, pos) => Math.abs(f.ex * pos.nx + f.ey * pos.ny),
+        }] : [
             // Horizontal edges (top and bottom)
             {
                 length: width,
@@ -169,8 +204,8 @@ function generateConductorSeedsWeighted(
                 if (!f) {
                     w.push(eps);
                 } else {
-                    // Normal field component
-                    w.push(edge.getField(f) + eps);
+                    // Normal field component (pos carries the local normal for curves)
+                    w.push(edge.getField(f, pos) + eps);
                 }
             }
 

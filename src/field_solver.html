@@ -125,6 +125,7 @@
             <option value="gcpw">GCPW</option>
             <option value="diff_gcpw">Differential GCPW</option>
             <option value="broadside_stripline">Broadside Coupled Stripline</option>
+            <option value="coax">Coaxial</option>
         </select>
     </div>
 
@@ -212,6 +213,34 @@
             <div class="control-group">
                 <label>Trace Spacing</label>
                 <input type="text" class="unit-input" id="inp_trace_spacing" value="0.2 mm">
+            </div>
+        </div>
+    </div>
+
+    <div id="coax-params" style="display: none;">
+        <div class="section-header" onclick="toggleSection(this)">
+            <h3>Coaxial</h3>
+        </div>
+        <div class="section-content">
+            <div class="control-group">
+                <label>Inner Conductor Diameter <span class="help-icon" onclick="showHelpModal('coax_d', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_coax_d" value="0.92 mm">
+            </div>
+            <div class="control-group">
+                <label>Dielectric Diameter <span class="help-icon" onclick="showHelpModal('coax_D', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_coax_D" value="2.95 mm">
+            </div>
+            <div class="control-group">
+                <label>Relative Permittivity (&epsilon;<sub>r</sub>)</label>
+                <input type="number" id="inp_coax_er" value="2.1" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Loss Tangent (tan &delta;)</label>
+                <input type="number" id="inp_coax_tand" value="0.0002" inputmode="decimal" placeholder="0">
+            </div>
+            <div class="control-group">
+                <label>Conductivity (S/m)</label>
+                <input type="number" id="inp_coax_sigma" value="5.8e7" inputmode="decimal">
             </div>
         </div>
     </div>
@@ -860,6 +889,8 @@
             'inp_rq': 'μm',
             'inp_plating_t': 'μm',
             'inp_plating_rq': 'μm',
+            'inp_coax_d': 'mm',
+            'inp_coax_D': 'mm',
 
             // Frequency - GHz
             'freq-start': 'GHz',
@@ -919,6 +950,11 @@
     window.parseValueWithUnit = parseValueWithUnit;
     window.formatValueWithUnit = formatValueWithUnit;
     window.getDefaultUnit = getDefaultUnit;
+    // restoreSettings (app_solver.js) sets tl_type before mesh_backend, so it must
+    // re-run the backend lock after both are in place. Assign the hoisted declaration
+    // directly, wrapping it in an arrow (`() => enforceBackendForType()`) overwrites
+    // the very global the arrow then resolves, giving infinite recursion.
+    window.enforceBackendForType = enforceBackendForType;
 
     // Collapsible Section Toggle
     function toggleSection(header) {
@@ -938,6 +974,14 @@
         roughness: {
             title: 'Surface Roughness',
             body: '<p>Conductor loss is calculated using gradient model (<a href="https://ieeexplore.ieee.org/document/7932148" target="_blank">https://ieeexplore.ieee.org/document/7932148</a>), both loss and inductance caused by the surface roughness is calculated. All conductors use this roughness on all sides. On PCB, typical RMS roughness is about 1 - 2 µm for normal copper foil and about 0.5 µm for special low profile foil.</p>'
+        },
+        coax_d: {
+            title: 'Inner Conductor Diameter',
+            body: '<p>Diameter of the round center conductor.</p>'
+        },
+        coax_D: {
+            title: 'Dielectric Diameter',
+            body: '<p>Outer diameter of the dielectric, which is also the inner diameter of the shield.</p><p>The shield is modelled as a lossy conducting boundary at this diameter with no modelled wall thickness, so it contributes surface loss but no DC resistance. Accurate wherever the skin depth is smaller than the real shield wall.</p>'
         },
         plating: {
             title: 'Surface Plating',
@@ -1035,7 +1079,14 @@
         const gcpwParams = document.getElementById('gcpw-params');
         const striplineParams = document.getElementById('stripline-params');
         const broadsideParams = document.getElementById('broadside-params');
+        const coaxParams = document.getElementById('coax-params');
         const advancedParams = document.getElementById('advanced-params');
+        // A circle has one continuous surface, so the per-face plating selection and the
+        // corner-wrap model have nothing to act on. Both are hidden for coax.
+        const platingFacesGroup = document.getElementById('plating-params')
+            ?.querySelector('.control-group:has(#chk_plating_top)');
+        const platingCornersGroup = document.getElementById('plating-params')
+            ?.querySelector('.control-group:has(#chk_plating_thick_corners)');
         const solderMaskGroup = advancedParams.querySelector('.control-group:has(#chk_solder_mask)');
         const solderMaskParams = document.getElementById('solder-mask-params');
         const topDielGroup = advancedParams.querySelector('.control-group:has(#chk_top_diel)');
@@ -1052,9 +1103,13 @@
         gcpwParams.style.display = 'none';
         striplineParams.style.display = 'none';
         broadsideParams.style.display = 'none';
+        coaxParams.style.display = 'none';
+        if (platingFacesGroup) platingFacesGroup.style.display = (tlType === 'coax') ? 'none' : 'block';
+        if (platingCornersGroup) platingCornersGroup.style.display = (tlType === 'coax') ? 'none' : 'block';
 
-        // Common params visible by default (hidden for broadside which has its own block)
-        microstripParams.style.display = (tlType === 'broadside_stripline') ? 'none' : 'block';
+        // Common params visible by default (hidden for broadside/coax, which have their own blocks)
+        microstripParams.style.display =
+            (tlType === 'broadside_stripline' || tlType === 'coax') ? 'none' : 'block';
 
         // Always show advanced params
         advancedParams.style.display = 'block';
@@ -1200,6 +1255,44 @@
                 gndCutParams.style.display = 'none';
             }
             if (chkEnclosure) chkEnclosure.disabled = false;
+        } else if (tlType === 'coax') {
+            coaxParams.style.display = 'block';
+            // The shield IS the domain boundary, so none of the board-stackup options
+            // apply. Plating and surface roughness do, and stay enabled.
+            if (solderMaskGroup) solderMaskGroup.style.display = 'none';
+            if (topDielGroup) topDielGroup.style.display = 'none';
+            if (gndCutGroup) gndCutGroup.style.display = 'none';
+            if (enclosureGroup) enclosureGroup.style.display = 'none';
+            if (topGndGroup) topGndGroup.style.display = 'none';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
+            for (const [cb, params] of [[chkSolderMask, solderMaskParams],
+                                        [chkTopDiel, topDielParams],
+                                        [chkGndCut, gndCutParams]]) {
+                if (!cb) continue;
+                cb.disabled = true; cb.checked = false;
+                if (params) params.style.display = 'none';
+            }
+            if (chkEnclosure) { chkEnclosure.disabled = true; chkEnclosure.checked = false; }
+        }
+        enforceBackendForType();
+    }
+
+    // Coax exists only on the full-wave backend. The quasi-static solver meshes on a
+    // rectilinear grid and cannot represent a circular conductor. Lock the
+    // dropdown rather than letting a solve fail. Called from toggleParameterVisibility,
+    // from the backend dropdown's own change handler, and at the end of restoreSettings
+    // (which sets tl_type before mesh_backend, so a stale or hand-edited link could
+    // otherwise land on coax + rectilinear).
+    function enforceBackendForType() {
+        const sel = document.getElementById('mesh_backend');
+        if (!sel) return;
+        const isCoax = document.getElementById('tl_type').value === 'coax';
+        const rect = sel.querySelector('option[value="rectilinear"]');
+        if (rect) rect.disabled = isCoax;
+        sel.title = isCoax ? 'Coaxial lines require the full-wave solver' : '';
+        if (isCoax && sel.value === 'rectilinear') {
+            sel.value = 'fullwave_mqs';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
         }
     }
 
@@ -1273,7 +1366,10 @@
                     : '';
             }
         }
-        document.getElementById('mesh_backend').addEventListener('change', updateThickPlatingAvailability);
+        document.getElementById('mesh_backend').addEventListener('change', () => {
+            updateThickPlatingAvailability();
+            enforceBackendForType();
+        });
 
         // Initialize checkbox sections based on restored state (for browser auto-restore)
         toggleCheckboxSection('chk_solder_mask', 'solder-mask-params');

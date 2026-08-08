@@ -7,14 +7,19 @@ class Dielectric {
      * @param {number} height - Height of the rectangle (can be negative)
      * @param {number} epsilon_r - Relative permittivity
      * @param {number} tan_delta - Loss tangent (default: 0.0)
+     * @param {object|null} shape - Optional non-rectangular shape descriptor (see
+     *   shapes.js). When set, x/y/width/height are only the bounding box. Containment
+     *   tests go through shapeContains() instead. Full-wave backend only. The
+     *   rectilinear FDM mesher rasterizes bounding boxes and ignores this.
      */
-    constructor(x, y, width, height, epsilon_r, tan_delta = 0.0) {
+    constructor(x, y, width, height, epsilon_r, tan_delta = 0.0, shape = null) {
         this.x = x;
         this.y = y;
         this.width = width;
         this.height = height;
         this.epsilon_r = epsilon_r;
         this.tan_delta = tan_delta;
+        this.shape = shape;
     }
 
     get x_min() { return this.x; }
@@ -40,8 +45,14 @@ class Conductor {
      * @param {boolean} plating.top - Apply plating on top face
      * @param {boolean} plating.sides - Apply plating on side faces
      * @param {boolean} plating.bottom - Apply plating on bottom face
+     * @param {boolean} plating.all - Apply plating over the whole boundary (shaped
+     *   conductors only — a circle has one continuous surface, not three faces)
+     * @param {object|null} shape - Optional non-rectangular shape descriptor (see
+     *   shapes.js). When set, x/y/width/height are only the BOUNDING BOX: containment
+     *   tests go through shapeContains() instead. Full-wave backend only — the
+     *   rectilinear FDM mesher rasterizes bounding boxes and ignores this.
      */
-    constructor(x, y, width, height, is_signal = false, polarity = 0, plating = null) {
+    constructor(x, y, width, height, is_signal = false, polarity = 0, plating = null, shape = null) {
         this.x = x;
         this.y = y;
         this.width = width;
@@ -49,6 +60,7 @@ class Conductor {
         this.is_signal = is_signal;
         this.polarity = is_signal ? (polarity || 1) : 0;
         this.plating = plating;
+        this.shape = shape;
     }
 
     get x_min() { return this.x; }

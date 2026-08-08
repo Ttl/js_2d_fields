@@ -436,6 +436,11 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
     const symX = (condRect && condRect.symmetry > 1) ? condRect.xmin_domain : null;
     const corners = [];
     for (const cr of condRects) {
+        // Shaped conductors have no rectangular corners. Their bbox corners are not
+        // on the metal at all. A regular n-gon vertex has interior angle (n-2)pi/n, so
+        // ν -> 1 and the field singularity vanishes. No correction is the physically
+        // correct answer.
+        if (cr.shape) continue;
         for (const p of [{x:cr.xmin,y:cr.ymin},{x:cr.xmax,y:cr.ymin},{x:cr.xmax,y:cr.ymax},{x:cr.xmin,y:cr.ymax}]) {
             if (symX !== null && Math.abs(p.x - symX) < TOL) continue;
             let nIdx = -1;
@@ -587,6 +592,15 @@ export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossE
     return h2dl_corrected;
 }
 
+// Meshed cross-section of a conductor entry, for the DC resistance. The mesher
+// stores meshArea because the bbox product is wrong for a shaped conductor
+// (disk), and because under half-domain symmetry the meshed body is the half,
+// which the callers then scale back up by condRect.symmetry.
+function _condArea(cr) {
+    return cr.meshArea !== undefined ? cr.meshArea
+        : Math.abs((cr.xmax - cr.xmin) * (cr.ymax - cr.ymin));
+}
+
 // --- Build isLossEdge array for microstrip geometry ---
 // Marks conductor boundary edges + ground (y=0) edges.
 // condRect: if provided and condRect.symmetry > 1, excludes edges on the
@@ -675,7 +689,7 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
     let signal_area=0;
     if (condRects) for(const cr of condRects) {
         if (cr.is_signal === false) continue;
-        signal_area+=Math.abs((cr.xmax-cr.xmin)*(cr.ymax-cr.ymin));
+        signal_area += _condArea(cr);
     }
     signal_area *= sym;
     const R_dc = signal_area>0 ? 1/(sigma*signal_area) : 0;
@@ -808,6 +822,7 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
         // Detect conductor corners for graded quadrature
         const TOL = 1e-10;
         for (const cr of condRects) {
+            if (cr.shape) continue;   // smooth boundary: no corner singularity to grade
             const symX = (cr.symmetry > 1) ? cr.xmin_domain : null;
             const pts = [
                 { x: cr.xmin, y: cr.ymin }, { x: cr.xmax, y: cr.ymin },
@@ -921,7 +936,7 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
     let signal_area=0;
     if (condRects) for(const cr of condRects) {
         if (cr.is_signal === false) continue;
-        signal_area+=Math.abs((cr.xmax-cr.xmin)*(cr.ymax-cr.ymin));
+        signal_area += _condArea(cr);
     }
     signal_area *= sym;
     const R_dc = signal_area>0 ? 1/(sigma*signal_area) : 0;

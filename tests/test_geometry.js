@@ -14,7 +14,10 @@
 // Run: node tests/test_geometry.js
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { CoaxSolver } from '../src/coax.js';
 import { _clipDomain } from '../src/tri_solver/occ_to_mesh.js';
+import { polyRadiusForArea, circlePolygon, shapePoly, shapeArea, shapeContains,
+         shapeSegments, shapeSignedDist, isComplement } from '../src/shapes.js';
 
 let failures = 0;
 function check(name, cond, detail = '') {
@@ -205,6 +208,124 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
     // slab NOT reaching a wall (coplanar ground) → not absorbed
     c = _clipDomain(dom, [slab(-1, -0.1, 2, 0)], ['open', 'open', 'open', 'gnd'], 1e-9);
     check('_clipDomain: partial-span slab is not absorbed', c.Y0 === -0.1);
+}
+
+// ---------- shape primitives (shapes.js) ----------
+// Circles are materialized as convex polygons and the POLYGON is the geometry, not an
+// approximation of it: the mesher, the material tagging, the freedom map and the loss
+// integrals all test against these same vertices. Two properties carry that design and
+// are pinned here.
+{
+    const r = 1.475e-3;
+
+    // 1. Area matching. The n-gon must enclose EXACTLY pi*r^2, which is what keeps the
+    //    capacitance right (and R_dc, which reads shapeArea directly).
+    for (const n of [32, 64, 128]) {
+        const disk = { shape: { type: 'circle', cx: 0, cy: 0, r, n, phase: 0 } };
+        check(`shapes: n=${n} polygon encloses exactly pi*r^2`,
+            near(shapeArea(disk) / (Math.PI * r * r), 1, 1e-12));
+        check(`shapes: n=${n} half polygon is exactly half`,
+            near(shapeArea(disk, { half: true }) / (shapeArea(disk) / 2), 1, 1e-12));
+    }
+    check('shapes: area-matched radius sits between in- and circumradius of the circle',
+        polyRadiusForArea(r, 64) > r && polyRadiusForArea(r, 64) / Math.cos(Math.PI / 64) > r);
+
+    // 2. Boundary ownership, both polarities. Vertices AND side midpoints must classify
+    //    as inside. Midpoints are the load-bearing case: buildTriFreedomMap decides a PEC
+    //    edge by its midpoint, so a complement shape (the coax shield) whose side
+    //    midpoints read as "outside the metal" would leak the whole outer boundary.
+    const n = 64, tol = r * 1e-9;
+    const disk = { shape: { type: 'circle', cx: 0, cy: 0, r, n, phase: 0 } };
+    const shell = { shape: { type: 'outside_circle', cx: 0, cy: 0, r, n, phase: 0 } };
+    const poly = shapePoly(disk.shape);
+    let vertexOk = true, midOk = true;
+    for (let k = 0; k < n; k++) {
+        const j = (k + 1) % n;
+        const vx = poly[2 * k], vy = poly[2 * k + 1];
+        const mx = (vx + poly[2 * j]) / 2, my = (vy + poly[2 * j + 1]) / 2;
+        if (!shapeContains(disk, vx, vy, tol) || !shapeContains(shell, vx, vy, tol)) vertexOk = false;
+        if (!shapeContains(disk, mx, my, tol) || !shapeContains(shell, mx, my, tol)) midOk = false;
+    }
+    check('shapes: both polarities own their polygon vertices', vertexOk);
+    check('shapes: both polarities own their side MIDPOINTS', midOk);
+    check('shapes: disk and shell partition the plane away from the boundary',
+        shapeContains(disk, 0, 0, 0) && !shapeContains(shell, 0, 0, 0) &&
+        !shapeContains(disk, 2 * r, 0, 0) && shapeContains(shell, 2 * r, 0, 0));
+    check('shapes: a shell has no finite area', shapeArea(shell) === 0 && isComplement(shell.shape));
+    check('shapes: signed distance is negative inside, positive outside',
+        shapeSignedDist(disk.shape, 0, 0) < 0 && shapeSignedDist(disk.shape, 2 * r, 0) > 0);
+    check('shapes: full boundary has n segments, half drops the symmetry chord',
+        shapeSegments(disk).length === n && shapeSegments(disk, { half: true }).length === n / 2);
+    check('shapes: circlePolygon is deterministic',
+        circlePolygon(0, 0, r, n, 0).every((v, i) => v === circlePolygon(0, 0, r, n, 0)[i]));
+
+    // A shapeless object must take the LEGACY bbox path unchanged — this is the
+    // invariant that keeps every rectangular medium bit-identical.
+    const rect = { x_min: -1, x_max: 2, y_min: -3, y_max: 4, width: 3, height: 7 };
+    check('shapes: shapeless objects fall back to the bbox test',
+        shapeContains(rect, 0, 0, 0) && shapeContains(rect, 2, 4, 0) &&
+        !shapeContains(rect, 2.1, 0, 0) && shapeArea(rect) === 21 &&
+        shapeSegments(rect).length === 0);
+}
+
+// ---------- coaxial ----------
+{
+    const d = 0.92e-3, D = 2.95e-3, a = d / 2, b = D / 2;
+    const s = new CoaxSolver({ inner_diameter: d, dielectric_diameter: D,
+        epsilon_r: 2.1, tan_delta: 2e-4, sigma_cond: 5.8e7 });
+    const sig = signals(s), gnd = grounds(s);
+    check('coax: one signal conductor and one ground', sig.length === 1 && gnd.length === 1);
+    check('coax: centre conductor is a disk of radius d/2',
+        sig[0].shape.type === 'circle' && near(sig[0].shape.r, a));
+    // The shield is the COMPLEMENT of the dielectric disk, not a ring: it owns the outer
+    // boundary (making it PEC and giving it loss edges) without meshing any metal or
+    // leaving dead air cavities in the corners of a bounding box.
+    check('coax: shield is the complement of the dielectric disk',
+        gnd[0].shape.type === 'outside_circle' && near(gnd[0].shape.r, b));
+    check('coax: the dielectric and the meshed domain are the SAME polygon object',
+        s.dielectrics[0].shape === s.domain_shape);
+    check('coax: fully enclosed — every wall is gnd', s.boundaries.every(v => v === 'gnd'));
+    check('coax: single-ended', s.is_differential === false);
+    check('coax: DC-resistance area is pi*a^2, not the bbox 4a^2',
+        near(shapeArea(sig[0]) / (Math.PI * a * a), 1, 1e-12));
+    // n % 4 == 0 with phase 0 puts vertices exactly on both axes, which is what makes
+    // the x >= 0 half an EXACT half — required by the half-domain symmetry solve.
+    check('coax: segment counts are multiples of 4',
+        s.n_inner % 4 === 0 && s.n_outer % 4 === 0, `${s.n_inner}, ${s.n_outer}`);
+    check('coax: shapes declare mirror symmetry',
+        [...s.conductors, ...s.dielectrics].every(o => o.shape.xSymmetric === true));
+    check('coax: domain box strictly encloses the meshed disk',
+        s.domain_width / 2 > b && s.domain_height > b && s.t_gnd > b);
+
+    // Plating on a circle has no faces to select between.
+    const plated = new CoaxSolver({ inner_diameter: d, dielectric_diameter: D, epsilon_r: 2.1,
+        plating: { sigma: 6.3e7, thickness: 4e-6, rq: 0, top: true, sides: false, bottom: false } });
+    check('coax: plating is normalized to all-around on the centre conductor',
+        plated.conductors[0].plating.all === true &&
+        plated.conductors[0].plating.top && plated.conductors[0].plating.sides &&
+        plated.conductors[0].plating.bottom &&
+        plated.conductors[0].plating.thick_corners === false);
+    check('coax: the shield is not plated', plated.conductors[1].plating === null);
+
+    // A shaped ground must never be absorbed into a wall — its bbox spans the domain but
+    // its body does not fill it.
+    const cl = _clipDomain({ x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
+                             y_min: -s.t_gnd, y_max: s.domain_height },
+                           s.conductors, s.boundaries, s.domain_width * 1e-9);
+    check('coax: _clipDomain leaves the domain untouched (no full-span slab)',
+        near(cl.X0, -s.domain_width / 2) && near(cl.X1, s.domain_width / 2) &&
+        near(cl.Y0, -s.t_gnd) && near(cl.Y1, s.domain_height));
+
+    const rejects = (o, label) => {
+        try { new CoaxSolver({ inner_diameter: 1e-3, dielectric_diameter: 3e-3, epsilon_r: 2.1, ...o }); }
+        catch { check(`coax: rejects ${label}`, true); return; }
+        check(`coax: rejects ${label}`, false);
+    };
+    rejects({ dielectric_diameter: 1e-3 }, 'D == d');
+    rejects({ dielectric_diameter: 1.01e-3 }, 'a dielectric annulus too thin to mesh');
+    rejects({ inner_diameter: -1e-3 }, 'a negative diameter');
+    rejects({ epsilon_r: 0.5 }, 'epsilon_r below 1');
+    rejects({ mesh_backend: 'rectilinear' }, 'the quasi-static backend');
 }
 
 console.log(failures === 0 ? '\nGEOMETRY OK' : `\nGEOMETRY: ${failures} FAILURE(S)`);

@@ -1,6 +1,7 @@
 // Triangular P2 Nedelec FEM — generic mesh, basis, assembly, and solver functions
 
 import { tripletsToCSR, solveCG, triQuality as triQualityXY } from './fem_core.js';
+import { shapeContains } from '../shapes.js';
 
 // --- 6-point Gauss quadrature on triangle (barycentric) ---
 
@@ -428,6 +429,14 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
     // boundary instead of PEC ground.
     const ymin = condRect.ymin_domain ?? 0;
     const condRects = condRect.rects || [condRect];
+    // Containment test. Shapeless rects take the literal legacy bbox expression at the
+    // original TOL, so every rectangular medium is bit-identical. Shaped conductors
+    // (coax) test the polygon, at the mesher's geometric tolerance — a boundary node
+    // must classify as metal or the PEC surface develops holes.
+    const STOL = Math.max(TOL, condRect.geomTol || 0);
+    const inCond = (cr, x, y) => (cr.shape
+        ? shapeContains(cr, x, y, STOL)
+        : (x >= cr.xmin - TOL && x <= cr.xmax + TOL && y >= cr.ymin - TOL && y <= cr.ymax + TOL));
 
     // Identify conductor nodes and edges
     const isCondNode = new Uint8Array(nNodes);
@@ -435,9 +444,7 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
     for (let n = 0; n < nNodes; n++) {
         const x = nodes[2 * n], y = nodes[2 * n + 1];
         for (let ci = 0; ci < condRects.length; ci++) {
-            const cr = condRects[ci];
-            if (x >= cr.xmin - TOL && x <= cr.xmax + TOL &&
-                y >= cr.ymin - TOL && y <= cr.ymax + TOL) {
+            if (inCond(condRects[ci], x, y)) {
                 isCondNode[n] = 1;
                 condNodeGroup[n] = ci + 1;
                 break;
@@ -459,9 +466,7 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
         const xm = (nodes[2*n0] + nodes[2*n1]) / 2;
         const ym = (nodes[2*n0+1] + nodes[2*n1+1]) / 2;
         for (let ci = 0; ci < condRects.length; ci++) {
-            const cr = condRects[ci];
-            if (xm >= cr.xmin - TOL && xm <= cr.xmax + TOL &&
-                ym >= cr.ymin - TOL && ym <= cr.ymax + TOL) {
+            if (inCond(condRects[ci], xm, ym)) {
                 isCondEdge[e] = 1;
                 condEdgeGroup[e] = ci + 1;
                 break;
@@ -498,12 +503,11 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
         const v0 = mesh.tris[3*t], v1 = mesh.tris[3*t+1], v2 = mesh.tris[3*t+2];
         const yc = (nodes[2*v0+1]+nodes[2*v1+1]+nodes[2*v2+1])/3;
         const xc = (nodes[2*v0]+nodes[2*v1]+nodes[2*v2])/3;
-        let inCond = false;
+        let interior = false;
         for (const cr of condRects) {
-            if (xc >= cr.xmin-TOL && xc <= cr.xmax+TOL &&
-                yc >= cr.ymin-TOL && yc <= cr.ymax+TOL) { inCond = true; break; }
+            if (inCond(cr, xc, yc)) { interior = true; break; }
         }
-        if (inCond) continue;
+        if (interior) continue;
         faceF[2*t] = nFreeEdgeDof + nFreeFaceDof++;   // nf1
         faceF[2*t+1] = nFreeEdgeDof + nFreeFaceDof++; // nf2
     }
@@ -1108,10 +1112,67 @@ export function refineTriMesh(mesh, marked) {
         xMin = Math.min(xMin, newNodes[2*n]); xMax = Math.max(xMax, newNodes[2*n]);
         yMin = Math.min(yMin, newNodes[2*n+1]); yMax = Math.max(yMax, newNodes[2*n+1]);
     }
+
+    // --- Constraint SEGMENTS (shaped conductors: polygon sides) ---
+    // A shaped conductor's boundary is not axis-aligned, so the onXLine/onYLine
+    // machinery above cannot see it — and the bbox-wall test cannot either, since a
+    // circle only touches its bounding box at four points. Without this, every
+    // polygon-boundary node classifies as FREE and the Laplacian smoother pulls it
+    // toward the mesh interior on every pass: the conductor shrinks until the
+    // containment test stops matching it and the PEC surface develops holes.
+    //
+    // Such nodes are PINNED rather than allowed to slide. Bisection midpoints of a
+    // straight segment land exactly on that segment, so pinning costs nothing
+    // geometrically, whereas sliding would need a parametric version of the
+    // clampLo/clampHi neighbour bounds and tends to bunch nodes near polygon vertices —
+    // degrading exactly the surface resolution the conductor-loss line integral needs.
+    //
+    // Classification is done ONCE here (with a per-segment bbox prefilter) and reused
+    // by both the smoother and the edge-swap guard, which would otherwise be an
+    // O(nodes x segments x passes) inner loop.
+    const segs = mesh.constraintSegments || [];
+    const nodeSegA = new Int32Array(newNodeCount).fill(-1);
+    const nodeSegB = new Int32Array(newNodeCount).fill(-1);
+    if (segs.length) {
+        const scale = Math.max(xMax - xMin, yMax - yMin);
+        const segTol = scale * 1e-9;
+        for (let si = 0; si < segs.length; si++) {
+            const s = segs[si];
+            const sxMin = Math.min(s.x0, s.x1) - segTol, sxMax = Math.max(s.x0, s.x1) + segTol;
+            const syMin = Math.min(s.y0, s.y1) - segTol, syMax = Math.max(s.y0, s.y1) + segTol;
+            const ex = s.x1 - s.x0, ey = s.y1 - s.y0;
+            const len = Math.hypot(ex, ey);
+            if (!(len > 0)) continue;
+            for (let n = 0; n < newNodeCount; n++) {
+                if (nodeSegA[n] >= 0 && nodeSegB[n] >= 0) continue;   // already on two
+                const px = newNodes[2*n], py = newNodes[2*n+1];
+                if (px < sxMin || px > sxMax || py < syMin || py > syMax) continue;
+                // Perpendicular distance to the (infinite) line; the bbox test above
+                // already restricted us to the segment's extent.
+                if (Math.abs((px - s.x0) * ey - (py - s.y0) * ex) / len > segTol) continue;
+                if (nodeSegA[n] < 0) nodeSegA[n] = si; else nodeSegB[n] = si;
+            }
+        }
+    }
+    const onSegment = (n) => nodeSegA[n] >= 0;
+    const segScale = Math.max(xMax - xMin, yMax - yMin);
+    const pointOnAnySegment = (px, py) => {
+        const t = segScale * 1e-9;
+        for (const s of segs) {
+            if (px < Math.min(s.x0, s.x1) - t || px > Math.max(s.x0, s.x1) + t) continue;
+            if (py < Math.min(s.y0, s.y1) - t || py > Math.max(s.y0, s.y1) + t) continue;
+            const ex = s.x1 - s.x0, ey = s.y1 - s.y0;
+            const len = Math.hypot(ex, ey);
+            if (len > 0 && Math.abs((px - s.x0) * ey - (py - s.y0) * ex) / len <= t) return true;
+        }
+        return false;
+    };
+
     // Classify ALL vertices: 0=pinned, 1=free, 2=along-Y, 3=along-X
     const canMove = new Uint8Array(newNodeCount);
     for (let n = 0; n < newNodeCount; n++) {
         const mx = newNodes[2*n], my = newNodes[2*n+1];
+        if (onSegment(n)) { canMove[n] = 0; continue; }
         let onX = 0, onY = 0;
         if (Math.abs(mx - xMin) < 1e-10 || Math.abs(mx - xMax) < 1e-10) onX = 1;
         if (Math.abs(my - yMin) < 1e-10 || Math.abs(my - yMax) < 1e-10) onY = 1;
@@ -1161,6 +1222,9 @@ export function refineTriMesh(mesh, marked) {
                     let snap = onYLine(nx, ny) || onXLine(nx, ny);
                     if (!snap) { if (Math.abs(nx - xMin) < 1e-10 || Math.abs(nx - xMax) < 1e-10) snap = true; }
                     if (!snap) { if (Math.abs(ny - yMin) < 1e-10 || Math.abs(ny - yMax) < 1e-10) snap = true; }
+                    // Same rule for shaped boundaries: a free vertex that lands on a
+                    // polygon side would be misread as a surface node next pass.
+                    if (!snap && segs.length) snap = pointOnAnySegment(nx, ny);
                     if (snap) continue;
                 }
                 // Clamp constrained vertices to stay between neighbors on constraint line
@@ -1201,6 +1265,13 @@ export function refineTriMesh(mesh, marked) {
     function isOnConstraint(na, nb) {
         const ax = newNodes[2*na], ay = newNodes[2*na+1];
         const bx = newNodes[2*nb], by = newNodes[2*nb+1];
+        // Both endpoints on the SAME polygon side ⇒ this edge lies on a shaped
+        // conductor's boundary. Swapping it would tear the surface apart. The domain
+        // outline is already safe (one adjacent triangle, so tris2.length !== 2), but
+        // an inner conductor's boundary has two — its interior is meshed.
+        const a0 = nodeSegA[na], a1 = nodeSegB[na];
+        if (a0 >= 0 && (a0 === nodeSegA[nb] || a0 === nodeSegB[nb])) return true;
+        if (a1 >= 0 && (a1 === nodeSegA[nb] || a1 === nodeSegB[nb])) return true;
         if (onYLine(ax, ay) && onYLine(bx, by) && Math.abs(ay - by) < 1e-10) return true;
         if (onXLine(ax, ay) && onXLine(bx, by) && Math.abs(ax - bx) < 1e-10) return true;
         if (Math.abs(ax - bx) < 1e-10 && (Math.abs(ax - xMin) < 1e-10 || Math.abs(ax - xMax) < 1e-10)) return true;
@@ -1369,6 +1440,8 @@ export function refineTriMesh(mesh, marked) {
         Nx: 0, Ny: 0,
         constraintYRanges: mesh.constraintYRanges || {},
         constraintXRanges: mesh.constraintXRanges || null,
-        constraintXs: mesh.constraintXs || []
+        constraintXs: mesh.constraintXs || [],
+        // Carried forward so every refinement pass re-pins the shaped boundaries.
+        constraintSegments: mesh.constraintSegments || []
     };
 }
