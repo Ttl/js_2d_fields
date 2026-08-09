@@ -118,9 +118,15 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   from the MQS smooth current distribution (corner-regularized, unlike a
 //   perturbation surface integral). Reduces exactly to the uniform factor when
 //   every face shares one Zs. Takes precedence over Rq when provided.
-// Returns { R_trace, R_gnd, R_total, L_loop, alpha_c, alpha_c_dBm, delta, nDofs }
+// Returns { R_trace, R_gnd, R_total, X_total, L_loop, alpha_c, alpha_c_dBm, delta, nDofs }
 // L_loop is the series inductance from Im(Z_pul) = ωL — includes trace internal
 // inductance and ground-current spreading (ground itself is PEC here).
+// X_total is the surface REACTANCE per unit length, the twin of R_total: the same
+// |K|²-weighted surface integral taken against Im(Zs) where R_total takes Re(Zs). It is
+// what the caller builds the internal inductance from (X_total/ω), because L_loop −
+// L_external cancels two large near-equal numbers and loses it. Smooth metal has
+// Zs = Rs(1 + j), so X_total === R_total there and only rough/plated surfaces separate
+// them (Im(Zs)/Re(Zs) reaches ~5 at 1 µm rms). Same differential convention as R_total.
 // Frequency-INVARIANT part of the MQS solve on a given mesh: conductor
 // classification, DOF map, the S (everywhere) / M, Fc (conductor) assembly, and
 // the symbolic block-CSR with separate S / M value templates. The block system
@@ -437,31 +443,45 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     // (the caller halves R_total to the per-trace mode R), while L_loop is
     // per-trace — so the surface-reactance increment must use the per-trace R.
     const perTrace = opts.diffPair ? 0.5 : 1;
+    // X_trace/X_gnd are the REACTANCE twins of R_trace/R_gnd: the same smooth-metal
+    // loss weighted by Im(Zs)/Rs where R is weighted by Re(Zs)/Rs. They are what the
+    // internal inductance is built from (X_total/omega), and they carry the same units
+    // and the same differential convention as R, so the caller halves them alike.
+    // Smooth metal has Im(Zs) = Re(Zs) = Rs, so these stay equal to R, the seed
+    // value below is that smooth case, and each branch overwrites it from the
+    // SMOOTH R before R is scaled by psiR.
+    let X_trace = R_trace, X_gnd = R_gnd;
     if (opts.surfaceZs) {
         if (trS > 0) {
             const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
             L_loop += perTrace * R_trace * (psiX - 1) / omega;
+            X_trace = R_trace * psiX;
             R_trace *= psiR;
             PsiR = psiR;
         }
         if (gndS > 0) {
             const psiR = gndZreS / (Rs * gndS), psiX = gndZimS / (Rs * gndS);
             L_loop += perTrace * R_gnd * (psiX - 1) / omega;
+            X_gnd = R_gnd * psiX;
             R_gnd *= psiR;
         }
     } else if (Rq > 0) {
         const Zs = calculate_Zrough(freq, sigma, Rq);
         PsiR = Zs.re / Rs;
+        const PsiX = Zs.im / Rs;
         const R_smooth = R_trace + R_gnd;
-        L_loop += perTrace * R_smooth * (Zs.im / Rs - 1) / omega;
+        L_loop += perTrace * R_smooth * (PsiX - 1) / omega;
+        X_trace = R_trace * PsiX;
+        X_gnd = R_gnd * PsiX;
         R_trace *= PsiR;
         R_gnd *= PsiR;
     }
 
     const R_total = R_trace + R_gnd;
+    const X_total = X_trace + X_gnd;
     const alpha_c = Z0 > 0 ? R_total / (2 * Z0) : NaN;
     return {
-        R_trace, R_gnd, R_total, L_loop, PsiR,
+        R_trace, R_gnd, R_total, X_total, L_loop, PsiR,
         alpha_c, alpha_c_dBm: alpha_c * 8.686,
         Rs, delta, nDofs: Nb,
     };

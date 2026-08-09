@@ -1133,15 +1133,15 @@ export class TriBackend {
         const s = this.solver;
         const sigma = s.sigma_cond ?? 5.8e7;
         const omega = 2 * Math.PI * f;
-        if (!(beta > 0)) return { alpha_c_np: 0, R_ac: 0 };
+        if (!(beta > 0)) return { alpha_c_np: 0, R_ac: 0, X_ac: 0 };
         let projH, P;
         try {
             projH = projectH(mesh, wg.fm, wg.vRe, wg.vIm, { re: 0, im: beta }, f,
                 this.ctx.wasmSolver, wg.projCache);
             P = Math.abs(computePoyntingFromProjectedH(mesh, wg.fm, wg.vRe, wg.vIm,
                 projH.htRe, projH.htIm, omega * MU0, projH.hDofs));
-        } catch { return { alpha_c_np: 0, R_ac: 0 }; }
-        if (!(P > 1e-30)) return { alpha_c_np: 0, R_ac: 0 };
+        } catch { return { alpha_c_np: 0, R_ac: 0, X_ac: 0 }; }
+        if (!(P > 1e-30)) return { alpha_c_np: 0, R_ac: 0, X_ac: 0 };
         const loss = solveConductorLoss(this.condRect.rects, f, sigma, mesh, wg.fm,
             wg.vRe, wg.vIm, -beta * beta, 0, P, Zpv, mesh.epsMap, wg.lossMask,
             projH, this.ctx.wasmSolver);
@@ -1152,8 +1152,13 @@ export class TriBackend {
         const Zs = (pl && pl.sigma > 0)
             ? calculate_Zrough_layered(f, sigma, pl.rq ?? s.rq ?? 0, pl.sigma, pl.thickness ?? 0)
             : calculate_Zrough(f, sigma, s.rq ?? 0);
+        // Re(Zs) carries the loss and Im(Zs) the internal inductance; solveConductorLoss
+        // evaluated BOTH at the smooth Rs, so each is recovered by its own scaling of the
+        // same integral. Smooth metal has Zs = Rs(1+j) => fX = fR, which is why a bare
+        // guide is unchanged by carrying X_ac.
         const fR = Rs > 0 ? Zs.re / Rs : 1;
-        return { alpha_c_np: loss.alpha_c * fR, R_ac: loss.R_ac * fR };
+        const fX = Rs > 0 ? Zs.im / Rs : 1;
+        return { alpha_c_np: loss.alpha_c * fR, R_ac: loss.R_ac * fR, X_ac: loss.R_ac * fX };
     }
 
     // Per-frequency result for the waveguide fundamental. Everything here is analytic in f
@@ -1215,7 +1220,7 @@ export class TriBackend {
         const beta = Math.sqrt(-g2);
         const Z_TE = omega * MU0 / beta;          // = k0·eta0/beta, independent of er
         const Zpv = kappa * Z_TE;
-        const { alpha_c_np, R_ac } = this._wgConductorLoss(mesh, wg, f, beta, Zpv);
+        const { alpha_c_np, R_ac, X_ac } = this._wgConductorLoss(mesh, wg, f, beta, Zpv);
         const alpha_d_np = k0 * k0 * er * tand / (2 * beta);
 
         // Exact per-unit-length equivalent circuit of the mode, normalized to Zpv:
@@ -1224,7 +1229,10 @@ export class TriBackend {
         // It reproduces gamma and Zc exactly, and eps_eff = c0²*L*C = er - (kc/k0)² falls
         // out with kappa cancelling. The R/G split is normalization-dependent, gamma is not.
         const L_external = kappa * MU0;
-        const L_internal = omega > 0 ? Math.min(R_ac / omega, 0.5 * L_external) : 0;
+        // The wall's internal inductance is its surface REACTANCE over omega, not its
+        // resistance: those coincide only while Zs = Rs(1+j), which a rough or plated
+        // wall breaks (Im(Zs)/Re(Zs) reaches ~5 at 1 um rms). Bare walls are unchanged.
+        const L_internal = omega > 0 ? Math.min(X_ac / omega, 0.5 * L_external) : 0;
         const L = L_external + L_internal;
         const C = (eps0 * er - kc * kc / (omega * omega * MU0)) / kappa;
         const G = omega * eps0 * er * tand / kappa;
@@ -1658,19 +1666,27 @@ export class TriBackend {
                 }
                 mqsMesh = sc.mesh;
             }
-            // R(f) anchor cache: the sweep consumes ONLY the scalar R_total from this
-            // solve (L_internal is derived as R/ω below), and R(f) is smooth on the
-            // ln-f axis — so past the first few anchor frequencies, interpolate it the
-            // same way the eigensolve's ε_eff dispersion cache does (PCHIP + leave-one-
-            // out gate) and skip the ~1s block-LU entirely. Keyed to the skin mesh so
-            // a finer rebuild (higher f seen) discards anchors from the coarser mesh.
+            // R(f) and X(f) anchor caches: the sweep consumes only these two scalars
+            // from the solve, and both are smooth on the ln-f axis — so past the first
+            // few anchor frequencies, interpolate them the same way the eigensolve's
+            // ε_eff dispersion cache does (PCHIP + leave-one-out gate) and skip the ~1s
+            // block-LU entirely. Keyed to the skin mesh so a finer rebuild (higher f
+            // seen) discards anchors from the coarser mesh.
+            //
+            // The two caches are written in lockstep so they always hold the same
+            // anchors, but each is gated on its OWN leave-one-out check and both must
+            // pass: a hit on R alone would otherwise force X to be reconstructed from
+            // it, which is exactly the R_ac/ω assumption this path exists to avoid.
             const rTol = this.opts.mqsInterpTol ?? 2e-3;
             const rc = (st.mqsR && st.mqsR.mesh === mqsMesh) ? st.mqsR
                 : (st.mqsR = { mesh: mqsMesh, xs: [], eps: [] });
+            const xc = (st.mqsX && st.mqsX.mesh === mqsMesh) ? st.mqsX
+                : (st.mqsX = { mesh: mqsMesh, xs: [], eps: [] });
             const rInterp = dispersionInterp(rc, f, rTol);
-            if (rInterp !== null && rInterp > 0) {
+            const xInterp = dispersionInterp(xc, f, rTol);
+            if (rInterp !== null && rInterp > 0 && xInterp !== null && xInterp > 0) {
                 R_total = rInterp;
-                L_internal = (omega > 0) ? Math.max(0, Math.min(R_total / omega, 0.5 * L_external)) : 0;
+                L_internal = (omega > 0) ? Math.max(0, Math.min(xInterp / omega, 0.5 * L_external)) : 0;
             } else {
             // Per-face plating ⇒ weight each face's smooth current by its own surface
             // impedance (surfaceZs); otherwise the uniform roughness factor (Rq).
@@ -1687,17 +1703,24 @@ export class TriBackend {
                 mqs = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveSparseMulti, 0, mqsOpts);
             } catch { mqs = null; }
             // Accept MQS only if physically sane.
-            if (mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop) && mqs.L_loop > 0) {
+            if (mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop) && mqs.L_loop > 0
+                && isFinite(mqs.X_total) && mqs.X_total > 0) {
                 R_total = s.is_differential ? mqs.R_total / 2 : mqs.R_total;
-                // Internal (skin) inductance from the closed form L_int = R_ac/ω, NOT the
-                // difference (mqs.L_loop − L_external): that subtracts two large near-equal
-                // numbers (~L_external each, computed on different bases — MQS magnetic
-                // energy vs analytic 1/c²C0) so the small ~1 nH internal part is lost to
-                // noise and clamps to 0 at high f, undershooting eps_eff vs the FDM/static
-                // backends. The skin-regime closed form (Zs=Rs(1+j) ⇒ X_int=R_ac) is well
-                // conditioned and matches the perturbation path below + the FDM backend.
-                L_internal = (omega > 0) ? Math.max(0, Math.min(R_total / omega, 0.5 * L_external)) : 0;
+                // Internal (skin) inductance from the surface REACTANCE X_total, NOT from
+                // the difference (mqs.L_loop − L_external): that subtracts two large
+                // near-equal numbers (~L_external each, computed on different bases — MQS
+                // magnetic energy vs analytic 1/c²C0) so the small ~1 nH internal part is
+                // lost to noise and clamps to 0 at high f, undershooting eps_eff vs the
+                // FDM/static backends. X_total is that same reactance assembled directly
+                // from the |K|²-weighted Im(Zs) instead of by cancellation, so it is well
+                // conditioned AND carries the roughness/plating tilt that the earlier
+                // R_ac/ω form here could not (it holds only while Zs = Rs(1+j), costing a
+                // factor ~5 in the increment at 1 µm rms). Smooth metal has X_total ===
+                // R_total, so bare lines are unchanged.
+                const X_total = s.is_differential ? mqs.X_total / 2 : mqs.X_total;
+                L_internal = (omega > 0) ? Math.max(0, Math.min(X_total / omega, 0.5 * L_external)) : 0;
                 dispersionInsert(rc, f, R_total);
+                dispersionInsert(xc, f, X_total);
             }
             }   // end R-cache miss (exact MQS solve)
         }
@@ -1784,27 +1807,38 @@ export class TriBackend {
             // The SIBC estimator self-normalizes by the eigenmode's own Poynting
             // power, so it needs no correction.
             const driveScale = s.is_differential ? 0.5 : 1;
-            let R_ac = 0;
+            // Both halves of the surface impedance, out of one loss integral per group.
+            // The perturbation integral is ∮|K|²dl/(2P) evaluated at the reference Rs and
+            // is linear in the surface impedance, so the same integral scaled by
+            // Re(Zs)/Rs is the resistance and scaled by Im(Zs)/Rs is the surface
+            // reactance. Carrying the second scaling costs nothing, which is
+            // why the reactance is accumulated here rather than reconstructed
+            // from R_ac afterwards (see L_internal below).
+            let R_ac = 0, X_ac = 0;
             for (const g of groups) {
-                const fRg = RsRef > 0 ? g.Zs.re / RsRef : 1;
                 const lossS = staticConductorLoss(cr.rects, f, sigmaRef, mesh, fm, phiEps,
                     Z0, eps_eff_static, eps_d, g.mask);
-                let racg = lossS.R_ac * driveScale * fRg;
+                let baseg = lossS.R_ac * driveScale;   // driveScale: static estimator only
                 if (haveFW && wFW > 0) {
                     const lossW = solveConductorLoss(cr.rects, f, sigmaRef, mesh, fm, fw.vRe, fw.vIm,
                         fw.g2Re, fw.g2Im, Pfw, Z0, mesh.epsMap, g.mask, projH, this.ctx.wasmSolver);
-                    racg = (1 - wFW) * racg + wFW * (lossW.R_ac * fRg);
+                    baseg = (1 - wFW) * baseg + wFW * lossW.R_ac;
                 }
-                R_ac += racg;
+                R_ac += baseg * (RsRef > 0 ? g.Zs.re / RsRef : 1);
+                X_ac += baseg * (RsRef > 0 ? g.Zs.im / RsRef : 1);
             }
             R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
-            // Internal (skin) inductance: in the skin regime Zs = Rs(1+j), so the
-            // internal reactance equals the AC resistance → L_int ≈ R_ac/ω. Neither the
-            // static-field nor the SIBC routine returns a reliable L_int across the
-            // transition; this closed form keeps eps_eff (= c²·L·C) and Re(Zc) consistent
-            // with the MQS/FDM backends, which include the internal inductance. The √f
-            // rolloff (R_ac∝√f) makes it vanish at high f and the cap bounds it near DC.
-            L_internal = (omega > 0) ? Math.max(0, Math.min(R_ac / omega, 0.5 * L_external)) : 0;
+            // Internal (skin) inductance is the surface reactance over ω.
+            // Smooth metal in the skin regime has Zs = Rs(1+j), which makes
+            // that exactly R_ac/ω.  Roughness and plating tilt Zs off 45°, and
+            // only X_ac follows: at 2 µm rms Im(Zs)/Re(Zs) reaches ~5.5, so
+            // R_ac/ω recovered under a fifth of the true increment and the line
+            // came out measurably fast.  Neither the static-field nor the SIBC
+            // routine returns a usable L_int of its own across the skin
+            // transition, which is why it is rebuilt here at all. The cap
+            // bounds it near dc, below the skin regime where no surface model
+            // holds.
+            L_internal = (omega > 0) ? Math.max(0, Math.min(X_ac / omega, 0.5 * L_external)) : 0;
         }
 
         // assemble RLGC + Zc
