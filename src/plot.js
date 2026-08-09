@@ -1,5 +1,6 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
-import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB } from './sparameters.js';
+import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB,
+         isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
 import { isComplement, svgRingPath } from './shapes.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
@@ -58,11 +59,42 @@ function contourScaledB(min, max, n) {
 // view and the field views so conductors look identical and the field views don't show heatmap/
 // contour bleed inside the PEC (the resampled field is identically zero in the conductor interior;
 // this just masks the zsmooth/contour interpolation that spills the steep boundary field inward).
+// Closed rectangular loop as an SVG path, in mm. Two of these in one path with the evenodd
+// fill rule give a rectangular ring, the frame drawn around an enclosed medium's domain.
+function rectLoopPath(x0, y0, x1, y1) {
+    const m = (v) => (v * 1000);
+    return `M ${m(x0)},${m(y0)} L ${m(x1)},${m(y0)} L ${m(x1)},${m(y1)} L ${m(x0)},${m(y1)} Z`;
+}
+
 function conductorFillShapes(solver, maxY) {
     const out = [];
     const FILL = 'rgba(217, 119, 6, 1.0)';
     const EDGE = { color: 'rgba(0, 0, 0, 0.5)', width: 1 };
     const GOLD = { color: 'rgba(255, 215, 0, 1.0)', width: 3 };
+
+    // Enclosing metal walls of a source-free medium (rectangular waveguide). They are not
+    // conductors in `solver.conductors`, physically they live in the boundary conditions,
+    // with no meshed thickness, so without this the geometry view would render a bare
+    // rectangle of dielectric with nothing to show it is a waveguide. Drawn as a ring
+    // (outer loop + inner loop, evenodd) exactly like the coax shield.
+    const w = solver.enclosure_walls;
+    if (w) {
+        const t = w.thickness;
+        out.push({
+            type: 'path',
+            path: rectLoopPath(w.x_min - t, w.y_min - t, w.x_max + t, w.y_max + t) + ' ' +
+                  rectLoopPath(w.x_min, w.y_min, w.x_max, w.y_max),
+            fillrule: 'evenodd', fillcolor: FILL, line: EDGE, layer: 'above',
+        });
+        // Plating covers the whole inner surface (one continuous wall, no separate faces),
+        // so the indicator is an outline of that surface rather than per-face lines.
+        if (solver.plating) {
+            out.push({
+                type: 'path', path: rectLoopPath(w.x_min, w.y_min, w.x_max, w.y_max),
+                fillcolor: 'rgba(0,0,0,0)', line: GOLD, layer: 'above',
+            });
+        }
+    }
     for (const cond of (solver.conductors || [])) {
         const sh = cond.shape;
         if (sh) {
@@ -163,7 +195,20 @@ function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, lay
 function computeGeometryView(solver, maxY, fraction = SIGNAL_CONDUCTOR_VIEW_FRACTION) {
     const signal = solver.conductors.filter(c => c.is_signal);
     const grounds = solver.conductors.filter(c => !c.is_signal);
-    if (!signal.length) return null;
+    if (!signal.length) {
+        // A source-free enclosed medium (rectangular waveguide) has no signal cluster to
+        // centre on, the structure is the domain. Frame the whole cross-section walls
+        // included with a margin. Without this the caller falls back to Plotly autoscale,
+        // which ignores shapes and so leaves the guide off-centre in a default range.
+        const w = solver.enclosure_walls;
+        if (!w) return null;
+        const outer = w.thickness;
+        const pad = 0.10 * Math.max(w.x_max - w.x_min, w.y_max - w.y_min);
+        return {
+            xRange: [(w.x_min - outer - pad) * 1000, (w.x_max + outer + pad) * 1000],
+            yRange: [(w.y_min - outer - pad) * 1000, (w.y_max + outer + pad) * 1000],
+        };
+    }
     const xl = Math.min(...signal.map(c => c.x_min));
     const xr = Math.max(...signal.map(c => c.x_max));
     const center = (xl + xr) / 2;
@@ -651,11 +696,18 @@ function draw(resetZoom = false) {
                     ];
 
                     if (solver.solution_valid) {
-                        buttons.push({
-                            label: "Potential",
-                            method: "skip",
-                            args: []
-                        });
+                        // A source-free medium (rectangular waveguide) has no static
+                        // potential to show, its field is the mode field, so the
+                        // Potential button is omitted rather than left to render a blank
+                        // heatmap. The click handler keys off the label, not the index,
+                        // so dropping a button here cannot mis-route the remaining ones.
+                        if (solver.has_potential !== false) {
+                            buttons.push({
+                                label: "Potential",
+                                method: "skip",
+                                args: []
+                            });
+                        }
                         buttons.push({
                             label: "|E| Field",
                             method: "skip",
@@ -727,14 +779,13 @@ function draw(resetZoom = false) {
             // Second menu (x=0.25): Mode selector (Odd/Even) - only for differential
 
             if (event.menu.x < 0.2) {
-                // View selector clicked
-                if (event.menu.active === 0) {
-                    setCurrentView("geometry");
-                } else if (event.menu.active === 1) {
-                    setCurrentView("potential");
-                } else if (event.menu.active === 2) {
-                    setCurrentView("efield");
-                }
+                // View selector clicked. Key off the LABEL, not the index: the Potential
+                // button is absent for a source-free medium (see the button list above),
+                // so index 1 is not always "potential".
+                const btn = event.menu.buttons[event.menu.active];
+                const label = btn && btn.label;
+                setCurrentView(label === "Geometry" ? "geometry"
+                    : label === "Potential" ? "potential" : "efield");
             } else {
                 // Mode selector clicked (differential lines only)
                 const plotModeEl = document.getElementById('plot-mode');
@@ -970,6 +1021,10 @@ function drawResultsPlot() {
 }
 
 function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) {
+    // A self-referenced medium (waveguide) drops its below-cutoff points and normalizes
+    // each remaining one to its own modal impedance; every other medium passes through.
+    sweepResults = usableSweepPoints(sweepResults);
+    if (!sweepResults.length) return [];
     const resultsAreDifferential = sweepResults[0].result.modes.length === 2;
     const freqs = sweepResults.map(r => r.freq / 1e9);
     const lineMode = freqs.length === 1 ? 'markers' : 'lines+markers';
@@ -982,7 +1037,7 @@ function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) 
         const S21_data = [];
 
         for (const { freq, result } of sweepResults) {
-            const sp = computeSParamsSingleEnded(freq, result.modes[0].RLGC, length, Z_ref);
+            const sp = sparamsForPoint(freq, result, length, Z_ref);
             if (plotMode === 'magnitude') {
                 S11_data.push(sParamTodB(sp.S11));
                 S21_data.push(sParamTodB(sp.S21));
@@ -1077,7 +1132,10 @@ function drawSParamPlot() {
     const Z_ref = parseFloat(document.getElementById('sparam-z-ref').value);
     const useMixedMode = document.getElementById('sparam-diff').checked;
 
-    if (isNaN(length) || length <= 0 || isNaN(Z_ref) || Z_ref <= 0) {
+    // A self-referenced medium ignores the reference-impedance box entirely (the UI hides
+    // it and shows "Z0" instead), so it must not gate on parsing that field.
+    const selfRef = isSelfReferenced(frequencySweepResults);
+    if (isNaN(length) || length <= 0 || (!selfRef && (isNaN(Z_ref) || Z_ref <= 0))) {
         return;
     }
 

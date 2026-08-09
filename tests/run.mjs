@@ -5,7 +5,8 @@
 //
 // Tiers:
 //   fast — run before every commit (~1.5 min): geometry construction, eigensolver
-//          pencil, enclosed-box analytic modes, closed-form parallel-plate and coax.
+//          pencil, enclosed-box analytic modes, closed-form parallel-plate, coax and
+//          rectangular waveguide.
 //   slow — full solver validation: tri-backend correctness suite, mode viewer,
 //          per-side plating, plating behavior invariants, a pinned-seed
 //          QS-vs-fullwave fuzzer smoke, and the reference suite on BOTH backends
@@ -21,6 +22,7 @@ const TIERS = {
         'src/tri_solver/tests/box_modes_test.mjs',
         'tests/test_parallel_plate.js',
         'tests/test_coax.js',
+        'tests/test_rect_waveguide.js',
         'tests/test_djordjevic_sarkar.js',
         'tests/test_meshability.js',
         'tests/test_causal_effect.js',
@@ -56,6 +58,7 @@ const TIERS = {
         'src/tri_solver/tests/e2e.mjs',
         'src/tri_solver/tests/e2e_occ.mjs',
         'src/tri_solver/tests/e2e_modes.mjs',
+        'src/tri_solver/tests/e2e_waveguide.mjs',
     ],
     fuzz: [
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['40', '1', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [N=40 seed=1]' },

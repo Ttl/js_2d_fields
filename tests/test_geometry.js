@@ -15,6 +15,7 @@
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
 import { CoaxSolver } from '../src/coax.js';
+import { RectWaveguideSolver } from '../src/rect_waveguide.js';
 import { _clipDomain } from '../src/tri_solver/occ_to_mesh.js';
 import { polyRadiusForArea, circlePolygon, shapePoly, shapeArea, shapeContains,
          shapeSegments, shapeSignedDist, isComplement } from '../src/shapes.js';
@@ -325,6 +326,82 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
     rejects({ dielectric_diameter: 1.01e-3 }, 'a dielectric annulus too thin to mesh');
     rejects({ inner_diameter: -1e-3 }, 'a negative diameter');
     rejects({ epsilon_r: 0.5 }, 'epsilon_r below 1');
+    rejects({ mesh_backend: 'rectilinear' }, 'the quasi-static backend');
+}
+
+// ---------- rectangular waveguide ----------
+// The first SOURCE-FREE medium: the walls are boundary conditions, not meshed bodies, so
+// the conductor list is empty. That is exactly what validateTriMesh's enclosed-domain
+// exemption keys on, so the _clipDomain assertion below is load-bearing.
+{
+    const A = 22.86e-3, B = 10.16e-3;                 // WR-90
+    const s = new RectWaveguideSolver({ width: A, height: B, sigma_cond: 5.8e7 });
+
+    check('waveguide: no conductors — the walls are boundary conditions',
+        s.conductors.length === 0);
+    check('waveguide: one homogeneous dielectric filling the guide',
+        s.dielectrics.length === 1 && near(s.dielectrics[0].x_min, -A / 2) &&
+        near(s.dielectrics[0].x_max, A / 2) && near(s.dielectrics[0].y_min, 0) &&
+        near(s.dielectrics[0].y_max, B));
+    check('waveguide: fully enclosed — every wall is gnd', s.boundaries.every(v => v === 'gnd'));
+    check('waveguide: single-ended', s.is_differential === false);
+    check('waveguide: domain box IS the guide interior',
+        near(s.domain_width, A) && near(s.domain_height, B) && s.t_gnd === 0);
+    check('waveguide: backend dispatch flags',
+        s.mode_type === 'waveguide' && s.tri_symmetry === false &&
+        s.has_potential === false && s.allow_dc === false);
+
+    // kc is purely geometric — no er — which is what lets beta(f) be propagated
+    // analytically from a single eigensolve.
+    check('waveguide: kc = pi/max(a,b)', near(s.kc_analytic, Math.PI / A));
+    check('waveguide: WR-90 cutoff is 6.557 GHz', near(s.fc / 1e9, 6.5571, 1e-3), (s.fc / 1e9).toFixed(4));
+    check('waveguide: WR-90 second cutoff is 13.114 GHz', near(s.fc2 / 1e9, 13.1143, 1e-3),
+        (s.fc2 / 1e9).toFixed(4));
+    check('waveguide: the published 8.2-12.4 GHz band is single-mode',
+        s.fc < 8.2e9 && s.fc2 > 12.4e9);
+
+    // Dielectric fill lowers both cutoffs by sqrt(er) and leaves kc alone.
+    const filled = new RectWaveguideSolver({ width: A, height: B, epsilon_r: 2.1 });
+    check('waveguide: er scales fc by 1/sqrt(er), kc unchanged',
+        near(filled.kc_analytic, s.kc_analytic) &&
+        near(filled.fc * Math.sqrt(2.1), s.fc, 1e-3));
+
+    // b > a: the fundamental is TE01, so max(a,b) must pick the HEIGHT.
+    const tall = new RectWaveguideSolver({ width: B, height: A });
+    check('waveguide: b > a puts the fundamental at pi/b (TE01)',
+        near(tall.kc_analytic, Math.PI / A) && near(tall.fc, s.fc));
+
+    // One continuous wall surface: no faces to select between.
+    const plated = new RectWaveguideSolver({ width: A, height: B,
+        plating: { sigma: 6.3e7, thickness: 4e-6, rq: 0, top: true, sides: false, bottom: false } });
+    check('waveguide: plating is normalized to all-around',
+        plated.plating.all === true && plated.plating.top && plated.plating.sides &&
+        plated.plating.bottom && plated.plating.thick_corners === false);
+    check('waveguide: no plating when none requested', s.plating === null);
+
+    // The enclosed-domain exemption in validateTriMesh requires all four wallPEC true and
+    // an untouched domain — with no conductors there is no full-span slab to absorb.
+    const cl = _clipDomain({ x_min: -A / 2, x_max: A / 2, y_min: 0, y_max: B },
+                           s.conductors, s.boundaries, A * 1e-9);
+    check('waveguide: _clipDomain sets all four wallPEC and leaves the domain untouched',
+        cl.wallPEC.left && cl.wallPEC.right && cl.wallPEC.top && cl.wallPEC.bottom &&
+        near(cl.X0, -A / 2) && near(cl.X1, A / 2) && near(cl.Y0, 0) && near(cl.Y1, B));
+
+    // Warnings, not throws: an out-of-band frequency is legal, just annotated.
+    check('waveguide: no warnings in band', s.waveguideWarnings(10e9).length === 0);
+    check('waveguide: warns below cutoff', s.waveguideWarnings(5e9).length === 1);
+    check('waveguide: warns when over-moded', s.waveguideWarnings(15e9).length === 1);
+
+    const rejects = (o, label) => {
+        try { new RectWaveguideSolver({ width: A, height: B, ...o }); }
+        catch { check(`waveguide: rejects ${label}`, true); return; }
+        check(`waveguide: rejects ${label}`, false);
+    };
+    rejects({ width: -1e-3 }, 'a negative width');
+    rejects({ height: 0 }, 'a zero height');
+    rejects({ epsilon_r: 0.5 }, 'epsilon_r below 1');
+    rejects({ tan_delta: -1e-3 }, 'a negative loss tangent');
+    rejects({ height: A / 200 }, 'an aspect ratio too extreme to mesh');
     rejects({ mesh_backend: 'rectilinear' }, 'the quasi-static backend');
 }
 

@@ -27,7 +27,7 @@ import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh, _clipDomain } 
 import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
-         staticToEdgeDofs, assembleTriFEM, assembleTriFEMDecomposed,
+         staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
          femFromDecomposition } from './tri_fem.js';
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
          projectH, computePoyntingFromProjectedH } from './conductor_loss.js';
@@ -475,6 +475,108 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     };
 }
 
+// Rectangular waveguide
+//
+// A hollow guide has no driven conductor, so there is no static solve to seed the Arnoldi
+// from, no eps_eff_static to centre the shift on, and no quasi-TEM mode to overlap
+// against. What replaces all three is the analytic cutoff wavenumber: kc is purely
+// geometric, so the target eigenvalue γ² = kc² - k0²*eps_r is known before the solve. A
+// shift placed exactly there converges in a handful of Arnoldi steps and cannot mode-hop.
+
+// Largest real permittivity on the mesh.
+function maxEpsRe(epsMap) {
+    let m = 1;
+    for (let t = 0; t < epsMap.length; t++) if (epsMap[t].re > m) m = epsMap[t].re;
+    return m;
+}
+
+// Loss tangent of the (homogeneous) fill, lossMap carries eps_r*tand per triangle.
+function wgFillTand(mesh) {
+    let t = 0;
+    for (let i = 0; i < mesh.nTris; i++) {
+        const e = mesh.epsMap[i].re, l = mesh.lossMap[i].re;
+        if (e > 0 && l / e > t) t = l / e;
+    }
+    return t;
+}
+
+// Guide dimensions and the Zpv/Z_TE ratio, taken from the meshed domain so they can never
+// disagree with what was actually solved.
+//
+// κ = Zpv/Z_TE = 2*(extent along E)/(extent along the sinusoid) = 2*min/max, for either
+// orientation: TE10 has E along y over b and varies along x over a (κ = 2b/a). TE01 has E
+// along x over a and varies along y over b (κ = 2a/b).
+function wgGeom(condRect) {
+    const a = condRect.xmax_domain - condRect.xmin_domain;
+    const b = condRect.ymax_domain - condRect.ymin_domain;
+    return { a, b, kappa: 2 * Math.min(a, b) / Math.max(a, b) };
+}
+
+// Analytic fundamental-mode field of the meshed box, for the Arnoldi seed.
+//   broad wall along x -> TE10, E = ŷ·sin(π(x−X0)/a)
+//   broad wall along y -> TE01, E = x̂·sin(π(y−Y0)/b)
+function wgFundamentalEfun(condRect) {
+    const X0 = condRect.xmin_domain, Y0 = condRect.ymin_domain;
+    const { a, b } = wgGeom(condRect);
+    if (a >= b) return (x) => [0, Math.sin(Math.PI * (x - X0) / a)];
+    return (x, y) => [Math.sin(Math.PI * (y - Y0) / b), 0];
+}
+
+// Fundamental guided mode of an enclosed PEC cross-section at frequency f.
+//
+// Unlike fullwaveMode the pick is not an overlap test but an ordering: γ² = kc² - k0²*eps_r
+// is monotone increasing in kc, so the smallest γ² is always the lower cutoff, the
+// fundamental at any frequency, including above the second cutoff where several modes
+// propagate. That is the whole of "solve only the lowest mode", with no per-frequency
+// special case. (solveModes sorts on the same key.)
+//
+// Returns { kc, vRe, vIm, g2Re, g2Im } or null when nothing physical converged.
+function waveguideEigen(ctx, mesh, fm, abc, condRect, epsMap, f, seed, kcAnalytic, cache = null) {
+    const k2 = (2 * Math.PI * f / c0) ** 2;
+    const erMax = maxEpsRe(epsMap);
+    // Same affine-in-k² decomposition + identity-validated cache as fullwaveMode.
+    let dec;
+    const abcKey = JSON.stringify(abc);
+    if (cache && cache.mesh === mesh && cache.fm === fm && cache.epsMap === epsMap &&
+        cache.abcKey === abcKey) {
+        dec = cache.dec;
+    } else {
+        dec = assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect);
+        if (cache) {
+            cache.mesh = mesh; cache.fm = fm; cache.epsMap = epsMap;
+            cache.abcKey = abcKey; cache.dec = dec;
+        }
+    }
+    const fem = femFromDecomposition(dec, k2);
+    if (!fem) return null;
+    const N = fem.N;
+    if (eigenSolveBytes(N, fem.csrA.colIdx.length) > MAX_SOLVE_BYTES)
+        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem.csrA.colIdx.length) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the guide dimensions.`);
+    // The shift IS the analytic target eigenvalue for a homogeneous fill.
+    const sigma = kcAnalytic * kcAnalytic - k2 * erMax;
+    const nev = Math.max(1, Math.min(6, N - 1));
+    const ncv = Math.min(2 * nev + 1, N - 1);
+    const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [sigma, 0], nev, ncv, seed || null);
+    if (!res || res.nconv <= 0) return null;
+    // Physicality gates, same thresholds solveModes uses: drop the discrete null space and
+    // anything faster than light in the densest medium.
+    const nullThresh = k2 * 1e-6;
+    let best = -1, bestG2 = Infinity;
+    for (let i = 0; i < res.nconv; i++) {
+        const g2 = res.evalsRe[i];
+        if (Math.abs(g2) < nullThresh) continue;
+        if (g2 < -k2 * erMax * 1.01) continue;
+        if (g2 < bestG2) { bestG2 = g2; best = i; }
+    }
+    if (best < 0) return null;
+    return {
+        kc: Math.sqrt(Math.max(bestG2 + k2 * erMax, 0)),
+        vRe: res.evecsRe.slice(best * N, (best + 1) * N),
+        vIm: res.evecsIm.slice(best * N, (best + 1) * N),
+        g2Re: bestG2, g2Im: res.evalsIm[best],
+    };
+}
+
 // ---- Dispersion cache (eps_d(f) interpolation between exact eigensolve anchors) ----
 // The full-wave eps_d(f) is a smooth, slowly-varying scalar (quasi-TEM dispersion).
 // On the MQS loss path the eigensolve contributes ONLY this scalar, so sweep points
@@ -605,6 +707,10 @@ export class TriBackend {
         this.fm = null;
         this.domain = null;
         this._static = null;   // per-mode cached static solve + resampled fields
+        // Source-free waveguide medium: no driven conductor, so no static solve exists.
+        // Every stage that would normally consume _prepareStatic takes a waveguide branch.
+        this._isWG = !!(solver && solver.mode_type === 'waveguide');
+        this._wg = null;       // cached fundamental eigenmode (see _prepareWaveguide)
     }
 
     get modeNames() { return this.solver.is_differential ? ['odd', 'even'] : ['single']; }
@@ -646,7 +752,14 @@ export class TriBackend {
         const tolX = s.domain_width * 1e-6;
         const diffStraddles = s.is_differential && s.conductors.some(
             c => c.is_signal && c.x_min < -tolX && c.x_max > tolX);
+        // A medium may also veto the half domain outright. A rectangular waveguide is
+        // mirror-symmetric and its fundamental has a magnetic wall at x=0, so the half
+        // solve would be valid, but resampleModeField has no parity/mirroring support the
+        // way resampleStatic does, so the plotted mode field would be blank for x < 0.
+        // (Routed through the solver, not tri_opts: app_solver overwrites tri_opts wholesale
+        // after construction.)
         this.symmetry = (this.opts.symmetry ?? true) && !diffStraddles &&
+            s.tri_symmetry !== false &&
             isXSymmetric(s.conductors, s.dielectrics, s.domain_width);
 
         const tAbs = Math.max(Math.abs(s.t ?? 35e-6), 1e-9);
@@ -788,7 +901,13 @@ export class TriBackend {
             let metric = null;
             const conv = [];   // convergence quantities (eps + loss surface integral per mode)
             const energy = []; // total field energy per mode (for the reported energy error)
-            for (const rm of refModes) {
+            // Source-free waveguide: there is no static solve, so the whole per-mode body
+            // below is replaced, see _wgRefinePass.
+            if (this._isWG) {
+                const p = this._wgRefinePass(mesh);
+                metric = p.metric; conv.push(...p.conv); energy.push(...p.energy);
+            }
+            for (const rm of (this._isWG ? [] : refModes)) {
                 const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
                 const pot = drivePotentials(this.condRect, rm, this.symmetry);
                 const fm = buildTriFreedomMap(mesh, this.condRect, abc);
@@ -886,8 +1005,240 @@ export class TriBackend {
         const meshErrors = validateTriMesh(mesh, this.condRect);
         if (meshErrors.length)
             throw new Error('Full-wave mesh validation failed:\n' + meshErrors.map(e => ' - ' + e).join('\n'));
-        this._prepareStatic();
+        if (this._isWG) this._prepareWaveguide(); else this._prepareStatic();
         return mesh;
+    }
+
+    // Rectangular waveguide path
+    //
+    // Reference frequency for the one eigensolve this medium runs: 1.5x cutoff.
+    //
+    // kc² = γ² + k0²·εr is a cancellation of two large numbers, so the relative error in
+    // γ² is amplified by (f/fc)² into kc², x100 at 10*fc, only x2.25 at 1.5*fc. Pinning
+    // it to a multiple of fc rather than the user's frequency also makes the refined mesh
+    // independent of the sweep range.
+    wgRefFreq() { return 1.5 * this.solver.fc; }
+
+    // One adaptive-refinement pass for the waveguide. Replaces the static energy /
+    // quasi-TEM eps_eff pair with the two quantities that actually have an analytic answer
+    // here, and refines on the projected-Ht ZZ metric alone (there is no static field to
+    // blend in, and the walls are where the loss integral lives anyway).
+    _wgRefinePass(mesh) {
+        const s = this.solver;
+        const f = this.wgRefFreq();
+        const { abc } = modeConfig('single', false, this.symmetry, this.condRect.wallPEC);
+        const fm = buildTriFreedomMap(mesh, this.condRect, abc);
+        const seed = analyticSeedDofs(mesh, fm, wgFundamentalEfun(this.condRect));
+        let wg = null;
+        try {
+            wg = waveguideEigen(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, f,
+                seed, s.kc_analytic, {});
+        } catch { wg = null; }
+        // Keep the convergence vector a consistent length across passes when a pass fails.
+        if (!wg) return { metric: null, conv: [s.kc_analytic, 0], energy: [s.kc_analytic] };
+
+        // Converge on kc and on alpha_c. The two quantities with an exact analytic answer
+        // here, both evaluated at the same fRef every pass so this is a relative test.
+        //
+        // kc is the binding one. alpha_c is a pure SURFACE integral, which is what makes it
+        // converge last on every OTHER medium (see CoaxSolver._hFine), but
+        // a waveguide has straight walls and a smooth sinusoidal mode, no
+        // corner singularities or polygonized curve, so measured it is
+        // converged to five figures on the coarsest usable mesh while kc is
+        // still moving. It stays in the vector anyway: it is cheap next to the
+        // eigensolve, and it is the only thing that would notice a mesh
+        // resolving the bulk field but not the wall currents.
+        const beta = Math.sqrt(Math.max(-wg.g2Re, 0));
+        const { kappa } = wgGeom(this.condRect);
+        const Zpv = beta > 0 ? kappa * 2 * Math.PI * f * MU0 / beta : 1;
+        const wgState = { fm, vRe: wg.vRe, vIm: wg.vIm, projCache: {},
+            lossMask: buildLossEdges(mesh, fm, this.condRect) };
+        const conv = [wg.kc, this._wgConductorLoss(mesh, wgState, f, beta, Zpv).alpha_c_np];
+
+        let zz = null;
+        try {
+            zz = computeHtZZMetric(mesh, fm, wg.vRe, wg.vIm, wg.g2Re, wg.g2Im, f,
+                this.condRect.rects, null, this.ctx.wasmSolver);
+        } catch { zz = null; }
+        let metric = null;
+        if (zz) {
+            let mZ = 0;
+            for (let i = 0; i < zz.length; i++) if (zz[i] > mZ) mZ = zz[i];
+            metric = new Float64Array(zz.length);
+            if (mZ > 0) for (let i = 0; i < zz.length; i++) metric[i] = zz[i] / mZ;
+        }
+        return { metric, conv, energy: [wg.kc] };
+    }
+
+    // Waveguide substitute for _prepareStatic. What the rest of the backend actually needs
+    // from that method is a freedom map, a resampled field for plotting, and something to
+    // centre the eigen shift on; all three come from ONE eigensolve of the fundamental.
+    //
+    // The eigenvector is then reused at every sweep frequency, exactly rather than
+    // approximately: kc is geometric, and projectH builds Ht from (Et, ∇Ez, γ) with
+    // Ez ≡ 0 for a TE mode, so the only frequency dependence is through γ and ω, both
+    // passed as arguments. The eigenvector's arbitrary scale cancels in h2dl/P.
+    _prepareWaveguide() {
+        const s = this.solver, mesh = this.mesh;
+        const { abc } = modeConfig('single', false, this.symmetry, this.condRect.wallPEC);
+        const fm = buildTriFreedomMap(mesh, this.condRect, abc);
+        const seed = analyticSeedDofs(mesh, fm, wgFundamentalEfun(this.condRect));
+        const wg = waveguideEigen(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap,
+            this.wgRefFreq(), seed, s.kc_analytic, {});
+        if (!wg) throw new Error(
+            'Waveguide eigensolve failed: no physical mode converged at the reference ' +
+            'frequency. Check the guide dimensions and the Max Nodes budget.');
+
+        // Sanity gate against the closed form. Outside it the mesh, the boundary conditions
+        // or the pick went wrong, and the analytic kc is the honest fallback, unlike the
+        // quasi-static eps the quasi-TEM path falls back to, which is meaningless here.
+        const gated = Math.abs(wg.kc / s.kc_analytic - 1) > 0.02;
+        const kc = gated ? s.kc_analytic : wg.kc;
+
+        this._staticGrid = buildGridFromMesh(mesh, this.domain, { resolution: this.opts.resolution });
+        this._plotRects = [];   // no conductors to clamp the resampler's E baseline against
+        const fields = resampleModeField(mesh, fm, wg.vRe, wg.vIm, this.domain,
+            { resolution: this.opts.resolution, grid: this._staticGrid });
+        this._wg = { fm, abc, seed, kc, kcRaw: wg.kc, gated,
+            vRe: wg.vRe, vIm: wg.vIm, g2Re: wg.g2Re, g2Im: wg.g2Im,
+            fields, projCache: {}, lossMask: buildLossEdges(mesh, fm, this.condRect) };
+        // solveModes and solveAt's plotting writeback both index _static by mode name;
+        // populating it here keeps them branch-free. modeNames is ['single'] (a waveguide
+        // is never differential), and `fields` is the SAME object as _wg.fields.
+        this._static = { single: { fm, abc, kC: 2, phiEps: null, C0: null, W_loss: null,
+            eps_eff_static: null, Z_static: null, fields } };
+    }
+
+    // Conductor loss of a waveguide mode at f. Returns { alpha_c_np, R_ac }.
+    //
+    // solveConductorLoss needs NO waveguide special-casing: with an empty rect list
+    // signal_area is 0, so R_dc = 0, R_combined = R_ac, and alpha_c = R_ac/(2·Z0) is
+    // exactly the Z0-independent alpha_c_ac = Rs*h2dl/(4*P), the Z0 passed in cancels.
+    // Passing Zpv makes the R_ac it returns the series resistance this medium's equivalent
+    // circuit wants, so one call yields both numbers.
+    //
+    // Roughness and plating are applied HERE rather than through buildSurfaceGroups: that
+    // path resolves a surface impedance per (rect, face), and a waveguide has no rects at
+    // all, so every wall edge would silently fall through to bare metal. The wall is ONE
+    // continuous surface, so a single scalar Zs.re/Rs scaling is exact, the same
+    // convention the per-face groups use on the quasi-TEM path.
+    _wgConductorLoss(mesh, wg, f, beta, Zpv) {
+        const s = this.solver;
+        const sigma = s.sigma_cond ?? 5.8e7;
+        const omega = 2 * Math.PI * f;
+        if (!(beta > 0)) return { alpha_c_np: 0, R_ac: 0 };
+        let projH, P;
+        try {
+            projH = projectH(mesh, wg.fm, wg.vRe, wg.vIm, { re: 0, im: beta }, f,
+                this.ctx.wasmSolver, wg.projCache);
+            P = Math.abs(computePoyntingFromProjectedH(mesh, wg.fm, wg.vRe, wg.vIm,
+                projH.htRe, projH.htIm, omega * MU0, projH.hDofs));
+        } catch { return { alpha_c_np: 0, R_ac: 0 }; }
+        if (!(P > 1e-30)) return { alpha_c_np: 0, R_ac: 0 };
+        const loss = solveConductorLoss(this.condRect.rects, f, sigma, mesh, wg.fm,
+            wg.vRe, wg.vIm, -beta * beta, 0, P, Zpv, mesh.epsMap, wg.lossMask,
+            projH, this.ctx.wasmSolver);
+        // Surface finish: smooth-metal Rs is what solveConductorLoss assumed.
+        const delta = Math.sqrt(2 / (omega * MU0 * sigma));
+        const Rs = 1 / (sigma * delta);
+        const pl = s.plating;
+        const Zs = (pl && pl.sigma > 0)
+            ? calculate_Zrough_layered(f, sigma, pl.rq ?? s.rq ?? 0, pl.sigma, pl.thickness ?? 0)
+            : calculate_Zrough(f, sigma, s.rq ?? 0);
+        const fR = Rs > 0 ? Zs.re / Rs : 1;
+        return { alpha_c_np: loss.alpha_c * fR, R_ac: loss.R_ac * fR };
+    }
+
+    // Per-frequency result for the waveguide fundamental. Everything here is analytic in f
+    // on top of the single cached eigensolve: kc is geometric, so beta, the impedances and
+    // alpha_d follow in closed form, and alpha_c reuses the cached eigenvector.
+    //
+    // The reported impedance is the POWER-VOLTAGE definition Zpv = kappa*Z_TE, which for
+    // TE10 follows exactly from V = E0*b and P = E0²ab/(4*Z_TE). Waveguide impedance is not
+    // unique, the choice is a normalization, and every normalization-independent quantity
+    // here (gamma, eps_eff, alpha) is unaffected by it.
+    _waveguideModeAtFreq(f) {
+        const s = this.solver, mesh = this.mesh, wg = this._wg;
+        const kc = wg.kc;
+        const omega = 2 * Math.PI * f;
+        const k0 = omega / c0;
+        // Read the fill from the MESH so causal materials are tracked automatically.
+        const er = maxEpsRe(mesh.epsMap);
+        const tand = wgFillTand(mesh);
+        const { kappa } = wgGeom(this.condRect);
+        const fc = c0 * kc / (2 * Math.PI * Math.sqrt(er));
+        const fc2 = s.fc2;
+        const warn = (type, message) => {
+            if (this._modeWarnings && !this._modeWarnings.some(w => w.type === type))
+                this._modeWarnings.push({ type, mode: 'single', freq: f, message });
+        };
+        if (wg.gated) {
+            warn('wg-kc-gate',
+                `Waveguide cutoff from the field solve (${(wg.kcRaw / (2 * Math.PI) * c0 / 1e9).toFixed(3)} GHz) ` +
+                `disagrees with the closed form by more than 2%, the mesh is too coarse. ` +
+                `Falling back to the analytic cutoff. Increase Max Nodes.`);
+        }
+        if (fc2 && f >= fc2) {
+            warn('wg-overmoded',
+                `${(f / 1e9).toFixed(3)} GHz is at or above the ${(fc2 / 1e9).toFixed(3)} GHz second ` +
+                `cutoff, the guide is over-moded. Only the fundamental mode is reported. ` +
+                `Use the Modes tab to inspect the higher-order modes.`);
+        }
+
+        const g2 = kc * kc - k0 * k0 * er;
+        if (g2 >= 0) {
+            // Below cutoff. Only the attenuation is meaningful. Everything else is reported
+            // as NaN so the Results traces break cleanly at cutoff instead of autoscaling
+            // around the (correct, but large and negative) evanescent shunt capacitance.
+            warn('wg-cutoff',
+                `${(f / 1e9).toFixed(3)} GHz is below the ${(fc / 1e9).toFixed(3)} GHz cutoff. ` +
+                `The mode is evanescent, so only the attenuation is reported.`);
+            return {
+                mode: 'single', Z0: NaN, eps_eff: NaN, eps_eff_mode: NaN, C: NaN, C0: NaN,
+                RLGC: { R: NaN, L: NaN, G: NaN, C: NaN },
+                Zc: new Complex(NaN, NaN),
+                alpha_c: NaN, alpha_d: NaN, alpha_total: NP_TO_DB * Math.sqrt(g2),
+                L_internal: NaN, L_external: NaN,
+                kc, fc, beta: 0, Z_TE: NaN, Zpv: NaN, belowCutoff: true,
+                self_referenced: true,
+                V: null, Ex: wg.fields.Ex, Ey: wg.fields.Ey,
+            };
+        }
+
+        const beta = Math.sqrt(-g2);
+        const Z_TE = omega * MU0 / beta;          // = k0·eta0/beta, independent of er
+        const Zpv = kappa * Z_TE;
+        const { alpha_c_np, R_ac } = this._wgConductorLoss(mesh, wg, f, beta, Zpv);
+        const alpha_d_np = k0 * k0 * er * tand / (2 * beta);
+
+        // Exact per-unit-length equivalent circuit of the mode, normalized to Zpv:
+        //   series Z = j*omega*mu0*kappa  (+ the wall surface resistance)
+        //   shunt  Y = (omega*eps0*er*tand + j*omega*eps0*er − j*kc²/(omega*mu0)) / kappa
+        // It reproduces gamma and Zc exactly, and eps_eff = c0²*L*C = er - (kc/k0)² falls
+        // out with kappa cancelling. The R/G split is normalization-dependent, gamma is not.
+        const L_external = kappa * MU0;
+        const L_internal = omega > 0 ? Math.min(R_ac / omega, 0.5 * L_external) : 0;
+        const L = L_external + L_internal;
+        const C = (eps0 * er - kc * kc / (omega * omega * MU0)) / kappa;
+        const G = omega * eps0 * er * tand / kappa;
+        const R = R_ac;
+        const Zc = new Complex(R, omega * L).div(new Complex(G, omega * C)).sqrt();
+        return {
+            mode: 'single',
+            Z0: Zpv,
+            eps_eff: c0 * c0 * L * C, eps_eff_mode: er - (kc / k0) ** 2,
+            C, C0: eps0,
+            RLGC: { R, L, G, C },
+            Zc,
+            alpha_c: NP_TO_DB * alpha_c_np, alpha_d: NP_TO_DB * alpha_d_np,
+            alpha_total: NP_TO_DB * (alpha_c_np + alpha_d_np),
+            L_internal, L_external,
+            kc, fc, beta, Z_TE, Zpv, belowCutoff: false,
+            // There is no external TEM reference for a guide: the S-parameter paths
+            // normalize each point to Zc, giving S11 = 0 and S21 = exp(-gamma*L).
+            self_referenced: true,
+            V: null, Ex: wg.fields.Ex, Ey: wg.fields.Ey,
+        };
     }
 
     _prepareStatic() {
@@ -1482,6 +1833,10 @@ export class TriBackend {
         });
         const { epsMap, lossMap } = tagMaterials(this.mesh, causalDiel);
         this.mesh.epsMap = epsMap; this.mesh.lossMap = lossMap;
+        // A waveguide has no static solve to redo and no field to resample: kc is purely
+        // geometric, so a causal shift in εr moves beta and the losses (both read the maps
+        // above per frequency) without touching the mode pattern or the cutoff.
+        if (this._isWG) return;
         // Asymmetric differential pair: the odd/even drive is NOT the modal basis, so re-derive
         // the genuine line modes (and the physical [C]/[L] matrices that drive the 4-port
         // S-parameters) under the causal permittivity — exactly as the initial build does.
@@ -1514,7 +1869,10 @@ export class TriBackend {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         if (this.solver.use_causal_materials) this._applyCausal(f, opts.skipFieldResample === true);
         this._modeWarnings = [];
-        const modes = this.modeNames.map(m => this._modeAtFreq(m, f));
+        // A waveguide never reaches _modeAtFreq, so its quasi-static fallback (which would
+        // be physically meaningless below cutoff) is unreachable for this medium.
+        const modes = this._isWG ? [this._waveguideModeAtFreq(f)]
+            : this.modeNames.map(m => this._modeAtFreq(m, f));
         const result = { modes };
         if (this._modeWarnings.length) result.warnings = this._modeWarnings;
         this.solver.modeWarnings = this._modeWarnings;
@@ -1591,7 +1949,12 @@ export class TriBackend {
         // one; differential: even AND odd). A genuine quasi-TEM mode matches ONE of these
         // (high overlap); a spurious discrete gradient mode matches none. All modes share
         // this fm (symmetry off), so each drive's phiEps projects into the same DOF space.
-        const seeds = this.modeNames.map(m => staticToEdgeDofs(this._static[m].phiEps, mesh, fm));
+        // A waveguide has no conductor drive: the analytic fundamental takes the seed's
+        // place, so the `overlap` column becomes "overlap with the fundamental" instead of
+        // "overlap with the static quasi-TEM field", the same thing it means elsewhere.
+        const seeds = this._isWG
+            ? [this._wg.seed]
+            : this.modeNames.map(m => staticToEdgeDofs(this._static[m].phiEps, mesh, fm));
         const seed = seeds[0];
         // Shift-invert centered on the quasi-TEM eigenvalue (-k²·eps_static) converges the
         // fundamental and the nearby higher-order modes first. Widen the Krylov subspace so
@@ -1600,10 +1963,15 @@ export class TriBackend {
         // higher-order modes sit far from the quasi-TEM shift (e.g. ε_eff≈0.5 vs a shift at
         // 3.4 on an enclosed εr=4.4 line) and need a much larger subspace than the
         // fixed 20-vector pass, whose strict residual gate silently dropped them.
+        // For a waveguide the equivalent centre is the fundamental's own eigenvalue,
+        // γ² = kc² - k²*εr, which is known exactly rather than estimated from a static solve.
+        const shift = this._isWG
+            ? this._wg.kc * this._wg.kc - k2 * maxEpsRe(mesh.epsMap)
+            : -k2 * eps_eff_static;
         const ncv = Math.min(Math.max(2 * nev + 1, 20), N - 1);
         const ncvMax = Math.min(320, N - 1);
         let res;
-        try { res = this.ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_eff_static, 0], nev, ncv, seed, ncvMax); }
+        try { res = this.ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [shift, 0], nev, ncv, seed, ncvMax); }
         catch (e) { return { modes: [], nconv: 0, error: String(e && e.message || e) }; }
         if (!res || !res.nconv) return { modes: [], nconv: 0 };
 

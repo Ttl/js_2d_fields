@@ -886,6 +886,35 @@ export function computeTriEnergy(phi, mesh, epsMap) {
     return 0.5 * W;
 }
 
+// Analytic field, Arnoldi start vector
+// Project a known transverse E field onto the eigen DOF vector, for geometries that have
+// no static solve to seed from. A hollow waveguide is the case: with no second conductor
+// drivePotentials() is empty, so there is no potential for staticToEdgeDofs to project.
+//
+// Only the lowest-order (Whitney / ne1) transverse DOFs are filled, that DOF is the
+// tangential line integral over the edge, taken here with the midpoint rule. The
+// quadratic ne2 DOFs and the interior face bubbles are left at 0: they are a second-order
+// correction to what is only a start vector, and the shift-invert target does the real
+// work of selecting the mode. The whole longitudinal (Ez) block is left at 0 too, which
+// is exact for a TE mode.
+//
+// Efun(x, y) -> [Ex, Ey].
+export function analyticSeedDofs(mesh, fm, Efun) {
+    const { nodes, edges, nEdges } = mesh;
+    const { edgeF, nFreeTransverse, nFreeLongitudinal } = fm;
+    const initVec = new Float64Array(nFreeTransverse + nFreeLongitudinal);
+    for (let e = 0; e < nEdges; e++) {
+        const ef = edgeF[2 * e];
+        if (ef < 0) continue;
+        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1];
+        const x1 = nodes[2 * n1], y1 = nodes[2 * n1 + 1];
+        const E = Efun(0.5 * (x0 + x1), 0.5 * (y0 + y1));
+        initVec[ef] = E[0] * (x1 - x0) + E[1] * (y1 - y0);
+    }
+    return initVec;
+}
+
 // --- Static → all DOFs ---
 // Compute initial guess from the static potential
 

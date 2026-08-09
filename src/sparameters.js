@@ -8,40 +8,79 @@ import { Matrix2x2, mat2Mul, mat2Inv, mat2T } from './matrix.js';
  * @param {number} freq - Frequency in Hz
  * @param {object} rlgc - RLGC parameters {R, L, G, C} in SI units
  * @param {number} length - Line length in meters
- * @param {number} Z_ref - Reference impedance in Ohms (typically 50)
+ * @param {number|Complex} Z_ref - Reference impedance in Ohms (typically the real 50).
+ *     A Complex is accepted, for a line referenced to its own slightly-complex Zc.
  * @returns {object} - {S11, S21, S12, S22} as Complex numbers
  */
 function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
     const omega = 2 * Math.PI * freq;
     const { R, L, G, C } = rlgc;
 
+    // The reference impedance may be complex. It usually is not, a 50 Ohm port is real,
+    // but a line referenced to its own Zc needs the true complex value. Zc of any lossy
+    // line has a small imaginary part, and the B/Zr and C*Zr terms below only cancel (so a
+    // matched line gives S11 = 0) when Zr is that exact value. Referencing to Re(Zc)
+    // instead leaves |S11| ~ |Im(Zc)|/(2*Re(Zc)), which looks like a real reflection.
+    //
+    // WAVE DEFINITION. This is the pseudo-wave / traveling-wave conversion, and
+    // those two match here for a line, so Gamma is (Z - Zr)/(Z + Zr) either
+    // way. Both are the same diagonal similarity transform of
+    // M = (Z - ZR)(Z + ZR)^-1, differing only in which diagonal matrix
+    // conjugates it:
+    //     pseudo    (Marks & Williams 1992)   S = U    M U^-1,    U    = diag(sqrt(Re z0)/|z0|)
+    //     traveling                           S = Y^.5 M Y^-.5,   Y^.5 = diag(1/sqrt(z0))
+    // When every port shares one reference, both conjugating matrices are a scalar times
+    // the identity, the similarity collapses, and S = M exactly, for any complex Zr and
+    // any network, not just a uniform line. With per-port references they separate, but
+    // only in the transmission terms: S[m][n] picks up U_m/U_n vs sqrt(z0_n/z0_m), and
+    // those ratios are both 1 on the diagonal, so reflection terms agree regardless.
+    //
+    // Power waves (Kurokawa 1965) are the genuinely different convention: b conjugates the
+    // reference, Gamma = (Z - Zr*)/(Z + Zr). That is what you want for conjugate-matching
+    // problems, and it is wrong here. Referenced to its own Z0 a perfectly uniform line
+    // would report |Gamma| = |Im Z0|/|Z0| rather than zero.
+    //
+    // Cross-checked against scikit-rf z2s(..., s_def=...) on a lossy waveguide
+    // 2-port with Zr = Z0 complex: 'pseudo' and 'traveling' each agree with
+    // this function to float precision, while 'power' differs by |Im Z0/Re Z0|.
+    // With a real Zr all three agree exactly — skrf's own s2s() short-circuits
+    // on real z0 for precisely that reason.
+    //
+    // Duck-typed, not `instanceof Complex`: build.sh ships the lazily-imported tri_solver
+    // tree with its own copy of complex.js alongside the one esbuild inlines into the app
+    // bundle, so a Zc built inside the backend is not an instance of the class this module
+    // sees. `instanceof` would silently take the number branch there and produce NaN
+    // S-parameters in the built app while dev (single module instance) looked perfect.
+    // Rebuilding as a local Complex also guarantees the arithmetic below is this copy's.
+    const Zr = (typeof Z_ref === 'number')
+        ? new Complex(Z_ref, 0)
+        : new Complex(Z_ref.re, Z_ref.im);
+
     // Handle DC case (frequency = 0)
     // At DC, the transmission line behaves as a simple series resistance R*length
     if (freq === 0 || omega === 0) {
         const R_total = R * length;
-        const Zr = Z_ref;
 
-        // ABCD matrix for series resistance:
-        // A = 1, B = R_total, C = 0, D = 1
-        const A = new Complex(1, 0);
-        const B = new Complex(R_total, 0);
-        const C_abcd = new Complex(0, 0);
-        const D = new Complex(1, 0);
+        // ABCD matrix for series resistance: A = 1, B = R_total, C = 0, D = 1
+        // den = A + B/Zr + C*Zr + D = 2 + R_total/Zr
+        // The real case stays in scalar arithmetic: complex division computes
+        // (a*c)/(c^2+d^2) rather than a/c, which differs by an ULP and would perturb every
+        // existing DC result for no reason.
+        const BoverZ = Zr.im === 0
+            ? new Complex(R_total / Zr.re, 0)
+            : new Complex(R_total, 0).div(Zr);
+        const den = BoverZ.add(new Complex(2, 0));
 
-        // Convert to S-parameters
-        // den = A + B/Zr + C*Zr + D = 1 + R_total/Zr + 0 + 1 = 2 + R_total/Zr
-        const den = new Complex(2 + R_total / Zr, 0);
-
-        // S11 = (A + B/Zr - C*Zr - D) / den = (1 + R_total/Zr - 0 - 1) / den = (R_total/Zr) / den
-        const S11 = new Complex(R_total / Zr, 0).div(den);
+        // S11 = (A + B/Zr - C*Zr - D) / den = (R_total/Zr) / den
+        const S11 = BoverZ.div(den);
 
         // S21 = 2 / den
         const S21 = new Complex(2, 0).div(den);
 
         const S12 = S21;  // Reciprocal
 
-        // S22 = (-A + B/Zr - C*Zr + D) / den = (-1 + R_total/Zr - 0 + 1) / den = (R_total/Zr) / den
-        const S22 = new Complex(R_total / Zr, 0).div(den);
+        // S22 = (-A + B/Zr - C*Zr + D) / den = (R_total/Zr) / den
+        const S22 = BoverZ.div(den);
 
         return { S11, S21, S12, S22 };
     }
@@ -71,10 +110,7 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
     const C_abcd = gl.sinh().div(Z0);
     const D = gl.cosh();
 
-    // Convert ABCD to S-parameters
-    // Reference impedance
-    const Zr = new Complex(Z_ref, 0);
-
+    // Convert ABCD to S-parameters (Zr built above, possibly complex)
     // Common denominator: A + B/Zr + C*Zr + D
     const den = A.add(B.div(Zr)).add(C_abcd.mul(Zr)).add(D);
 
@@ -349,7 +385,47 @@ function sParamToPhase(s) {
     return s.arg() * 180 / Math.PI;
 }
 
+// Self-referenced (non-TEM) media
+//
+// A rectangular waveguide has no external TEM reference to normalize against.
+// Referenced to Z0 instead.
+//
+// Marked on the mode object by the backend (`self_referenced`), so nothing here has to
+// know which media are non-TEM.
+function isSelfReferenced(sweepResults) {
+    const m = sweepResults && sweepResults[0] && sweepResults[0].result
+        && sweepResults[0].result.modes && sweepResults[0].result.modes[0];
+    return !!(m && m.self_referenced);
+}
+
+// Single-ended S-parameters for one sweep point, picking the reference from the mode
+// itself: a non-TEM medium has no external reference, so it normalizes to the mode's own
+// characteristic impedance. Every other line uses the caller's fixed Z_ref.
+//
+// Zc is passed complex. Referencing to Re(Zc) instead leaves a spurious |S11| of roughly
+// |Im(Zc)|/(2*Re(Zc)), about -80 dB on a copper waveguide, because the B/Zr and C*Zr
+// terms in the T to S conversion only cancel when Zr is the true (complex) Zc.
+function sparamsForPoint(freq, result, length, Z_ref) {
+    const mode = result.modes[0];
+    return computeSParamsSingleEnded(freq, mode.RLGC, length,
+        mode.self_referenced ? mode.Zc : Z_ref);
+}
+
+// Sweep points that can actually produce S-parameters. Below cutoff a waveguide
+// mode is evanescent and its modal impedance is imaginary. Those points are
+// dropped. Non-self-referenced media are returned unchanged.
+function usableSweepPoints(sweepResults) {
+    if (!isSelfReferenced(sweepResults)) return sweepResults;
+    return sweepResults.filter(({ result }) => {
+        const m = result.modes[0];
+        return !m.belowCutoff && m.Zc && isFinite(m.Zc.re) && m.Zc.re > 0;
+    });
+}
+
 export {
+    isSelfReferenced,
+    sparamsForPoint,
+    usableSweepPoints,
     computeSParamsSingleEnded,
     computeSParamsDifferential,
     computeSParamsDifferentialMTL,

@@ -1,5 +1,6 @@
 // snp_export.js - Touchstone (SnP) File Export for S-Parameters
-import { computeSParamsSingleEnded, computeSParamsDiffAuto } from './sparameters.js';
+import { computeSParamsSingleEnded, computeSParamsDiffAuto,
+         isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
 
 // Map transmission line types to short names
 const TL_TYPE_SHORT_NAMES = {
@@ -10,7 +11,8 @@ const TL_TYPE_SHORT_NAMES = {
     'gcpw': 'gcpw',
     'diff_gcpw': 'diff_gcpw',
     'broadside_stripline': 'bs_sl',
-    'coax': 'coax'
+    'coax': 'coax',
+    'rect_waveguide': 'rect_wg'
 };
 
 /**
@@ -107,6 +109,18 @@ function generateParamComments(params) {
 function generateS2P(frequencySweepResults, length, Z_ref, params = {}) {
     const lines = [];
 
+    // A self-referenced medium (waveguide) normalizes each point to its own modal
+    // impedance and cannot represent its below-cutoff points at all — see
+    // usableSweepPoints. Drop them and say so in the header rather than writing rows a
+    // consumer would read as a lossy through.
+    const selfRef = isSelfReferenced(frequencySweepResults);
+    const points = usableSweepPoints(frequencySweepResults);
+    const dropped = frequencySweepResults.length - points.length;
+    if (selfRef && !points.length) {
+        throw new Error('Every sweep point is below the waveguide cutoff — there are no ' +
+            'propagating S-parameters to export. Raise the sweep frequency above the cutoff.');
+    }
+
     // Comment header with parameters
     if (params && Object.keys(params).length > 0) {
         lines.push(...generateParamComments({ ...params, length, zRef: Z_ref }));
@@ -116,14 +130,29 @@ function generateS2P(frequencySweepResults, length, Z_ref, params = {}) {
         lines.push(`! Reference impedance: ${Z_ref} Ohm`);
         lines.push('!');
     }
+    if (selfRef) {
+        // Touchstone carries a single real reference impedance, so a frequency-dependent
+        // modal reference cannot be stated in the option line. The R value below is
+        // nominal. The matrix itself is that of a matched section of guide and cascades
+        // correctly with other guide parts.
+        lines.push('! Reference impedance: the modal impedance Z0(f) of the guided mode,');
+        lines.push('! which is frequency-dependent. S11 = S22 = 0, and the');
+        lines.push('! R value on the option line below is nominal only.');
+        const fc = points[0].result.modes[0].fc;
+        if (dropped > 0 && isFinite(fc)) {
+            lines.push(`! ${dropped} sweep point(s) below the ${(fc / 1e9).toFixed(3)} GHz cutoff are omitted`);
+            lines.push('! (the mode is evanescent there, with an imaginary modal impedance).');
+        }
+        lines.push('!');
+    }
 
     // Option line: Hz S MA R 50 (Magnitude/Angle format)
     lines.push(`# Hz S MA R ${Z_ref}`);
     lines.push('! Freq(Hz)      S11_mag    S11_ang    S21_mag    S21_ang    S12_mag    S12_ang    S22_mag    S22_ang');
 
     // Data lines
-    for (const { freq, result } of frequencySweepResults) {
-        const sp = computeSParamsSingleEnded(freq, result.modes[0].RLGC, length, Z_ref);
+    for (const { freq, result } of points) {
+        const sp = sparamsForPoint(freq, result, length, Z_ref);
 
         const S11_mag = sp.S11.abs();
         const S11_ang = sp.S11.arg() * 180 / Math.PI;

@@ -126,6 +126,7 @@
             <option value="diff_gcpw">Differential GCPW</option>
             <option value="broadside_stripline">Broadside Coupled Stripline</option>
             <option value="coax">Coaxial</option>
+            <option value="rect_waveguide">Rectangular Waveguide</option>
         </select>
     </div>
 
@@ -241,6 +242,34 @@
             <div class="control-group">
                 <label>Conductivity (S/m)</label>
                 <input type="number" id="inp_coax_sigma" value="5.8e7" inputmode="decimal">
+            </div>
+        </div>
+    </div>
+
+    <div id="wg-params" style="display: none;">
+        <div class="section-header" onclick="toggleSection(this)">
+            <h3>Rectangular Waveguide <span class="help-icon" onclick="showHelpModal('waveguide', event)">?</span></h3>
+        </div>
+        <div class="section-content">
+            <div class="control-group">
+                <label>Broad Wall (a) <span class="help-icon" onclick="showHelpModal('wg_a', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_wg_a" value="22.86 mm">
+            </div>
+            <div class="control-group">
+                <label>Narrow Wall (b) <span class="help-icon" onclick="showHelpModal('wg_b', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_wg_b" value="10.16 mm">
+            </div>
+            <div class="control-group">
+                <label>Relative Permittivity (&epsilon;<sub>r</sub>)</label>
+                <input type="number" id="inp_wg_er" value="1.0" inputmode="decimal">
+            </div>
+            <div class="control-group">
+                <label>Loss Tangent (tan &delta;)</label>
+                <input type="number" id="inp_wg_tand" value="0" inputmode="decimal" placeholder="0">
+            </div>
+            <div class="control-group">
+                <label>Conductivity (S/m)</label>
+                <input type="number" id="inp_wg_sigma" value="5.8e7" inputmode="decimal">
             </div>
         </div>
     </div>
@@ -576,7 +605,11 @@
         <div class="sparam-controls">
             <label class="checkbox-label"><input type="checkbox" id="sparam-log-x"> Log frequency axis</label>
             <label>Line Length: <input type="text" class="unit-input" id="sparam-length" value="10 mm" step="0.001"></label>
-            <label>Reference Impedance: <input type="number" id="sparam-z-ref" value="50" step="1" min="1"> Ohm</label>
+            <label id="sparam-z-ref-label">Reference Impedance: <input type="number" id="sparam-z-ref" value="50" step="1" min="1"> Ohm</label>
+            <!-- Shown instead of the box for a self-referenced (non-TEM) medium, where the
+                 reference is the mode's own frequency-dependent impedance. -->
+            <label id="sparam-z-ref-modal" style="display: none;">Reference Impedance: <b>Z<sub>0</sub></b> (modal)
+                <span class="help-icon" onclick="showHelpModal('wg_sparam', event)">?</span></label>
             <label class="checkbox-label"><input type="checkbox" id="sparam-diff"> Differential-mode</label>
             <button id="export-snp">Export SnP file</button>
             <div id="sparam-notice" style="display: none; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; flex-shrink: 0; color: #fbbf24;">
@@ -674,6 +707,17 @@
             mode drives inside it, resolving skin and proximity effects directly
             to give resistive loss and the internal inductance. Surface
             roughness and plating is applied as post-processing.</p>
+
+            <h3>Rectangular Waveguide</h3> <p>The rectangular waveguide
+            is not TEM or quasi-TEM. It has
+            a single conductor, so there is no static solution. It is solved as
+            a pure eigenmode problem on the full-wave backend, and <b>only the
+            lowest (fundamental) mode is reported</b>, TE<sub>10</sub> when the
+            broad wall is wider than the narrow one. Below the cutoff frequency that
+            mode is evanescent and only its attenuation is meaningful. Above the
+            second cutoff the guide is over-moded and the higher-order modes it also
+            supports are not included in the results. The Modes tab shows all the
+            modes.</p>
 
             <h3>S-Parameters</h3> <p>S-parameters are computed from the RLGC
             transmission line model using standard ABCD matrix (T-parameter)
@@ -891,6 +935,8 @@
             'inp_plating_rq': 'μm',
             'inp_coax_d': 'mm',
             'inp_coax_D': 'mm',
+            'inp_wg_a': 'mm',
+            'inp_wg_b': 'mm',
 
             // Frequency - GHz
             'freq-start': 'GHz',
@@ -982,6 +1028,26 @@
         coax_D: {
             title: 'Dielectric Diameter',
             body: '<p>Outer diameter of the dielectric, which is also the inner diameter of the shield.</p><p>The shield is modelled as a lossy conducting boundary at this diameter with no modelled wall thickness, so it contributes surface loss but no DC resistance. Accurate wherever the skin depth is smaller than the real shield wall.</p>'
+        },
+        waveguide: {
+            title: 'Rectangular Waveguide',
+            body: '<p>A hollow rectangular metal pipe of inner dimensions <i>a</i> &times; <i>b</i>, optionally filled with a dielectric. Unlike every other line type here it is not TEM or quasi-TEM. There is no second conductor, so there is no static solution. It is solved with the full-wave eigenmode solver only.</p><p>Only the lowest (fundamental) mode is solved and swept, TE<sub>10</sub> when a &ge; b, TE<sub>01</sub> otherwise. Its cutoff frequency is f<sub>c</sub> = c / (2 &middot; max(a,b) &middot; &radic;&epsilon;<sub>r</sub>).</p><ul><li><b>Below f<sub>c</sub></b> the mode is evanescent: only the attenuation is reported, and the other results are blank (the trace breaks at cutoff).</li><li><b>Above the second cutoff</b> f<sub>c2</sub> = c &middot; min(2/a, 1/b) / (2&radic;&epsilon;<sub>r</sub>) the guide is over-moded, higher-order modes also propagate and are not included in these results. Use the Modes tab to inspect them.</li></ul><p>Surface roughness and plating apply to the walls.</p>'
+        },
+        wg_a: {
+            title: 'Broad Wall (a)',
+            body: '<p>Inner width of the guide. Together with the narrow wall it sets the cutoff: the fundamental mode has f<sub>c</sub> = c / (2 &middot; max(a,b) &middot; &radic;&epsilon;<sub>r</sub>).</p><p>The walls are modelled as a lossy conducting boundary with no wall thickness, so they contribute surface loss but no DC resistance. Accurate wherever the skin depth is smaller than the real wall, which is the entire useful range.</p><p>Standard WR sizes: WR-90 = 22.86 &times; 10.16 mm (X band, 8.2&ndash;12.4 GHz), WR-42 = 10.668 &times; 4.318 mm, WR-28 = 7.112 &times; 3.556 mm, WR-159 = 40.386 &times; 20.193 mm.</p>'
+        },
+        wg_b: {
+            title: 'Narrow Wall (b)',
+            body: '<p>Inner height of the guide. It does not affect the fundamental cutoff (when b &lt; a) but it does set the second cutoff, and hence the single-mode bandwidth: b = a/2 gives the widest single-mode band, which is why standard guides use that ratio.</p><p>It also scales the reported impedance, which is proportional to b/a.</p>'
+        },
+        wg_z0: {
+            title: 'Waveguide Impedance',
+            body: '<p>A waveguide has no unique characteristic impedance. There is no unique voltage or current. The reported Z<sub>0</sub> is the <b>power-voltage</b> definition Z<sub>pv</sub> = |V|&sup2;/(2P), with V integrated across the centre of the guide. For the fundamental mode that is exactly 2(b/a)&middot;Z<sub>TE</sub>, where Z<sub>TE</sub> = &eta;/&radic;(1&minus;(f<sub>c</sub>/f)&sup2;) is the wave impedance.</p><p>The reported R/L/G/C are the exact per-unit-length equivalent circuit of the mode in that same normalization, not physical metal and dielectric parameters. They reproduce &gamma; and Z<sub>0</sub> exactly, which is what feeds the S-parameters. The R/G split depends on the normalization; &gamma;, &epsilon;<sub>eff</sub> and the attenuations do not. L is constant by construction, and Im(Z<sub>0</sub>) is negligible for a TE mode.</p>'
+        },
+        wg_sparam: {
+            title: 'Waveguide S-Parameters',
+            body: '<p>A waveguide has no external TEM reference to normalize against. Its impedance is frequency-dependent, and a fixed 50 &Omega; reference would not be useful. Each frequency is therefore referenced to its own modal impedance.</p><p>That makes S11 = S22 = 0.</p><p>Touchstone carries only a single real reference impedance, so the exported file states the real reference in comments and leaves the R value on the option line nominal. Frequencies below cutoff are omitted from both the plot and the file. The mode is evanescent there, its modal impedance is imaginary, and a below-cutoff guide reflects rather than absorbs.</p>'
         },
         plating: {
             title: 'Surface Plating',
@@ -1080,9 +1146,11 @@
         const striplineParams = document.getElementById('stripline-params');
         const broadsideParams = document.getElementById('broadside-params');
         const coaxParams = document.getElementById('coax-params');
+        const wgParams = document.getElementById('wg-params');
         const advancedParams = document.getElementById('advanced-params');
-        // A circle has one continuous surface, so the per-face plating selection and the
-        // corner-wrap model have nothing to act on. Both are hidden for coax.
+        // A circle and a waveguide wall has one continuous surface, so the per-face
+        // plating selection and the corner-wrap model have nothing to act on. Both are
+        // hidden for those types (plating itself still applies, all-around).
         const platingFacesGroup = document.getElementById('plating-params')
             ?.querySelector('.control-group:has(#chk_plating_top)');
         const platingCornersGroup = document.getElementById('plating-params')
@@ -1104,12 +1172,15 @@
         striplineParams.style.display = 'none';
         broadsideParams.style.display = 'none';
         coaxParams.style.display = 'none';
-        if (platingFacesGroup) platingFacesGroup.style.display = (tlType === 'coax') ? 'none' : 'block';
-        if (platingCornersGroup) platingCornersGroup.style.display = (tlType === 'coax') ? 'none' : 'block';
+        wgParams.style.display = 'none';
+        const oneSurface = (tlType === 'coax' || tlType === 'rect_waveguide');
+        if (platingFacesGroup) platingFacesGroup.style.display = oneSurface ? 'none' : 'block';
+        if (platingCornersGroup) platingCornersGroup.style.display = oneSurface ? 'none' : 'block';
 
-        // Common params visible by default (hidden for broadside/coax, which have their own blocks)
+        // Common params visible by default (hidden for broadside/coax/waveguide, which
+        // have their own blocks)
         microstripParams.style.display =
-            (tlType === 'broadside_stripline' || tlType === 'coax') ? 'none' : 'block';
+            (tlType === 'broadside_stripline' || oneSurface) ? 'none' : 'block';
 
         // Always show advanced params
         advancedParams.style.display = 'block';
@@ -1273,24 +1344,76 @@
                 if (params) params.style.display = 'none';
             }
             if (chkEnclosure) { chkEnclosure.disabled = true; chkEnclosure.checked = false; }
+        } else if (tlType === 'rect_waveguide') {
+            wgParams.style.display = 'block';
+            // The walls are the domain boundary, exactly as for coax, so no board-stackup
+            // option applies. Plating and surface roughness do, and stay enabled.
+            if (solderMaskGroup) solderMaskGroup.style.display = 'none';
+            if (topDielGroup) topDielGroup.style.display = 'none';
+            if (gndCutGroup) gndCutGroup.style.display = 'none';
+            if (enclosureGroup) enclosureGroup.style.display = 'none';
+            if (topGndGroup) topGndGroup.style.display = 'none';
+            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
+            for (const [cb, params] of [[chkSolderMask, solderMaskParams],
+                                        [chkTopDiel, topDielParams],
+                                        [chkGndCut, gndCutParams]]) {
+                if (!cb) continue;
+                cb.disabled = true; cb.checked = false;
+                if (params) params.style.display = 'none';
+            }
+            if (chkEnclosure) { chkEnclosure.disabled = true; chkEnclosure.checked = false; }
         }
         enforceBackendForType();
+        enforceSweepOptionsForType();
     }
 
-    // Coax exists only on the full-wave backend. The quasi-static solver meshes on a
-    // rectilinear grid and cannot represent a circular conductor. Lock the
-    // dropdown rather than letting a solve fail. Called from toggleParameterVisibility,
-    // from the backend dropdown's own change handler, and at the end of restoreSettings
-    // (which sets tl_type before mesh_backend, so a stale or hand-edited link could
-    // otherwise land on coax + rectilinear).
+    // The interpolating sweep assumes a smooth non-vanishing RLGC set. A waveguide's shunt
+    // C crosses zero at cutoff, so the interpolator's relative-error test explodes there
+    // and after its single eigensolve every sweep point is analytic anyway, so there is
+    // nothing to save. Lock it off, and swap the S-parameter reference-impedance box for
+    // the "Z0 (modal)" label, since that medium ignores the box entirely.
+    function enforceSweepOptionsForType() {
+        const isWG = document.getElementById('tl_type').value === 'rect_waveguide';
+        const chk = document.getElementById('chk_interp_sweep');
+        if (chk) {
+            chk.disabled = isWG;
+            if (isWG && chk.checked) {
+                chk.checked = false;
+                // Setting .checked in script fires no event, and the tolerance row's
+                // visibility is driven by one — so it would stay open with the box off.
+                chk.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            const row = chk.closest('.control-group') || chk.parentElement;
+            if (row) row.title = isWG
+                ? 'Not applicable to a waveguide — every sweep point is already analytic'
+                : '';
+        }
+        const zBox = document.getElementById('sparam-z-ref-label');
+        const zModal = document.getElementById('sparam-z-ref-modal');
+        if (zBox) zBox.style.display = isWG ? 'none' : '';
+        if (zModal) zModal.style.display = isWG ? '' : 'none';
+    }
+
+    // Some line types exist only on the full-wave backend. Coax: the quasi-static solver
+    // meshes on a rectilinear grid and cannot represent a circular conductor. Rectangular
+    // waveguide: it has no TEM mode at all, so there is nothing for the Laplace solve to
+    // find. Lock the dropdown rather than letting a solve fail. Called from
+    // toggleParameterVisibility, from the backend dropdown's own change handler, and at
+    // the end of restoreSettings (which sets tl_type before mesh_backend, so a stale or
+    // hand-edited link could otherwise land on one of these + rectilinear).
+    // app_solver.js keeps its own copy of this set (separate script scope).
+    const FULLWAVE_ONLY_TYPES = {
+        coax: 'Coaxial lines require the full-wave solver',
+        rect_waveguide: 'Rectangular waveguides require the full-wave solver',
+    };
     function enforceBackendForType() {
         const sel = document.getElementById('mesh_backend');
         if (!sel) return;
-        const isCoax = document.getElementById('tl_type').value === 'coax';
+        const reason = FULLWAVE_ONLY_TYPES[document.getElementById('tl_type').value];
         const rect = sel.querySelector('option[value="rectilinear"]');
-        if (rect) rect.disabled = isCoax;
-        sel.title = isCoax ? 'Coaxial lines require the full-wave solver' : '';
-        if (isCoax && sel.value === 'rectilinear') {
+        if (rect) rect.disabled = !!reason;
+        sel.title = reason || '';
+        if (reason && sel.value === 'rectilinear') {
             sel.value = 'fullwave_mqs';
             sel.dispatchEvent(new Event('change', { bubbles: true }));
         }

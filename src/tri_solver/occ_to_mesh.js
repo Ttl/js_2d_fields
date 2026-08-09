@@ -84,7 +84,16 @@ export function validateTriMesh(mesh, condRect) {
         }
     }
     const roles = condRect && condRect.rectRoles;
-    if (!roles || !roles.some(r => r.is_signal)) errors.push('No signal conductor found in the geometry.');
+    // A fully enclosed all-PEC domain guides modes with no conductor meshed inside it at
+    // all: A hollow waveguide, where the walls themselves are the only metal and they
+    // live in the boundary conditions rather than in rectRoles. Every other geometry
+    // without a signal conductor is degenerate, so the check stays for them.
+    // Under half-domain symmetry the left wall is the symmetry plane, not
+    // metal, so it is exempt from the test.
+    const w = condRect && condRect.wallPEC;
+    const enclosed = !!(w && (w.left || condRect.symmetry > 1) && w.right && w.top && w.bottom);
+    if ((!roles || !roles.some(r => r.is_signal)) && !enclosed)
+        errors.push('No signal conductor found in the geometry.');
     return errors;
 }
 

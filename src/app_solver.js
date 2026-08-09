@@ -1,6 +1,7 @@
 import { MicrostripSolver } from './microstrip.js';
 import { BroadsideStriplineSolver } from './broadside_stripline.js';
 import { CoaxSolver } from './coax.js';
+import { RectWaveguideSolver } from './rect_waveguide.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
@@ -9,6 +10,13 @@ import { InterpolatingSweep } from './interpolating_sweep.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
+
+// Line types with no quasi-static implementation. Coax: a rectilinear grid staircases a
+// circle. Rectangular waveguide: a hollow guide has no TEM mode at all, so there is
+// nothing for the Laplace solve to find. Both constructors throw on any other backend;
+// this set is the app-level guard, and field_solver.html keeps its own copy for the
+// Solver-dropdown lock (separate script scope).
+const FULLWAVE_ONLY_TYPES = new Set(['coax', 'rect_waveguide']);
 
 let solver = null;
 let stopRequested = false;
@@ -56,6 +64,12 @@ const SWEEP_PARAM_CONFIG = {
     coax_er:            { label: 'Permittivity',             inputId: 'inp_coax_er',   group: 'coax' },
     coax_tand:          { label: 'Loss Tangent',             inputId: 'inp_coax_tand', group: 'coax' },
     coax_sigma:         { label: 'Conductivity',             inputId: 'inp_coax_sigma', fixedUnit: 'S/m', group: 'coax' },
+    // Rectangular waveguide only. Same reasoning as the coax block above.
+    wg_a:               { label: 'Broad Wall (a)',           inputId: 'inp_wg_a',      group: 'waveguide' },
+    wg_b:               { label: 'Narrow Wall (b)',          inputId: 'inp_wg_b',      group: 'waveguide' },
+    wg_er:              { label: 'Permittivity',             inputId: 'inp_wg_er',     group: 'waveguide' },
+    wg_tand:            { label: 'Loss Tangent',             inputId: 'inp_wg_tand',   group: 'waveguide' },
+    wg_sigma:           { label: 'Conductivity',             inputId: 'inp_wg_sigma', fixedUnit: 'S/m', group: 'waveguide' },
     // Differential types only
     trace_spacing:      { label: 'Trace Spacing',        inputId: 'inp_trace_spacing', group: 'diff' },
     // GCPW types only
@@ -214,6 +228,14 @@ const DEFAULT_SETTINGS = {
     coax_er: 2.1,
     coax_tand: 0.0002,
     coax_sigma: 5.8e7,
+
+    // Rectangular waveguide (display units: mm). Defaults are WR-90 (X band):
+    // fc = 6.557 GHz, second cutoff 13.114 GHz, published band 8.2-12.4 GHz.
+    wg_a: 22.86,         // mm, broad inner wall
+    wg_b: 10.16,         // mm, narrow inner wall
+    wg_er: 1.0,
+    wg_tand: 0,
+    wg_sigma: 5.8e7,
 };
 
 /**
@@ -314,6 +336,13 @@ function getUISettings() {
         coax_er: getInputValueUnitless('inp_coax_er'),
         coax_tand: getInputValueUnitless('inp_coax_tand'),
         coax_sigma: getInputValueUnitless('inp_coax_sigma'),
+
+        // Rectangular waveguide
+        wg_a: getDisplayValue('inp_wg_a'),
+        wg_b: getDisplayValue('inp_wg_b'),
+        wg_er: getInputValueUnitless('inp_wg_er'),
+        wg_tand: getInputValueUnitless('inp_wg_tand'),
+        wg_sigma: getInputValueUnitless('inp_wg_sigma'),
     };
 }
 
@@ -347,14 +376,27 @@ const COAX_EXCLUDED_KEYS = new Set([
     'use_enclosure', 'enclosure_width', 'use_side_gnd',
 ]);
 
+// Rectangular waveguide: the walls are the domain boundary, exactly as for coax, so the
+// same board-stackup and enclosure options are meaningless. The interpolating sweep is
+// excluded too, it is forced off for this type (see toggleParameterVisibility).
+const WAVEGUIDE_EXCLUDED_KEYS = new Set([
+    ...COAX_EXCLUDED_KEYS,
+    // Both are forced/ignored for this type: the sweep is analytic after one eigensolve
+    // so interpolation is off, and the S-parameters are referenced to the modal impedance
+    // rather than to sparam_z_ref.
+    'interp_sweep', 'interp_tolerance', 'sparam_z_ref',
+]);
+
 // Each type's own geometry keys, so a link for one type never carries another's.
 const TYPE_ONLY_KEYS = {
     broadside_stripline: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('bs_')),
     coax: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('coax_')),
+    rect_waveguide: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('wg_')),
 };
 const EXCLUDED_BY_TYPE = {
     broadside_stripline: BROADSIDE_EXCLUDED_KEYS,
     coax: COAX_EXCLUDED_KEYS,
+    rect_waveguide: WAVEGUIDE_EXCLUDED_KEYS,
 };
 
 function settingsToURL(settings) {
@@ -542,9 +584,15 @@ function restoreSettings(settings) {
         document.getElementById('inp_coax_tand').value = fullSettings.coax_tand;
         document.getElementById('inp_coax_sigma').value = fullSettings.coax_sigma;
 
+        setValueWithUnit('inp_wg_a', fullSettings.wg_a);
+        setValueWithUnit('inp_wg_b', fullSettings.wg_b);
+        document.getElementById('inp_wg_er').value = fullSettings.wg_er;
+        document.getElementById('inp_wg_tand').value = fullSettings.wg_tand;
+        document.getElementById('inp_wg_sigma').value = fullSettings.wg_sigma;
+
         // tl_type is restored ABOVE mesh_backend, so the backend lock has to run once
-        // both are in place — otherwise a stale or hand-edited link can leave coax
-        // selected with the quasi-static backend, which cannot mesh it.
+        // both are in place — otherwise a stale or hand-edited link can leave a
+        // full-wave-only type selected with the quasi-static backend, which cannot mesh it.
         if (window.enforceBackendForType) window.enforceBackendForType();
 
         return true;
@@ -682,7 +730,12 @@ function getGeometryHash() {
         coax_D: p.coax_D,
         coax_er: p.coax_er,
         coax_tand: p.coax_tand,
-        coax_sigma: p.coax_sigma
+        coax_sigma: p.coax_sigma,
+        wg_a: p.wg_a,
+        wg_b: p.wg_b,
+        wg_er: p.wg_er,
+        wg_tand: p.wg_tand,
+        wg_sigma: p.wg_sigma
     });
 }
 
@@ -1186,6 +1239,13 @@ function getParams() {
         coax_er: getInputValueUnitless('inp_coax_er'),
         coax_tand: getInputValueUnitless('inp_coax_tand'),
         coax_sigma: getInputValueUnitless('inp_coax_sigma'),
+
+        // Rectangular waveguide (inner wall dimensions)
+        wg_a: getInputValue('inp_wg_a'),
+        wg_b: getInputValue('inp_wg_b'),
+        wg_er: getInputValueUnitless('inp_wg_er'),
+        wg_tand: getInputValueUnitless('inp_wg_tand'),
+        wg_sigma: getInputValueUnitless('inp_wg_sigma'),
     };
 }
 
@@ -1366,6 +1426,23 @@ function buildSolverFromParams(p) {
                 freq: p.freq,
                 mesh_backend: 'triangular',
             });
+        } else if (p.tl_type === 'rect_waveguide') {
+            // Full-wave only, like coax, but for a different reason: a hollow guide has no
+            // TEM mode for the quasi-static Laplace solve to find. addCommonOptions is
+            // deliberately not used, solder mask, top dielectric, ground cutout and the
+            // enclosure have no meaning inside a waveguide, where the walls are the
+            // boundary. Plating and surface roughness do apply and are passed through.
+            solver = new RectWaveguideSolver({
+                width: p.wg_a,
+                height: p.wg_b,
+                epsilon_r: p.wg_er,
+                tan_delta: p.wg_tand,
+                sigma_cond: p.wg_sigma,
+                rq: p.rq,
+                plating: platingOptions(p),
+                freq: p.freq,
+                mesh_backend: 'triangular',
+            });
         } else if (p.tl_type === 'broadside_stripline') {
             const options = {
                 trace_width: p.bs_w,
@@ -1451,10 +1528,11 @@ function buildSolverFromParams(p) {
         // Store causal materials option on solver
         if (solver) {
             solver.use_causal_materials = p.use_causal_materials;
-            // Coax has no quasi-static implementation (a rectilinear grid cannot mesh a
-            // circle), so force the full-wave backend. The UI disables the option and
-            // CoaxSolver throws, but a stale link can still arrive with 'rectilinear'.
-            const backend = p.tl_type === 'coax' ? 'fullwave_mqs' : p.mesh_backend;
+            // Some media have no quasi-static implementation. A rectilinear grid cannot
+            // mesh a circle, and a hollow waveguide has no TEM mode for Laplace to find.
+            // Force the full-wave backend. The UI disables the option and the
+            // constructors throw, but a stale link can still arrive with 'rectilinear'.
+            const backend = FULLWAVE_ONLY_TYPES.has(p.tl_type) ? 'fullwave_mqs' : p.mesh_backend;
             // Solver mode → numerical backend + triangular loss method:
             //   'rectilinear'   = quasi-static FDM (fastest)
             //   'fullwave_pert' = triangular full-wave, perturbation loss (~2× faster)
@@ -1480,7 +1558,18 @@ async function runSimulation() {
     }
 
     const p = getParams();
-    const frequencies = getFrequencies();
+    let frequencies = getFrequencies();
+    // A waveguide is a DC block: the f=0 limit of its equivalent circuit is correct
+    // (Z0 -> 0) but the literal evaluation divides by zero, and computeSParamsSingleEnded
+    // has a freq===0 branch that would model it as a lossless through. Drop the point.
+    if (solver.allow_dc === false && frequencies.includes(0)) {
+        frequencies = frequencies.filter(f => f > 0);
+        log('Note: DC (0 Hz) is skipped for this line type — a waveguide does not propagate at DC.');
+        if (!frequencies.length) {
+            log('ERROR: no non-zero frequencies to solve.');
+            return;
+        }
+    }
     const btn = document.getElementById('btn_solve');
     const pbar = document.getElementById('progress_bar');
     const ptext = document.getElementById('progress_text');
@@ -1506,6 +1595,13 @@ async function runSimulation() {
     if (ptext) ptext.textContent = '';
     log("Starting simulation...");
     for (const w of solver.openBoundaryWarnings()) log(`⚠ Warning: ${w}`);
+    if (solver.mode_type === 'waveguide') {
+        // State the single-mode limitation and the usable band up front, every solve.
+        log(`Rectangular waveguide: fundamental mode only ` +
+            `(cutoff ${(solver.fc / 1e9).toFixed(3)} GHz, single-mode up to ` +
+            `${(solver.fc2 / 1e9).toFixed(3)} GHz).`);
+        for (const w of solver.waveguideWarnings(Math.max(...frequencies))) log(`⚠ Warning: ${w}`);
+    }
 
     try {
 
@@ -1634,7 +1730,12 @@ async function runSimulation() {
         const fMax = Math.max(...frequencies);
         const nonZeroFreqs = frequencies.filter(f => f > 0);
         const fMinNonZero = nonZeroFreqs.length > 0 ? Math.min(...nonZeroFreqs) : 0;
+        // The waveguide opts out: its shunt C crosses zero at cutoff, so the interpolator's
+        // relative-error test (denominator max(|C|, 1e-12)) explodes there and refines to
+        // maxPoints. It also gains nothing. After the single eigensolve every sweep point
+        // is analytic and costs ~50 ms.
         const useInterpolation = document.getElementById('chk_interp_sweep')?.checked
+            && solver.allow_interp_sweep !== false
             && nonZeroFreqs.length > 1
             && fMax > fMinNonZero;
 
@@ -1840,10 +1941,24 @@ async function runSimulation() {
                 const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
                 lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`;
             }
+            // Z0/eps_eff are quoted at the first point, which for a waveguide can be below
+            // cutoff (where they are NaN by design). Quote the first propagating point
+            // instead, and say which one it is, rather than printing "NaN Ohm".
+            let sumMode = mode0, sumF = f0, cutoffNote = '';
+            if (Number.isNaN(mode0.Z0)) {
+                const firstProp = frequencySweepResults.find(r => !Number.isNaN(r.result.modes[0].Z0));
+                if (firstProp) {
+                    sumMode = firstProp.result.modes[0];
+                    sumF = firstProp.freq / 1e9;
+                    cutoffNote = ` (at ${sumF.toFixed(2)} GHz — the sweep starts below cutoff)`;
+                }
+            }
             log(`\nRESULTS:\n` +
                      `----------------------\n` +
-                     `Z0: ${mode0.Z0.toFixed(2)} Ohm\n` +
-                     `eps_eff: ${mode0.eps_eff.toFixed(3)}\n` +
+                     (Number.isNaN(sumMode.Z0)
+                        ? `Below cutoff across the whole sweep — attenuation only.\n`
+                        : `Z0: ${sumMode.Z0.toFixed(2)} Ohm${cutoffNote}\n` +
+                          `eps_eff: ${sumMode.eps_eff.toFixed(3)}\n`) +
                      `${lossStr}`);
         }
 
@@ -1924,6 +2039,9 @@ function updateSweepParamList() {
     const isGcpw = tlType.includes('gcpw');
     const isStripline = tlType.includes('stripline');
     const isCoax      = tlType === 'coax';
+    const isWaveguide = tlType === 'rect_waveguide';
+    // Both replace the microstrip stackup entirely with their own geometry block.
+    const isSelfBounded = isCoax || isWaveguide;
     const useSm       = document.getElementById('chk_solder_mask').checked;
     const useTopDiel  = document.getElementById('chk_top_diel').checked;
     const useGndCut   = document.getElementById('chk_gnd_cut').checked;
@@ -1932,18 +2050,19 @@ function updateSweepParamList() {
 
     const groupEnabled = {
         shared: true,                    // surface roughness, applies to every type
-        // Coax has its own geometry block and none of the microstrip stackup inputs,
-        // so the 'always' set and the board-stackup groups are off for it. Plating
-        // still applies (all-around, on the centre conductor).
-        always: !isCoax,
+        // Coax and waveguide each have their own geometry block and none of the microstrip
+        // stackup inputs, so the 'always' set and the board-stackup groups are off for
+        // them. Plating still applies (all-around: the centre conductor / the walls).
+        always: !isSelfBounded,
         diff: isDiff,
         gcpw: isGcpw,
         stripline: isStripline,
         coax: isCoax,
-        sm: useSm && !isCoax,
-        top_diel: useTopDiel && !isCoax,
-        gnd_cut: useGndCut && !isCoax,
-        enclosure: useEnclosure && !isCoax,
+        waveguide: isWaveguide,
+        sm: useSm && !isSelfBounded,
+        top_diel: useTopDiel && !isSelfBounded,
+        gnd_cut: useGndCut && !isSelfBounded,
+        enclosure: useEnclosure && !isSelfBounded,
         plating: usePlating,
     };
 
@@ -2325,13 +2444,21 @@ function bindEvents() {
                 sigma: p.sigma,
                 traceSpacing: p.trace_spacing,
                 surfaceRoughness: p.rq,
-                // Coax is not a trace-on-substrate stackup, so it describes itself.
+                // Coax and waveguide are not trace-on-substrate stackups, so they
+                // describe themselves.
                 geometryLines: p.tl_type === 'coax' ? [
                     `!   Inner conductor diameter: ${(p.coax_d * 1e6).toFixed(1)} um`,
                     `!   Dielectric diameter (shield ID): ${(p.coax_D * 1e6).toFixed(1)} um`,
                     `!   Dielectric permittivity: ${p.coax_er}`,
                     `!   Loss tangent: ${p.coax_tand}`,
                     `!   Conductivity: ${p.coax_sigma.toExponential(2)} S/m`,
+                ] : p.tl_type === 'rect_waveguide' ? [
+                    `!   Broad wall a: ${(p.wg_a * 1e6).toFixed(1)} um`,
+                    `!   Narrow wall b: ${(p.wg_b * 1e6).toFixed(1)} um`,
+                    `!   Fill permittivity: ${p.wg_er}`,
+                    `!   Loss tangent: ${p.wg_tand}`,
+                    `!   Wall conductivity: ${p.wg_sigma.toExponential(2)} S/m`,
+                    `!   Fundamental mode only (TE10 when a >= b)`,
                 ] : null,
                 plating: p.use_plating ? {
                     sigma: p.plating_sigma,
@@ -2474,6 +2601,7 @@ function bindEvents() {
         'inp_bs_h_middle', 'inp_bs_er_middle', 'inp_bs_tand_middle',
         'inp_bs_h_top', 'inp_bs_er_top', 'inp_bs_tand_top',
         'inp_coax_d', 'inp_coax_D', 'inp_coax_er', 'inp_coax_tand', 'inp_coax_sigma',
+        'inp_wg_a', 'inp_wg_b', 'inp_wg_er', 'inp_wg_tand', 'inp_wg_sigma',
         'freq-start'
     ];
 
