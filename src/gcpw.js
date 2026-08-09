@@ -30,6 +30,8 @@ export class GroundedCPWSolver2D extends MicrostripSolver {
             gap: options.gap,
             via_gap: options.via_gap,
             use_vias: true,
+            rq: options.rq ?? 0,
+            plating: options.plating ?? null,
             // Solder mask
             use_sm: options.use_sm ?? false,
             sm_t_sub: options.sm_t_sub ?? 20e-6,
