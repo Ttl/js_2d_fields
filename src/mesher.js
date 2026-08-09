@@ -47,6 +47,10 @@ class Conductor {
      * @param {boolean} plating.bottom - Apply plating on bottom face
      * @param {boolean} plating.all - Apply plating over the whole boundary (shaped
      *   conductors only — a circle has one continuous surface, not three faces)
+     * @param {boolean} plating.inner/outer - Which coax conductor the layer was selected
+     *   for. Recorded for the UI/export only: CoaxSolver has already resolved the
+     *   selection by the time a Conductor gets a plating object (an unplated conductor
+     *   gets null), so nothing downstream reads these.
      * @param {object|null} shape - Optional non-rectangular shape descriptor (see
      *   shapes.js). When set, x/y/width/height are only the BOUNDING BOX: containment
      *   tests go through shapeContains() instead. Full-wave backend only — the

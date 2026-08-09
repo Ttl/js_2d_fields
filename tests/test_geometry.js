@@ -298,15 +298,26 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
     check('coax: domain box strictly encloses the meshed disk',
         s.domain_width / 2 > b && s.domain_height > b && s.t_gnd > b);
 
-    // Plating on a circle has no faces to select between.
-    const plated = new CoaxSolver({ inner_diameter: d, dielectric_diameter: D, epsilon_r: 2.1,
-        plating: { sigma: 6.3e7, thickness: 4e-6, rq: 0, top: true, sides: false, bottom: false } });
+    // Plating on a circle has no faces to select between; what it selects is WHICH
+    // CONDUCTOR carries the layer. A block naming neither (the pre-inner/outer shape, or
+    // one filled from a rectangular line's face checkboxes) means the centre conductor.
+    const platingOf = (sel) => new CoaxSolver({ inner_diameter: d, dielectric_diameter: D,
+        epsilon_r: 2.1, plating: { sigma: 6.3e7, thickness: 4e-6, rq: 0, ...sel } })
+        .conductors.map(c => c.plating);
+    const plated = platingOf({ top: true, sides: false, bottom: false });
     check('coax: plating is normalized to all-around on the centre conductor',
-        plated.conductors[0].plating.all === true &&
-        plated.conductors[0].plating.top && plated.conductors[0].plating.sides &&
-        plated.conductors[0].plating.bottom &&
-        plated.conductors[0].plating.thick_corners === false);
-    check('coax: the shield is not plated', plated.conductors[1].plating === null);
+        plated[0].all === true && plated[0].top && plated[0].sides && plated[0].bottom &&
+        plated[0].thick_corners === false);
+    check('coax: a plating block naming no conductor plates the centre one only',
+        plated[1] === null);
+    const outerOnly = platingOf({ inner: false, outer: true });
+    check('coax: outer-only plating plates the shield and leaves the centre bare',
+        outerOnly[0] === null && outerOnly[1] !== null && outerOnly[1].all === true);
+    const bothPlated = platingOf({ inner: true, outer: true });
+    check('coax: both conductors can be plated at once',
+        bothPlated[0] !== null && bothPlated[1] !== null);
+    check('coax: selecting neither conductor is bare metal',
+        platingOf({ inner: false, outer: false }).every(p => p === null));
 
     // A shaped ground must never be absorbed into a wall — its bbox spans the domain but
     // its body does not fill it.

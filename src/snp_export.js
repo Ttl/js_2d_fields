@@ -84,11 +84,18 @@ function generateParamComments(params) {
         // A curved or self-bounded conductor has ONE continuous surface, so the
         // top/sides/bottom selection has nothing to select between (the solvers
         // normalize it to `all`) and listing the three faces would be misleading.
+        // Coax has two such surfaces, and selects between THEM instead.
         const surfaces = [];
-        if (params.plating.top) surfaces.push('top');
-        if (params.plating.sides) surfaces.push('sides');
-        if (params.plating.bottom) surfaces.push('bottom');
-        lines.push(`!     Applied to: ${params.plating.all ? 'the whole surface' : surfaces.join(', ')}`);
+        if (params.plating.inner !== undefined || params.plating.outer !== undefined) {
+            if (params.plating.inner) surfaces.push('the inner conductor');
+            if (params.plating.outer) surfaces.push('the shield');
+            lines.push(`!     Applied to: ${surfaces.join(' and ') || 'nothing (bare metal)'}`);
+        } else {
+            if (params.plating.top) surfaces.push('top');
+            if (params.plating.sides) surfaces.push('sides');
+            if (params.plating.bottom) surfaces.push('bottom');
+            lines.push(`!     Applied to: ${params.plating.all ? 'the whole surface' : surfaces.join(', ')}`);
+        }
     }
     lines.push('!');
     lines.push('! S-Parameter Settings:');

@@ -28,6 +28,9 @@ import { shapeBBox } from './shapes.js';
  * at any frequency where the skin depth is below the real shield wall, which is the
  * entire useful range for a coaxial cable.
  *
+ * Plating selects a conductor (options.plating.inner / .outer), not a face, see the
+ * plating block in the constructor.
+ *
  * Exact closed forms this geometry must reproduce (used by tests/test_coax.js):
  *   Z0     = eta0/(2*pi*sqrt(er)) * ln(b/a)
  *   C      = 2*pi*eps0*er / ln(b/a)
@@ -35,6 +38,8 @@ import { shapeBBox } from './shapes.js';
  *   eps_eff= er exactly (homogeneous fill)
  *   a_d    = pi*f*sqrt(er)/c0 * tand
  *   a_c    = Rs*(1/a + 1/b) / (2*eta*ln(b/a)),  eta = eta0/sqrt(er)
+ *   with each conductor's Rs set by its own surface: plating the inner conductor scales
+ *   the 1/a term, plating the shield scales the 1/b term.
  */
 class CoaxSolver extends FieldSolver2D {
     constructor(options) {
@@ -111,14 +116,34 @@ class CoaxSolver extends FieldSolver2D {
 
         // --- Plating ------------------------------------------------------------
         // A circle has ONE continuous surface, so the per-face top/sides/bottom model
-        // has nothing to select between: any enabled face means "plate the whole
-        // circumference". `all: true` is what the surface-impedance classifiers key on.
-        // thick_corners is dropped — there are no corners to wrap.
+        // has nothing to select between. What a coax selects between instead is WHICH
+        // CONDUCTOR carries the layer, inner or outer conductor. Each selected
+        // conductor is plated all the way around: `all: true` is what the
+        // surface-impedance classifiers key on, and thick_corners is dropped
+        // since there are no corners to wrap.
+        //
+        // Both conductors share the same plating object (it is read-only downstream,
+        // and makePlatingZs caches its impedance by sigma/rq/thickness), so
+        // `this.plating` stays "the layer in effect" and the per-conductor
+        // assignment below carries the selection.
         const pl = options.plating;
-        const platingOn = pl && pl.sigma > 0 && (pl.all || pl.top || pl.sides || pl.bottom);
+        const named = pl && (pl.inner !== undefined || pl.outer !== undefined);
+        const selected = pl && (named ? (pl.inner || pl.outer)
+                                      : (pl.all || pl.top || pl.sides || pl.bottom));
+        const platingOn = !!(pl && pl.sigma > 0 && selected);
+        const platesInner = platingOn && (named ? !!pl.inner : true);
+        const platesOuter = platingOn && (named ? !!pl.outer : false);
         this.plating = platingOn
-            ? { ...pl, top: true, sides: true, bottom: true, all: true, thick_corners: false }
+            ? { ...pl, top: true, sides: true, bottom: true, all: true, thick_corners: false,
+                inner: platesInner, outer: platesOuter }
             : null;
+
+        // The shield is modelled as a zero-thickness shell of semi-infinite metal (see the
+        // header), which is exactly the substrate the layered plating-over-bulk impedance
+        // assumes, so plating it needs no extra geometry, only the surface impedance on
+        // its boundary edges changes.
+        const innerPlating = platesInner ? this.plating : null;
+        const outerPlating = platesOuter ? this.plating : null;
 
         // --- Geometry lists ------------------------------------------------------
         // Bounding boxes are still supplied because bbox-only consumers (plot framing,
@@ -135,8 +160,8 @@ class CoaxSolver extends FieldSolver2D {
         ];
         this.conductors = [
             new Conductor(ib.xmin, ib.ymin, ib.xmax - ib.xmin, ib.ymax - ib.ymin,
-                true, 1, this.plating, inner),
-            new Conductor(-Rd, -Rd, 2 * Rd, 2 * Rd, false, 0, null, shield),
+                true, 1, innerPlating, inner),
+            new Conductor(-Rd, -Rd, 2 * Rd, 2 * Rd, false, 0, outerPlating, shield),
         ];
 
         // Domain box must strictly ENCLOSE the meshed disk (tri_backend derives its

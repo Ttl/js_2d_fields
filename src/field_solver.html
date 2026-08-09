@@ -435,6 +435,15 @@
                     <label style="font-weight: normal;"><input type="checkbox" id="chk_plating_bottom"> Bottom</label>
                 </div>
             </div>
+            <!-- Coax replaces the face selection: each of its conductors is one continuous
+                 circular surface, so the choice is WHICH CONDUCTOR is plated. -->
+            <div class="control-group" id="plating-coax-group" style="display: none;">
+                <label>Applied Conductors</label>
+                <div style="display: flex; gap: 12px; margin-top: 4px;">
+                    <label style="font-weight: normal;"><input type="checkbox" id="chk_plating_inner" checked> Inner</label>
+                    <label style="font-weight: normal;"><input type="checkbox" id="chk_plating_outer"> Outer (shield)</label>
+                </div>
+            </div>
             <div class="control-group">
                 <label>Plating Conductivity (S/m)</label>
                 <input type="number" id="inp_plating_sigma" value="1e7" inputmode="decimal">
@@ -1060,7 +1069,7 @@
         },
         plating: {
             title: 'Surface Plating',
-            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both the plating layer and the bulk metal underneath (since the plating conforms to the bulk surface).</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p><p>For a coaxial line the plating covers the centre conductor (the shield is left bare, it is modelled as a boundary with no meshed metal, and carries the base Surface Roughness). For a rectangular waveguide it covers the whole inner wall.</p>'
+            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both the plating layer and the bulk metal underneath (since the plating conforms to the bulk surface).</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p><p>For a coaxial line each conductor is one continuous circular surface, so instead of faces you choose which conductors are plated: the inner conductor, the shield, or both. An unplated conductor carries the base conductivity and Surface Roughness.</p><p>For a rectangular waveguide the plating covers the whole inner wall.</p>'
         },
         plating_thick_corners: {
             title: 'Model Thick Plating',
@@ -1165,11 +1174,14 @@
         const advancedParams = document.getElementById('advanced-params');
         // A circle and a waveguide wall each have one continuous surface, so the per-face
         // plating selection and the corner-wrap model have nothing to act on. Both are
-        // hidden for those types (plating itself still applies, all-around).
+        // hidden for those types (plating itself still applies, all-around). Coax gets a
+        // selection of its own in their place: it has TWO such surfaces (centre conductor
+        // and shield), each plated all-around or not at all.
         const platingFacesGroup = document.getElementById('plating-params')
             ?.querySelector('.control-group:has(#chk_plating_top)');
         const platingCornersGroup = document.getElementById('plating-params')
             ?.querySelector('.control-group:has(#chk_plating_thick_corners)');
+        const platingCoaxGroup = document.getElementById('plating-coax-group');
         const solderMaskGroup = advancedParams.querySelector('.control-group:has(#chk_solder_mask)');
         const solderMaskParams = document.getElementById('solder-mask-params');
         const topDielGroup = advancedParams.querySelector('.control-group:has(#chk_top_diel)');
@@ -1192,6 +1204,7 @@
         const oneSurface = !!SELF_BOUNDED_PARAM_DIVS[tlType];
         if (platingFacesGroup) platingFacesGroup.style.display = oneSurface ? 'none' : 'block';
         if (platingCornersGroup) platingCornersGroup.style.display = oneSurface ? 'none' : 'block';
+        if (platingCoaxGroup) platingCoaxGroup.style.display = tlType === 'coax' ? 'block' : 'none';
 
         // Common params visible by default (hidden for broadside/coax/waveguide, which
         // have their own blocks)

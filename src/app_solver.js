@@ -228,6 +228,10 @@ const DEFAULT_SETTINGS = {
     coax_er: 2.1,
     coax_tand: 0.0002,
     coax_sigma: 5.8e7,
+    // Which conductor the plating lands on, coax's counterpart to plating_top/sides/
+    // bottom. Named coax_* so TYPE_ONLY_KEYS keeps them out of every other type's link.
+    coax_plating_inner: 1,
+    coax_plating_outer: 0,
 
     // Rectangular waveguide (display units: mm). Defaults are WR-90 (X band):
     // fc = 6.557 GHz, second cutoff 13.114 GHz, published band 8.2-12.4 GHz.
@@ -336,6 +340,8 @@ function getUISettings() {
         coax_er: getInputValueUnitless('inp_coax_er'),
         coax_tand: getInputValueUnitless('inp_coax_tand'),
         coax_sigma: getInputValueUnitless('inp_coax_sigma'),
+        coax_plating_inner: document.getElementById('chk_plating_inner').checked ? 1 : 0,
+        coax_plating_outer: document.getElementById('chk_plating_outer').checked ? 1 : 0,
 
         // Rectangular waveguide
         wg_a: getDisplayValue('inp_wg_a'),
@@ -583,6 +589,8 @@ function restoreSettings(settings) {
         document.getElementById('inp_coax_er').value = fullSettings.coax_er;
         document.getElementById('inp_coax_tand').value = fullSettings.coax_tand;
         document.getElementById('inp_coax_sigma').value = fullSettings.coax_sigma;
+        document.getElementById('chk_plating_inner').checked = !!fullSettings.coax_plating_inner;
+        document.getElementById('chk_plating_outer').checked = !!fullSettings.coax_plating_outer;
 
         setValueWithUnit('inp_wg_a', fullSettings.wg_a);
         setValueWithUnit('inp_wg_b', fullSettings.wg_b);
@@ -734,6 +742,8 @@ function getGeometryHash() {
         coax_er: p.coax_er,
         coax_tand: p.coax_tand,
         coax_sigma: p.coax_sigma,
+        coax_plating_inner: p.coax_plating_inner,
+        coax_plating_outer: p.coax_plating_outer,
         wg_a: p.wg_a,
         wg_b: p.wg_b,
         wg_er: p.wg_er,
@@ -1254,6 +1264,8 @@ function getParams() {
         coax_er: getInputValueUnitless('inp_coax_er'),
         coax_tand: getInputValueUnitless('inp_coax_tand'),
         coax_sigma: getInputValueUnitless('inp_coax_sigma'),
+        coax_plating_inner: document.getElementById('chk_plating_inner').checked,
+        coax_plating_outer: document.getElementById('chk_plating_outer').checked,
 
         // Rectangular waveguide (inner wall dimensions)
         wg_a: getInputValue('inp_wg_a'),
@@ -1309,8 +1321,10 @@ function addCommonOptions(options, p) {
 }
 
 // The plating block on its own, so line types that take plating but none of the other
-// board-stackup options (coax) can reuse it instead of duplicating it.
-function platingOptions(p) {
+// board-stackup options (coax) can reuse it instead of duplicating it. `extra` carries a
+// type's own surface selection where top/sides/bottom has no meaning, coax passes
+// inner/outer (which conductor), and CoaxSolver reads those in place of the faces.
+function platingOptions(p, extra = null) {
     if (!p.use_plating) return null;
     return {
         sigma: p.plating_sigma,
@@ -1319,7 +1333,8 @@ function platingOptions(p) {
         top: p.plating_top,
         sides: p.plating_sides,
         bottom: p.plating_bottom,
-        thick_corners: p.plating_thick_corners
+        thick_corners: p.plating_thick_corners,
+        ...extra,
     };
 }
 
@@ -1429,7 +1444,9 @@ function buildSolverFromParams(p) {
             // Full-wave only; CoaxSolver throws on any other backend. addCommonOptions is
             // deliberately NOT used — solder mask, top dielectric, ground cutout and the
             // enclosure have no meaning inside a coax, where the shield IS the boundary.
-            // Plating and surface roughness do apply and are passed through.
+            // Plating and surface roughness do apply and are passed through. The plating
+            // is selected per conductor here rather than per face (each conductor is one
+            // continuous circular surface).
             solver = new CoaxSolver({
                 inner_diameter: p.coax_d,
                 dielectric_diameter: p.coax_D,
@@ -1437,7 +1454,8 @@ function buildSolverFromParams(p) {
                 tan_delta: p.coax_tand,
                 sigma_cond: p.coax_sigma,
                 rq: p.rq,
-                plating: platingOptions(p),
+                plating: platingOptions(p, { inner: p.coax_plating_inner,
+                                             outer: p.coax_plating_outer }),
                 freq: p.freq,
                 mesh_backend: 'triangular',
             });
@@ -2476,15 +2494,13 @@ function bindEvents() {
                     `!   Wall conductivity: ${p.wg_sigma.toExponential(2)} S/m`,
                     `!   Fundamental mode only (TE10 when a >= b)`,
                 ] : null,
-                plating: p.use_plating ? {
-                    sigma: p.plating_sigma,
-                    thickness: p.plating_t,
-                    rq: p.plating_rq,
-                    top: p.plating_top,
-                    sides: p.plating_sides,
-                    bottom: p.plating_bottom,
-                    thick_corners: p.plating_thick_corners
-                } : null,
+                // Mirror what the solver actually built, not the raw checkboxes: a coax
+                // selects conductors and a waveguide plates its whole wall, so the
+                // top/sides/bottom boxes (hidden for both) would misdescribe the run.
+                plating: platingOptions(p,
+                    p.tl_type === 'coax' ? { inner: p.coax_plating_inner, outer: p.coax_plating_outer }
+                    : p.tl_type === 'rect_waveguide' ? { all: true }
+                    : null),
                 freqStart: frequencySweepResults[0].freq,
                 freqStop: frequencySweepResults[frequencySweepResults.length - 1].freq,
                 numPoints: frequencySweepResults.length
@@ -2644,7 +2660,8 @@ function bindEvents() {
     // Real-time updates for checkboxes
     const geometryCheckboxes = [
         'chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_side_gnd', 'chk_top_gnd',
-        'chk_plating', 'chk_plating_top', 'chk_plating_sides', 'chk_plating_bottom', 'chk_plating_thick_corners'
+        'chk_plating', 'chk_plating_top', 'chk_plating_sides', 'chk_plating_bottom', 'chk_plating_thick_corners',
+        'chk_plating_inner', 'chk_plating_outer'
     ];
 
     geometryCheckboxes.forEach(id => {
