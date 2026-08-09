@@ -451,17 +451,16 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     // value below is that smooth case, and each branch overwrites it from the
     // SMOOTH R before R is scaled by psiR.
     let X_trace = R_trace, X_gnd = R_gnd;
+    const R_smooth_total = R_trace + R_gnd;   // before psiR rewrites either one
     if (opts.surfaceZs) {
         if (trS > 0) {
             const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
-            L_loop += perTrace * R_trace * (psiX - 1) / omega;
             X_trace = R_trace * psiX;
             R_trace *= psiR;
             PsiR = psiR;
         }
         if (gndS > 0) {
             const psiR = gndZreS / (Rs * gndS), psiX = gndZimS / (Rs * gndS);
-            L_loop += perTrace * R_gnd * (psiX - 1) / omega;
             X_gnd = R_gnd * psiX;
             R_gnd *= psiR;
         }
@@ -469,8 +468,6 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         const Zs = calculate_Zrough(freq, sigma, Rq);
         PsiR = Zs.re / Rs;
         const PsiX = Zs.im / Rs;
-        const R_smooth = R_trace + R_gnd;
-        L_loop += perTrace * R_smooth * (PsiX - 1) / omega;
         X_trace = R_trace * PsiX;
         X_gnd = R_gnd * PsiX;
         R_trace *= PsiR;
@@ -479,6 +476,11 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
 
     const R_total = R_trace + R_gnd;
     const X_total = X_trace + X_gnd;
+    // The surface-reactance increment on the loop inductance is (X − R_smooth)/ω by
+    // construction, so it is formed ONCE from X_total here rather than accumulated
+    // branch by branch. That keeps L_loop and X_total from ever describing different
+    // surfaces, and it is identically zero for smooth metal (X_total === R_smooth_total).
+    L_loop += perTrace * (X_total - R_smooth_total) / omega;
     const alpha_c = Z0 > 0 ? R_total / (2 * Z0) : NaN;
     return {
         R_trace, R_gnd, R_total, X_total, L_loop, PsiR,

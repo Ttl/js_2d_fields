@@ -184,7 +184,13 @@ async function test_corner_symmetry() {
         bottom: false
     };
 
-    const gcpw = new GroundedCPWSolver2D({
+    // Built twice from one description, differing ONLY in the plating block, because the
+    // plating has to be shown to reach the solver at all. GroundedCPWSolver2D is a
+    // back-compat wrapper that maps its options across by hand, and it silently dropped
+    // `plating` (and `rq`) for a while: this test still printed a loss and still passed,
+    // because it only ever asserted that the numbers were finite. The comparison below
+    // is what makes that failure mode visible.
+    const build = (pl) => new GroundedCPWSolver2D({
         substrate_height: 800e-6,
         trace_width: 100e-6,
         trace_thickness: 35e-6,
@@ -203,14 +209,15 @@ async function test_corner_symmetry() {
         ny: 25,
         boundaries: null,
         use_sm: false,
-        plating: plating
+        plating: pl
     });
 
-    const result = await gcpw.solve_adaptive({ max_refinements: 0 });
-    const mode = result.modes[0];
+    const mode = (await build(plating).solve_adaptive({ max_refinements: 0 })).modes[0];
+    const bare = (await build(null).solve_adaptive({ max_refinements: 0 })).modes[0];
 
     console.log(`  GCPW Z0: ${mode.Z0.toFixed(2)} Ω`);
-    console.log(`  GCPW conductor loss: ${mode.alpha_c.toFixed(3)} dB/m`);
+    console.log(`  GCPW conductor loss: ${bare.alpha_c.toFixed(3)} dB/m bare`
+        + ` -> ${mode.alpha_c.toFixed(3)} dB/m plated`);
     console.log('  ✓ Symmetric structure computed successfully');
 
     // The result should be finite and reasonable
@@ -220,6 +227,15 @@ async function test_corner_symmetry() {
     if (mode.Z0 < 20 || mode.Z0 > 200) {
         throw new Error(`Corner symmetry test: unrealistic Z0 = ${mode.Z0.toFixed(2)} Ω`);
     }
+    // This plating is the bulk metal again (5.96e7) but ROUGHENED to 0.5 um rms on the
+    // side faces, so its whole effect is added loss — a few percent, and one-directional.
+    // Z0 is a capacitance quantity and must not move at all.
+    if (!(mode.alpha_c > bare.alpha_c * 1.02)) {
+        throw new Error('Corner symmetry test: side plating did not raise the loss '
+            + `(bare ${bare.alpha_c.toFixed(4)}, plated ${mode.alpha_c.toFixed(4)} dB/m) — `
+            + 'the plating block is not reaching the solver');
+    }
+    assert_close(mode.Z0, bare.Z0, 1e-6, 'Corner symmetry test: plating moved Z0');
 }
 
 async function test_corner_only_with_sides_enabled() {
