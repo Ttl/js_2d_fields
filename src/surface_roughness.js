@@ -93,6 +93,36 @@ function _gaussianCDF(x, mean, sigma) {
     return 0.5 * (1.0 + _erf((x - mean) / (Math.SQRT2 * sigma)));
 }
 
+// Antiderivative of the Gaussian CDF:
+//   G(x) = ∫ Φ((t−m)/s) dt = (x−m)·Φ((x−m)/s) + s·φ((x−m)/s)
+// with φ the standard normal density. At s → 0 the CDF becomes a step and G degenerates
+// to the ramp max(x−m, 0), so one expression covers both the roughened interface and the
+// perfectly sharp one.
+function _cdfIntegral(x, mean, sigma) {
+    const d = x - mean;
+    if (sigma <= 0) return Math.max(d, 0);
+    const z = d / sigma;
+    return d * _gaussianCDF(x, mean, sigma)
+         + sigma * Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+}
+
+// Mean of that CDF over [a, b], the fraction of the segment lying past the boundary.
+// This is what makes the profile below a partial-volume average rather than a point
+// sample, so a boundary falling mid-segment is placed exactly instead of snapping to the
+// grid. Segments wholly clear of the transition short-circuit to the constant 0 or 1:
+// there the antiderivatives are large and nearly equal, and differencing them would both
+// cancel and inherit the erf fit's ~1e-7 absolute error.
+function _cdfMean(a, b, mean, sigma) {
+    if (sigma > 0) {
+        if (b <= mean - 6 * sigma) return 0;
+        if (a >= mean + 6 * sigma) return 1;
+    } else {
+        if (b <= mean) return 0;
+        if (a >= mean) return 1;
+    }
+    return (_cdfIntegral(b, mean, sigma) - _cdfIntegral(a, mean, sigma)) / (b - a);
+}
+
 /**
  * Layered gradient model using transmission line taper approach.
  * Based on the method described in [1] and generalized for multiple layers in [2].
@@ -126,34 +156,39 @@ function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_pl
     const min_sigma = Math.min(sigma_bulk, sigma_plating);
     const skin_depth = Math.sqrt(2.0 / (omega * MU0 * min_sigma));
 
-    // Recursion span: from -5*rq (into air) to well past skin depth
-    const epsilon = 1e-9; // Handle rq=0 case
-    const recursion_min = -5 * rq - epsilon;
-    const recursion_max = Math.max(thickness_plating + 10 * skin_depth, 5e-6) + epsilon;
+    // Recursion span: from 5*rq above the mean surface (out in the air, where the graded
+    // profile has died away) to well past the skin depth. Zs is referenced to the top of
+    // this span, so that top must sit at the surface for a sharp interface.
+    const recursion_min = -5 * rq;
+    const recursion_max = Math.max(thickness_plating + 10 * skin_depth, 5e-6);
 
     // Uniform grid spacing
     const dx = (recursion_max - recursion_min) / (N - 1);
 
-    // Build conductivity profile using CDF approach
-    // Two interfaces: air/plating at x=0 and plating/bulk at x=thickness_plating
+    // Build the conductivity profile from the two interface CDFs: air/plating at x = 0
+    // and plating/bulk at x = thickness_plating.
+    //
+    // Each entry is the segment's partial-volume average over [x_k, x_k + dx], not the
+    // profile sampled at x_k, and the recursion below consumes it as a uniform slab of
+    // exactly that span. Point sampling made both interfaces snap to the nearest grid
+    // node, which cost two distinct errors: the layer thickness was quantized by ±dx
+    // (up to 0.48% on Re(Zs), hence on loss, worst for a thin smooth plating), and the
+    // topmost segment was read as all-vacuum, standing the whole stack off by up to
+    // ~80 nm and inflating Im(Zs), hence the internal inductance. Averaging places both
+    // boundaries exactly wherever they fall, so neither survives grid alignment.
+    //
+    // Averaging the CDFs is enough to average sigma: with thickness_plating > 0 the
+    // deeper CDF never exceeds the shallower one, so sigma is a fixed linear combination
+    // of the two and the mean passes straight through it.
     const sigma_profile = new Float64Array(N);
+    const s_rough = rq <= 1e-12 ? 0 : rq;   // 0 selects the exact-step branch of _cdfMean
 
     for (let k = 0; k < N; k++) {
-        const x_k = recursion_min + k * dx;
-        let cdf0, cdf1;
+        const xa = recursion_min + k * dx, xb = xa + dx;
+        const cdf0 = _cdfMean(xa, xb, 0, s_rough);
+        const cdf1 = _cdfMean(xa, xb, thickness_plating, s_rough);
 
-        if (rq <= 1e-12) {
-            // Step profile: no roughness smoothing
-            cdf0 = x_k >= 0 ? 1.0 : 0.0;
-            cdf1 = x_k >= thickness_plating ? 1.0 : 0.0;
-        } else {
-            // Gaussian CDF for smooth transitions
-            cdf0 = _gaussianCDF(x_k, 0, rq);
-            cdf1 = _gaussianCDF(x_k, thickness_plating, rq);
-        }
-
-        // Build profile from CDFs
-        // Region probabilities: air (sigma=0) -> plating -> bulk
+        // Region fractions: air (sigma = 0) -> plating -> bulk
         const p_plating = Math.max(0, cdf0 - cdf1);
         const p_bulk = cdf1;
 
