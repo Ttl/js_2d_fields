@@ -8,9 +8,10 @@
 //          pencil, enclosed-box analytic modes, closed-form parallel-plate, coax and
 //          rectangular waveguide.
 //   slow — full solver validation: tri-backend correctness suite, mode viewer,
-//          per-side plating, plating behavior invariants, a pinned-seed
-//          QS-vs-fullwave fuzzer smoke, and the reference suite on BOTH backends
-//          (the MESH_BACKEND=triangular pass is the longest single entry).
+//          per-side plating, plating behavior invariants, the reference-free identity
+//          suite (test_invariants.js), a pinned-seed QS-vs-fullwave fuzzer smoke, and
+//          the reference suite on BOTH backends (the MESH_BACKEND=triangular pass is
+//          the longest single entry).
 //   e2e  — browser tests; need the dev server on localhost:8731 and chromium.
 //   fuzz — the full 40-case QS-vs-fullwave fuzzer run (~10 min, deterministic seed).
 import { spawnSync } from 'child_process';
@@ -52,6 +53,7 @@ const TIERS = {
         'tests/test_corner_roughness.js',
         'tests/test_coax_plating.js',
         'tests/test_surface_reactance.js',
+        'tests/test_invariants.js',
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['6', '3', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [smoke N=6 seed=3]' },
         { file: 'tests/fuzz_fullwave_interp.js', args: ['3', '1'], label: 'tests/fuzz_fullwave_interp.js [smoke N=3 seed=1]' },
     ],
