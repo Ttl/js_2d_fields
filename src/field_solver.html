@@ -567,6 +567,10 @@
                 <option value="C">C (F/m)</option>
                 <option value="G">G (S/m)</option>
             </select>
+            <!-- Shown only for a medium whose Z0/RLGC are a modal normalization rather than
+                 physical per-unit-length parameters (rectangular waveguide). -->
+            <span class="help-icon" id="results-modal-z0-help" style="display: none;"
+                  onclick="showHelpModal('wg_z0', event)">?</span>
             <button id="freeze-results-btn" style="width:auto; padding:6px 12px; font-size:0.85em;">Freeze</button>
             <span class="help-icon" onclick="showHelpModal('freeze')">?</span>
         </div>
@@ -996,11 +1000,16 @@
     window.parseValueWithUnit = parseValueWithUnit;
     window.formatValueWithUnit = formatValueWithUnit;
     window.getDefaultUnit = getDefaultUnit;
-    // restoreSettings (app_solver.js) sets tl_type before mesh_backend, so it must
-    // re-run the backend lock after both are in place. Assign the hoisted declaration
-    // directly, wrapping it in an arrow (`() => enforceBackendForType()`) overwrites
-    // the very global the arrow then resolves, giving infinite recursion.
+    // restoreSettings (app_solver.js) sets tl_type before the backend dropdown and the
+    // sweep checkboxes, so it must re-run both locks once every input is in place,
+    // otherwise a restored link can leave a full-wave-only type on the quasi-static
+    // backend, or leave "Interpolating sweep" ticked-but-disabled on a waveguide (the
+    // key is excluded from those links, so it restores to the global default of on).
+    // Assign the hoisted declarations directly: wrapping one in an arrow
+    // (`() => enforceBackendForType()`) overwrites the very global the arrow then
+    // resolves, giving infinite recursion.
     window.enforceBackendForType = enforceBackendForType;
+    window.enforceSweepOptionsForType = enforceSweepOptionsForType;
 
     // Collapsible Section Toggle
     function toggleSection(header) {
@@ -1051,7 +1060,7 @@
         },
         plating: {
             title: 'Surface Plating',
-            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both the plating layer and the bulk metal underneath (since the plating conforms to the bulk surface).</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p>'
+            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both the plating layer and the bulk metal underneath (since the plating conforms to the bulk surface).</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p><p>For a coaxial line the plating covers the centre conductor (the shield is left bare, it is modelled as a boundary with no meshed metal, and carries the base Surface Roughness). For a rectangular waveguide it covers the whole inner wall.</p>'
         },
         plating_thick_corners: {
             title: 'Model Thick Plating',
@@ -1138,6 +1147,14 @@
         }
     }
 
+    // Self-bounded media: the metal that encloses them is the domain boundary, so they
+    // replace the microstrip stackup wholesale with their own geometry block and share one
+    // branch in toggleParameterVisibility. tlType -> id of that block.
+    const SELF_BOUNDED_PARAM_DIVS = {
+        coax: 'coax-params',
+        rect_waveguide: 'wg-params',
+    };
+
     function toggleParameterVisibility() {
         const tlType = document.getElementById('tl_type').value;
         const microstripParams = document.getElementById('microstrip-params');
@@ -1145,10 +1162,8 @@
         const gcpwParams = document.getElementById('gcpw-params');
         const striplineParams = document.getElementById('stripline-params');
         const broadsideParams = document.getElementById('broadside-params');
-        const coaxParams = document.getElementById('coax-params');
-        const wgParams = document.getElementById('wg-params');
         const advancedParams = document.getElementById('advanced-params');
-        // A circle and a waveguide wall has one continuous surface, so the per-face
+        // A circle and a waveguide wall each have one continuous surface, so the per-face
         // plating selection and the corner-wrap model have nothing to act on. Both are
         // hidden for those types (plating itself still applies, all-around).
         const platingFacesGroup = document.getElementById('plating-params')
@@ -1171,9 +1186,10 @@
         gcpwParams.style.display = 'none';
         striplineParams.style.display = 'none';
         broadsideParams.style.display = 'none';
-        coaxParams.style.display = 'none';
-        wgParams.style.display = 'none';
-        const oneSurface = (tlType === 'coax' || tlType === 'rect_waveguide');
+        for (const id of Object.values(SELF_BOUNDED_PARAM_DIVS)) {
+            document.getElementById(id).style.display = 'none';
+        }
+        const oneSurface = !!SELF_BOUNDED_PARAM_DIVS[tlType];
         if (platingFacesGroup) platingFacesGroup.style.display = oneSurface ? 'none' : 'block';
         if (platingCornersGroup) platingCornersGroup.style.display = oneSurface ? 'none' : 'block';
 
@@ -1326,28 +1342,11 @@
                 gndCutParams.style.display = 'none';
             }
             if (chkEnclosure) chkEnclosure.disabled = false;
-        } else if (tlType === 'coax') {
-            coaxParams.style.display = 'block';
-            // The shield IS the domain boundary, so none of the board-stackup options
-            // apply. Plating and surface roughness do, and stay enabled.
-            if (solderMaskGroup) solderMaskGroup.style.display = 'none';
-            if (topDielGroup) topDielGroup.style.display = 'none';
-            if (gndCutGroup) gndCutGroup.style.display = 'none';
-            if (enclosureGroup) enclosureGroup.style.display = 'none';
-            if (topGndGroup) topGndGroup.style.display = 'none';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
-            for (const [cb, params] of [[chkSolderMask, solderMaskParams],
-                                        [chkTopDiel, topDielParams],
-                                        [chkGndCut, gndCutParams]]) {
-                if (!cb) continue;
-                cb.disabled = true; cb.checked = false;
-                if (params) params.style.display = 'none';
-            }
-            if (chkEnclosure) { chkEnclosure.disabled = true; chkEnclosure.checked = false; }
-        } else if (tlType === 'rect_waveguide') {
-            wgParams.style.display = 'block';
-            // The walls are the domain boundary, exactly as for coax, so no board-stackup
-            // option applies. Plating and surface roughness do, and stay enabled.
+        } else if (SELF_BOUNDED_PARAM_DIVS[tlType]) {
+            // Self-bounded media (coax, rectangular waveguide): the shield / the walls ARE
+            // the domain boundary, so none of the board-stackup options apply. Plating and
+            // surface roughness do, and stay enabled.
+            document.getElementById(SELF_BOUNDED_PARAM_DIVS[tlType]).style.display = 'block';
             if (solderMaskGroup) solderMaskGroup.style.display = 'none';
             if (topDielGroup) topDielGroup.style.display = 'none';
             if (gndCutGroup) gndCutGroup.style.display = 'none';
@@ -1370,8 +1369,11 @@
     // The interpolating sweep assumes a smooth non-vanishing RLGC set. A waveguide's shunt
     // C crosses zero at cutoff, so the interpolator's relative-error test explodes there
     // and after its single eigensolve every sweep point is analytic anyway, so there is
-    // nothing to save. Lock it off, and swap the S-parameter reference-impedance box for
-    // the "Z0 (modal)" label, since that medium ignores the box entirely.
+    // nothing to save. Lock it off, swap the S-parameter reference-impedance box for the
+    // "Z0 (modal)" label (that medium ignores the box entirely), and expose the modal-Z0
+    // help next to the results selector. Called from toggleParameterVisibility and, via
+    // window, from the end of restoreSettings, which sets tl_type before the checkboxes,
+    // so a restored link would otherwise leave the sweep box ticked-but-disabled.
     function enforceSweepOptionsForType() {
         const isWG = document.getElementById('tl_type').value === 'rect_waveguide';
         const chk = document.getElementById('chk_interp_sweep');
@@ -1392,6 +1394,10 @@
         const zModal = document.getElementById('sparam-z-ref-modal');
         if (zBox) zBox.style.display = isWG ? 'none' : '';
         if (zModal) zModal.style.display = isWG ? '' : 'none';
+        // Z0/RLGC are a modal normalization for this medium, not physical per-unit-length
+        // metal and dielectric parameters, which needs saying where they are read.
+        const z0Help = document.getElementById('results-modal-z0-help');
+        if (z0Help) z0Help.style.display = isWG ? '' : 'none';
     }
 
     // Some line types exist only on the full-wave backend. Coax: the quasi-static solver

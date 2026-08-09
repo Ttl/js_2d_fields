@@ -1,7 +1,7 @@
 // Triangular P2 Nedelec FEM — generic mesh, basis, assembly, and solver functions
 
 import { tripletsToCSR, solveCG, triQuality as triQualityXY } from './fem_core.js';
-import { shapeContains } from '../shapes.js';
+import { shapeContains, REL_SHAPE_TOL } from '../shapes.js';
 
 // --- 6-point Gauss quadrature on triangle (barycentric) ---
 
@@ -1156,46 +1156,64 @@ export function refineTriMesh(mesh, marked) {
     // clampLo/clampHi neighbour bounds and tends to bunch nodes near polygon vertices —
     // degrading exactly the surface resolution the conductor-loss line integral needs.
     //
-    // Classification is done ONCE here (with a per-segment bbox prefilter) and reused
-    // by both the smoother and the edge-swap guard, which would otherwise be an
-    // O(nodes x segments x passes) inner loop.
+    // Node classification is done ONCE here and reused by both the smoother's eligibility
+    // test and the edge-swap guard, which would otherwise repeat it every pass. The
+    // smoother still queries segmentAt for the candidate POSITIONS it proposes (those are
+    // not nodes, so there is nothing to precompute for them), hence the union-bbox reject
+    // in segmentAt, which is what keeps that per-pass query off the O(segments) path for
+    // the majority of vertices, the ones nowhere near a shaped boundary.
     const segs = mesh.constraintSegments || [];
+    // Per-segment geometry, precomputed once: padded bbox (the cheap reject), the edge
+    // vector, and len·tol so the perpendicular-distance test needs no division. Segments
+    // of zero length are dropped here rather than re-checked on every query.
+    const segTol = Math.max(xMax - xMin, yMax - yMin) * REL_SHAPE_TOL;
+    const segData = [];
+    let hullX0 = Infinity, hullX1 = -Infinity, hullY0 = Infinity, hullY1 = -Infinity;
+    for (const s of segs) {
+        const ex = s.x1 - s.x0, ey = s.y1 - s.y0;
+        const len = Math.hypot(ex, ey);
+        if (!(len > 0)) continue;
+        const d = {
+            x0: s.x0, y0: s.y0, ex, ey, crossTol: len * segTol,
+            xMin: Math.min(s.x0, s.x1) - segTol, xMax: Math.max(s.x0, s.x1) + segTol,
+            yMin: Math.min(s.y0, s.y1) - segTol, yMax: Math.max(s.y0, s.y1) + segTol,
+        };
+        segData.push(d);
+        hullX0 = Math.min(hullX0, d.xMin); hullX1 = Math.max(hullX1, d.xMax);
+        hullY0 = Math.min(hullY0, d.yMin); hullY1 = Math.max(hullY1, d.yMax);
+    }
+    // Index of a constraint segment (px, py) lies on, or -1. `skip` excludes one already
+    // found, so a vertex shared by two polygon sides reports both. The union-bbox test
+    // first: most queries come from nodes nowhere near a shaped boundary and reject in O(1).
+    const segmentAt = (px, py, skip = -1) => {
+        if (px < hullX0 || px > hullX1 || py < hullY0 || py > hullY1) return -1;
+        for (let si = 0; si < segData.length; si++) {
+            if (si === skip) continue;
+            const d = segData[si];
+            if (px < d.xMin || px > d.xMax || py < d.yMin || py > d.yMax) continue;
+            // Perpendicular distance to the (infinite) line; the bbox test above already
+            // restricted us to the segment's extent.
+            if (Math.abs((px - d.x0) * d.ey - (py - d.y0) * d.ex) > d.crossTol) continue;
+            return si;
+        }
+        return -1;
+    };
+    // Which segment(s) each EXISTING node sits on. Computed once and reused by the
+    // smoother's eligibility test and the edge-swap guard; only the smoother's candidate
+    // positions (which are not nodes yet) have to go back through segmentAt.
     const nodeSegA = new Int32Array(newNodeCount).fill(-1);
     const nodeSegB = new Int32Array(newNodeCount).fill(-1);
-    if (segs.length) {
-        const scale = Math.max(xMax - xMin, yMax - yMin);
-        const segTol = scale * 1e-9;
-        for (let si = 0; si < segs.length; si++) {
-            const s = segs[si];
-            const sxMin = Math.min(s.x0, s.x1) - segTol, sxMax = Math.max(s.x0, s.x1) + segTol;
-            const syMin = Math.min(s.y0, s.y1) - segTol, syMax = Math.max(s.y0, s.y1) + segTol;
-            const ex = s.x1 - s.x0, ey = s.y1 - s.y0;
-            const len = Math.hypot(ex, ey);
-            if (!(len > 0)) continue;
-            for (let n = 0; n < newNodeCount; n++) {
-                if (nodeSegA[n] >= 0 && nodeSegB[n] >= 0) continue;   // already on two
-                const px = newNodes[2*n], py = newNodes[2*n+1];
-                if (px < sxMin || px > sxMax || py < syMin || py > syMax) continue;
-                // Perpendicular distance to the (infinite) line; the bbox test above
-                // already restricted us to the segment's extent.
-                if (Math.abs((px - s.x0) * ey - (py - s.y0) * ex) / len > segTol) continue;
-                if (nodeSegA[n] < 0) nodeSegA[n] = si; else nodeSegB[n] = si;
-            }
+    if (segData.length) {
+        for (let n = 0; n < newNodeCount; n++) {
+            const px = newNodes[2*n], py = newNodes[2*n+1];
+            const a = segmentAt(px, py);
+            if (a < 0) continue;
+            nodeSegA[n] = a;
+            nodeSegB[n] = segmentAt(px, py, a);
         }
     }
     const onSegment = (n) => nodeSegA[n] >= 0;
-    const segScale = Math.max(xMax - xMin, yMax - yMin);
-    const pointOnAnySegment = (px, py) => {
-        const t = segScale * 1e-9;
-        for (const s of segs) {
-            if (px < Math.min(s.x0, s.x1) - t || px > Math.max(s.x0, s.x1) + t) continue;
-            if (py < Math.min(s.y0, s.y1) - t || py > Math.max(s.y0, s.y1) + t) continue;
-            const ex = s.x1 - s.x0, ey = s.y1 - s.y0;
-            const len = Math.hypot(ex, ey);
-            if (len > 0 && Math.abs((px - s.x0) * ey - (py - s.y0) * ex) / len <= t) return true;
-        }
-        return false;
-    };
+    const pointOnAnySegment = (px, py) => segmentAt(px, py) >= 0;
 
     // Classify ALL vertices: 0=pinned, 1=free, 2=along-Y, 3=along-X
     const canMove = new Uint8Array(newNodeCount);
@@ -1253,7 +1271,7 @@ export function refineTriMesh(mesh, marked) {
                     if (!snap) { if (Math.abs(ny - yMin) < 1e-10 || Math.abs(ny - yMax) < 1e-10) snap = true; }
                     // Same rule for shaped boundaries: a free vertex that lands on a
                     // polygon side would be misread as a surface node next pass.
-                    if (!snap && segs.length) snap = pointOnAnySegment(nx, ny);
+                    if (!snap && segData.length) snap = pointOnAnySegment(nx, ny);
                     if (snap) continue;
                 }
                 // Clamp constrained vertices to stay between neighbors on constraint line
@@ -1471,6 +1489,10 @@ export function refineTriMesh(mesh, marked) {
         constraintXRanges: mesh.constraintXRanges || null,
         constraintXs: mesh.constraintXs || [],
         // Carried forward so every refinement pass re-pins the shaped boundaries.
-        constraintSegments: mesh.constraintSegments || []
+        constraintSegments: mesh.constraintSegments || [],
+        // Bisection never adds elements where there were none, so the refined mesh has a
+        // conductor interior exactly when its parent did. Carried forward so the MQS
+        // applicability guard still sees it after any number of passes.
+        condInteriorMeshed: mesh.condInteriorMeshed
     };
 }

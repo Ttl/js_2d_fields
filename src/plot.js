@@ -55,17 +55,17 @@ function contourScaledB(min, max, n) {
     return [eMin, eMax, logStep];
 }
 
-// Opaque conductor fills (+ yellow plating edges), drawn ABOVE the field. Shared by the geometry
-// view and the field views so conductors look identical and the field views don't show heatmap/
-// contour bleed inside the PEC (the resampled field is identically zero in the conductor interior;
-// this just masks the zsmooth/contour interpolation that spills the steep boundary field inward).
 // Closed rectangular loop as an SVG path, in mm. Two of these in one path with the evenodd
 // fill rule give a rectangular ring, the frame drawn around an enclosed medium's domain.
 function rectLoopPath(x0, y0, x1, y1) {
-    const m = (v) => (v * 1000);
+    const m = (v) => v * 1000;
     return `M ${m(x0)},${m(y0)} L ${m(x1)},${m(y0)} L ${m(x1)},${m(y1)} L ${m(x0)},${m(y1)} Z`;
 }
 
+// Opaque conductor fills (+ yellow plating edges), drawn above the field. Shared by the geometry
+// view and the field views so conductors look identical and the field views don't show heatmap/
+// contour bleed inside the PEC (the resampled field is identically zero in the conductor interior,
+// this just masks the zsmooth/contour interpolation that spills the steep boundary field inward).
 function conductorFillShapes(solver, maxY) {
     const out = [];
     const FILL = 'rgba(217, 119, 6, 1.0)';
@@ -673,50 +673,31 @@ function draw(resetZoom = false) {
             const menus = [];
 
             // View selector (Geometry/Potential/E-field)
+            const viewButtons = [{ label: "Geometry", method: "skip", args: [] }];
+            if (solver.solution_valid) {
+                // A source-free medium (rectangular waveguide) has no static potential to
+                // show, its field is the mode field, so the Potential button is omitted
+                // rather than left to render a blank heatmap.
+                if (solver.has_potential !== false) {
+                    viewButtons.push({ label: "Potential", method: "skip", args: [] });
+                }
+                viewButtons.push({ label: "|E| Field", method: "skip", args: [] });
+            }
+            // Both the highlighted button and the click handler key off the LABEL, never a
+            // fixed index, with Potential absent, "|E| Field" is at index 1, not 2.
+            // Prefix match so the differential "_odd"/"_even" view variants land on their
+            // own button rather than falling through to the first one.
+            const activeLabel = currentView.startsWith("geometry") ? "Geometry"
+                : currentView.startsWith("potential") ? "Potential" : "|E| Field";
             menus.push({
                 x: 0.01,
                 y: 1.15,
                 showactive: true,
-                active: (() => {
-                    if (currentView === "geometry") return 0;
-                    if (currentView === "potential") return 1;
-                    if (currentView === "efield") return 2;
-                    return 0;
-                })(),
+                active: Math.max(0, viewButtons.findIndex(b => b.label === activeLabel)),
                 bgcolor: '#2a2a2a',
                 bordercolor: '#444',
                 font: { color: '#aaa' },
-                buttons: (() => {
-                    const buttons = [
-                        {
-                            label: "Geometry",
-                            method: "skip",
-                            args: []
-                        }
-                    ];
-
-                    if (solver.solution_valid) {
-                        // A source-free medium (rectangular waveguide) has no static
-                        // potential to show, its field is the mode field, so the
-                        // Potential button is omitted rather than left to render a blank
-                        // heatmap. The click handler keys off the label, not the index,
-                        // so dropping a button here cannot mis-route the remaining ones.
-                        if (solver.has_potential !== false) {
-                            buttons.push({
-                                label: "Potential",
-                                method: "skip",
-                                args: []
-                            });
-                        }
-                        buttons.push({
-                            label: "|E| Field",
-                            method: "skip",
-                            args: []
-                        });
-                    }
-
-                    return buttons;
-                })()
+                buttons: viewButtons
             });
 
             // Mode selector (Odd/Even) - only for differential lines

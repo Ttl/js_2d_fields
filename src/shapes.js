@@ -27,8 +27,15 @@
 // is exact with respect to that polygon.
 
 // Relative tolerance for "is this point on the boundary" tests, scaled by the caller's
-// domain diagonal. Boundary points must classify as INSIDE for both polarities so a
-// node sitting exactly on a conductor surface is PEC.
+// domain diagonal (or by the local feature size where that is the meaningful scale).
+// Boundary points must classify as inside for both polarities so a node sitting exactly
+// on a conductor surface is PEC.
+//
+// Every stage that decides "is this node/edge/curve ON a shape boundary" must agree, or a
+// node classifies as metal in one and as free space in the next and the PEC surface
+// develops holes. So this is the single definition, imported by the mesher (its geometric
+// tolerance), the freedom map and the refinement smoother's segment pinning, rather than
+// each re-deriving its own 1e-9.
 export const REL_SHAPE_TOL = 1e-9;
 
 const TWO_PI = 2 * Math.PI;

@@ -310,12 +310,17 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
 // Is the geometry mirror-symmetric about x=0? (lets us mesh only the right half.)
 function isXSymmetric(conductors, dielectrics, domainW) {
     const tol = domainW * 1e-6;
-    // Shaped geometry can't be compared by rect spans. A shape declares its own mirror
-    // symmetry (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
-    // phase 0, which puts vertices exactly on the y axis so the x >= 0 half is an
-    // EXACT half). If any shape is present, all of them must qualify.
-    const shaped = [...conductors, ...dielectrics].filter(o => o.shape);
-    if (shaped.length) return shaped.every(o => o.shape.xSymmetric === true);
+    // Shaped geometry can't be compared by rect spans, so a shape declares its own mirror
+    // symmetry instead (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
+    // phase 0, which puts vertices exactly on the y axis so the x >= 0 half is an exact 
+    // half). Every shape must qualify and the rectangular remainder still has to pass
+    // the span test below, so a shaped conductor can never wave through asymmetric rects
+    // sitting next to it.
+    const shaped = (o) => !!o.shape;
+    if (![...conductors, ...dielectrics].filter(shaped).every(o => o.shape.xSymmetric === true))
+        return false;
+    conductors = conductors.filter(o => !shaped(o));
+    dielectrics = dielectrics.filter(o => !shaped(o));
     const mirrorOf = (list, extra) => {
         // every rect must have a mirror partner (xmin↔-xmax) with same y + material
         const key = (r) => `${extra(r)}|${r.y_min.toFixed(12)}|${r.y_max.toFixed(12)}`;
@@ -531,22 +536,17 @@ function wgFundamentalEfun(condRect) {
 // special case. (solveModes sorts on the same key.)
 //
 // Returns { kc, vRe, vIm, g2Re, g2Im } or null when nothing physical converged.
-function waveguideEigen(ctx, mesh, fm, abc, condRect, epsMap, f, seed, kcAnalytic, cache = null) {
+//
+// No assembly cache, unlike fullwaveMode. This medium runs exactly one eigensolve per
+// (mesh, freedom map), one per refinement pass, then one on the final mesh and every
+// call therefore arrives with a freshly built fm, so there is nothing a cache could hit.
+// The sweep itself never comes back here at all: _waveguideModeAtFreq propagates beta(f)
+// analytically from the single cached eigenvector.
+function waveguideEigen(ctx, mesh, fm, abc, condRect, epsMap, f, seed, kcAnalytic) {
     const k2 = (2 * Math.PI * f / c0) ** 2;
     const erMax = maxEpsRe(epsMap);
-    // Same affine-in-k² decomposition + identity-validated cache as fullwaveMode.
-    let dec;
-    const abcKey = JSON.stringify(abc);
-    if (cache && cache.mesh === mesh && cache.fm === fm && cache.epsMap === epsMap &&
-        cache.abcKey === abcKey) {
-        dec = cache.dec;
-    } else {
-        dec = assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect);
-        if (cache) {
-            cache.mesh = mesh; cache.fm = fm; cache.epsMap = epsMap;
-            cache.abcKey = abcKey; cache.dec = dec;
-        }
-    }
+    // Same affine-in-k² decomposition as fullwaveMode.
+    const dec = assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect);
     const fem = femFromDecomposition(dec, k2);
     if (!fem) return null;
     const N = fem.N;
@@ -835,11 +835,19 @@ export class TriBackend {
                 if (Number.isFinite(e) && e > 0.3) p = Math.min(e, 3);
             }
             const factor = Math.pow(mesh.nTris / maxTris, 1 / p) * 1.05;   // +5% to land under
-            // Backstops: accept a mesh already within ~30% of budget rather than pay a
-            // whole gmsh run to shave it, and give up if coarsening has stopped paying
-            // (some geometries floor out — a shaped conductor forces one mesh edge per
-            // polygon side, which no coarsening gets under).
-            if (factor < 1.2 || mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
+            // Backstops: accept a mesh already within OVERSHOOT_OK of the budget rather
+            // than pay a whole gmsh run to shave it, and give up if coarsening has stopped
+            // paying (some geometries floor out, a shaped conductor forces one mesh edge
+            // per polygon side, which no coarsening gets under).
+            //
+            // The test is on the OVERSHOOT, not on `factor`: factor is the p-th root, so
+            // the same cutoff there would mean a different budget overrun for every fitted
+            // exponent (a `factor < 1.2` bail lets p=3 through at 1.5x budget while p=2
+            // stops at 1.3x). maxTris is a memory guard, so what it may be exceeded by has
+            // to be stated in its own units.
+            const OVERSHOOT_OK = 1.3;
+            if (mesh.nTris < maxTris * OVERSHOOT_OK ||
+                mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
             prevAtt = { h: hFine, n: mesh.nTris };
             hFine *= factor; hCoarse *= factor;
         }
@@ -902,12 +910,11 @@ export class TriBackend {
             const conv = [];   // convergence quantities (eps + loss surface integral per mode)
             const energy = []; // total field energy per mode (for the reported energy error)
             // Source-free waveguide: there is no static solve, so the whole per-mode body
-            // below is replaced, see _wgRefinePass.
+            // in the else branch is replaced, see _wgRefinePass.
             if (this._isWG) {
                 const p = this._wgRefinePass(mesh);
                 metric = p.metric; conv.push(...p.conv); energy.push(...p.energy);
-            }
-            for (const rm of (this._isWG ? [] : refModes)) {
+            } else for (const rm of refModes) {
                 const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
                 const pot = drivePotentials(this.condRect, rm, this.symmetry);
                 const fm = buildTriFreedomMap(mesh, this.condRect, abc);
@@ -1032,7 +1039,7 @@ export class TriBackend {
         let wg = null;
         try {
             wg = waveguideEigen(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, f,
-                seed, s.kc_analytic, {});
+                seed, s.kc_analytic);
         } catch { wg = null; }
         // Keep the convergence vector a consistent length across passes when a pass fails.
         if (!wg) return { metric: null, conv: [s.kc_analytic, 0], energy: [s.kc_analytic] };
@@ -1084,7 +1091,7 @@ export class TriBackend {
         const fm = buildTriFreedomMap(mesh, this.condRect, abc);
         const seed = analyticSeedDofs(mesh, fm, wgFundamentalEfun(this.condRect));
         const wg = waveguideEigen(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap,
-            this.wgRefFreq(), seed, s.kc_analytic, {});
+            this.wgRefFreq(), seed, s.kc_analytic);
         if (!wg) throw new Error(
             'Waveguide eigensolve failed: no physical mode converged at the reference ' +
             'frequency. Check the guide dimensions and the Max Nodes budget.');
@@ -1424,8 +1431,22 @@ export class TriBackend {
                 message: 'MQS conductor loss is not applicable with explicit ground conductors ' +
                          '(they would be driven as signal); using the perturbation method instead.' });
         }
-        const useMQS = (lossMethod === 'mqs' && !hasGroundRect)
+        // The volume eddy-current solve reads the elements INSIDE the metal, which the
+        // mesher only emits when buildMesh's own applicability test (mqsPre) said MQS
+        // could apply. That test is derived from the pre-mesh geometry and this one from
+        // the built condRect, so they are computed independently and could in principle
+        // disagree, on a mesh with no conductor interior MQS would return a plausible
+        // but wrong R rather than fail, so fall back to perturbation and say so.
+        let useMQS = (lossMethod === 'mqs' && !hasGroundRect)
             || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
+        if (useMQS && mesh.condInteriorMeshed === false) {
+            useMQS = false;
+            if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'mqs-no-interior')) {
+                this._modeWarnings.push({ type: 'mqs-no-interior', mode, freq: f,
+                    message: 'MQS conductor loss needs the conductor interiors meshed, but this ' +
+                             'mesh was built without them; using the perturbation method instead.' });
+            }
+        }
         let eps_d = eps_eff_static, fw = null;
         if (f >= F_STATIC_MAX) {
             // Seed the eigensolve with the STATIC field (frequency-deterministic), NOT a
@@ -1602,8 +1623,9 @@ export class TriBackend {
             const mqsBand = this.opts.mqsBand ?? 1.5;
             // DEFAULT: f_max-reuse. Build the skin mesh at the HIGHEST frequency seen
             // (finest target, narrowest band) and reuse it for all lower frequencies.
-            // The fine near-surface band plus the always-meshed conductor interior
-            // resolve the lower-frequency (more uniform) current accurately — validated
+            // The fine near-surface band plus the conductor interior (always meshed on
+            // this path, see the guard on condInteriorMeshed above) resolve the
+            // lower-frequency (more uniform) current accurately, validated
             // against the reference suite to a 100× frequency mismatch. One mesh ⇒ smooth
             // R(f) with no per-frequency-remesh "dip", at moderate size (the high-f band
             // is narrow), unlike a whole-range mesh which over-resolves the low-f band.

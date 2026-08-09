@@ -2,7 +2,7 @@ import { MicrostripSolver } from './microstrip.js';
 import { BroadsideStriplineSolver } from './broadside_stripline.js';
 import { CoaxSolver } from './coax.js';
 import { RectWaveguideSolver } from './rect_waveguide.js';
-import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB } from './sparameters.js';
+import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usableSweepPoints } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView } from './plot.js';
@@ -590,10 +590,13 @@ function restoreSettings(settings) {
         document.getElementById('inp_wg_tand').value = fullSettings.wg_tand;
         document.getElementById('inp_wg_sigma').value = fullSettings.wg_sigma;
 
-        // tl_type is restored ABOVE mesh_backend, so the backend lock has to run once
-        // both are in place — otherwise a stale or hand-edited link can leave a
-        // full-wave-only type selected with the quasi-static backend, which cannot mesh it.
+        // tl_type is restored above the backend dropdown and the sweep checkboxes, so both
+        // locks have to run once every input is in place, otherwise a stale or
+        // hand-edited link can leave a full-wave-only type selected with the quasi-static
+        // backend (which cannot mesh it), or leave the interpolating sweep ticked on a
+        // medium that does not support it.
         if (window.enforceBackendForType) window.enforceBackendForType();
+        if (window.enforceSweepOptionsForType) window.enforceSweepOptionsForType();
 
         return true;
     } catch (e) {
@@ -830,12 +833,24 @@ function updateResultNotices() {
             if (resultsNotice) {
                 resultsNotice.style.display = 'none';
             }
+            // A self-referenced medium drops its below-cutoff points (they have an
+            // imaginary modal impedance), so the S-parameter tab can legitimately end up
+            // with nothing to draw while the Results tab is full. Say why, rather than
+            // leaving an empty plot and an export button that only fails when clicked.
+            const exportable = usableSweepPoints(frequencySweepResults).length > 0;
             if (sparamNotice) {
-                sparamNotice.style.display = 'none';
+                if (!exportable) {
+                    sparamNoticeText.textContent = 'Every sweep point is below the cutoff — ' +
+                        'the mode is evanescent there, so there are no propagating ' +
+                        'S-parameters. Raise the sweep frequency above the cutoff.';
+                    sparamNotice.style.display = 'block';
+                } else {
+                    sparamNotice.style.display = 'none';
+                }
             }
             if (exportBtn) {
-                exportBtn.disabled = false;
-                exportBtn.title = '';
+                exportBtn.disabled = !exportable;
+                exportBtn.title = exportable ? '' : 'Cannot export - no propagating sweep points';
             }
         }
     }
@@ -1564,7 +1579,8 @@ async function runSimulation() {
     // has a freq===0 branch that would model it as a lossless through. Drop the point.
     if (solver.allow_dc === false && frequencies.includes(0)) {
         frequencies = frequencies.filter(f => f > 0);
-        log('Note: DC (0 Hz) is skipped for this line type — a waveguide does not propagate at DC.');
+        // The medium names its own reason (allow_dc is a generic flag, not a waveguide one).
+        log(`Note: DC (0 Hz) is skipped — ${solver.dc_block_reason || 'this line type does not propagate at DC'}.`);
         if (!frequencies.length) {
             log('ERROR: no non-zero frequencies to solve.');
             return;
@@ -2473,8 +2489,15 @@ function bindEvents() {
                 freqStop: frequencySweepResults[frequencySweepResults.length - 1].freq,
                 numPoints: frequencySweepResults.length
             };
-            const filename = exportSnP(frequencySweepResults, length, Z_ref, isDifferential, params);
-            log(`Exported ${filename}`);
+            // generateS2P rejects a sweep it cannot represent (e.g. every point below a
+            // waveguide's cutoff) with a message written for the user, surface it in the
+            // log like every other failure here, rather than letting it escape to the
+            // console where the button just appears to do nothing.
+            try {
+                log(`Exported ${exportSnP(frequencySweepResults, length, Z_ref, isDifferential, params)}`);
+            } catch (e) {
+                log(`Export failed: ${e && e.message ? e.message : e}`);
+            }
         });
     }
 

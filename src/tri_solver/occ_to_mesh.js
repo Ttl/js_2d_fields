@@ -22,9 +22,12 @@
 // boundary is the domain outline, but still gets a condRects entry so the freedom map
 // makes that outline PEC and the loss integral finds its surface edges.
 
-import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, isComplement } from '../shapes.js';
+import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist,
+         isComplement, REL_SHAPE_TOL } from '../shapes.js';
 
-const REL_TOL = 1e-9;
+// Domain-diagonal-relative geometric tolerance. Shared with the freedom map and the
+// refinement smoother (see REL_SHAPE_TOL) so all three agree on where a boundary is.
+const REL_TOL = REL_SHAPE_TOL;
 
 // Per-triangle ε / loss maps by centroid (last-match-wins over the dielectric list,
 // matching _setup_geometry). Reusable: call again after refineTriMesh.
@@ -312,12 +315,16 @@ export function buildOccMeshFromGeometry(G, opts) {
         // units, verified empirically) — the containment pad must absorb that,
         // capped per rect so a very thin conductor can't false-positive.
         const OCC_BBOX_PAD = 2e-7;
-        const inCond = (x0, y0, x1, y1) => bboxRects.some(c => {
-            const pad = Math.max(tol, Math.min(OCC_BBOX_PAD,
-                0.4 * Math.min(c.xmax - c.xmin, c.ymax - c.ymin)));
+        const bboxPad = (c) => Math.max(tol, Math.min(OCC_BBOX_PAD,
+            0.4 * Math.min(c.xmax - c.xmin, c.ymax - c.ymin)));
+        // Is the bbox (x0,y0)-(x1,y1) contained in this rect, within the OCC pad? Shared
+        // with the conductor-interior removal below so both use one padding rule.
+        const bboxInRect = (c, x0, y0, x1, y1) => {
+            const pad = bboxPad(c);
             return x0 > c.xmin - pad && x1 < c.xmax + pad &&
                    y0 > c.ymin - pad && y1 < c.ymax + pad;
-        });
+        };
+        const inCond = (x0, y0, x1, y1) => bboxRects.some(c => bboxInRect(c, x0, y0, x1, y1));
         for (let i = 0; i < faces.length; i += 2) {
             const ftag = faces[i + 1];
             G._gmshModelGetBoundingBox(2, ftag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr); check('GetBoundingBox');
@@ -377,13 +384,8 @@ export function buildOccMeshFromGeometry(G, opts) {
                 check('GetBoundingBox');
                 const bx0 = G.getValue(bb[0], 'double'), by0 = G.getValue(bb[1], 'double');
                 const bx1 = G.getValue(bb[3], 'double'), by1 = G.getValue(bb[4], 'double');
-                const hit = condRects.some(c => {
-                    if (c.shape && isComplement(c.shape)) return false;
-                    const pad = Math.max(tol, Math.min(2e-7,
-                        0.4 * Math.min(c.xmax - c.xmin, c.ymax - c.ymin)));
-                    return bx0 > c.xmin - pad && bx1 < c.xmax + pad &&
-                           by0 > c.ymin - pad && by1 < c.ymax + pad;
-                });
+                const hit = condRects.some(c =>
+                    !(c.shape && isComplement(c.shape)) && bboxInRect(c, bx0, by0, bx1, by1));
                 if (hit) holes.push(ftag);
             }
             let dangling = 0;
@@ -595,6 +597,11 @@ export function buildOccMeshFromGeometry(G, opts) {
         nodes, tris, edges, triEdges, triSigns, nNodes, nTris, nEdges,
         constraintYRanges, constraintXRanges, constraintXs, constraintSegments,
         condRect, epsMap, lossMap,
+        // Whether conductor interiors carry triangles. The MQS volume eddy solve is the
+        // only consumer of them and would silently return a wrong R on a mesh built
+        // without them, so it is recorded on the mesh rather than left implicit in the
+        // caller's (separately derived) applicability test. See TriBackend._modeAtFreq.
+        condInteriorMeshed: opts.meshConductorInterior !== false,
         meshedDomain: { X0, X1, Y0, Y1, wallPEC },
     };
 }

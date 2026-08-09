@@ -96,6 +96,7 @@ class RectWaveguideSolver extends FieldSolver2D {
         this.tri_symmetry = false;
         this.has_potential = false;      // no static potential to plot
         this.allow_dc = false;           // a guide is a DC block; the f=0 limit is degenerate
+        this.dc_block_reason = 'a waveguide does not propagate at DC';
         // The shunt C crosses zero at cutoff, which blows up the interpolator's relative
         // error test — and after the single eigensolve every sweep point is analytic
         // anyway, so there is nothing to save.
