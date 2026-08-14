@@ -1960,12 +1960,17 @@ export class FieldSolver2D {
             // Wire the UI adaptive controls (max iterations, tolerance, max nodes) into
             // the triangular backend's refinement loop; buildMesh reports each pass via
             // onProgress. Undefined values fall back to the backend defaults.
-            const tri = await this._ensureTriBackend(options.onProgress, {
+            const triOpts = {
                 maxRefineIters: options.max_iters,
                 refineTol: options.energy_tol,
                 maxNodes: options.max_nodes,
                 minConvergedPasses: options.min_converged_passes,
-            }, options.shouldStop);
+            };
+            // Only forward certify when the caller decided it (the UI "Estimate
+            // solution error" checkbox): an unconditional `certify: undefined` would
+            // shadow a certify set through tri_opts.
+            if (options.certify !== undefined) triOpts.certify = options.certify;
+            const tri = await this._ensureTriBackend(options.onProgress, triOpts, options.shouldStop);
             return tri.solveAt(this.freq);
         }
 

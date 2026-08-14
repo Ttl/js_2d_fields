@@ -188,6 +188,7 @@ const DEFAULT_SETTINGS = {
     max_iters: 10,
     tolerance: 0.01,
     min_converged_passes: 2,
+    estimate_error: 1,
     max_nodes: 20,
     rq: 0,             // μm
     use_plating: 0,
@@ -304,6 +305,7 @@ function getUISettings() {
         // use the fraction.
         tolerance: getInputValueUnitless('inp_tolerance') / 100,
         min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
+        estimate_error: document.getElementById('chk_estimate_error').checked ? 1 : 0,
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         rq: getDisplayValue('inp_rq'),
         use_plating: document.getElementById('chk_plating').checked ? 1 : 0,
@@ -550,6 +552,7 @@ function restoreSettings(settings) {
             parseFloat((100 * fullSettings.tolerance).toPrecision(10));
         if (fullSettings.min_converged_passes !== undefined)
             document.getElementById('inp_min_converged_passes').value = fullSettings.min_converged_passes;
+        document.getElementById('chk_estimate_error').checked = !!fullSettings.estimate_error;
         document.getElementById('inp_max_nodes').value = fullSettings.max_nodes;
         setValueWithUnit('inp_rq', fullSettings.rq);
 
@@ -956,6 +959,7 @@ async function runModesSolve() {
         refineTol: p.tolerance,
         maxNodes: p.max_nodes * 1000,
         minConvergedPasses: p.min_converged_passes,
+        certify: !!p.estimate_error,
         wavelengthDensity: meshDensity,
     };
 
@@ -1236,6 +1240,7 @@ function getParams() {
         // and share links (which diff against DEFAULT_SETTINGS.tolerance) unchanged.
         tolerance: getInputValueUnitless('inp_tolerance') / 100,
         min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
+        estimate_error: document.getElementById('chk_estimate_error').checked,
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         // Surface roughness parameter
         rq: getInputValue('inp_rq'),
@@ -1704,6 +1709,7 @@ async function runSimulation() {
             param_tol: 0.05,
             max_nodes: p.max_nodes*1000,
             min_converged_passes: p.min_converged_passes,
+            certify: !!p.estimate_error,
             onProgress: (info) => {
                 // Mesh usually converges in ~EST_MESH_PASSES passes (far fewer than
                 // p.max_iters), so estimate completion from that. Mesh owns only the
@@ -2271,6 +2277,7 @@ async function runParameterSweep() {
                 param_tol: 0.05,
                 max_nodes: p.max_nodes * 1000,
                 min_converged_passes: p.min_converged_passes,
+                certify: !!p.estimate_error,
                 onProgress: () => {},
                 shouldStop: () => sweepStopRequested
             });

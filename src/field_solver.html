@@ -537,6 +537,9 @@
         <label>Tolerance (%) <span class="help-icon" onclick="showHelpModal('tolerance')">?</span></label>
         <input type="number" id="inp_tolerance" value="1" inputmode="decimal" min="0" max="100">
     </div>
+    <div class="control-group">
+        <label><input type="checkbox" id="chk_estimate_error" checked> Estimate solution error <span class="help-icon" onclick="showHelpModal('estimate_error', event)">?</span></label>
+    </div>
     </div>
     </div>
 
@@ -1086,6 +1089,10 @@
         tolerance: {
             title: 'Tolerance (%)',
             body: '<p>Target accuracy of the adaptive mesh refinement in percent. The mesh is refined until the pass-to-pass change in field energy and line parameters drops below this value, and the result is then verified: the static fields are re-solved on a uniformly refined mesh and the true remaining error is estimated by Richardson extrapolation. Refinement continues until this verified remaining error of the static quantities (C and C<sub>0</sub>, which set Z<sub>0</sub> and &epsilon;<sub>eff</sub>) is below the tolerance, with a 1.5&times; safety margin on the estimate.</p><p>On success the log prints the verified remaining error. If Max Nodes or Max Iterations stop refinement before the tolerance is reached, a warning reports the estimated remaining error instead of stopping silently.</p><p>Not covered: conductor and dielectric losses are outside the verification, only the static field solution is certified.</p><p>Cost: the verification re-solves on a mesh with about 4&times; the nodes, so tight tolerances get slow. 1% is a good default; use 0.1&ndash;0.25% for reference-quality results.</p>'
+        },
+        estimate_error: {
+            title: 'Estimate Solution Error',
+            body: '<p>When enabled (default), every converged solve is verified: the static fields are re-solved on uniformly refined mesh, the true remaining error is estimated by Richardson extrapolation, and refinement continues until the estimate is below the Tolerance. The log reports the verified remaining error, and a warning is shown if Max Nodes or Max Iterations stop refinement before the tolerance is reached.</p><p>When disabled, refinement stops when the pass-to-pass change drops below the Tolerance. This is faster (no verification solves on a ~4&times; refined mesh), but the pass-to-pass change measures the rate of convergence rather than the distance to the converged answer, so the true error can be larger.</p>'
         },
         maxnodes: {
             title: 'Max nodes (thousands)',
