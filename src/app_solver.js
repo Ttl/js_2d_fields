@@ -2229,9 +2229,12 @@ async function runParameterSweep() {
     };
     const minSI = parseVal(document.getElementById('sweep-x-min').value);
     const maxSI = parseVal(document.getElementById('sweep-x-max').value);
-    // For unitless/fixedUnit params, min/maxSI are already display values
-    const minDisplay = isUnitless ? minSI : convertToDisplayUnit(minSI, displayUnit);
-    const maxDisplay = isUnitless ? maxSI : convertToDisplayUnit(maxSI, displayUnit);
+    // For unitless/fixedUnit params, min/maxSI are already display values.
+    // Unit conversion leaves float noise trim to 12 significant digits so the
+    // output is clean.
+    const trimFloat = (v) => parseFloat(v.toPrecision(12));
+    const minDisplay = trimFloat(isUnitless ? minSI : convertToDisplayUnit(minSI, displayUnit));
+    const maxDisplay = trimFloat(isUnitless ? maxSI : convertToDisplayUnit(maxSI, displayUnit));
     const nPoints = parseInt(document.getElementById('sweep-points').value, 10);
     const freqHz = getInputValue('sweep-freq');
 
@@ -2266,7 +2269,8 @@ async function runParameterSweep() {
         for (let i = 0; i < nPoints; i++) {
             if (sweepStopRequested) { log('Sweep stopped.'); break; }
 
-            const displayVal = minDisplay + (maxDisplay - minDisplay) * i / (nPoints - 1);
+            // Interpolation reintroduces float noise (0.105 + 0.315/9 = 0.14000000000000001).
+            const displayVal = trimFloat(minDisplay + (maxDisplay - minDisplay) * i / (nPoints - 1));
             // Temporarily set value for updateGeometry to read, then restore
             inputEl.value = isUnitless ? displayVal : `${displayVal} ${displayUnit}`;
             updateGeometry();
