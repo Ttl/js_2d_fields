@@ -82,13 +82,15 @@ const quiet = async (fn) => {
 
 // One solve, returning the whole result so differential callers can reach both modes and
 // the physical matrix. `hints` overrides the triangular mesher's element sizes, which is
-// how the convergence sweep in section A refines without touching the geometry.
-async function solve(opts, freq, { backend = 'triangular', hints = null } = {}) {
+// how the convergence sweep in section A refines without touching the geometry. `tol`
+// tightens the triangular tolerance for checks that compare INDEPENDENT solves against
+// a margin finer than the default certified accuracy (see section B).
+async function solve(opts, freq, { backend = 'triangular', hints = null, tol = null } = {}) {
     const s = new MicrostripSolver({ ...opts, mesh_backend: backend });
     s.use_causal_materials = false;         // DS would move er off its nominal value
     if (hints) s.tri_mesh_hints = hints;
     const cached = await quiet(() => s.solve_adaptive(backend === 'triangular'
-        ? { max_nodes: 200000 }
+        ? (tol ? { max_nodes: 200000, energy_tol: tol, max_iters: 12 } : { max_nodes: 200000 })
         : { max_iters: 6, energy_tol: 0.005, param_tol: 0.02, max_nodes: 40000 }));
     const result = await quiet(() => s.computeAtFrequency(freq, cached));
     return { s, result, mode: result.modes[0],
@@ -337,8 +339,16 @@ console.log('\n=== B. decoupling limit: a widely spaced pair == two single-ended
         boundaries: ['open', 'open', 'open', 'gnd'],
     };
     const SPACING = 20 * SE.substrate_height;
-    const { mode: se } = await solve(SE, 5e9);
-    const { result } = await solve({ ...SE, trace_spacing: SPACING }, 5e9);
+    // The ordering check below resolves a ±0.2% margin between two INDEPENDENT solves,
+    // which needs (a) the same open-boundary truncation on both — the single-ended
+    // auto-domain is 6 mm wide vs the pair's 35.2 mm, and that mismatch alone biases
+    // the single-ended Z high by ~0.18%, consuming the whole margin to Z_even (it used
+    // to pass only because the coarse-mesh C bias canceled the truncation bias) — and
+    // (b) certified accuracy finer than the margin, hence tol 0.1% instead of the
+    // default 0.3%.
+    const PAIR_DOMAIN = 2 * Math.max(4 * (2 * SE.trace_width + SPACING), 15 * SE.substrate_height);
+    const { mode: se } = await solve({ ...SE, enclosure_width: PAIR_DOMAIN }, 5e9, { tol: 1e-3 });
+    const { result } = await solve({ ...SE, trace_spacing: SPACING }, 5e9, { tol: 1e-3 });
     const odd = result.modes.find((m) => m.mode === 'odd');
     const even = result.modes.find((m) => m.mode === 'even');
     check('the spaced solve produced both modes', !!odd && !!even);

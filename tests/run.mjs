@@ -53,6 +53,7 @@ const TIERS = {
         'tests/test_corner_roughness.js',
         'tests/test_coax_plating.js',
         'tests/test_surface_reactance.js',
+        'tests/test_certification.js',
         'tests/test_invariants.js',
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['6', '3', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [smoke N=6 seed=3]' },
         { file: 'tests/fuzz_fullwave_interp.js', args: ['3', '1'], label: 'tests/fuzz_fullwave_interp.js [smoke N=3 seed=1]' },

@@ -1713,6 +1713,17 @@ async function runSimulation() {
             shouldStop: () => stopRequested
         });
 
+        // Verification certificate (triangular backend): the per-pass errors
+        // logged above are pass-to-pass changes. The certificate is the
+        // verified remaining error measured against a uniform-refinement solve,
+        // so log it as the authoritative accuracy number. A failed certificate
+        // additionally arrives as an accuracy warning through logModeWarnings
+        // below.
+        if (solver.certification && solver.certification.pass) {
+            log(`Estimated remaining error ${(100 * solver.certification.err).toExponential(2)}% ` +
+                `(tolerance ${(100 * p.tolerance).toFixed(2)}%)`);
+        }
+
         // Mesh quality warning (triangular backend): a high worst-case Q means a sliver
         // triangle that can ill-condition the FEM solve and degrade accuracy.
         if (solver.meshQuality && solver.meshQuality.maxQ > 100) {

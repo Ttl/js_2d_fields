@@ -27,6 +27,7 @@ import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh, _clipDomain } 
 import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
          markTrianglesForRefinement, computeTriP2StaticMatrices,
+         triCoefficients, lvGrad, leGrad,
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
          femFromDecomposition } from './tri_fem.js';
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
@@ -344,7 +345,9 @@ function isXSymmetric(conductors, dielectrics, domainW) {
     return condOk && dielOk;
 }
 
-// Per-triangle electrostatic energy (refinement metric): ε·∫|∇φ|² over each tri.
+// Per-triangle electrostatic energy (legacy refinement metric): ε·∫|∇φ|² over
+// each tri.  Kept as the fallback for perElementKelly below. It refines where
+// the field is strong, not where the discretization error is.
 function perElementEnergy(phi, mesh, epsMap) {
     const { nodes, tris, nTris, triEdges } = mesh;
     const m = new Float64Array(nTris);
@@ -357,6 +360,85 @@ function perElementEnergy(phi, mesh, epsMap) {
         let e = 0;
         for (let li = 0; li < 6; li++) for (let lj = 0; lj < 6; lj++) e += Sz[li * 6 + lj] * lp[li] * lp[lj];
         m[t] = epsMap[t].re * Math.abs(e);
+    }
+    return m;
+}
+
+// Per-triangle Kelly (flux-jump) error indicator for the P2 static solve:
+//   η_T² = Σ_{edges e of T} w_e · h_e · ∫_e [[ε ∂φ/∂n]]² ds
+// The exact solution has a continuous normal flux ε∂φ/∂n across element interfaces, so
+// the discrete jump measures the local discretization error. Interior
+// edges split the contribution between their two triangles (w = 0.5). Edges
+// whose midpoint DOF is constrained (fm.edgeNodeF < 0: conductor surfaces and
+// interiors, PEC walls) are skipped because the flux jump at a Dirichlet
+// surface is the physical surface charge, not an error.
+function perElementKelly(phi, mesh, epsMap, fm) {
+    const { nodes, tris, triEdges, edges, nTris, nEdges } = mesh;
+    const { phiVertex, phiEdge } = phi;
+    const edgeVerts = [[0, 1], [1, 2], [2, 0]];
+
+    // edge → adjacent triangles
+    const edgeT = new Int32Array(2 * nEdges).fill(-1);
+    for (let t = 0; t < nTris; t++)
+        for (let k = 0; k < 3; k++) {
+            const e = triEdges[3 * t + k];
+            if (edgeT[2 * e] < 0) edgeT[2 * e] = t; else edgeT[2 * e + 1] = t;
+        }
+
+    // Per-triangle barycentric coefficients, computed once (gradAt is called up to
+    // 4× per edge below).
+    const coeffs = new Array(nTris);
+    const coeffOf = t => coeffs[t] ??
+        (coeffs[t] = triCoefficients(nodes, tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]).coeff);
+
+    // ∇φ of triangle t's P2 solution at (x, y)
+    const gradAt = (t, x, y) => {
+        const coeff = coeffOf(t);
+        let gx = 0, gy = 0;
+        for (let k = 0; k < 3; k++) {
+            const p = phiVertex[tris[3 * t + k]];
+            if (p !== 0) { const g = lvGrad(coeff, k, x, y); gx += p * g[0]; gy += p * g[1]; }
+        }
+        for (let k = 0; k < 3; k++) {
+            const p = phiEdge[triEdges[3 * t + k]];
+            if (p !== 0) {
+                const [i, j] = edgeVerts[k];
+                const g = leGrad(coeff, i, j, x, y); gx += p * g[0]; gy += p * g[1];
+            }
+        }
+        return [gx, gy];
+    };
+
+    // 2-point Gauss on the edge (P2, the normal flux is linear along the edge, so this
+    // integrates J^2 exactly on straight edges).
+    const GP = [0.5 - 0.5 / Math.sqrt(3), 0.5 + 0.5 / Math.sqrt(3)];
+    const m = new Float64Array(nTris);
+    for (let e = 0; e < nEdges; e++) {
+        if (fm.edgeNodeF[e] < 0) continue;           // Dirichlet-constrained: physical flux, skip
+        const t1 = edgeT[2 * e], t2 = edgeT[2 * e + 1];
+        if (t1 < 0) continue;
+        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1];
+        const ex = nodes[2 * n1] - x0, ey = nodes[2 * n1 + 1] - y0;
+        const h = Math.hypot(ex, ey);
+        if (!(h > 0)) continue;
+        const nxu = ey / h, nyu = -ex / h;           // unit normal (orientation cancels in J²)
+        const e1 = epsMap ? epsMap[t1].re : 1;
+        const e2 = (t2 >= 0 && epsMap) ? epsMap[t2].re : 1;
+        let I = 0;
+        for (const s of GP) {
+            const x = x0 + s * ex, y = y0 + s * ey;
+            const g1 = gradAt(t1, x, y);
+            let J = e1 * (g1[0] * nxu + g1[1] * nyu);
+            if (t2 >= 0) {
+                const g2 = gradAt(t2, x, y);
+                J -= e2 * (g2[0] * nxu + g2[1] * nyu);
+            }
+            I += 0.5 * J * J;                        // Gauss weights ½ each
+        }
+        const eta2 = h * h * I;                      // h_e · ∫ J² ds
+        if (t2 >= 0) { m[t1] += 0.5 * eta2; m[t2] += 0.5 * eta2; }
+        else m[t1] += eta2;
     }
     return m;
 }
@@ -887,6 +969,11 @@ export class TriBackend {
         const refTol = this.opts.refineTol ?? 0.003;
         const refineFrac = this.opts.refineFrac ?? 0.15;   // matches the FDM backend's fraction
         const minRefineNodes = this.opts.minRefineNodes ?? 0;
+        // Certify the tolerance against a controlled uniform-refinement solve before
+        // accepting the (optimistic) pass-to-pass convergence gate. See _certifyStatic.
+        const certify = this.opts.certify ?? true;
+        this.certification = null;
+        this._certWarn = null;
         // Require the convergence test to hold for this many CONSECUTIVE passes before
         // stopping (matches the FDM backend's min_converged_passes / UI "Min Converged
         // Passes"): guards against a premature stop on a single lucky pass.
@@ -937,7 +1024,12 @@ export class TriBackend {
                 // vector keeps a consistent length across passes.
                 conv.push(1 / Math.sqrt(Math.max(W_eps * W_air, 1e-300)));
                 conv.push(fw && fw.eps > 0 ? fw.eps : eps_static);
-                const metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
+                // Static marking metric: Kelly flux-jump error indicator (refines where
+                // the discretization error is), falling back to the legacy field-energy
+                // metric if it degenerates (e.g. every edge constrained).
+                let metricS = null;
+                try { metricS = perElementKelly(phiEps, mesh, mesh.epsMap, fm); } catch { metricS = null; }
+                if (!metricS || !metricS.some(v => v > 0)) metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
                 let zz = null;
                 if (fw) { try { zz = computeHtZZMetric(mesh, fm, fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, fRef, this.condRect.rects, null, this.ctx.wasmSolver); } catch { zz = null; } }
                 let mS = 0, mZ = 0;
@@ -988,7 +1080,25 @@ export class TriBackend {
                 console.log('Adaptive refinement stopped by user');
                 break;
             }
-            if (it === maxIters || convergedCount >= minConvergedPasses || projTris > maxTris) break;
+            // Verification certificate: the pass-to-pass gate above measures
+            // the rate of approach, not the absolute error. Each pass refines
+            // only refineFrac of the triangles, so with a per-pass error-decay
+            // ratio r near 1 the remaining error is (observed change)*r/(1−r).
+            // A tripped gate is a candidate stop. Certify the actual error
+            // first (see _certifyStatic) and keep refining if the certificate
+            // fails. Waveguides have no static solve to certify with, and
+            // a mesh past certifyMaxTris (cert === null) keeps the legacy
+            // behavior.
+            if (convergedCount >= minConvergedPasses) {
+                let cert = null;
+                if (certify && !this._isWG) {
+                    try { cert = this._certifyStatic(mesh, refTol); } catch { cert = null; }
+                    if (cert) this.certification = cert;
+                }
+                if (!certify || this._isWG || !cert || cert.pass) break;
+                convergedCount = 0;   // gate was optimistic — keep refining
+            }
+            if (it === maxIters || projTris > maxTris) break;
             const marked = markTrianglesForRefinement(metric, refineFrac);
             const refined = refineTriMesh(mesh, marked);
             refined.condRect = this.condRect;
@@ -998,6 +1108,28 @@ export class TriBackend {
         }
 
         this.mesh = mesh;
+        // Accuracy report: if refinement ended without a passing certificate
+        // (iteration cap, triangle budget), measure the final mesh once so the
+        // user gets an estimated error. A certificate that already covered this
+        // mesh (pass or fail) is not recomputed.
+        if (certify && !this._isWG) {
+            let cert = this.certification;
+            if (!cert || (!cert.pass && cert.tris !== mesh.nTris)) {
+                try { cert = this._certifyStatic(mesh, refTol); this.certification = cert; }
+                catch { /* keep whatever we had */ }
+            }
+            if (cert && !cert.pass) {
+                const estStr = cert.preAsymptotic
+                    ? `at least ${(100 * cert.err).toFixed(2)}% (mesh still pre-asymptotic — the estimate is a lower bound)`
+                    : `about ${(100 * cert.err).toFixed(2)}%`;
+                this._certWarn = { type: 'accuracy', mode: 'all', message:
+                    `Full-wave mesh refinement stopped before reaching the requested tolerance ` +
+                    `(${(100 * refTol).toFixed(2)}%): verified remaining error is ${estStr}. ` +
+                    `Increase Max Nodes / Max Iterations, or relax Tolerance.` };
+                globalThis.__TRI_DEBUG__ && console.warn('[tri] ' + this._certWarn.message);
+            }
+        }
+        this.solver.certification = this.certification;
         // Mesh quality of the final (post-refinement) mesh. Q = circumradius/(2·inradius),
         // ideal 1; a very high Qmax means a sliver that ill-conditions the FEM solve.
         // Surfaced to the UI as a warning (empty constraint args → quality metrics only).
@@ -1014,6 +1146,80 @@ export class TriBackend {
             throw new Error('Full-wave mesh validation failed:\n' + meshErrors.map(e => ' - ' + e).join('\n'));
         if (this._isWG) this._prepareWaveguide(); else this._prepareStatic();
         return mesh;
+    }
+
+    // Verification certificate
+    // Bisect every triangle (uniform refinement) and re-solve the statics:
+    //   d1 = max rel change of (W_eps, W_air) per mode, mesh -> bisect
+    //   d2 = same, bisect -> bisect^2,   r = d2/d1
+    //   certified error = d1/(1−r)
+    // Every reported static quantity (C, C0, eps_static, Z0) is a combination of W_eps
+    // and W_air, and the eigensolve eps_eff error tracked the static error at <=1× on every
+    // mesh measured, so the static energies certify the reported numbers. Gates:
+    //   * r > certifyRMax  -> pre-asymptotic,  cannot certify.
+    //   * d1 ≥ tol         -> already failed. Level 2 skipped (cost control).
+    //   * d1 < noise floor -> pass outright: below the linear-solver reproducibility.
+    //   * level-2 mesh over certifyMaxTris -> fall back to r = 0.5 (certified 2*d1). The
+    //     assumption is only reached on budget-sized meshes, past the pre-asymptotic
+    //     regime the r-gate exists for. A base mesh over the cap returns null (caller
+    //     keeps the legacy gate).
+    // The pass decision applies certifySafety (x1.5) on top of the estimate: the static
+    // certificate does not see the eigensolve eps_eff part of the reported error.
+    // `err` stays the un-inflated best estimate (it is what warnings report).
+    _uniformBisect(mesh) {
+        const refined = refineTriMesh(mesh, new Uint8Array(mesh.nTris).fill(1));
+        refined.condRect = this.condRect;
+        const mats = tagMaterials(refined, this.solver.dielectrics);
+        refined.epsMap = mats.epsMap; refined.lossMap = mats.lossMap;
+        return refined;
+    }
+
+    _staticEnergies(mesh) {
+        const s = this.solver;
+        const out = [];
+        for (const rm of this.modeNames) {
+            const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
+            const pot = drivePotentials(this.condRect, rm, this.symmetry);
+            const fm = buildTriFreedomMap(mesh, this.condRect, abc);
+            const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
+            const phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
+            out.push(computeTriEnergy(phiEps, mesh, mesh.epsMap), computeTriEnergy(phiAir, mesh, null));
+        }
+        return out;
+    }
+
+    _certifyStatic(mesh, tol) {
+        const maxDiff = (a, b) => {
+            let m = 0;
+            for (let i = 0; i < a.length; i++)
+                m = Math.max(m, Math.abs(a[i] - b[i]) / Math.max(Math.abs(b[i]), 1e-300));
+            return m;
+        };
+        // Uniform bisection grows the mesh ~2.4x per level (all longest edges split,
+        // plus conformity closure).
+        const GROW = 2.6;
+        const cap = this.opts.certifyMaxTris ?? 150000;
+        if (mesh.nTris * GROW > cap) return null;
+        const rMax = this.opts.certifyRMax ?? 0.7;
+        const safety = this.opts.certifySafety ?? 1.5;
+        const q0 = this._staticEnergies(mesh);
+        const m1 = this._uniformBisect(mesh);
+        const q1 = this._staticEnergies(m1);
+        const d1 = maxDiff(q0, q1);
+        const base = { tris: mesh.nTris, d1 };
+        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
+        if (d1 * safety >= tol) return { ...base, pass: false, err: d1, r: null, levels: 1 };
+        let r = 0.5, levels = 1;
+        if (m1.nTris * GROW <= cap) {
+            const m2 = this._uniformBisect(m1);
+            const q2 = this._staticEnergies(m2);
+            r = maxDiff(q1, q2) / d1;
+            levels = 2;
+            if (r >= rMax)
+                return { ...base, pass: false, err: d1, r, levels, preAsymptotic: true };
+        }
+        const err = d1 / (1 - Math.min(r, rMax));
+        return { ...base, pass: err * safety < tol, err, r, levels };
     }
 
     // Rectangular waveguide path
@@ -1925,6 +2131,9 @@ export class TriBackend {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         if (this.solver.use_causal_materials) this._applyCausal(f, opts.skipFieldResample === true);
         this._modeWarnings = [];
+        // Surface the buildMesh-time accuracy warning (failed verification certificate)
+        // through the same per-solve channel as the mode warnings, so the UI logs it.
+        if (this._certWarn) this._modeWarnings.push(this._certWarn);
         // A waveguide never reaches _modeAtFreq, so its quasi-static fallback (which would
         // be physically meaningless below cutoff) is unreachable for this medium.
         const modes = this._isWG ? [this._waveguideModeAtFreq(f)]
