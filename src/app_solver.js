@@ -959,7 +959,11 @@ async function runModesSolve() {
         refineTol: p.tolerance,
         maxNodes: p.max_nodes * 1000,
         minConvergedPasses: p.min_converged_passes,
-        certify: !!p.estimate_error,
+        // Never verify here: the certificate covers only the quasi-TEM static
+        // solution, not the higher-order modes this tab displays, so it would add
+        // bisected-mesh solves (the tab is slow already) without certifying anything
+        // the user sees.
+        certify: false,
         wavelengthDensity: meshDensity,
     };
 
@@ -2277,12 +2281,28 @@ async function runParameterSweep() {
                 param_tol: 0.05,
                 max_nodes: p.max_nodes * 1000,
                 min_converged_passes: p.min_converged_passes,
-                certify: !!p.estimate_error,
+                // Verify the first point only. Adjacent sweep points share the
+                // geometry family and mesh behavior, so one certificate is
+                // representative, while verifying every point would multiply the
+                // whole sweep by the verification overhead.
+                certify: !!p.estimate_error && i === 0,
                 onProgress: () => {},
                 shouldStop: () => sweepStopRequested
             });
 
             if (sweepStopRequested) { log('Sweep stopped.'); break; }
+
+            // Surface the first point's verification outcome once. Later points run
+            // the legacy per-pass gate with the same refinement settings.
+            if (i === 0 && p.estimate_error) {
+                const cert = solver.certification;
+                if (cert && cert.pass) {
+                    log(`Estimated remaining error (first-point) ${(100 * cert.err).toExponential(2)}%. ` +
+                        `Later sweep points are not re-verified.`);
+                }
+                const aw = ((cachedResults && cachedResults.warnings) || []).find(w => w.type === 'accuracy');
+                if (aw) log(`⚠ First point: ${aw.message} Later sweep points are not re-verified.`);
+            }
 
             const result = await solver.computeAtFrequency(freqHz, cachedResults);
             parameterSweepResults.push({ paramValue: displayVal, result });

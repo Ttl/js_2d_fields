@@ -1092,7 +1092,7 @@
         },
         estimate_error: {
             title: 'Estimate Solution Error',
-            body: '<p>When enabled (default), every converged solve is verified: the static fields are re-solved on uniformly refined mesh, the true remaining error is estimated by Richardson extrapolation, and refinement continues until the estimate is below the Tolerance. The log reports the verified remaining error, and a warning is shown if Max Nodes or Max Iterations stop refinement before the tolerance is reached.</p><p>When disabled, refinement stops when the pass-to-pass change drops below the Tolerance. This is faster (no verification solves on a ~4&times; refined mesh), but the pass-to-pass change measures the rate of convergence rather than the distance to the converged answer, so the true error can be larger.</p>'
+            body: '<p>When enabled (default), every converged solve is verified: the static fields are re-solved on uniformly refined mesh, the true remaining error is estimated by Richardson extrapolation, and refinement continues until the estimate is below the Tolerance. The log reports the verified remaining error, and a warning is shown if Max Nodes or Max Iterations stop refinement before the tolerance is reached.</p><p>When disabled, refinement stops when the pass-to-pass change drops below the Tolerance. This is faster (no verification solves on a ~4&times; refined mesh), but the pass-to-pass change measures the rate of convergence rather than the distance to the converged answer, so the true error can be larger.</p><p>Verification runs on the main solve and on the first point of a parameter sweep. The Modes tab never verifies.</p>'
         },
         maxnodes: {
             title: 'Max nodes (thousands)',
