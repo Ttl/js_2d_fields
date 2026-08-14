@@ -300,7 +300,9 @@ function getUISettings() {
         enclosure_width: getDisplayValue('inp_enclosure_width'),
         enclosure_height: getDisplayValue('inp_enclosure_height'),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
-        tolerance: getInputValueUnitless('inp_tolerance'),
+        // The input is in percent. The solvers (and saved settings / share links)
+        // use the fraction.
+        tolerance: getInputValueUnitless('inp_tolerance') / 100,
         min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         rq: getDisplayValue('inp_rq'),
@@ -542,7 +544,10 @@ function restoreSettings(settings) {
         setValueWithUnit('inp_enclosure_height', fullSettings.enclosure_height);
 
         document.getElementById('inp_max_iters').value = fullSettings.max_iters;
-        document.getElementById('inp_tolerance').value = fullSettings.tolerance;
+        // Stored as a fraction (settings/link format), displayed in percent.
+        // toPrecision strips float noise (0.003 * 100 = 0.30000000000000004).
+        document.getElementById('inp_tolerance').value =
+            parseFloat((100 * fullSettings.tolerance).toPrecision(10));
         if (fullSettings.min_converged_passes !== undefined)
             document.getElementById('inp_min_converged_passes').value = fullSettings.min_converged_passes;
         document.getElementById('inp_max_nodes').value = fullSettings.max_nodes;
@@ -1227,7 +1232,9 @@ function getParams() {
         enclosure_width: getInputValue('inp_enclosure_width'),
         enclosure_height: getInputValue('inp_enclosure_height'),
         max_iters: parseInt(document.getElementById('inp_max_iters').value),
-        tolerance: getInputValueUnitless('inp_tolerance'),
+        // Percent in the UI, fraction in the settings object, keeps saved settings
+        // and share links (which diff against DEFAULT_SETTINGS.tolerance) unchanged.
+        tolerance: getInputValueUnitless('inp_tolerance') / 100,
         min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         // Surface roughness parameter
@@ -1678,7 +1685,7 @@ async function runSimulation() {
 
         // Run adaptive refinement at highest frequency first
         // Note: Causal materials will be applied during frequency sweep in computeAtFrequency()
-        log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes}k nodes, tolerance ${p.tolerance})...`);
+        log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes}k nodes, tolerance ${(100 * p.tolerance).toFixed(2)}%)...`);
 
         // Progress-bar work model. Mesh refinement is a handful of passes on a
         // coarse-until-the-end mesh and is MUCH faster than the frequency sweep,
@@ -2611,7 +2618,7 @@ function bindEvents() {
         'freq-stop': { default: 10, label: 'Stop frequency' },
         'inp_max_iters': { min: 1, default: 10, integer: true, label: 'Max iterations' },
         'inp_max_nodes': { min: 1, default: 20, integer: true, label: 'Max nodes' },
-        'inp_tolerance': { min: 0, max: 1, default: 0.05, label: 'Tolerance' },
+        'inp_tolerance': { min: 0, max: 100, default: 1, label: 'Tolerance' },
         'sparam-length': { default: 0.01, label: 'Line length' },
         'sparam-z-ref': { min: 1, default: 50, label: 'Reference impedance' }
     };

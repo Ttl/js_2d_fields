@@ -1904,7 +1904,7 @@ export class FieldSolver2D {
         const x1 = bisect(this.x), y1 = bisect(this.y);
         const q1 = await this._withGrid(x1, y1, () => this._staticCapacitances());
         const d1 = maxDiff(q0, q1);
-        const base = { nodes: this.x.length * this.y.length, d1 };
+        const base = { nodes: this.x.length * this.y.length, d1, safety };
         if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
         if (d1 * safety >= tol) return { ...base, pass: false, err: d1, r: null, levels: 1 };
         let r = 0.5, levels = 1;
@@ -2134,12 +2134,21 @@ export class FieldSolver2D {
                 catch { /* keep whatever we had */ }
             }
             if (cert && !cert.pass) {
+                // Failure regimes: pre-asymptotic (estimate is only a lower
+                // bound), estimate over the tolerance, and estimate under the
+                // tolerance but without the safety margin the certificate
+                // requires (saying "stopped before reaching 1%: error is 0.7%"
+                // would read as a contradiction).
+                const pct = (x) => (100 * x).toFixed(2);
                 const estStr = cert.preAsymptotic
-                    ? `at least ${(100 * cert.err).toFixed(2)}% (grid still pre-asymptotic — the estimate is a lower bound)`
-                    : `about ${(100 * cert.err).toFixed(2)}%`;
+                    ? `at least ${pct(cert.err)}% (grid still pre-asymptotic, the estimate is a lower bound)`
+                    : cert.err < energy_tol
+                        ? `about ${pct(cert.err)}%, within the tolerance but without the ` +
+                          `×${cert.safety ?? 1.5} margin needed to certify it`
+                        : `about ${pct(cert.err)}%`;
                 this._certWarn = { type: 'accuracy', mode: 'all', message:
-                    `Quasi-static mesh refinement stopped before reaching the requested tolerance ` +
-                    `(${(100 * energy_tol).toFixed(2)}%): verified remaining error is ${estStr}. ` +
+                    `Quasi-static mesh refinement could not verify the requested tolerance ` +
+                    `(${pct(energy_tol)}%): estimated remaining error is ${estStr}. ` +
                     `Increase Max Nodes / Max Iterations, or relax Tolerance.` };
             }
         }

@@ -1119,12 +1119,21 @@ export class TriBackend {
                 catch { /* keep whatever we had */ }
             }
             if (cert && !cert.pass) {
+                // Three failure regimes need three phrasings: pre-asymptotic (estimate
+                // is only a lower bound), estimate over the tolerance, and estimate
+                // under the tolerance but without the safety margin the certificate
+                // requires (saying "stopped before reaching 1%: error is 0.7%" would
+                // read as a contradiction).
+                const pct = (x) => (100 * x).toFixed(2);
                 const estStr = cert.preAsymptotic
-                    ? `at least ${(100 * cert.err).toFixed(2)}% (mesh still pre-asymptotic — the estimate is a lower bound)`
-                    : `about ${(100 * cert.err).toFixed(2)}%`;
+                    ? `at least ${pct(cert.err)}% (mesh still pre-asymptotic — the estimate is a lower bound)`
+                    : cert.err < refTol
+                        ? `about ${pct(cert.err)}%, within the tolerance but without the ` +
+                          `×${cert.safety ?? 1.5} margin needed to certify it`
+                        : `about ${pct(cert.err)}%`;
                 this._certWarn = { type: 'accuracy', mode: 'all', message:
-                    `Full-wave mesh refinement stopped before reaching the requested tolerance ` +
-                    `(${(100 * refTol).toFixed(2)}%): verified remaining error is ${estStr}. ` +
+                    `Full-wave mesh refinement could not verify the requested tolerance ` +
+                    `(${pct(refTol)}%): estimated remaining error is ${estStr}. ` +
                     `Increase Max Nodes / Max Iterations, or relax Tolerance.` };
                 globalThis.__TRI_DEBUG__ && console.warn('[tri] ' + this._certWarn.message);
             }
@@ -1206,7 +1215,7 @@ export class TriBackend {
         const m1 = this._uniformBisect(mesh);
         const q1 = this._staticEnergies(m1);
         const d1 = maxDiff(q0, q1);
-        const base = { tris: mesh.nTris, d1 };
+        const base = { tris: mesh.nTris, d1, safety };
         if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
         if (d1 * safety >= tol) return { ...base, pass: false, err: d1, r: null, levels: 1 };
         let r = 0.5, levels = 1;
