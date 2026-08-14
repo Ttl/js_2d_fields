@@ -1713,12 +1713,12 @@ async function runSimulation() {
             shouldStop: () => stopRequested
         });
 
-        // Verification certificate (triangular backend): the per-pass errors
-        // logged above are pass-to-pass changes. The certificate is the
-        // verified remaining error measured against a uniform-refinement solve,
-        // so log it as the authoritative accuracy number. A failed certificate
-        // additionally arrives as an accuracy warning through logModeWarnings
-        // below.
+        // Verification certificate (both backends TriBackend._certifyStatic and
+        // FieldSolver2D._certifyStatic): the per-pass errors logged above are
+        // pass-to-pass changes. The certificate is the verified remaining error
+        // measured against a uniform-refinement solve, so log it as the
+        // authoritative accuracy number. A failed certificate additionally arrives
+        // as an accuracy warning through logModeWarnings below.
         if (solver.certification && solver.certification.pass) {
             log(`Estimated remaining error ${(100 * solver.certification.err).toExponential(2)}% ` +
                 `(tolerance ${(100 * p.tolerance).toFixed(2)}%)`);

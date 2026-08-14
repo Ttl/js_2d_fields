@@ -1662,6 +1662,23 @@ export class FieldSolver2D {
         return results;
     }
 
+    // Signal-trace capacitance for a solved potential. For a differential pair the
+    // charge is averaged over the two traces: an asymmetric pair (e.g. broadside
+    // stripline with unequal top/bottom dielectric heights) carries a different charge
+    // on each trace, while for a symmetric pair the average changes nothing.
+    _signal_capacitance(V, vacuum) {
+        if (!this.is_differential) {
+            return this.calculate_capacitance(V, vacuum);
+        }
+        const orig_signal_mask = this.signal_mask;
+        this.signal_mask = this.signal_p_mask;
+        const Cp = this.calculate_capacitance(V, vacuum);
+        this.signal_mask = this.signal_n_mask;
+        const Cn = this.calculate_capacitance(V, vacuum);
+        this.signal_mask = orig_signal_mask;
+        return 0.5 * (Cp + Cn);
+    }
+
     async _solve_single_mode(mode, vacuum_first = true) {
         /**
          * Solve a single mode and return full results.
@@ -1682,43 +1699,13 @@ export class FieldSolver2D {
             // Calculate C0 (vacuum capacitance)
             V = this._create_voltage_array(mode);
             V = await this.solve_laplace(V, true);
-
-            if (this.is_differential) {
-                // Average the charge over both traces. For an asymmetric pair
-                // (e.g.  broadside stripline with unequal top/bottom dielectric
-                // heights) the two traces carry different charge.  For
-                // a symmetric pair the two are equal, so the average is
-                // unchanged.
-                const orig_signal_mask = this.signal_mask;
-                this.signal_mask = this.signal_p_mask;
-                const Cp = this.calculate_capacitance(V, true);
-                this.signal_mask = this.signal_n_mask;
-                const Cn = this.calculate_capacitance(V, true);
-                this.signal_mask = orig_signal_mask;
-                C0 = 0.5 * (Cp + Cn);
-            } else {
-                C0 = this.calculate_capacitance(V, true);
-            }
+            C0 = this._signal_capacitance(V, true);
         }
 
         // Solve with dielectric
         V = this._create_voltage_array(mode);
         V = await this.solve_laplace(V, false);
-
-        let C;
-        if (this.is_differential) {
-            // Average the charge over both traces (see C0 above) — correct for asymmetric
-            // differential pairs, unchanged for symmetric ones.
-            const orig_signal_mask = this.signal_mask;
-            this.signal_mask = this.signal_p_mask;
-            const Cp = this.calculate_capacitance(V, false);
-            this.signal_mask = this.signal_n_mask;
-            const Cn = this.calculate_capacitance(V, false);
-            this.signal_mask = orig_signal_mask;
-            C = 0.5 * (Cp + Cn);
-        } else {
-            C = this.calculate_capacitance(V, false);
-        }
+        const C = this._signal_capacitance(V, false);
 
         // Calculate fields
         const { Ex, Ey } = this.compute_fields(V);
@@ -1823,6 +1810,116 @@ export class FieldSolver2D {
         return this._modesBackend ? this._modesBackend.getModeField(sortedIdx) : null;
     }
 
+    // Verification certificate (rectilinear backend)
+    // Mirror of TriBackend._certifyStatic, so the UI Tolerance means the same thing
+    // on both backends: the verified remaining error of the reported static
+    // quantities, not the pass-to-pass change the refinement gate measures.
+    //
+    // Insert a grid line at the midpoint of every x and y interval (uniform bisection
+    // of the tensor grid, exact projected size (2nx-1)(2ny-1) ~= 4x nodes per level)
+    // and re-solve the statics:
+    //   d1 = max rel change of (C, C0) per mode, grid -> bisect
+    //   d2 = same, bisect -> bisect^2,   r = d2/d1
+    //   certified error = d1/(1−r)
+    // Every reported static quantity (C, C0, eps_eff, Z0) is a combination of C and
+    // C0, so the static capacitances certify the reported numbers. Losses are not
+    // covered (the triangular certificate does not cover them either). Gates match
+    // the triangular backend:
+    //   * r > rMax  -> pre-asymptotic, cannot certify.
+    //   * d1 > tol  -> already failed. Level 2 skipped (cost control).
+    //   * d1 < noise floor -> pass outright.
+    //   * level-2 grid over its (smaller) node cap -> fall back to r = 0.5. Measured
+    //     r on microstrip geometries (single-ended and differential) is 0.28-0.41,
+    //     so the fallback overestimates the remaining error (conservative) and the
+    //     x1.5 safety additionally covers a true r up to 2/3. Level 2 gets its own
+    //     cap well below the level-1 cap because its value (a genuine measured r and
+    //     the pre-asymptotic gate) matters most on coarse grids, while on mid-size
+    //     grids a 16x-node LU dominates the whole solve time for little sharpening.
+    //     A base grid whose bisection is already over the level-1 cap returns null
+    //     (the caller keeps the legacy gate). The caps also guard the WASM LU's
+    //     ~1 GB allocation limit.
+    // The pass decision applies `safety` (x1.5) on top of the estimate; `err` stays
+    // the un-inflated best estimate (it is what warnings report).
+    //
+    // Coarsening (solving on decimated grids, ~0.3x base cost instead of ~6x) was
+    // measured as an alternative and rejected: the coarse-level convergence ratio
+    // does not transfer to the base level, and the resulting estimate came out 1.2x
+    // to 3.5x optimistic vs the bisection reference.
+
+    // Run fn on a temporarily swapped grid. Every grid-derived array (masks,
+    // epsilon_r, conductor ids) is rebuilt from this.x/this.y by _setup_geometry, so
+    // swapping the line arrays and rebuilding is a complete state switch, and the
+    // finally-rebuild restores the caller's exact state. (this.dx/dy are left
+    // untouched, matching _refine_selected_lines, nothing reads them after the
+    // initial mesh generation.)
+    async _withGrid(x, y, fn) {
+        const saved_x = this.x, saved_y = this.y;
+        this.x = x;
+        this.y = y;
+        this._setup_geometry();
+        try {
+            return await fn();
+        } finally {
+            this.x = saved_x;
+            this.y = saved_y;
+            this._setup_geometry();
+        }
+    }
+
+    // Static (C, C0) per mode — the quantities _solve_single_mode reports, without
+    // the loss post-processing the certificate does not cover.
+    async _staticCapacitances() {
+        const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
+        const out = [];
+        for (const mode of modeNames) {
+            let V = this._create_voltage_array(mode);
+            V = await this.solve_laplace(V, false);
+            out.push(this._signal_capacitance(V, false));
+            V = this._create_voltage_array(mode);
+            V = await this.solve_laplace(V, true);
+            out.push(this._signal_capacitance(V, true));
+        }
+        return out;
+    }
+
+    async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = 150000, rMax = 0.7, safety = 1.5 } = {}) {
+        const maxDiff = (a, b) => {
+            let m = 0;
+            for (let i = 0; i < a.length; i++)
+                m = Math.max(m, Math.abs(a[i] - b[i]) / Math.max(Math.abs(b[i]), 1e-300));
+            return m;
+        };
+        const bisect = (arr) => {
+            const out = new Float64Array(2 * arr.length - 1);
+            for (let i = 0; i < arr.length - 1; i++) {
+                out[2 * i] = arr[i];
+                out[2 * i + 1] = 0.5 * (arr[i] + arr[i + 1]);
+            }
+            out[out.length - 1] = arr[arr.length - 1];
+            return out;
+        };
+        const bisectedNodes = (x, y) => (2 * x.length - 1) * (2 * y.length - 1);
+        if (bisectedNodes(this.x, this.y) > maxNodes) return null;
+        const q0 = await this._staticCapacitances();
+        const x1 = bisect(this.x), y1 = bisect(this.y);
+        const q1 = await this._withGrid(x1, y1, () => this._staticCapacitances());
+        const d1 = maxDiff(q0, q1);
+        const base = { nodes: this.x.length * this.y.length, d1 };
+        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
+        if (d1 * safety >= tol) return { ...base, pass: false, err: d1, r: null, levels: 1 };
+        let r = 0.5, levels = 1;
+        if (bisectedNodes(x1, y1) <= l2MaxNodes) {
+            const x2 = bisect(x1), y2 = bisect(y1);
+            const q2 = await this._withGrid(x2, y2, () => this._staticCapacitances());
+            r = maxDiff(q1, q2) / d1;
+            levels = 2;
+            if (r >= rMax)
+                return { ...base, pass: false, err: d1, r, levels, preAsymptotic: true };
+        }
+        const err = d1 / (1 - Math.min(r, rMax));
+        return { ...base, pass: err * safety < tol, err, r, levels };
+    }
+
     async solve_adaptive(options = {}) {
         /**
          * Adaptive mesh solve with robust convergence criteria.
@@ -1884,6 +1981,9 @@ export class FieldSolver2D {
             param_tol = 0.1,
             max_nodes = 20000,
             min_converged_passes = 1,
+            certify = true,
+            certify_max_nodes = 600000,
+            certify_l2_max_nodes = 150000,
             onProgress = null,
             shouldStop = null,
             skip_mesh = false
@@ -1908,6 +2008,13 @@ export class FieldSolver2D {
 
         // Set default refine_frac based on mode
         const refineFrac = refine_frac !== undefined ? refine_frac : (this.is_differential ? 0.15 : 0.2);
+
+        // Verification certificate state (see _certifyStatic). Mirrors the triangular
+        // backend: a tripped pass-to-pass gate is only a CANDIDATE stop until the
+        // certified remaining error passes the tolerance.
+        const certOpts = { maxNodes: certify_max_nodes, l2MaxNodes: certify_l2_max_nodes };
+        this.certification = null;
+        this._certWarn = null;
 
         // Define modes to solve
         const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
@@ -1969,8 +2076,21 @@ export class FieldSolver2D {
                 if (max_energy_err < energy_tol && max_param_err < param_tol) {
                     converged_count++;
                     if (converged_count >= min_converged_passes) {
-                        console.log(`Converged after ${it + 1} passes`);
-                        break;
+                        // The pass-to-pass gate above measures the RATE of approach,
+                        // not the absolute error. Certify the actual remaining error
+                        // (see _certifyStatic) and keep refining if the certificate
+                        // fails. A null certificate (grid over the certification cap)
+                        // keeps the legacy behavior.
+                        let cert = null;
+                        if (certify) {
+                            try { cert = await this._certifyStatic(energy_tol, certOpts); } catch { cert = null; }
+                            if (cert) this.certification = cert;
+                        }
+                        if (!certify || !cert || cert.pass) {
+                            console.log(`Converged after ${it + 1} passes`);
+                            break;
+                        }
+                        converged_count = 0;   // gate was optimistic — keep refining
                     }
                 } else {
                     converged_count = 0;
@@ -1999,6 +2119,28 @@ export class FieldSolver2D {
                     this.refine_mesh(refineMode.V, refineMode.Ex, refineMode.Ey, refineFrac);
                 }
                 this._setup_geometry();
+            }
+        }
+
+        // Accuracy report: if refinement ended without a passing certificate
+        // (iteration cap, node budget), measure the final grid once so the user gets
+        // an estimated error. A certificate that already covered this grid (pass or
+        // fail) is not recomputed. Mirrors TriBackend.buildMesh.
+        if (certify) {
+            let cert = this.certification;
+            const nNodes = this.x.length * this.y.length;
+            if (!cert || (!cert.pass && cert.nodes !== nNodes)) {
+                try { cert = await this._certifyStatic(energy_tol, certOpts); this.certification = cert; }
+                catch { /* keep whatever we had */ }
+            }
+            if (cert && !cert.pass) {
+                const estStr = cert.preAsymptotic
+                    ? `at least ${(100 * cert.err).toFixed(2)}% (grid still pre-asymptotic — the estimate is a lower bound)`
+                    : `about ${(100 * cert.err).toFixed(2)}%`;
+                this._certWarn = { type: 'accuracy', mode: 'all', message:
+                    `Quasi-static mesh refinement stopped before reaching the requested tolerance ` +
+                    `(${(100 * energy_tol).toFixed(2)}%): verified remaining error is ${estStr}. ` +
+                    `Increase Max Nodes / Max Iterations, or relax Tolerance.` };
             }
         }
 
@@ -2047,6 +2189,15 @@ export class FieldSolver2D {
          * Build the unified result structure from mode results.
          */
         const result = { modes: modeResults };
+
+        // Failed verification certificate: surface as an accuracy warning on every
+        // result built from this grid, the same per-solve channel the triangular
+        // backend uses (result.warnings / solver.modeWarnings), so the UI logs it for
+        // the adaptive solve and for every sweep point alike.
+        if (this._certWarn) {
+            result.warnings = [this._certWarn];
+            this.modeWarnings = result.warnings;
+        }
 
         if (this.is_differential) {
             const odd = modeResults.find(m => m.mode === 'odd');
