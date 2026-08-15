@@ -10,9 +10,15 @@
 // Coverage:
 //   line types — microstrip, diff_microstrip, stripline, diff_stripline,
 //                gcpw, diff_gcpw, broadside_stripline
-//   features   — solder mask, top dielectric, ground cutout, enclosure (side/top
-//                ground walls), surface plating, surface roughness, differential gaps,
-//                causal (Djordjevic-Sarkar) dielectric dispersion
+//   features   — solder mask (incl. coplanar mask on gcpw; er 2–10, thicknesses
+//                10–30 µm), top dielectric (material from the substrate range),
+//                ground cutout, enclosure (closed gnd box), surface plating
+//                (σ 1e6–6e7 independent of the bulk — both better- and
+//                worse-conducting; thickness 1–8 µm), surface roughness (rq up
+//                to 3 µm), differential gaps, causal (Djordjevic-Sarkar)
+//                dielectric dispersion
+//   materials  — bulk conductor σ 1e6–6e7 S/m; substrate er 2.2–10 (broadside
+//                layers 2.2–6), tanδ 0.001–0.02
 //   modes      — single-ended lines compare the one quasi-TEM mode; differential pairs
 //                compare BOTH the odd and the even mode (the worst of the two is flagged)
 //
@@ -51,7 +57,19 @@ const TL_TYPES = ['microstrip', 'diff_microstrip', 'stripline', 'diff_stripline'
 // --- Random spec generator (geometry + which features are enabled) ---
 export function randomSpec(rng) {
     const tl = rng.pick(TL_TYPES);
-    const spec = { tl, freq: rng.logf(0.5e9, 6e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 1e-6) : 0 };
+    // rq up to 3 µm: at copper GHz skin depths that is rq/δ > 2, where the
+    // roughness models diverge the most — exactly the regime worth comparing.
+    const spec = { tl, freq: rng.logf(0.5e9, 6e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 3e-6) : 0 };
+    // Plating σ is drawn INDEPENDENTLY of the bulk σ over the same 1e6–6e7 range,
+    // so plating lands both better- and worse-conducting than the bulk (silver
+    // over copper vs nickel over copper); thickness spans thinner and thicker
+    // than typical GHz skin depths, exercising the layered-impedance mix.
+    const rollPlating = () => {
+        if (!rng.bool(0.2)) return false;
+        spec.plating_sigma = rng.logf(1e6, 6e7);
+        spec.plating_t = rng.logf(1e-6, 8e-6);
+        return true;
+    };
     // Causal (Djordjevic-Sarkar) dielectric dispersion — applies to every line type and to
     // both backends, so it stays inside the cross-backend comparison (it shifts er(f), hence
     // C and eps_eff, which the fuzzer DOES compare). See solveOn for how it is evaluated.
@@ -61,55 +79,93 @@ export function randomSpec(rng) {
     spec.use_causal = rng.bool(0.2);
 
     if (tl === 'broadside_stripline') {
+        const bs_w = rng.logf(0.05e-3, 1e-3), bs_t = rng.logf(10e-6, 50e-6);
         Object.assign(spec, {
-            bs_w: rng.logf(0.05e-3, 1e-3), bs_t: rng.logf(10e-6, 50e-6),
+            bs_w, bs_t,
             bs_x_offset: rng.bool(0.5) ? rng.f(-0.15e-3, 0.15e-3) : 0,
             bs_h_bottom: rng.logf(0.05e-3, 0.5e-3), bs_er_bottom: rng.f(2.2, 6), bs_tand_bottom: rng.f(0.001, 0.02),
-            bs_h_middle: rng.logf(0.05e-3, 0.5e-3), bs_er_middle: rng.f(2.2, 6), bs_tand_middle: rng.f(0.001, 0.02),
+            // Floor of 2.5t: the middle layer must clear 2× trace_thickness or the
+            // broadside pair collides and validation rejects the case on both backends.
+            bs_h_middle: rng.logf(Math.max(0.05e-3, 2.5 * bs_t), 0.5e-3), bs_er_middle: rng.f(2.2, 6), bs_tand_middle: rng.f(0.001, 0.02),
             bs_h_top: rng.logf(0.05e-3, 0.5e-3), bs_er_top: rng.f(2.2, 6), bs_tand_top: rng.f(0.001, 0.02),
-            bs_sigma: 5.8e7,
+            bs_sigma: rng.logf(1e6, 6e7),
         });
         spec.use_enclosure = rng.bool(0.3);
-        spec.use_side_gnd = rng.bool(0.6);
+        // An enclosure always closes its side walls (see the enclosure block below).
+        spec.use_side_gnd = spec.use_enclosure;
         if (spec.use_enclosure) spec.enclosure_width = spec.bs_w * rng.f(3, 8);
-        spec.use_plating = rng.bool(0.2);
+        spec.use_plating = rollPlating();
         return spec;
     }
 
+    // Bulk conductor σ spans 1e6–6e7 S/m (poor alloys up to copper): at fixed
+    // frequency this sweeps δ ~8×, walking the skin-transition/thickness ratio.
     const w = rng.logf(0.05e-3, 3e-3), h = rng.logf(0.05e-3, 1.5e-3), t = rng.logf(10e-6, 70e-6);
     Object.assign(spec, {
-        w, h, t, er: rng.f(2.2, 10), tand: rng.f(0.001, 0.02), sigma: 5.8e7,
+        w, h, t, er: rng.f(2.2, 10), tand: rng.f(0.001, 0.02), sigma: rng.logf(1e6, 6e7),
         gnd_thickness: rng.logf(10e-6, 35e-6),
     });
     const isDiff = tl.includes('diff');
     if (isDiff) spec.trace_spacing = rng.logf(0.02e-3, 0.6e-3);
-    if (tl.includes('stripline')) { spec.er_top = spec.er; spec.tand_top = spec.tand; spec.stripline_top_h = rng.logf(0.05e-3, 1.5e-3); }
+    // Top height floor of 2t: a cover thinner than the trace always fails
+    // parameter validation (trace_thickness > enclosure_height) on both backends.
+    if (tl.includes('stripline')) { spec.er_top = spec.er; spec.tand_top = spec.tand; spec.stripline_top_h = rng.logf(Math.max(0.05e-3, 2 * t), 1.5e-3); }
     if (tl.includes('gcpw')) { spec.gap = rng.logf(0.05e-3, 0.5e-3); spec.via_gap = rng.logf(0.05e-3, 0.5e-3); }
 
-    // Advanced features (solder mask / top dielectric / ground cutout only apply to
-    // the plain microstrip family in the app).
-    if (tl === 'microstrip' || tl === 'diff_microstrip') {
+    // Advanced features. Solder mask applies to the microstrip AND gcpw families
+    // (gcpw takes the coplanar solder mask path in MicrostripSolver); its material
+    // and thicknesses are randomized — er well past the usual 3.5 to make the
+    // C/eps shift it causes clearly visible in the comparison. Top dielectric /
+    // ground cutout stay microstrip-family-only, as in the app.
+    if (tl === 'microstrip' || tl === 'diff_microstrip' || tl === 'gcpw' || tl === 'diff_gcpw') {
         spec.use_sm = rng.bool(0.3);
-        if (rng.bool(0.3)) { spec.use_top_diel = true; spec.top_diel_h = rng.logf(0.05e-3, 0.5e-3); }
+        if (spec.use_sm) {
+            spec.sm_er = rng.f(2, 10); spec.sm_tand = rng.f(0.001, 0.03);
+            spec.sm_t_sub = rng.f(10e-6, 30e-6); spec.sm_t_trace = rng.f(10e-6, 30e-6);
+            spec.sm_t_side = rng.f(10e-6, 30e-6);
+        }
+    }
+    if (tl === 'microstrip' || tl === 'diff_microstrip') {
+        // Top dielectric material drawn from the same range as the substrate.
+        if (rng.bool(0.3)) {
+            spec.use_top_diel = true; spec.top_diel_h = rng.logf(0.05e-3, 0.5e-3);
+            spec.top_diel_er = rng.f(2.2, 10); spec.top_diel_tand = rng.f(0.001, 0.02);
+        }
         if (rng.bool(0.2)) { spec.use_gnd_cut = true; spec.gnd_cut_w = w * rng.f(0.2, 1.5); spec.gnd_cut_h = h * rng.f(0.1, 0.7); }
     }
-    // Enclosure walls apply to any of these.
+    // Enclosure walls apply to any of these. An enclosure is always a CLOSED box
+    // (gnd sides + gnd top): it shrinks the domain to a few trace widths, and an
+    // OPEN boundary that close to the trace is a domain truncation the two
+    // backends legitimately approximate differently (the tri backend's natural-BC
+    // walls act as magnetic mirrors on a tight box and inflate C ~1/width, while
+    // the QS open treatment is near-transparent) — a modeling artifact, not a
+    // backend bug, so those combos are excluded by construction instead of
+    // surfacing as spurious discrepancies. Open boundaries stay covered by the
+    // non-enclosure cases, whose auto-sized domains keep the walls far away.
     if (rng.bool(0.3)) {
         spec.use_enclosure = true;
-        const span = isDiff ? (2 * w + spec.trace_spacing) : w;
+        let span = isDiff ? (2 * w + spec.trace_spacing) : w;
+        // GCPW: the enclosure must clear the full coplanar active width (trace +
+        // gaps + via fences, matching MicrostripSolver's active_width), not just
+        // the trace span — otherwise the combo always fails validation.
+        if (tl.includes('gcpw')) span += (isDiff ? 0 : w) + 2 * (spec.gap + spec.via_gap);
         spec.enclosure_width = span * rng.f(2.5, 6) + 2 * spec.gnd_thickness;
         spec.enclosure_height = (h + t) * rng.f(1.5, 4);
-        spec.use_side_gnd = rng.bool(0.6);
-        spec.use_top_gnd = rng.bool(0.4);
+        spec.use_side_gnd = true;
+        spec.use_top_gnd = true;
     }
-    spec.use_plating = rng.bool(0.2);
+    spec.use_plating = rollPlating();
     return spec;
 }
 
 // --- Build solver options for a spec on a backend (mirrors app_solver.updateGeometry) ---
 function addCommon(o, spec) {
-    if (spec.use_sm) { o.use_sm = true; o.sm_t_sub = 20e-6; o.sm_t_trace = 20e-6; o.sm_t_side = 20e-6; o.sm_er = 3.5; o.sm_tand = 0.02; }
-    if (spec.use_top_diel) { o.top_diel_h = spec.top_diel_h; o.top_diel_er = 4.5; o.top_diel_tand = 0.02; }
+    if (spec.use_sm) {
+        o.use_sm = true;
+        o.sm_t_sub = spec.sm_t_sub; o.sm_t_trace = spec.sm_t_trace; o.sm_t_side = spec.sm_t_side;
+        o.sm_er = spec.sm_er; o.sm_tand = spec.sm_tand;
+    }
+    if (spec.use_top_diel) { o.top_diel_h = spec.top_diel_h; o.top_diel_er = spec.top_diel_er; o.top_diel_tand = spec.top_diel_tand; }
     if (spec.use_gnd_cut) { o.gnd_cut_width = spec.gnd_cut_w; o.gnd_cut_sub_h = spec.gnd_cut_h; }
     if (spec.use_enclosure) {
         o.enclosure_width = spec.enclosure_width;
@@ -119,7 +175,7 @@ function addCommon(o, spec) {
         const bot = o.boundaries ? o.boundaries[3] : 'gnd';
         o.boundaries = [lr, lr, top, bot];
     }
-    if (spec.use_plating) o.plating = { sigma: 1e7, thickness: 4e-6, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
+    if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
 }
 
 export function buildSolver(spec, backend) {
@@ -133,7 +189,7 @@ export function buildSolver(spec, backend) {
             nx: 30, ny: 30,   // coarse initial grid (matches the app) so adaptive refinement has headroom
         };
         if (spec.use_enclosure) { o.enclosure_width = spec.enclosure_width; if (spec.use_side_gnd) o.boundaries = ['gnd', 'gnd', 'gnd', 'gnd']; }
-        if (spec.use_plating) o.plating = { sigma: 1e7, thickness: 4e-6, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
+        if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
         const s = new BroadsideStriplineSolver(o);
         s.use_causal_materials = !!spec.use_causal;
         return s;
@@ -195,7 +251,7 @@ function fmtSpec(spec) {
     let s = spec.tl;
     if (spec.tl === 'broadside_stripline') s += ` w=${u(spec.bs_w)}mm t=${u(spec.bs_t, 1e6, 1)}µm off=${u(spec.bs_x_offset)}mm hM=${u(spec.bs_h_middle)}mm`;
     else s += ` w=${u(spec.w)}mm h=${u(spec.h)}mm t=${u(spec.t, 1e6, 1)}µm er=${spec.er.toFixed(2)}`;
-    s += ` f=${(spec.freq / 1e9).toFixed(2)}GHz`;
+    s += ` sig=${((spec.sigma ?? spec.bs_sigma) / 1e6).toFixed(1)}e6 f=${(spec.freq / 1e9).toFixed(2)}GHz`;
     if (spec.trace_spacing) s += ` gap=${u(spec.trace_spacing)}mm`;
     const feats = ['use_sm', 'use_top_diel', 'use_gnd_cut', 'use_enclosure', 'use_side_gnd', 'use_top_gnd', 'use_plating', 'use_causal']
         .filter(k => spec[k]).map(k => k.replace('use_', ''));
