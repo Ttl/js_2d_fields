@@ -890,6 +890,16 @@ export class TriBackend {
         // what prevents the very first eigensolve from running on an unbounded mesh.
         const maxTris = maxTrisForBudget(this.opts.maxNodes ?? 18000);
         let mesh, prevAtt = null;   // previous attempt's (h, nTris), for the scaling fit
+        // Passive-ground surface-size relaxation: when the initial mesh
+        // overruns the budget, first coarsen the size painted on passive-ground
+        // curves (gndScale, see occ_to_mesh gndSizeScale) and only fall back to
+        // global hFine/hCoarse coarsening once that stops paying. Rationale:
+        // a large interior ground can cost more triangles than the entire
+        // signal region. Coarsening hFine globally to absorb it left the trace
+        // with elements bigger than the trace. Signal resolution is what the
+        // solved quantities live on, so it is the last thing the budget may
+        // take.
+        let gndScale = 1, gndStalled = false, gndPrevN = null;
         for (let attempt = 0; ; attempt++) {
             mesh = buildOccMeshFromGeometry(this.ctx.G, {
                 conductors: s.conductors, dielectrics: s.dielectrics,
@@ -904,9 +914,33 @@ export class TriBackend {
                 // (non-rectangular) conductors rule MQS out.
                 meshConductorInterior: mqsPre,
                 occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
+                gndSizeScale: gndScale,
                 gmshOptions: this.opts.gmshOptions,
             });
             if (mesh.nTris <= maxTris || attempt >= 4) break;
+            // Accept a near-budget mesh before any relaxation/coarsening. This is the
+            // same OVERSHOOT_OK acceptance as below, hoisted so a mesh that today gets
+            // accepted at, say, 1.2x budget is still accepted identically rather than
+            // paying a rebuild with relaxed grounds (keeps the meshes of every family
+            // that never over-runs badly bit-for-bit unchanged).
+            const OVERSHOOT_OK = 1.3;
+            if (mesh.nTris < maxTris * OVERSHOOT_OK) break;
+            // Ground relaxation first (only when there are relaxable ground curves and
+            // headroom below the hCoarse cap). Element count along a painted curve is
+            // ~1/size, so scale by the overshoot, +5% to land under. If a relaxation
+            // pass cut the mesh by less than 10%, the grounds were not the cost, stop
+            // relaxing and let the global path take over.
+            const surfScaleB = this.opts.occSurfScale ?? 0.35;
+            const gndCap = hCoarse / (hFine * surfScaleB);
+            if (!gndStalled && mesh.nGndCurves > 0 && gndScale < gndCap) {
+                if (gndPrevN !== null && mesh.nTris > gndPrevN * 0.9) {
+                    gndStalled = true;
+                } else {
+                    gndPrevN = mesh.nTris;
+                    gndScale = Math.min(gndScale * (mesh.nTris / maxTris) * 1.05, gndCap);
+                    continue;
+                }
+            }
             // Element count vs element size is NOT the uniform-fill nTris ∝ 1/h². The
             // conductor-surface size field makes the mesh a graded band around the
             // metal, so the true exponent is shallower — measured ~0.75 on coax, where
@@ -920,19 +954,16 @@ export class TriBackend {
                 if (Number.isFinite(e) && e > 0.3) p = Math.min(e, 3);
             }
             const factor = Math.pow(mesh.nTris / maxTris, 1 / p) * 1.05;   // +5% to land under
-            // Backstops: accept a mesh already within OVERSHOOT_OK of the budget rather
-            // than pay a whole gmsh run to shave it, and give up if coarsening has stopped
-            // paying (some geometries floor out, a shaped conductor forces one mesh edge
-            // per polygon side, which no coarsening gets under).
-            //
-            // The test is on the OVERSHOOT, not on `factor`: factor is the p-th root, so
-            // the same cutoff there would mean a different budget overrun for every fitted
-            // exponent (a `factor < 1.2` bail lets p=3 through at 1.5x budget while p=2
-            // stops at 1.3x). maxTris is a memory guard, so what it may be exceeded by has
-            // to be stated in its own units.
-            const OVERSHOOT_OK = 1.3;
-            if (mesh.nTris < maxTris * OVERSHOOT_OK ||
-                mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
+            // Backstop: give up if coarsening has stopped paying (some geometries floor
+            // out). The companion OVERSHOOT_OK acceptance, accept a
+            // mesh already near the budget rather than pay a whole gmsh run to shave
+            // it is hoisted above the ground relaxation. Its test is on the
+            // overshoot, not on `factor`: factor is the p-th root, so the same cutoff
+            // there would mean a different budget overrun for every fitted exponent (a
+            // `factor < 1.2` bail lets p=3 through at 1.5x budget while p=2 stops at
+            // 1.3x). maxTris is a memory guard, so what it may be exceeded by has to
+            // be stated in its own units.
+            if (mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
             prevAtt = { h: hFine, n: mesh.nTris };
             hFine *= factor; hCoarse *= factor;
         }

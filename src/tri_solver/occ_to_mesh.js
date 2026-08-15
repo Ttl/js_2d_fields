@@ -294,7 +294,14 @@ export function buildOccMeshFromGeometry(G, opts) {
     // ---- Size field: distance to conductor boundary curves → threshold ----
     // Identify conductor faces by enumerating all fragment faces and matching each face's
     // bounding-box centre to a conductor rect; collect their boundary curves for the field.
-    const condCurves = new Set();
+    // Signal and passive-ground conductor curves feed separate size fields. The
+    // budget-coarsening loop in tri_backend.buildMesh relaxes the ground painting
+    // (gndSizeScale) before it touches the signal hFine. With one union field a
+    // large interior ground (e.g. the split ground planes of a cutout, ~the whole
+    // domain width of curves painted at sizeMin) blows the initial-mesh budget and
+    // the only lever was global coarsening, which left the signal trace with
+    // elements larger than the trace itself.
+    const sigCurves = new Set(), gndCurves = new Set();
     {
         const fe = G.stackAlloc(4), feN = G.stackAlloc(4);
         G._gmshModelGetEntities(fe, feN, 2, ierr); check('GetEntities(2)');
@@ -304,8 +311,13 @@ export function buildOccMeshFromGeometry(G, opts) {
         // conductor's bounding box is far larger than its body (a complement shield's
         // spans the whole domain), so it would match the air face and collect the
         // entire domain outline as "conductor" curves, refining everything at sizeMin.
-        const bboxRects = condRects.filter(c => !c.shape);
-        const shapedRects = condRects.filter(c => c.shape);
+        // Roles ride along (condRoles is index-parallel to condRects) so each face's
+        // curves land in the signal or ground set.
+        const bboxRects = [], shapedRects = [];
+        condRects.forEach((c, i) => {
+            const sig = !!(condRoles[i] && condRoles[i].is_signal);
+            if (c.shape) shapedRects.push(c); else bboxRects.push({ c, sig });
+        });
         // A conductor sub-face's bounding box is contained in its conductor rect.
         // Testing only the bbox CENTER misclassifies a face-with-hole: the air
         // face surrounding a centered conductor (e.g. symmetric stripline) has
@@ -324,18 +336,20 @@ export function buildOccMeshFromGeometry(G, opts) {
             return x0 > c.xmin - pad && x1 < c.xmax + pad &&
                    y0 > c.ymin - pad && y1 < c.ymax + pad;
         };
-        const inCond = (x0, y0, x1, y1) => bboxRects.some(c => bboxInRect(c, x0, y0, x1, y1));
+        const inCond = (x0, y0, x1, y1) => bboxRects.find(e => bboxInRect(e.c, x0, y0, x1, y1)) || null;
         for (let i = 0; i < faces.length; i += 2) {
             const ftag = faces[i + 1];
             G._gmshModelGetBoundingBox(2, ftag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr); check('GetBoundingBox');
             const bx0 = G.getValue(bb[0], 'double'), by0 = G.getValue(bb[1], 'double');
             const bx1 = G.getValue(bb[3], 'double'), by1 = G.getValue(bb[4], 'double');
-            if (!inCond(bx0, by0, bx1, by1)) continue;
+            const hit = inCond(bx0, by0, bx1, by1);
+            if (!hit) continue;
             const fbuf = G.stackAlloc(8); G.setValue(fbuf, 2, 'i32'); G.setValue(fbuf + 4, ftag, 'i32');
             const cb = G.stackAlloc(4), cbN = G.stackAlloc(4);
             G._gmshModelGetBoundary(fbuf, 2, cb, cbN, 0, 0, 0, ierr); check('GetBoundary');
             const curves = _readIntArray(G, cb, cbN);
-            for (let k = 1; k < curves.length; k += 2) condCurves.add(Math.abs(curves[k]));
+            const set = hit.sig ? sigCurves : gndCurves;
+            for (let k = 1; k < curves.length; k += 2) set.add(Math.abs(curves[k]));
         }
 
         // Shaped conductors are classified per CURVE instead of per face. This is what
@@ -357,8 +371,11 @@ export function buildOccMeshFromGeometry(G, opts) {
                 check('GetBoundingBox(1)');
                 const cx = (G.getValue(bb[0], 'double') + G.getValue(bb[3], 'double')) / 2;
                 const cy = (G.getValue(bb[1], 'double') + G.getValue(bb[4], 'double')) / 2;
+                // Shaped conductors always take the fine (signal) field: a coax
+                // shield is the return conductor and its surface bounds the whole
+                // field region, so it never qualifies for the ground relaxation.
                 for (const c of shapedRects) {
-                    if (Math.abs(shapeSignedDist(c.shape, cx, cy)) < tol) { condCurves.add(ctag); break; }
+                    if (Math.abs(shapeSignedDist(c.shape, cx, cy)) < tol) { sigCurves.add(ctag); break; }
                 }
             }
         }
@@ -436,25 +453,50 @@ export function buildOccMeshFromGeometry(G, opts) {
     // Conductor-surface element size — finer than global hFine (see field setup below).
     const surfScale = opts.occSurfScale ?? 0.35;
     const sizeMin = hFine * surfScale;
-    if (globalThis.__OCC_DEBUG__) console.error('[occ] condRects', condRects.length, 'condCurves', condCurves.size, 'hFine', hFine, 'sizeMin', sizeMin, 'hCoarse', hCoarse);
-    if (condCurves.size > 0) {
-        const fd = G._gmshModelMeshFieldAdd(_cstr(G, 'Distance'), -1, ierr); check('FieldAdd Distance');
-        const cl = [...condCurves];
-        const clBuf = G.stackAlloc(cl.length * 8);
-        cl.forEach((v, i) => G.setValue(clBuf + i * 8, v, 'double'));
-        G._gmshModelMeshFieldSetNumbers(fd, _cstr(G, 'CurvesList'), clBuf, cl.length, ierr); check('CurvesList');
-        G._gmshModelMeshFieldSetNumber(fd, _cstr(G, 'Sampling'), 200, ierr);
+    // Passive-ground surface size: sizeMin relaxed by gndSizeScale (default 1 = the
+    // grounds mesh exactly as fine as the signals, tri_backend raises it only when the
+    // initial mesh overruns its triangle budget). At the hCoarse cap the ground field
+    // is inert, nearby signal grading (the signal Threshold is a background field
+    // evaluated everywhere, ground surfaces included) and thin-rect conformity then
+    // set the ground resolution, and the adaptive passes sharpen what matters.
+    const gndScale = Math.max(1, opts.gndSizeScale ?? 1);
+    const sizeMinGnd = Math.min(sizeMin * gndScale, hCoarse);
+    if (globalThis.__OCC_DEBUG__) console.error('[occ] condRects', condRects.length, 'sigCurves', sigCurves.size, 'gndCurves', gndCurves.size, 'hFine', hFine, 'sizeMin', sizeMin, 'sizeMinGnd', sizeMinGnd, 'hCoarse', hCoarse);
+    {
         // sizeMin (conductor-surface element size) is finer than the global hFine so the
         // current distribution (skin/proximity loss) and a narrow inter-trace gap (only
         // ~1·hFine wide) are resolved WITHOUT globally refining the far field. Adaptive ZZ
         // passes sharpen it further.
-        const ft = G._gmshModelMeshFieldAdd(_cstr(G, 'Threshold'), -1, ierr); check('FieldAdd Threshold');
-        G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'InField'), fd, ierr);
-        G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMin'), sizeMin, ierr);
-        G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMax'), hCoarse, ierr);
-        G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMin'), sizeMin, ierr);
-        G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), hFine + (hCoarse - hFine) / gradeRate, ierr);
-        G._gmshModelMeshFieldSetAsBackgroundMesh(ft, ierr); check('SetBackground');
+        const addCurveField = (curveSet, sMin) => {
+            const fd = G._gmshModelMeshFieldAdd(_cstr(G, 'Distance'), -1, ierr); check('FieldAdd Distance');
+            const cl = [...curveSet];
+            const clBuf = G.stackAlloc(cl.length * 8);
+            cl.forEach((v, i) => G.setValue(clBuf + i * 8, v, 'double'));
+            G._gmshModelMeshFieldSetNumbers(fd, _cstr(G, 'CurvesList'), clBuf, cl.length, ierr); check('CurvesList');
+            G._gmshModelMeshFieldSetNumber(fd, _cstr(G, 'Sampling'), 200, ierr);
+            const ft = G._gmshModelMeshFieldAdd(_cstr(G, 'Threshold'), -1, ierr); check('FieldAdd Threshold');
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'InField'), fd, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMin'), sMin, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMax'), hCoarse, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMin'), sMin, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), hFine + (hCoarse - hFine) / gradeRate, ierr);
+            return ft;
+        };
+        const fields = [];
+        if (sigCurves.size > 0) fields.push(addCurveField(sigCurves, sizeMin));
+        // A fully relaxed ground field would be constant hCoarse — skip it.
+        if (gndCurves.size > 0 && sizeMinGnd < hCoarse) fields.push(addCurveField(gndCurves, sizeMinGnd));
+        if (fields.length === 1) {
+            G._gmshModelMeshFieldSetAsBackgroundMesh(fields[0], ierr); check('SetBackground');
+        } else if (fields.length > 1) {
+            // With gndSizeScale = 1 both Thresholds have identical parameters, so
+            // Min over the two curve subsets equals the old single union field.
+            const fm = G._gmshModelMeshFieldAdd(_cstr(G, 'Min'), -1, ierr); check('FieldAdd Min');
+            const fBuf = G.stackAlloc(fields.length * 8);
+            fields.forEach((v, i) => G.setValue(fBuf + i * 8, v, 'double'));
+            G._gmshModelMeshFieldSetNumbers(fm, _cstr(G, 'FieldsList'), fBuf, fields.length, ierr); check('FieldsList');
+            G._gmshModelMeshFieldSetAsBackgroundMesh(fm, ierr); check('SetBackground');
+        }
     }
 
     // Field-only sizing (don't let point/curvature/boundary sizing fight it).
@@ -620,6 +662,9 @@ export function buildOccMeshFromGeometry(G, opts) {
         // without them, so it is recorded on the mesh rather than left implicit in the
         // caller's (separately derived) applicability test. See TriBackend._modeAtFreq.
         condInteriorMeshed: opts.meshConductorInterior !== false,
+        // How many passive-ground boundary curves fed the (relaxable) ground size
+        // field — tri_backend's budget loop only tries gndSizeScale when nonzero.
+        nGndCurves: gndCurves.size,
         meshedDomain: { X0, X1, Y0, Y1, wallPEC },
     };
 }
