@@ -7,13 +7,20 @@
 using namespace Eigen;
 
 extern "C" {
+
+// Factor A once and solve nRhs right-hand sides. b and x_out are nRhs
+// contiguous vectors of length N (column r at offset r*N). The certificate's
+// odd/even mode solves share one operator, so amortizing the factorization
+// (which dominates: the back-substitutions are cheap by comparison) halves the
+// differential-pair cost.
 EMSCRIPTEN_KEEPALIVE
-int solve_sparse(
+int solve_sparse_multi(
     int N,
     int nnz,
     int* rowPtr,
     int* colIdx,
     double* values,
+    int nRhs,
     double* b,
     double* x_out,
     int use_lu
@@ -48,19 +55,19 @@ int solve_sparse(
         A.setFromTriplets(triplets.begin(), triplets.end());
         A.makeCompressed();
 
-        // Map input/output arrays
-        Map<VectorXd> b_vec(b, N);
-        Map<VectorXd> x_vec(x_out, N);
-
         if (use_lu) {
             SparseLU<SparseMatrix<double>> solver;
             solver.compute(A);
             if (solver.info() != Success) {
                 return 1; // Decomposition failed
             }
-            x_vec = solver.solve(b_vec);
-            if (solver.info() != Success) {
-                return 2; // Solving failed
+            for (int r = 0; r < nRhs; r++) {
+                Map<VectorXd> b_vec(b + (size_t)r * N, N);
+                Map<VectorXd> x_vec(x_out + (size_t)r * N, N);
+                x_vec = solver.solve(b_vec);
+                if (solver.info() != Success) {
+                    return 2; // Solving failed
+                }
             }
         } else {
             SimplicialLDLT<SparseMatrix<double>> solver;
@@ -68,15 +75,34 @@ int solve_sparse(
             if (solver.info() != Success) {
                 return 3; // Decomposition failed
             }
-            x_vec = solver.solve(b_vec);
-            if (solver.info() != Success) {
-                return 4; // Solving failed
+            for (int r = 0; r < nRhs; r++) {
+                Map<VectorXd> b_vec(b + (size_t)r * N, N);
+                Map<VectorXd> x_vec(x_out + (size_t)r * N, N);
+                x_vec = solver.solve(b_vec);
+                if (solver.info() != Success) {
+                    return 4; // Solving failed
+                }
             }
         }
-        
+
         return 0;
     } catch (...) {
         return 99; // Unknown error
     }
 }
+
+EMSCRIPTEN_KEEPALIVE
+int solve_sparse(
+    int N,
+    int nnz,
+    int* rowPtr,
+    int* colIdx,
+    double* values,
+    double* b,
+    double* x_out,
+    int use_lu
+) {
+    return solve_sparse_multi(N, nnz, rowPtr, colIdx, values, 1, b, x_out, use_lu);
+}
+
 }

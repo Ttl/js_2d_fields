@@ -56,16 +56,21 @@ function buildCSR(colLists, valLists, N) {
 // Store the initialized WASM module (singleton pattern)
 let WASMModuleInstance = null;
 
-async function solveWithWASM(csr, B, useLU = false) {
+// Solve one matrix against several right-hand sides with a single
+// factorization. The factorization dominates the solve cost, so k systems that
+// share an operator (e.g. the odd and even modes of a differential pair, which
+// differ only in their Dirichlet values) cost barely more than one.
+async function solveWithWASMMulti(csr, Bs, useLU = false) {
     if (!WASMModuleInstance) {
         // Initialize the module if it hasn't been already
         WASMModuleInstance = await createWASMModule();
     }
 
-    const N = B.length;
+    const nRhs = Bs.length;
+    const N = Bs[0].length;
     const nnz = csr.values.length;
 
-    const bytesNeeded = 10 * (12 * nnz + 20 * N);
+    const bytesNeeded = 10 * (12 * nnz + 20 * N) + 16 * N * (nRhs - 1);
 
     if (bytesNeeded > 1e9) {
       throw new Error(`Problem too large. Tried to allocate ${bytesNeeded/1e9} GB.`);
@@ -75,8 +80,8 @@ async function solveWithWASM(csr, B, useLU = false) {
     const pRow = WASMModuleInstance._malloc(4 * (N + 1));
     const pCol = WASMModuleInstance._malloc(4 * nnz);
     const pVal = WASMModuleInstance._malloc(8 * nnz);
-    const pB   = WASMModuleInstance._malloc(8 * N);
-    const pX   = WASMModuleInstance._malloc(8 * N);
+    const pB   = WASMModuleInstance._malloc(8 * N * nRhs);
+    const pX   = WASMModuleInstance._malloc(8 * N * nRhs);
 
     try {
         // Re-acquire HEAP views to ensure they are current in case memory grew
@@ -87,22 +92,22 @@ async function solveWithWASM(csr, B, useLU = false) {
         const rowView = new Int32Array(currentHEAP32.buffer, pRow, N + 1);
         const colView = new Int32Array(currentHEAP32.buffer, pCol, nnz);
         const valView = new Float64Array(currentHEAPF64.buffer, pVal, nnz);
-        const bView = new Float64Array(currentHEAPF64.buffer, pB, N);
+        const bView = new Float64Array(currentHEAPF64.buffer, pB, N * nRhs);
 
         rowView.set(csr.rowPtr);
         colView.set(csr.colIdx);
         valView.set(csr.values);
-        bView.set(B);
+        for (let r = 0; r < nRhs; r++) bView.set(Bs[r], r * N);
 
-        if (!WASMModuleInstance._solve_sparse) {
-            throw new Error("WASM function solve_sparse not found. Module not loaded properly.");
+        if (!WASMModuleInstance._solve_sparse_multi) {
+            throw new Error("WASM function solve_sparse_multi not found. Module not loaded properly.");
         }
 
         // Call solver
-        const status = WASMModuleInstance._solve_sparse(
+        const status = WASMModuleInstance._solve_sparse_multi(
             N, nnz,
             pRow, pCol, pVal,
-            pB, pX,
+            nRhs, pB, pX,
             useLU ? 1 : 0
         );
 
@@ -117,12 +122,16 @@ async function solveWithWASM(csr, B, useLU = false) {
             throw new Error(errors[status] || `WASM solver failed with code: ${status}`);
         }
 
-        // Copy result
-        const xView = new Float64Array(WASMModuleInstance.HEAPF64.buffer, pX, N);
-        const x = new Float64Array(N);
-        x.set(xView);
+        // Copy results
+        const xView = new Float64Array(WASMModuleInstance.HEAPF64.buffer, pX, N * nRhs);
+        const xs = [];
+        for (let r = 0; r < nRhs; r++) {
+            const x = new Float64Array(N);
+            x.set(xView.subarray(r * N, (r + 1) * N));
+            xs.push(x);
+        }
 
-        return x;
+        return xs;
     } finally {
         // Always free memory
         WASMModuleInstance._free(pRow);
@@ -131,6 +140,10 @@ async function solveWithWASM(csr, B, useLU = false) {
         WASMModuleInstance._free(pB);
         WASMModuleInstance._free(pX);
     }
+}
+
+async function solveWithWASM(csr, B, useLU = false) {
+    return (await solveWithWASMMulti(csr, [B], useLU))[0];
 }
 
 function isArrayLike2D(arr, ny, nx) {
@@ -558,26 +571,37 @@ export class FieldSolver2D {
      * @returns {Array<Float64Array>} - The solved voltage array (same reference as input)
      */
     async solve_laplace(V, vacuum = false, onProgress = null) {
+        return (await this.solve_laplace_multi([V], vacuum))[0];
+    }
+
+    // Solve the same operator (grid + epsilon + conductor mask) for several sets
+    // of Dirichlet drive voltages at once. The matrix does not depend on the
+    // drive, only the right-hand side does, so all systems share a single
+    // assembly and a single factorization (see solveWithWASMMulti). Each Vs[m]
+    // is filled in place and the array of solutions is returned.
+    async solve_laplace_multi(Vs, vacuum = false) {
         // Ensure mesh is generated
         if (this.ensure_mesh) {
             this.ensure_mesh();
         }
 
-        const errors = validate_laplace_inputs(
-                V,
-                this.x,
-                this.y,
-                this.epsilon_r,
-                this.conductor_mask,
-                vacuum
-            );
-
-        if (errors.length > 0) {
-                throw new Error(
-                    "Laplace solver input validation failed:\n" +
-                    errors.map(e => " - " + e).join("\n")
+        for (const V of Vs) {
+            const errors = validate_laplace_inputs(
+                    V,
+                    this.x,
+                    this.y,
+                    this.epsilon_r,
+                    this.conductor_mask,
+                    vacuum
                 );
-            }
+
+            if (errors.length > 0) {
+                    throw new Error(
+                        "Laplace solver input validation failed:\n" +
+                        errors.map(e => " - " + e).join("\n")
+                    );
+                }
+        }
 
         const ny = this.y.length, nx = this.x.length;
         const dx = diff(this.x), dy = diff(this.y);
@@ -614,7 +638,7 @@ export class FieldSolver2D {
         }
 
         // Build sparse system
-        const B = new Float64Array(N_unknown);
+        const Bs = Vs.map(() => new Float64Array(N_unknown));
         const diag = new Float64Array(N_unknown);
 
         const colLists = Array(N_unknown);
@@ -696,7 +720,8 @@ export class FieldSolver2D {
                     if (!is_cond(ii, jj)) {
                         addA(n, full_to_red[fn2], c);
                     } else {
-                        B[n] -= c * V[ii][jj];
+                        for (let m = 0; m < Vs.length; m++)
+                            Bs[m][n] -= c * Vs[m][ii][jj];
                     }
                 };
 
@@ -709,17 +734,20 @@ export class FieldSolver2D {
 
         const { rowPtr, colIdx, values } = buildCSR(colLists, valLists, N_unknown);
         const csr = { rowPtr, colIdx, values };
-        const x = await solveWithWASM(csr, B, true);
+        const xs = await solveWithWASMMulti(csr, Bs, true);
 
-        // Reconstruct solution for full mesh
-        for (let k = 0; k < N_unknown; k++) {
-            const n = red_to_full[k];
-            const i = (n / nx) | 0;
-            const j = n % nx;
-            V[i][j] = x[k];
+        // Reconstruct solutions for full mesh
+        for (let m = 0; m < Vs.length; m++) {
+            const V = Vs[m], x = xs[m];
+            for (let k = 0; k < N_unknown; k++) {
+                const n = red_to_full[k];
+                const i = (n / nx) | 0;
+                const j = n % nx;
+                V[i][j] = x[k];
+            }
         }
 
-        return V;
+        return Vs;
     }
 
     /**
@@ -1845,6 +1873,18 @@ export class FieldSolver2D {
     // measured as an alternative and rejected: the coarse-level convergence ratio
     // does not transfer to the base level, and the resulting estimate came out 1.2x
     // to 3.5x optimistic vs the bisection reference.
+    //
+    // Cost reductions that keep the certificate's meaning intact:
+    //   * The base level reuses the (C, C0) the refinement pass just computed
+    //     (q0 option) instead of re-solving the base grid.
+    //   * Odd/even modes share each operator, so every grid level factors the
+    //     signal and vacuum matrices once and back-substitutes per mode
+    //     (solve_laplace_multi).
+    //   * r is measured once per solve and reused by later certificates (knownR
+    //     option), deleting the 16x level-2 solve from every call but the first.
+    //   * After a failed certificate the loop predicts how many refinement passes
+    //     the measured error trend needs before a pass is plausible and skips
+    //     certifying until then (certSkipPasses in solve_adaptive).
 
     // Run fn on a temporarily swapped grid. Every grid-derived array (masks,
     // epsilon_r, conductor ids) is rebuilt from this.x/this.y by _setup_geometry, so
@@ -1867,22 +1907,35 @@ export class FieldSolver2D {
     }
 
     // Static (C, C0) per mode — the quantities _solve_single_mode reports, without
-    // the loss post-processing the certificate does not cover.
+    // the loss post-processing the certificate does not cover. All modes share the
+    // signal-dielectric operator and the vacuum operator, so each matrix is
+    // factored once and back-substituted per mode (solve_laplace_multi): a
+    // differential pair does 2 factorizations per grid level instead of 4.
     async _staticCapacitances() {
         const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
+        const signal = await this.solve_laplace_multi(
+            modeNames.map(m => this._create_voltage_array(m)), false);
+        const vacuum = await this.solve_laplace_multi(
+            modeNames.map(m => this._create_voltage_array(m)), true);
         const out = [];
-        for (const mode of modeNames) {
-            let V = this._create_voltage_array(mode);
-            V = await this.solve_laplace(V, false);
-            out.push(this._signal_capacitance(V, false));
-            V = this._create_voltage_array(mode);
-            V = await this.solve_laplace(V, true);
-            out.push(this._signal_capacitance(V, true));
+        for (let i = 0; i < modeNames.length; i++) {
+            out.push(this._signal_capacitance(signal[i], false));
+            out.push(this._signal_capacitance(vacuum[i], true));
         }
         return out;
     }
 
-    async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = 150000, rMax = 0.7, safety = 1.5 } = {}) {
+    // Options beyond the caps/gates:
+    //   * q0: base-grid (C, C0) per mode in _staticCapacitances order, when the
+    //     caller already has them (the refinement pass that tripped the gate just
+    //     computed exactly these). Skips re-solving the base level.
+    //   * knownR: convergence ratio measured by an earlier certificate in the same
+    //     solve. Skips the 16x level-2 solve entirely: r decreases (or holds) under
+    //     refinement, so an earlier genuine measurement used on a finer grid errs
+    //     conservative, and the x1.5 safety still covers a moderately larger true r.
+    //     Only genuinely measured, non-pre-asymptotic r values are reused.
+    async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = 150000, rMax = 0.7, safety = 1.5,
+                                q0 = null, knownR = null } = {}) {
         const maxDiff = (a, b) => {
             let m = 0;
             for (let i = 0; i < a.length; i++)
@@ -1900,24 +1953,28 @@ export class FieldSolver2D {
         };
         const bisectedNodes = (x, y) => (2 * x.length - 1) * (2 * y.length - 1);
         if (bisectedNodes(this.x, this.y) > maxNodes) return null;
-        const q0 = await this._staticCapacitances();
+        if (!q0) q0 = await this._staticCapacitances();
         const x1 = bisect(this.x), y1 = bisect(this.y);
         const q1 = await this._withGrid(x1, y1, () => this._staticCapacitances());
         const d1 = maxDiff(q0, q1);
         const base = { nodes: this.x.length * this.y.length, d1, safety };
         if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
         if (d1 * safety >= tol) return { ...base, pass: false, err: d1, r: null, levels: 1 };
-        let r = 0.5, levels = 1;
-        if (bisectedNodes(x1, y1) <= l2MaxNodes) {
+        let r = 0.5, levels = 1, rSource = 'fallback';
+        if (knownR != null) {
+            r = knownR;
+            rSource = 'reused';
+        } else if (bisectedNodes(x1, y1) <= l2MaxNodes) {
             const x2 = bisect(x1), y2 = bisect(y1);
             const q2 = await this._withGrid(x2, y2, () => this._staticCapacitances());
             r = maxDiff(q1, q2) / d1;
             levels = 2;
+            rSource = 'measured';
             if (r >= rMax)
-                return { ...base, pass: false, err: d1, r, levels, preAsymptotic: true };
+                return { ...base, pass: false, err: d1, r, levels, rSource, preAsymptotic: true };
         }
         const err = d1 / (1 - Math.min(r, rMax));
-        return { ...base, pass: err * safety < tol, err, r, levels };
+        return { ...base, pass: err * safety < tol, err, r, levels, rSource };
     }
 
     async solve_adaptive(options = {}) {
@@ -2021,6 +2078,34 @@ export class FieldSolver2D {
         this.certification = null;
         this._certWarn = null;
 
+        // The refinement pass that trips the gate has already computed exactly the
+        // quantities the certificate compares against (C, C0 per mode via
+        // _signal_capacitance), so the certificate's base level is free.
+        const certQ0 = () => modeResults ? modeResults.flatMap(r => [r.C, r.C0]) : null;
+
+        // Predictive re-certification: after a failed certificate the error must
+        // still shrink by err*safety/tol before a pass is possible, so certifying
+        // again at the very next gate trip mostly wastes a 4x-node solve. Estimate
+        // the per-pass error shrink (measured from consecutive failed certificates
+        // when available, else assume 30% per adaptive pass) and hold off
+        // certifying for the predicted number of passes, capped so a bad estimate
+        // cannot postpone convergence detection for long. The post-loop
+        // certification is unconditional, so a hold can never lose the final
+        // verdict, only defer it.
+        const certSkipPasses = (cert, prevFail, itNow) => {
+            const need = (cert.err * (cert.safety ?? 1.5)) / energy_tol;
+            if (!(need > 1)) return 1;
+            let rho = 0.7;
+            if (prevFail && cert.err < prevFail.err && itNow > prevFail.it) {
+                rho = Math.pow(cert.err / prevFail.err, 1 / (itNow - prevFail.it));
+                rho = Math.min(Math.max(rho, 0.3), 0.95);
+            }
+            return Math.min(Math.max(Math.ceil(Math.log(need) / Math.log(1 / rho)), 1), 4);
+        };
+        let certR = null;          // measured convergence ratio, reused by later certificates
+        let certHoldUntil = -1;    // certification is skipped while it < certHoldUntil
+        let lastFailedCert = null;
+
         // Define modes to solve
         const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
 
@@ -2080,7 +2165,7 @@ export class FieldSolver2D {
             if (hasPrevious && it > 0) {
                 if (max_energy_err < energy_tol && max_param_err < param_tol) {
                     converged_count++;
-                    if (converged_count >= min_converged_passes) {
+                    if (converged_count >= min_converged_passes && it >= certHoldUntil) {
                         // The pass-to-pass gate above measures the RATE of approach,
                         // not the absolute error. Certify the actual remaining error
                         // (see _certifyStatic) and keep refining if the certificate
@@ -2088,14 +2173,25 @@ export class FieldSolver2D {
                         // keeps the legacy behavior.
                         let cert = null;
                         if (certify) {
-                            try { cert = await this._certifyStatic(energy_tol, certOpts); } catch { cert = null; }
-                            if (cert) this.certification = cert;
+                            try {
+                                cert = await this._certifyStatic(energy_tol,
+                                    { ...certOpts, q0: certQ0(), knownR: certR });
+                            } catch { cert = null; }
+                            if (cert) {
+                                this.certification = cert;
+                                if (cert.rSource === 'measured' && !cert.preAsymptotic)
+                                    certR = cert.r;
+                            }
                         }
                         if (!certify || !cert || cert.pass) {
                             console.log(`Converged after ${it + 1} passes`);
                             break;
                         }
-                        converged_count = 0;   // gate was optimistic — keep refining
+                        // gate was optimistic, keep refining and hold off the next
+                        // certificate until the predicted refinement has accumulated
+                        certHoldUntil = it + certSkipPasses(cert, lastFailedCert, it);
+                        lastFailedCert = { err: cert.err, it };
+                        converged_count = 0;
                     }
                 } else {
                     converged_count = 0;
@@ -2135,7 +2231,11 @@ export class FieldSolver2D {
             let cert = this.certification;
             const nNodes = this.x.length * this.y.length;
             if (!cert || (!cert.pass && cert.nodes !== nNodes)) {
-                try { cert = await this._certifyStatic(energy_tol, certOpts); this.certification = cert; }
+                try {
+                    cert = await this._certifyStatic(energy_tol,
+                        { ...certOpts, q0: certQ0(), knownR: certR });
+                    this.certification = cert;
+                }
                 catch { /* keep whatever we had */ }
             }
             if (cert && !cert.pass) {
