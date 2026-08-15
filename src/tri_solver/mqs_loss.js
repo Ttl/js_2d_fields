@@ -7,16 +7,25 @@
 // generateGmshMesh({..., meshConductorInterior: true}).
 //
 // Formulation (A_z, e^{jωt}, quasi-TEM so the H pattern is ε-independent):
-//   conductor:  ∇²A − jωμ₀σ·A + μ₀σ·C = 0     J = σ(C − jωA), C = −dV/dz (V/m)
+//   signal:     ∇²A − jωμ₀σ·A + μ₀σ·C = 0     J = σ(C − jωA), C = −dV/dz (V/m)
+//   ground rect: ∇²A − jωμ₀σ·A = 0            J = −jωσA (passive return/eddy)
 //   dielectric: ∇²A = 0
 //   ground y=0 and outer walls: A = 0 (perfect ground; its loss is added
 //   perturbatively with the flat-surface skin formula — exact for a plane).
 //   Symmetry plane (condRect.symmetry > 1): natural BC at x = xmin_domain.
 //
-// The problem is linear in C: solve K·A1 = μ₀σ·Fc once with C = 1
-// (K = S + jωμ₀σ·Mc, complex symmetric), then scale C so the total conductor
-// current equals I. The complex system is solved as the REAL SYMMETRIC indefinite
-// block [[S, −βM],[−βM, −S]]·[Ar; Ai] = [μ₀σFc; 0] — symmetry is required because
+// Explicit ground rects (coplanar GCPW grounds, via-fence slabs, ground-cutout
+// remnants) are return conductors tied to the reference at both line ends, so
+// their per-unit-length voltage gradient is C = 0: they get finite σ (the jωμ₀σ
+// mass term) but no source term, and the induced return current splits between
+// them and the PEC boundary walls by the field solution itself. The roles come
+// from condRect.rectRoles (is_signal), without rectRoles every rect is driven.
+//
+// The problem is linear in the single drive C: solve K*A1 = μ₀σ*Fc once with
+// C = 1 (K = S + jωμ₀σ*M, complex symmetric, Fc spans the signal rects only),
+// then scale C so the total signal current equals I. The complex system is
+// solved as the real symmetric indefinite block
+// [[S, −βM],[−βM, −S]]·[Ar; Ai] = [μ₀σFc; 0], symmetry is required because
 // the WASM solver's LDLT fast path assumes a symmetric matrix.
 
 import { tripletsToCSR, GL3p, GL3w } from './fem_core.js';
@@ -41,7 +50,15 @@ function inAnyRect(rects, x, y, tol) {
 // (coarse initial meshes: triangles touching the surface always qualify).
 // Element size roughly halves per pass. If `targetH` is given, refinement stops
 // early once the smallest conductor-surface edge is ≤ targetH.
-export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity) {
+//
+// `grading` (optional) relaxes the target size with distance from the signal
+// conductors: target(x,y) = max(targetH, slope*(d_sig - Dfine)) where d_sig is
+// the distance to the nearest rect in grading.sigRects. Used for the ground-rect
+// band (GCPW coplanar grounds, via slabs): their surface current decays away
+// from the slot, so full δ-resolution is only needed within ~Dfine of the signal
+// and the band cost stays independent of how far the ground pour extends.
+// Refinement stops naturally once the graded target exceeds the base mesh size.
+export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity, grading = null) {
     const rects = condRect.rects || [condRect];
     const bw = band * delta;
     function distToRectBoundary(r, x, y) {
@@ -54,6 +71,17 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     function nearSurface(x, y) {
         for (const r of rects) if (Math.abs(distToRectBoundary(r, x, y)) < bw) return true;
         return false;
+    }
+    // Graded target size at a point: outside distance to the nearest signal rect.
+    function targetAt(x, y) {
+        if (!grading) return targetH;
+        let d = Infinity;
+        for (const r of grading.sigRects) {
+            const dx = Math.max(r.xmin - x, 0, x - r.xmax);
+            const dy = Math.max(r.ymin - y, 0, y - r.ymax);
+            d = Math.min(d, Math.hypot(dx, dy));
+        }
+        return Math.max(targetH, grading.slope * (d - grading.Dfine));
     }
     // Size-aware marking: refine a band triangle only while it is still larger
     // than targetH, and stop when nothing needs refining. (The previous early-stop
@@ -76,11 +104,12 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
             const xc = (x0+x1+x2)/3, yc = (y0+y1+y2)/3;
             if (!(nearSurface(xc, yc) || nearSurface(x0, y0) ||
                   nearSurface(x1, y1) || nearSurface(x2, y2))) continue;
-            if (targetH > 0) {
+            const tgt = grading ? targetAt(xc, yc) : targetH;
+            if (tgt > 0) {
                 const hMax = Math.max(Math.hypot(x1-x0, y1-y0),
                                       Math.hypot(x2-x1, y2-y1),
                                       Math.hypot(x0-x2, y0-y2));
-                if (hMax <= targetH) continue;   // this element already resolves the band
+                if (hMax <= tgt) continue;   // this element already resolves the band
             }
             marked[t] = 1; any = true; nMarked++;
         }
@@ -138,16 +167,23 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 export function mqsPrecompute(mesh, condRect, opts = {}) {
     const { nodes, edges, tris, triEdges, nNodes, nEdges, nTris } = mesh;
     const rects = condRect.rects || [condRect];
+    const roles = condRect.rectRoles || null;
     const sym = condRect.symmetry > 1 ? 2 : 1;
     const TOL = 1e-12;
 
-    // Conductor triangles by centroid
+    // Conductor triangles by centroid: 1 = signal (driven, C), 2 = ground rect
+    // (passive, C = 0). Without rectRoles every rect is driven.
+    // Signal wins where rects overlap; ground rects may overlap each other (GCPW
+    // via slab under the coplanar ground), same class either way.
+    const sigRects = roles ? rects.filter((_, i) => roles[i].is_signal) : rects;
+    const gndRects = roles ? rects.filter((_, i) => !roles[i].is_signal) : [];
     const isCondTri = new Uint8Array(nTris);
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const xc = (nodes[2*v0]+nodes[2*v1]+nodes[2*v2])/3;
         const yc = (nodes[2*v0+1]+nodes[2*v1+1]+nodes[2*v2+1])/3;
-        if (inAnyRect(rects, xc, yc, TOL)) isCondTri[t] = 1;
+        if (inAnyRect(sigRects, xc, yc, TOL)) isCondTri[t] = 1;
+        else if (gndRects.length && inAnyRect(gndRects, xc, yc, TOL)) isCondTri[t] = 2;
     }
 
     // DOFs: vertices + edge midpoints, Dirichlet at ground/outer walls.
@@ -174,7 +210,9 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         if (!isDirichletPt(xm, ym)) dofOf[nNodes + e] = nF++;
     }
 
-    // Assemble S (everywhere), Mc and Fc (conductor only)
+    // Assemble S (everywhere), M (all metal: signal + passive grounds) and Fc
+    // (signal only, grounds have C = 0, so no source term). condArea is the
+    // signal cross-section: it is only used to normalize the signal current.
     const sR = [], sC = [], sV = [], mR = [], mC = [], mV = [];
     const Fc = new Float64Array(nF);
     let condArea = 0;
@@ -187,7 +225,8 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         const xs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
         const ys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
         const cond = isCondTri[t];
-        if (cond) condArea += Area;
+        const driven = cond === 1;
+        if (driven) condArea += Area;
         const Sl = new Float64Array(36), Ml = new Float64Array(36), Fl = new Float64Array(6);
         for (let q = 0; q < NQ; q++) {
             const w = QW[q] * Area;
@@ -202,7 +241,7 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
                 const ge = leGrad(coeff, p, qq, xq, yq); Gx[3+k] = ge[0]; Gy[3+k] = ge[1];
             }
             for (let i = 0; i < 6; i++) {
-                if (cond) Fl[i] += w * N[i];
+                if (driven) Fl[i] += w * N[i];
                 for (let j = 0; j < 6; j++) {
                     Sl[6*i+j] += w * (Gx[i]*Gx[j] + Gy[i]*Gy[j]);
                     if (cond) Ml[6*i+j] += w * N[i]*N[j];
@@ -211,7 +250,7 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         }
         for (let i = 0; i < 6; i++) {
             const gi = lg[i]; if (gi < 0) continue;
-            if (cond) Fc[gi] += Fl[i];
+            if (driven) Fc[gi] += Fl[i];
             for (let j = 0; j < 6; j++) {
                 const gj = lg[j]; if (gj < 0) continue;
                 if (Sl[6*i+j] !== 0) { sR.push(gi); sC.push(gj); sV.push(Sl[6*i+j]); }
@@ -281,11 +320,14 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     for (let i = 0; i < nF; i++) rhs[i] = MU0 * sigma * Fc[i];
     const [sol] = solveSparseMulti(Nb, csr, [rhs]);
 
-    // Rescale C for trace current 1 A. When the conductor straddles the symmetry
-    // plane (single-ended half mesh), the meshed part carries half the current;
-    // when the conductor lies entirely inside the half domain (differential pair,
-    // one full trace meshed), it carries the full per-trace current.
-    const straddles = rects.some(r => r.xmin <= xmin_d + 1e-12);
+    // Rescale C for trace current 1 A. When the signal conductor straddles the
+    // symmetry plane (single-ended half mesh), the meshed part carries half the
+    // current. When it lies entirely inside the half domain (differential pair,
+    // one full trace meshed), it carries the full per-trace current. Ground rects
+    // are excluded. They carry return current, not the normalized drive current.
+    const rolesCR = condRect.rectRoles || null;
+    const straddles = rects.some((r, i) =>
+        (!rolesCR || rolesCR[i].is_signal) && r.xmin <= xmin_d + 1e-12);
     const I_mesh = (sym === 2 && straddles) ? 0.5 : 1;
     let fr = 0, fi = 0;
     for (let i = 0; i < nF; i++) { fr += Fc[i] * sol[i]; fi += Fc[i] * sol[nF + i]; }
@@ -295,16 +337,22 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     const Cr = I_mesh * dR / dMag2, Ci = -I_mesh * dI / dMag2;
     const Cmag2 = Cr*Cr + Ci*Ci;
 
-    // Conductor dissipation: J/σ = C·(1 − jωA1)
-    let Pcond = 0;
+    // Conductor dissipation: J/σ = C*(u - jωA1) with the drive u = 1 in the
+    // signal (class 1) and u = 0 in passive ground rects (class 2, pure eddy /
+    // return current). Signal and ground-rect dissipation accumulate separately
+    // so the ground share reports (and plating-scales) with R_gnd, not R_trace.
+    let Psig = 0, PgndRect = 0;
     for (let t = 0; t < nTris; t++) {
-        if (!isCondTri[t]) continue;
+        const cls = isCondTri[t];
+        if (!cls) continue;
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
         lg[0] = dofOf[v0]; lg[1] = dofOf[v1]; lg[2] = dofOf[v2];
         for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*t+k]];
         const xs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
         const ys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
+        const drive = cls === 1 ? 1 : 0;
+        let Ptri = 0;
         for (let q = 0; q < NQ; q++) {
             const w = QW[q] * Area;
             const xq = xs[0]*QL1[q] + xs[1]*QL2[q] + xs[2]*QL3[q];
@@ -315,10 +363,11 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
                 const Nk = k < 3 ? lv(coeff, k, xq, yq) : le(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
                 aR += Nk * sol[g]; aI += Nk * sol[nF + g];
             }
-            const uR = 1 + omega * aI, uI = -omega * aR;
+            const uR = drive + omega * aI, uI = -omega * aR;
             const eR = Cr * uR - Ci * uI, eI = Cr * uI + Ci * uR;
-            Pcond += 0.5 * sigma * (eR*eR + eI*eI) * w;
+            Ptri += 0.5 * sigma * (eR*eR + eI*eI) * w;
         }
+        if (cls === 1) Psig += Ptri; else PgndRect += Ptri;
     }
 
     // Ground loss: flat-surface skin formula on |Hx(y=0)| = |∂A/∂y|/μ₀
@@ -367,7 +416,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     // per-face impedance we weight each face by its surface current ∮|K|²dl, taken
     // on the EXTERIOR (dielectric) side of the face — like the ground above. K is
     // the tangential H: ∂A/∂y for a horizontal (top/bottom) face, ∂A/∂x for a side.
+    // Signal faces and ground-rect faces accumulate separate buckets: each scales
+    // its own volume loss (a plated trace next to a bare ground must not dilute).
     let trS = 0, trZreS = 0, trZimS = 0;
+    let grS = 0, grZreS = 0, grZimS = 0;
     if (opts.surfaceZs) {
         const eA = new Int32Array(2 * nEdges).fill(-1);
         for (let t = 0; t < nTris; t++) for (let k = 0; k < 3; k++) {
@@ -378,9 +430,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         for (let e = 0; e < nEdges; e++) {
             const ta = eA[2*e], tb = eA[2*e+1];
             if (ta < 0 || tb < 0) continue;          // boundary edge, not a cond/dielectric interface
-            if (isCondTri[ta] === isCondTri[tb]) continue;   // both in or both out → not a surface
-            const ext = isCondTri[ta] ? tb : ta;     // exterior (dielectric) triangle
-            const cnd = isCondTri[ta] ? ta : tb;      // conductor-interior triangle
+            const aMetal = isCondTri[ta] > 0, bMetal = isCondTri[tb] > 0;
+            if (aMetal === bMetal) continue;         // both metal or both dielectric → not a surface
+            const ext = aMetal ? tb : ta;            // exterior (dielectric) triangle
+            const cnd = aMetal ? ta : tb;            // conductor-interior triangle
             const n0 = edges[2*e], n1 = edges[2*e+1];
             const x0 = nodes[2*n0], y0 = nodes[2*n0+1], x1 = nodes[2*n1], y1 = nodes[2*n1+1];
             if (Math.abs(x0 - xmin_d) < 1e-9 && Math.abs(x1 - xmin_d) < 1e-9) continue;  // symmetry-plane cut
@@ -417,7 +470,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
                 }
                 Sseg += (gR*gR + gI*gI) * GL3w[q] * L;
             }
-            trS += Sseg; trZreS += Zs.re * Sseg; trZimS += Zs.im * Sseg;
+            if (isCondTri[cnd] === 1) { trS += Sseg; trZreS += Zs.re * Sseg; trZimS += Zs.im * Sseg; }
+            else { grS += Sseg; grZreS += Zs.re * Sseg; grZimS += Zs.im * Sseg; }
         }
     }
 
@@ -426,9 +480,13 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     // R_total covers BOTH traces (mirror included) — per-trace mode R is
     // R_total/2, and L_loop is already per-trace (from the drive field C/I₁).
     // Cross-check: Re(C) = per-trace dissipation (power balance of the drive
-    // field; ground is PEC inside the solve so it adds nothing there).
-    let R_trace = 2 * sym * Pcond;
-    let R_gnd = 2 * sym * Pgnd;
+    // field: signal + ground-rect volume loss. The PEC boundary walls add
+    // nothing there, their loss is the perturbative Pgnd term).
+    // R_gnd has two parts: the meshed passive ground rects (volume eddy loss)
+    // and the PEC boundary walls (flat-surface skin formula).
+    let R_trace = 2 * sym * Psig;
+    let R_gr = 2 * sym * PgndRect;
+    let R_gw = 2 * sym * Pgnd;
     let L_loop = Ci / omega;  // Z_pul = C/I = R + jωL (trace internal L included)
 
     // Surface roughness / plating post-processing. Scale the smooth-σ loss by the
@@ -443,15 +501,17 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     // (the caller halves R_total to the per-trace mode R), while L_loop is
     // per-trace — so the surface-reactance increment must use the per-trace R.
     const perTrace = opts.diffPair ? 0.5 : 1;
-    // X_trace/X_gnd are the REACTANCE twins of R_trace/R_gnd: the same smooth-metal
+    // X_* are the REACTANCE twins of the R components: the same smooth-metal
     // loss weighted by Im(Zs)/Rs where R is weighted by Re(Zs)/Rs. They are what the
     // internal inductance is built from (X_total/omega), and they carry the same units
     // and the same differential convention as R, so the caller halves them alike.
     // Smooth metal has Im(Zs) = Re(Zs) = Rs, so these stay equal to R, the seed
     // value below is that smooth case, and each branch overwrites it from the
-    // SMOOTH R before R is scaled by psiR.
-    let X_trace = R_trace, X_gnd = R_gnd;
-    const R_smooth_total = R_trace + R_gnd;   // before psiR rewrites either one
+    // SMOOTH R before R is scaled by psiR. Each component scales by its own
+    // face bucket: signal faces -> R_trace, ground-rect faces -> R_gr, boundary
+    // walls -> R_gw (walls are bare metal unless surfaceZs says otherwise).
+    let X_trace = R_trace, X_gr = R_gr, X_gw = R_gw;
+    const R_smooth_total = R_trace + R_gr + R_gw;   // before psiR rewrites any part
     if (opts.surfaceZs) {
         if (trS > 0) {
             const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
@@ -459,21 +519,30 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
             R_trace *= psiR;
             PsiR = psiR;
         }
+        if (grS > 0) {
+            const psiR = grZreS / (Rs * grS), psiX = grZimS / (Rs * grS);
+            X_gr = R_gr * psiX;
+            R_gr *= psiR;
+        }
         if (gndS > 0) {
             const psiR = gndZreS / (Rs * gndS), psiX = gndZimS / (Rs * gndS);
-            X_gnd = R_gnd * psiX;
-            R_gnd *= psiR;
+            X_gw = R_gw * psiX;
+            R_gw *= psiR;
         }
     } else if (Rq > 0) {
         const Zs = calculate_Zrough(freq, sigma, Rq);
         PsiR = Zs.re / Rs;
         const PsiX = Zs.im / Rs;
         X_trace = R_trace * PsiX;
-        X_gnd = R_gnd * PsiX;
+        X_gr = R_gr * PsiX;
+        X_gw = R_gw * PsiX;
         R_trace *= PsiR;
-        R_gnd *= PsiR;
+        R_gr *= PsiR;
+        R_gw *= PsiR;
     }
 
+    const R_gnd = R_gr + R_gw;
+    const X_gnd = X_gr + X_gw;
     const R_total = R_trace + R_gnd;
     const X_total = X_trace + X_gnd;
     // The surface-reactance increment on the loop inductance is (X − R_smooth)/ω by

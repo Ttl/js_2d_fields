@@ -27,9 +27,12 @@
 // tri_backend.js builds L_int at THREE independent sites, and each one had to learn
 // this separately — so each gets a case here:
 //
-//   perturbation  (X_ac beside R_ac)         geometries with explicit ground rects:
-//                                            coax, GCPW, broadside stripline
-//   MQS           (X_total from mqs_loss.js) symmetric, wall-absorbed ground: microstrip
+//   perturbation  (X_ac beside R_ac)         shaped conductors (coax) and forced
+//                                            lossMethod: GCPW's rectangular faces
+//   MQS           (X_total from mqs_loss.js) microstrip (wall-absorbed ground) and
+//                                            GCPW (passive C = 0 ground rects — the
+//                                            trace/ground-rect/wall buckets each
+//                                            carry their own Zs scaling)
 //   waveguide TE  (X_ac from the wall Zs)    rectangular waveguide
 //
 // The rectilinear (FDM) backend has always done this correctly — field_solver.js
@@ -91,14 +94,20 @@ const coax = (extra = {}) => {
     return s;
 };
 // GCPW as app_solver.js builds it: MicrostripSolver + use_coplanar_gnd. Its coplanar
-// grounds are explicit ground rects, which is what routes it to the perturbation path.
-const gcpw = (extra = {}) => new MicrostripSolver({
-    substrate_height: 200e-6, trace_width: 300e-6, trace_thickness: 35e-6,
-    gnd_thickness: 35e-6, epsilon_r: 3.5, tan_delta: 0.005, sigma_cond: SIG,
-    freq: 1e9, boundaries: ['open', 'open', 'open', 'gnd'], rq: 0,
-    use_coplanar_gnd: true, gap: 150e-6, via_gap: null, use_vias: true,
-    mesh_backend: 'triangular', ...extra,
-});
+// grounds are explicit ground rects; by default MQS handles them as passive C = 0
+// return conductors, and triOpts { lossMethod: 'perturbation' } forces the
+// per-face surface-group path on the same rectangular faces.
+const gcpw = (extra = {}, triOpts = null) => {
+    const s = new MicrostripSolver({
+        substrate_height: 200e-6, trace_width: 300e-6, trace_thickness: 35e-6,
+        gnd_thickness: 35e-6, epsilon_r: 3.5, tan_delta: 0.005, sigma_cond: SIG,
+        freq: 1e9, boundaries: ['open', 'open', 'open', 'gnd'], rq: 0,
+        use_coplanar_gnd: true, gap: 150e-6, via_gap: null, use_vias: true,
+        mesh_backend: 'triangular', ...extra,
+    });
+    if (triOpts) s.tri_opts = triOpts;
+    return s;
+};
 // The same solver WITHOUT coplanar grounds: symmetric, ground absorbed into the wall,
 // so there is no ground rect and MQS applies. That is the only difference from gcpw().
 const microstrip = (extra = {}) => new MicrostripSolver({
@@ -159,11 +168,18 @@ checkRatio('coax tin-plated', coaxBare,
 
 // ------------------------------------------------------------------- gcpw
 // The ratio is a property of Zs alone, so a geometry with rectangular faces and coplanar
-// grounds must produce the SAME number as the coax above. That it does is the evidence
-// that the reactance is carried through the per-face surface groups, not special-cased.
-console.log('\n=== gcpw: rectangular faces, coplanar grounds (perturbation path) ===');
+// grounds must produce the SAME number as the coax above. The default path is now MQS
+// with the grounds as passive C = 0 rects — its trace / ground-rect / wall loss buckets
+// each carry their own Zs scaling, and the identity holding proves all three tilt with
+// Im(Zs) together. The forced-perturbation run keeps the per-face surface-group path
+// covered on the same rectangular faces (coax only exercises the shaped-'all' branch).
+console.log('\n=== gcpw: rectangular faces, coplanar grounds (MQS, passive ground rects) ===');
 checkRatio('gcpw rough 1um', await internalL(gcpw()), await internalL(gcpw({ rq: RQ })),
     (f) => calculate_Zrough(f, SIG, RQ));
+console.log('\n=== gcpw: forced perturbation (per-face surface groups) ===');
+const pert = { lossMethod: 'perturbation' };
+checkRatio('gcpw pert rough 1um', await internalL(gcpw({}, pert)),
+    await internalL(gcpw({ rq: RQ }, pert)), (f) => calculate_Zrough(f, SIG, RQ));
 
 // ------------------------------------------------------------------- mqs
 // A centred microstrip over a wall-absorbed ground is symmetric with no ground rect, so

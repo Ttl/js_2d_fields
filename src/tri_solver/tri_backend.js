@@ -870,10 +870,13 @@ export class TriBackend {
         const clip = _clipDomain(dom, s.conductors, s.boundaries, s.domain_width * 1e-9);
         const survives = c => Math.min(c.x_max, clip.X1) - Math.max(c.x_min, clip.X0) > 0
                           && Math.min(c.y_max, clip.Y1) - Math.max(c.y_min, clip.Y0) > 0;
-        const gndRectPre = s.conductors.some(c => !c.is_signal && survives(c));
-        const anyCondPre = s.conductors.some(c => survives(c));
-        const mqsPre = (lmPre === 'mqs' && !gndRectPre)
-            || (lmPre === 'auto' && this.symmetry && !gndRectPre && anyCondPre);
+        // MQS handles explicit ground rects as passive (C = 0) return
+        // conductors, only shaped conductors do (coax), and
+        // a surviving signal rect must exist to drive.
+        const shapedPre = s.conductors.some(c => c.shape);
+        const sigCondPre = s.conductors.some(c => c.is_signal && survives(c));
+        const mqsPre = (lmPre === 'mqs' && !shapedPre && sigCondPre)
+            || (lmPre === 'auto' && this.symmetry && !shapedPre && sigCondPre);
         // A medium may supply its own base sizing (coax: derived from the conductor
         // radii, since w/t have no meaning for a round conductor).
         const hints = s.tri_mesh_hints || {};
@@ -897,8 +900,8 @@ export class TriBackend {
                 // solve. mqsPre is the same applicability test _modeAtFreq uses, hoisted
                 // here (it already gates hFine above). On the perturbation path those
                 // elements carry no DOFs — every node/edge inside metal is PEC — so
-                // meshing them is pure cost. Coax always lands here: its shield is a
-                // ground role, which rules MQS out.
+                // meshing them is pure cost. Coax always lands here: its shaped
+                // (non-rectangular) conductors rule MQS out.
                 meshConductorInterior: mqsPre,
                 occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
                 gmshOptions: this.opts.gmshOptions,
@@ -1626,9 +1629,9 @@ export class TriBackend {
         // Full-wave eigenmode above 100 MHz (dispersive eps + the mode field used
         // for the perturbation conductor loss); static solve near DC.
         // Conductor-loss method (UI "Solver" dropdown for the full-wave backend):
-        //   'auto'         — MQS volume eddy-current where applicable (symmetric, no
-        //                    ground rect), else the blended perturbation. Most
-        //                    accurate; default ("Full-wave (MQS)").
+        //   'auto'         — MQS volume eddy-current where applicable (symmetric,
+        //                    rectangular conductors), else the blended perturbation.
+        //                    Most accurate; default ("Full-wave (MQS)").
         //   'perturbation' — blended perturbation (static-field in the skin transition,
         //                    SIBC eigenmode at deep skin); much cheaper than MQS per
         //                    point, smooth across frequency. ("Full-wave (perturbation)").
@@ -1637,22 +1640,24 @@ export class TriBackend {
         // MQS applicability, hoisted ABOVE the eigensolve: the MQS loss path consumes
         // only the scalar eps_d from the full-wave solve (never the eigenvector), which
         // is what makes the dispersion-cache fast path below safe on that path. MQS
-        // (reference) applies when grounds are wall-absorbed (signal-only rects) and
-        // the domain is symmetric (mode set by the BC); else H-field perturbation.
-        // Per-face plating is handled INSIDE MQS (surfaceZs weights each face's smooth
+        // applies to rectangular conductors, explicit ground rects (coplanar GCPW
+        // grounds, via slabs, cutout remnants) are handled inside the solve as passive
+        // C = 0 return conductors, and on 'auto' a symmetric domain (mode set by
+        // the BC). Shaped conductors (coax) have no rect-based skin-band/
+        // classification support, so they fall back to the H-field perturbation.
+        // Per-face plating is handled inside MQS (surfaceZs weights each face's smooth
         // current by its own impedance), so plating doesn't force perturbation.
-        const hasGroundRect = cr.rectRoles.some(r => !r.is_signal);
+        const mqsOk = cr.rects.length > 0 && !cr.rects.some(r => r.shape)
+            && cr.rectRoles.some(r => r.is_signal);
         const anyPlating = cr.rectRoles.some(r => r.plating && r.plating.sigma > 0
             && (r.plating.top || r.plating.sides || r.plating.bottom));
-        // MQS drives every meshed conductor rect with the same source current, so
-        // explicit ground rects (coplanar GCPW grounds etc.) would carry FORWARD
-        // current instead of return current — nonsense R. Refuse the forced 'mqs'
-        // override there (with a warning) rather than produce garbage.
-        if (lossMethod === 'mqs' && hasGroundRect && this._modeWarnings
-            && !this._modeWarnings.some(w => w.type === 'mqs-grounds')) {
-            this._modeWarnings.push({ type: 'mqs-grounds', mode, freq: f,
-                message: 'MQS conductor loss is not applicable with explicit ground conductors ' +
-                         '(they would be driven as signal); using the perturbation method instead.' });
+        // Refuse a forced 'mqs' override where it cannot apply (with a warning)
+        // rather than produce garbage.
+        if (lossMethod === 'mqs' && !mqsOk && this._modeWarnings
+            && !this._modeWarnings.some(w => w.type === 'mqs-shape')) {
+            this._modeWarnings.push({ type: 'mqs-shape', mode, freq: f,
+                message: 'MQS conductor loss is not applicable to this geometry ' +
+                         '(shaped conductors or no signal conductor), using the perturbation method instead.' });
         }
         // The volume eddy-current solve reads the elements INSIDE the metal, which the
         // mesher only emits when buildMesh's own applicability test (mqsPre) said MQS
@@ -1660,8 +1665,8 @@ export class TriBackend {
         // the built condRect, so they are computed independently and could in principle
         // disagree, on a mesh with no conductor interior MQS would return a plausible
         // but wrong R rather than fail, so fall back to perturbation and say so.
-        let useMQS = (lossMethod === 'mqs' && !hasGroundRect)
-            || (lossMethod === 'auto' && this.symmetry && !hasGroundRect && cr.rects.length > 0);
+        let useMQS = (lossMethod === 'mqs' && mqsOk)
+            || (lossMethod === 'auto' && this.symmetry && mqsOk);
         if (useMQS && mesh.condInteriorMeshed === false) {
             useMQS = false;
             if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'mqs-no-interior')) {
@@ -1810,7 +1815,7 @@ export class TriBackend {
         }
         const lossEdgeMask = f > 0 ? lc.mask : null;
 
-        // (hasGroundRect / anyPlating / useMQS are computed above the eigensolve —
+        // (mqsOk / anyPlating / useMQS are computed above the eigensolve —
         // the dispersion-cache fast path there needs the MQS applicability.)
         let R_total = 0, L_internal = 0;
         // Smallest conductor cross-section dimension (gates the skin-band remesh and
@@ -1844,6 +1849,47 @@ export class TriBackend {
             // band partially resolved rather than aborting).
             const mqsMaxTris = this.opts.mqsMaxTris ?? 40000;
             const mqsBand = this.opts.mqsBand ?? 1.5;
+            // Skin-band refinement runs in two passes, trace first: the signal
+            // band takes the full mqsMaxTris budget, then the passive ground
+            // rects (GCPW coplanar grounds, via slabs) refine on top with their
+            // own additional budget and a distance-graded target, full
+            // bandDelta*δ resolution only within ~Dfine of the signal, where
+            // the return current concentrates at the slot edge, growing
+            // linearly beyond (the ground surface current decays away from the
+            // slot, and past the via fence it is negligible). The grading
+            // keeps the band cost independent of how far the ground pour
+            // extends, the pass order keeps a large ground perimeter from
+            // eating the trace's budget (one shared budget would abort the
+            // whole refinement with the trace still coarse, worse than no
+            // ground band at all).
+            const sigRects = [], gndRects = [];
+            cr.rects.forEach((r, i) => (cr.rectRoles[i].is_signal ? sigRects : gndRects).push(r));
+            let gndGrading = null;
+            if (gndRects.length) {
+                // Dfine keys off the signal-ground clearance (the GCPW slot width):
+                // points on the ground's inner edge sit exactly gapMin from the
+                // signal, so Dfine = 1.5*gapMin keeps ~half a slot-width of the
+                // ground at full resolution beyond its inner edge.
+                let gapMin = Infinity;
+                for (const gr of gndRects) for (const sr of sigRects) {
+                    const dx = Math.max(0, Math.max(gr.xmin, sr.xmin) - Math.min(gr.xmax, sr.xmax));
+                    const dy = Math.max(0, Math.max(gr.ymin, sr.ymin) - Math.min(gr.ymax, sr.ymax));
+                    gapMin = Math.min(gapMin, Math.hypot(dx, dy));
+                }
+                if (!isFinite(gapMin)) gapMin = 0;
+                gndGrading = { sigRects,
+                    Dfine: (this.opts.mqsGndFine ?? 1.5) * gapMin,
+                    slope: this.opts.mqsGndSlope ?? 0.5 };
+            }
+            const gndBudget = this.opts.mqsGndMaxTris ?? Math.floor(mqsMaxTris / 2);
+            const buildSkin = (base, dlt) => {
+                let m = refineSkinBand(base, { rects: sigRects }, dlt, 12, mqsBand, bandDelta * dlt, mqsMaxTris);
+                if (gndRects.length) {
+                    m = refineSkinBand(m, { rects: gndRects }, dlt, 12, mqsBand,
+                        bandDelta * dlt, m.nTris + gndBudget, gndGrading);
+                }
+                return m;
+            };
             // DEFAULT: f_max-reuse. Build the skin mesh at the HIGHEST frequency seen
             // (finest target, narrowest band) and reuse it for all lower frequencies.
             // The fine near-surface band plus the conductor interior (always meshed on
@@ -1867,7 +1913,7 @@ export class TriBackend {
             if (deltaBand >= minDim) {
                 mqsMesh = mesh;
             } else if (this.opts.mqsCacheMesh === false) {
-                mqsMesh = refineSkinBand(mesh, cr, mqsDelta, 12, mqsBand, bandDelta * mqsDelta, mqsMaxTris);
+                mqsMesh = buildSkin(mesh, mqsDelta);
             } else {
                 // The skin mesh depends only on the geometry and the band skin depth —
                 // NOT on the mode (the odd/even BC enters the MQS solve, not the mesh) —
@@ -1877,7 +1923,7 @@ export class TriBackend {
                     : (this._skinCache = { base: mesh, dB: Infinity, mesh: null });
                 if (!sc.mesh || deltaBand < sc.dB * (1 - 1e-9)) {   // higher freq appeared → rebuild finer
                     sc.dB = deltaBand;
-                    sc.mesh = refineSkinBand(mesh, cr, deltaBand, 12, mqsBand, bandDelta * deltaBand, mqsMaxTris);
+                    sc.mesh = buildSkin(mesh, deltaBand);
                 }
                 mqsMesh = sc.mesh;
             }

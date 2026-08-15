@@ -34,6 +34,7 @@ const TIERS = {
     ],
     slow: [
         'tests/test_fullwave_correctness.js',
+        'tests/test_gcpw_mqs.js',
         'src/tri_solver/tests/modes_test.mjs',
         'src/tri_solver/tests/plating_perside_test.mjs',
         'tests/test_vs_ref.js',
