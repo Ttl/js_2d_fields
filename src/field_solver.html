@@ -1499,24 +1499,7 @@
             toggleCheckboxSection('chk_plating', 'plating-params');
         });
 
-        // Thick-plating (corner wrap) modeling is only implemented in the quasi-static
-        // solver. The full-wave backend models per-face plating but not the geometric
-        // corner wrap, so disable the option (and grey it out) when full-wave is active.
-        function updateThickPlatingAvailability() {
-            const isFullWave = document.getElementById('mesh_backend').value !== 'rectilinear';
-            const cb = document.getElementById('chk_plating_thick_corners');
-            if (!cb) return;
-            cb.disabled = isFullWave;
-            const label = cb.closest('label');
-            if (label) {
-                label.style.opacity = isFullWave ? '0.5' : '';
-                label.title = isFullWave
-                    ? 'Thick plating modeling is not supported by the full-wave solver'
-                    : '';
-            }
-        }
         document.getElementById('mesh_backend').addEventListener('change', () => {
-            updateThickPlatingAvailability();
             enforceBackendForType();
         });
 
@@ -1526,7 +1509,6 @@
         toggleCheckboxSection('chk_gnd_cut', 'gnd-cut-params');
         toggleCheckboxSection('chk_enclosure', 'enclosure-params');
         toggleCheckboxSection('chk_plating', 'plating-params');
-        updateThickPlatingAvailability();
 
         // Setup unit parsing for all unit-input fields
         document.querySelectorAll('.unit-input').forEach(input => {

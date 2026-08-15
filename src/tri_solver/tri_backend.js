@@ -165,30 +165,33 @@ function effectiveSurface(solver) {
     return { sigma, rq };
 }
 
-// Per-face plating model. Each conductor face (top / bottom / sides) gets its own
-// surface impedance: plated faces use the layered (plating-over-bulk) gradient
-// impedance — matching the FDM backend's per-face model; bare faces and grounded
-// walls use the base metal. NOTE: thick-corner plating (geometric wrap of
-// side/top plating around corners) is NOT modeled — disabled in the UI for the
-// full-wave solver.
+// Per-face plating model. Each conductor face (top / bottom / sides) gets its
+// own surface impedance: plated faces use the layered (plating-over-bulk)
+// gradient impedance matching the FDM backend's per-face model and bare faces
+// and grounded walls use the base metal. Thick-corner plating (geometric wrap
+// of side plating onto the bottom face within one plating thickness of each
+// corner) and the top-only side coverage are modeled position-aware via zAt
+// the same rule as the FDM getZsurf.
 //
 // Two consumers, sharing makePlatingZs:
-//   • buildSurfaceGroups (PERTURBATION path) groups loss edges by surface
+//   * buildSurfaceGroups (pertrubation path) groups loss edges by surface
 //     impedance so the surface integral is summed per group (loss is linear in
-//     the per-edge surface resistance). `uniform` true ⇒ a single impedance
-//     everywhere ⇒ the plain single-pass path.
-//   • buildFaceZs (MQS path) returns Zs at a face midpoint, so the MQS volume
+//     the per-edge surface resistance). `uniform` true, a single impedance
+//     everywhere, the plain single-pass path.
+//   * buildFaceZs (MQS path) returns Zs at a face midpoint, so the MQS volume
 //     solve can weight each face's smooth current by its own plating impedance.
-// Shared surface-impedance model: the bare-metal Zs plus a (rectIndex, face) → Zs
+// Shared surface-impedance model: the bare-metal Zs plus a (rectIndex, face) -> Zs
 // resolver. Plated faces use the layered (plating-over-bulk) gradient impedance
-// (cached per distinct plating); bare faces use the base metal. Used by both the
+// (cached per distinct plating), bare faces use the base metal. Used by both the
 // edge-based grouping (perturbation path) and the point-based lookup (MQS path).
 function makePlatingZs(solver, condRect, freq) {
     const roles = condRect.rectRoles || [];
+    const rects = condRect.rects || [];
     const sigmaBase = solver.sigma_cond ?? 5.8e7;
     const rqBase = solver.rq ?? 0;
     const Zbare = calculate_Zrough(freq, sigmaBase, rqBase);    // Complex (.re/.im)
     const layeredCache = new Map();
+    const singleCache = new Map();
     // face is 'top' | 'bottom' | 'sides' | 'all'. 'all' is the shaped-conductor case:
     // a circle has ONE continuous surface, so there is nothing to select between and
     // the plating covers the whole boundary (CoaxSolver sets pl.all).
@@ -203,7 +206,32 @@ function makePlatingZs(solver, condRect, freq) {
         }
         return z;
     };
-    return { Zbare, zForFace };
+    // Single-layer plating impedance (no bulk underneath) for wrap-around regions.
+    const zSingle = (sigma, rq) => {
+        const key = `${sigma}|${rq}`;
+        let z = singleCache.get(key);
+        if (!z) { z = calculate_Zrough(freq, sigma, rq); singleCache.set(key, z); }
+        return z;
+    };
+    // Position-aware resolver: same per-face Zs as zForFace, plus the FDM backend's
+    // thick-corner wrap (field_solver.getZsurf): side
+    // plating physically wraps onto the bottom face within one plating thickness
+    // of each corner (sides plated, bottom not, thick_corners on). Single-layer
+    // plating σ with the bulk rq (the surface prep is the original bottom).
+    //
+    // The FDM's other coverage rule, top-only plating extending down the sides by
+    // one thickness, is not implemented.
+    const zAt = (ri, face, x, y) => {
+        const pl = roles[ri] && roles[ri].plating;
+        const r = rects[ri];
+        if (pl && pl.sigma > 0 && r && !r.shape && (pl.thickness ?? 0) > 0 &&
+            face === 'bottom' && pl.sides && !pl.bottom && pl.thick_corners) {
+            const d = Math.min(x - r.xmin, r.xmax - x);
+            if (d <= pl.thickness) return zSingle(pl.sigma, rqBase);
+        }
+        return zForFace(ri, face);
+    };
+    return { Zbare, zForFace, zAt };
 }
 
 function platingTol(condRect) {
@@ -219,7 +247,7 @@ function platingTol(condRect) {
 function buildFaceZs(solver, condRect, freq) {
     const rects = condRect.rects || [];
     const tol = platingTol(condRect);
-    const { Zbare, zForFace } = makePlatingZs(solver, condRect, freq);
+    const { Zbare, zForFace, zAt } = makePlatingZs(solver, condRect, freq);
     return (x, y, orient) => {
         for (let ri = 0; ri < rects.length; ri++) {
             const r = rects[ri];
@@ -238,7 +266,7 @@ function buildFaceZs(solver, condRect, freq) {
                 face = 'sides';
             }
             if (!face) continue;
-            return zForFace(ri, face);
+            return zAt(ri, face, x, y);
         }
         return Zbare;
     };
@@ -248,7 +276,7 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
     const { nodes, edges, nEdges } = mesh;
     const rects = condRect.rects || [];
     const tol = platingTol(condRect);
-    const { Zbare, zForFace } = makePlatingZs(solver, condRect, freq);
+    const { Zbare, zForFace, zAt } = makePlatingZs(solver, condRect, freq);
     // 4 slots, not 3: shaped conductors add 'all' (one continuous curved surface).
     const FACES = ['top', 'bottom', 'sides', 'all'];
     const NFACE = FACES.length;
@@ -298,7 +326,13 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
     for (let e = 0; e < nEdges; e++) {
         if (!baseMask[e]) continue;
         const fid = edgeFace[e];
-        const z = fid < 0 ? Zbare : zForFace((fid / NFACE) | 0, FACES[fid % NFACE]);
+        // Position-aware Zs (zAt): the thick-corner / top-only wrap regions get the
+        // single-layer plating impedance, resolved at the edge midpoint. 'all'
+        // (shaped) faces have no wrap geometry, zAt falls through to zForFace.
+        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const z = fid < 0 ? Zbare
+            : zAt((fid / NFACE) | 0, FACES[fid % NFACE],
+                  (nodes[2 * n0] + nodes[2 * n1]) / 2, (nodes[2 * n0 + 1] + nodes[2 * n1 + 1]) / 2);
         const k = keyOf(z);
         let gi = groupIdx.get(k);
         if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); }

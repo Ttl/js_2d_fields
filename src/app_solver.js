@@ -502,7 +502,7 @@ function restoreSettings(settings) {
             // getParams() would then silently fall back to rectilinear — pin to
             // the first (default) option instead.
             if (meshBackendSelect.value !== v) meshBackendSelect.selectedIndex = 0;
-            // Fire change so dependent UI (e.g. thick-plating availability) updates.
+            // Fire change so dependent UI (backend-vs-line-type enforcement) updates.
             meshBackendSelect.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
