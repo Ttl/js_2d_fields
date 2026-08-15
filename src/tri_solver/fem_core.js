@@ -131,6 +131,26 @@ export function csqrt(re, im) {
 
 // ==================== WASM Helpers ====================
 
+// Debug hook (node only): EIGEN_WASM_DUMP=<dir> writes each WASM solver call's
+// inputs to <dir>/last_<fn>.bin before the call and removes the file on success.
+// After an eigen_assert abort() (which kills the WASM instance mid-call), the
+// file left behind is the exact failing matrix, feed it to a native harness
+// with assertions on to get a real stack trace. Zero cost when the env is unset.
+const _dumpDir = (typeof process !== 'undefined' && process.env && process.env.EIGEN_WASM_DUMP) || null;
+let _fs = null;
+if (_dumpDir) import('fs').then(m => { _fs = m; });   // resolved long before any solve runs
+function _dumpCall(fn, meta, arrays) {
+    if (!_dumpDir || !_fs) return null;
+    arrays = arrays.filter(([, a]) => a != null);
+    const header = Buffer.from(JSON.stringify({ ...meta, arrays: arrays.map(([name, a]) => [name, a.constructor.name, a.length]) }));
+    const parts = [Buffer.from(new Uint32Array([header.length]).buffer), header];
+    for (const [, a] of arrays) parts.push(Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+    const path = `${_dumpDir}/last_${fn}.bin`;
+    _fs.writeFileSync(path, Buffer.concat(parts));
+    return path;
+}
+function _dumpDone(path) { if (path) try { _fs.unlinkSync(path); } catch { /* keep */ } }
+
 export function createWasmHelpers(M) {
     function allocInt32(arr) {
         const p = M._malloc(4 * arr.length);
@@ -159,6 +179,11 @@ export function createWasmHelpers(M) {
         const ptrs = [];
         function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
         function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
+        const dumpPath = _dumpCall('solveGeneralized',
+            { N, sigma, nev, ncv, ncvMax, hasInit: !!initVec },
+            [['aRowPtr', csrA.rowPtr], ['aColIdx', csrA.colIdx], ['aValRe', csrA.valRe], ['aValIm', csrA.valIm],
+             ['bRowPtr', csrB.rowPtr], ['bColIdx', csrB.colIdx], ['bValRe', csrB.valRe], ['bValIm', csrB.valIm],
+             ...(initVec ? [['init', initVec]] : [])]);
         try {
             const pAr = ai(csrA.rowPtr), pAc = ai(csrA.colIdx), pAre = af(csrA.valRe), pAim = af(csrA.valIm);
             const pBr = ai(csrB.rowPtr), pBc = ai(csrB.colIdx), pBre = af(csrB.valRe), pBim = af(csrB.valIm);
@@ -187,6 +212,7 @@ export function createWasmHelpers(M) {
             // exception caught in C++, …). Throw so callers can't mistake it for
             // a truthy "converged" count.
             if (nc < 0) throw new Error(`Eigensolver failed (code ${nc})`);
+            _dumpDone(dumpPath);
             return {
                 nconv: nc,
                 evalsRe: readFloat64(pEvRe, nc > 0 ? nc : 0),
@@ -205,6 +231,10 @@ export function createWasmHelpers(M) {
         const ptrs = [];
         function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
         function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
+        const dumpPath = _dumpCall('solveSparseMulti',
+            { N, nRhs: rhsArrays.length },
+            [['rowPtr', csr.rowPtr], ['colIdx', csr.colIdx], ['valRe', csr.valRe],
+             ...rhsArrays.map((r, i) => [`rhs${i}`, r])]);
         try {
             const pR = ai(csr.rowPtr), pC = ai(csr.colIdx), pV = af(csr.valRe);
             const nRhs = rhsArrays.length;
@@ -215,6 +245,7 @@ export function createWasmHelpers(M) {
             const pX = M._malloc(8 * nRhs * N); ptrs.push(pX);
             const rc = M._solve_sparse_multi(N, csr.colIdx.length, pR, pC, pV, nRhs, pRhs, pX);
             if (rc !== 0) throw new Error(`solve_sparse_multi failed: ${rc}`);
+            _dumpDone(dumpPath);
             const results = [];
             for (let r = 0; r < nRhs; r++)
                 results.push(readFloat64(pX + r * N * 8, N));

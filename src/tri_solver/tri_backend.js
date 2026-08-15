@@ -75,7 +75,11 @@ function maxTrisForBudget(maxNodes) {
 // the FDM estimate 10·(12·nnz + 20·N). With the triangle budget above this never trips in
 // normal use; it backstops direct/programmatic misuse and extreme Max Nodes settings.
 const MAX_SOLVE_BYTES = 1e9;
-function eigenSolveBytes(N, nnz) {
+// The eigensolver factorizes C = A - σB, whose sparsity pattern is the union of
+// the A and B patterns, and B (with the g2 coupling blocks) is typically ~2.6x
+// denser than A. Size the estimate on the denser of the two patterns.
+function eigenSolveBytes(N, fem) {
+    const nnz = Math.max(fem.csrA.colIdx.length, fem.csrB.colIdx.length);
     return 2 * 10 * (12 * nnz + 20 * N);
 }
 
@@ -497,8 +501,8 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // Absolute ceiling (mirrors the FDM "Problem too large" guard): refuse a solve that
     // would overrun the eigensolver heap with a clear error rather than an opaque abort().
     // The triangle budget keeps normal solves well under this; this backstops misuse.
-    if (eigenSolveBytes(N, fem.csrA.colIdx.length) > MAX_SOLVE_BYTES)
-        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem.csrA.colIdx.length) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
+    if (eigenSolveBytes(N, fem) > MAX_SOLVE_BYTES)
+        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
     // solveGeneralized throws on solver failure (negative return code) — let it
     // propagate so the caller can warn. nconv === 0 (nothing converged) → null.
     const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed);
@@ -632,8 +636,8 @@ function waveguideEigen(ctx, mesh, fm, abc, condRect, epsMap, f, seed, kcAnalyti
     const fem = femFromDecomposition(dec, k2);
     if (!fem) return null;
     const N = fem.N;
-    if (eigenSolveBytes(N, fem.csrA.colIdx.length) > MAX_SOLVE_BYTES)
-        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem.csrA.colIdx.length) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the guide dimensions.`);
+    if (eigenSolveBytes(N, fem) > MAX_SOLVE_BYTES)
+        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the guide dimensions.`);
     // The shift IS the analytic target eigenvalue for a homogeneous fill.
     const sigma = kcAnalytic * kcAnalytic - k2 * erMax;
     const nev = Math.max(1, Math.min(6, N - 1));
@@ -1993,7 +1997,16 @@ export class TriBackend {
             let mqs = null;
             try {
                 mqs = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveSparseMulti, 0, mqsOpts);
-            } catch { mqs = null; }
+            } catch (e) {
+                // Surface the downgrade instead of silently falling back: an MQS solve
+                // failure here is almost always the block LU exhausting the WASM heap
+                // on a very large skin mesh, and the perturbation estimate it falls
+                // back to is markedly less accurate (corner-sensitive).
+                mqs = null;
+                if (this._modeWarnings) this._modeWarnings.push({ type: 'mqs-solve-failed', mode, freq: f, message:
+                    `MQS conductor-loss solve failed (${String(e && e.message || e).slice(0, 120)}); ` +
+                    `using the perturbation loss estimate instead. Reduce Max Nodes if this persists.` });
+            }
             // Accept MQS only if physically sane.
             if (mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop) && mqs.L_loop > 0
                 && isFinite(mqs.X_total) && mqs.X_total > 0) {
@@ -2294,8 +2307,8 @@ export class TriBackend {
         // Absolute ceiling (mirrors the FDM "Problem too large" guard) — return a clean
         // error instead of letting the eigensolver heap-abort(). The mesh is already held to
         // the triangle budget, so this only trips on extreme settings.
-        if (eigenSolveBytes(N, fem.csrA.colIdx.length) > MAX_SOLVE_BYTES)
-            return { modes: [], nconv: 0, error: `Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem.csrA.colIdx.length) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.` };
+        if (eigenSolveBytes(N, fem) > MAX_SOLVE_BYTES)
+            return { modes: [], nconv: 0, error: `Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.` };
         // Static-field "drive" seeds for every physical conductor excitation (single-ended:
         // one; differential: even AND odd). A genuine quasi-TEM mode matches ONE of these
         // (high overlap); a spurious discrete gradient mode matches none. All modes share

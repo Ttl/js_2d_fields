@@ -1,0 +1,87 @@
+diff --git a/Eigen/src/SparseLU/SparseLU_Memory.h b/Eigen/src/SparseLU/SparseLU_Memory.h
+index 22affd221..e3df43ddb 100644
+--- a/Eigen/src/SparseLU/SparseLU_Memory.h
++++ b/Eigen/src/SparseLU/SparseLU_Memory.h
+@@ -66,20 +66,27 @@ Index SparseLUImpl<Scalar, StorageIndex>::expand(VectorType& vec, Index& length,
+   else
+     new_len = (std::max)(length + 1, Index(alpha * length));
+ 
+-  VectorType old_vec;  // Temporary vector to hold the previous values
+-  if (nbElts > 0) old_vec = vec.segment(0, nbElts);
+-
+-    // Allocate or expand the current vector
++  // Grow into a fresh buffer and swap: resizing `vec` in place is not
++  // exception-safe here (DenseStorage::resize frees the old buffer BEFORE
++  // allocating the new one, so a std::bad_alloc leaves `vec` with a dangling
++  // data pointer and a stale nonzero size(); the retry loop below then read
++  // that stale size, exited as if the resize had succeeded, and the caller
++  // went on to write through the dangling pointer). The temporary starts
++  // empty, so a failed resize leaves it empty and retrying is safe; `vec`
++  // stays intact until the final swap.
++  VectorType new_vec;
++
++    // Allocate the new vector
+ #ifdef EIGEN_EXCEPTIONS
+   try
+ #endif
+   {
+-    vec.resize(new_len);
++    new_vec.resize(new_len);
+   }
+ #ifdef EIGEN_EXCEPTIONS
+   catch (std::bad_alloc&)
+ #else
+-  if (!vec.size())
++  if (!new_vec.size())
+ #endif
+   {
+     if (!num_expansions) {
+@@ -100,22 +107,23 @@ Index SparseLUImpl<Scalar, StorageIndex>::expand(VectorType& vec, Index& length,
+         try
+ #endif
+         {
+-          vec.resize(new_len);
++          new_vec.resize(new_len);
+         }
+ #ifdef EIGEN_EXCEPTIONS
+         catch (std::bad_alloc&)
+ #else
+-        if (!vec.size())
++        if (!new_vec.size())
+ #endif
+         {
+           tries += 1;
+           if (tries > 10) return new_len;
+         }
+-      } while (!vec.size());
++      } while (!new_vec.size());
+     }
+   }
+   // Copy the previous values to the newly allocated space
+-  if (nbElts > 0) vec.segment(0, nbElts) = old_vec;
++  if (nbElts > 0) new_vec.segment(0, nbElts) = vec.segment(0, nbElts);
++  vec.swap(new_vec);
+ 
+   length = new_len;
+   if (num_expansions) ++num_expansions;
+diff --git a/Eigen/src/SparseLU/SparseLU_column_dfs.h b/Eigen/src/SparseLU/SparseLU_column_dfs.h
+index 71a9ff483..752710eac 100644
+--- a/Eigen/src/SparseLU/SparseLU_column_dfs.h
++++ b/Eigen/src/SparseLU/SparseLU_column_dfs.h
+@@ -48,7 +48,15 @@ struct column_dfs_traits : no_assignment_operator {
+       : m_jcol(jcol), m_jsuper_ref(jsuper), m_glu(glu), m_luImpl(luImpl) {}
+   bool update_segrep(Index /*krep*/, Index /*jj*/) { return true; }
+   void mem_expand(IndexVector& lsub, Index& nextl, Index chmark) {
+-    if (nextl >= m_glu.nzlmax) m_luImpl.memXpand(lsub, m_glu.nzlmax, nextl, LSUB, m_glu.num_expansions);
++    if (nextl >= m_glu.nzlmax) {
++      // Propagate an expansion failure instead of ignoring it: the caller
++      // (dfs_kernel) writes lsub(nextl) next, so continuing with the old,
++      // full buffer is an out-of-bounds write (assertion failure, or memory
++      // corruption with -DNDEBUG). Report allocation failure the same way
++      // Eigen's own allocators do.
++      if (m_luImpl.memXpand(lsub, m_glu.nzlmax, nextl, LSUB, m_glu.num_expansions) != 0)
++        internal::throw_std_bad_alloc();
++    }
+     if (chmark != (m_jcol - 1)) m_jsuper_ref = emptyIdxLU;
+   }
+   enum { ExpandMem = true };

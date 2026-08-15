@@ -15,9 +15,22 @@ EMCC ?= emcc
 
 all: solver eigen_solver
 
+# --- eigen patch --------------------------------------------------------------
+# SparseLU out-of-memory robustness (see eigen.patch): upstream's storage
+# expansion is not exception-safe (dangling pointer + stale size after a failed
+# resize) and column_dfs ignores expansion failure, writing past the end of the
+# factor arrays, an eigen_assert abort() that permanently poisons the WASM
+# module when a large solve exhausts the 2 GB heap. The patch makes both fail
+# softly (std::bad_alloc / factorization-failed), which the solver entry points
+# already catch and report as a clean error code.
+eigen-patch:
+	cd eigen && (git apply --check ../eigen.patch 2>/dev/null && git apply ../eigen.patch \
+	  && echo "applied eigen.patch" || echo "eigen.patch already applied / not applicable; skipping")
+
 # --- quasi-static solver -----------------------------------------------------
 solver: solver.js
 solver.js: solver.cpp | eigen
+	$(MAKE) eigen-patch
 	$(EMCC) solver.cpp -I eigen -O3 -fwasm-exceptions \
 	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,node \
 	  -s EXPORTED_FUNCTIONS='["_solve_sparse","_solve_sparse_multi","_malloc","_free"]' \
@@ -31,6 +44,7 @@ solver.js: solver.cpp | eigen
 # and permanently poisons the module for the rest of the session.
 eigen_solver: eigen_solver.js
 eigen_solver.js: eigen_solver.cpp | eigen spectra
+	$(MAKE) eigen-patch
 	$(EMCC) eigen_solver.cpp -I eigen -I spectra/include -O3 -fwasm-exceptions \
 	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,node \
 	  -s EXPORTED_FUNCTIONS='["_solve_generalized_eigen","_solve_generalized_eigen_with_init","_solve_sparse_multi","_solve_rqi","_solve_qep_rqi","_malloc","_free"]' \
