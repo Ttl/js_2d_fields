@@ -1,9 +1,11 @@
 [submodule "src/wasm_solver/eigen"]
 	path = src/wasm_solver/eigen
 	url = https://gitlab.com/libeigen/eigen.git
+	ignore = dirty
 [submodule "src/wasm_solver/spectra"]
 	path = src/wasm_solver/spectra
 	url = https://github.com/yixuan/spectra.git
 [submodule "src/wasm_solver/gmsh"]
 	path = src/wasm_solver/gmsh
 	url = https://gitlab.onelab.info/gmsh/gmsh.git
+	ignore = dirty
