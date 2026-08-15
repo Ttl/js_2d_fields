@@ -491,6 +491,24 @@ export function buildOccMeshFromGeometry(G, opts) {
     const nodes = new Float64Array(2 * nNodes);
     for (let i = 0; i < nNodes; i++) { nodes[2 * i] = coords[3 * i]; nodes[2 * i + 1] = coords[3 * i + 1]; }
 
+    // Snap near-wall nodes exactly onto the domain walls
+    //
+    // OCC's boolean fragmentation works to Precision::Confusion() (1e-7 in
+    // model units = metres), so a nearly-degenerate fragment (for example
+    // solder mask) can emit nodes tens of nanometres off the wall. Adaptive
+    // passes can then drag the node causing it to cause a void to appear near
+    // the symmetry plane.  Shaped domains (coax) are excluded.
+    if (!domainShape) {
+        const snapTol = Math.max(tol, 2e-7);
+        for (let i = 0; i < nNodes; i++) {
+            const x = nodes[2 * i], y = nodes[2 * i + 1];
+            if (Math.abs(x - X0) < snapTol) nodes[2 * i] = X0;
+            else if (Math.abs(x - X1) < snapTol) nodes[2 * i] = X1;
+            if (Math.abs(y - Y0) < snapTol) nodes[2 * i + 1] = Y0;
+            else if (Math.abs(y - Y1) < snapTol) nodes[2 * i + 1] = Y1;
+        }
+    }
+
     // ---- Extract triangles ----
     const etPtrPtr = G.stackAlloc(4), etNPtr = G.stackAlloc(4);
     const enPtrPtr = G.stackAlloc(4), enNPtr = G.stackAlloc(4);
