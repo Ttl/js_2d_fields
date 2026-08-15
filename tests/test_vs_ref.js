@@ -899,12 +899,62 @@ async function solve_broadside_stripline_offset() {
     return results;
 }
 
+async function solve_gcpw() {
+    const solver = new MicrostripSolver({
+        substrate_height: 0.3e-3,
+        trace_width: 0.3e-3,
+        trace_thickness: 35e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.5,
+        tan_delta: 0.02,
+        sigma_cond: 5.8e7,
+        freq: 1e9,
+        nx: 10,
+        ny: 10,
+        use_coplanar_gnd: true,
+        gap: 150e-6,
+        via_gap: 500e-6,
+        use_vias: true,
+        boundaries: ["open", "open", "open", "gnd"]
+    });
+
+    const results = await solver.solve_adaptive();
+    const mode = results.modes[0];
+
+    const solver_results = {
+        'Z0': mode.Z0,
+        'eps_eff': mode.eps_eff,
+        'loss': mode.alpha_total,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
+    };
+
+    // Reference values from: t_sub=0.3mm, w=0.3mm, t=35µm,
+    // gap=150µm, stitching via 500µm from the gap edge, er=4.5, tand=0.02,
+    // copper 5.8e7 S/m, 1 GHz. Total attenuation 4.5816 dB/m.
+    const reference = {
+        "Z0": 55.465,
+        "eps_eff": 2.7542,
+        "loss": 4.5816,
+        "C": 99.804e-12,
+        "R": 27.297,
+        "L": 307.05e-9,
+        "G": 10.147e-3
+    };
+
+    test_microstrip_solution(solver_results, reference, "GCPW 1 GHz");
+
+    return solver_results;
+}
+
 // Run tests. Each case is isolated so the whole suite reports even when some
 // cases fail (useful when comparing the two backends).
 async function runTests() {
     const cases = [
         solve_microstrip, solve_microstrip_1khz, solve_microstrip_embed,
-        solve_microstrip_cut, solve_microstrip_20ghz, solve_stripline,
+        solve_microstrip_cut, solve_microstrip_20ghz, solve_gcpw, solve_stripline,
         solve_rough_stripline, solve_differential_stripline,
         solve_differential_stripline_rlgc, solve_differential_microstrip,
         solve_broadside_stripline, solve_broadside_stripline_offset,

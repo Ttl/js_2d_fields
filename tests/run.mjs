@@ -51,6 +51,7 @@ const TIERS = {
         'tests/test_plating_thicker_than_trace.js',
         'tests/test_corner_plating.js',
         'tests/test_corner_roughness.js',
+        'tests/test_corner_loss_regularization.js',
         'tests/test_coax_plating.js',
         'tests/test_surface_reactance.js',
         'tests/test_certification.js',

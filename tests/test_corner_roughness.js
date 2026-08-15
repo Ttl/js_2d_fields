@@ -155,13 +155,18 @@ async function test_corner_roughness_parameter() {
         console.log('  ✗ ERROR: Bulk rq should affect bottom corners!');
     }
 
-    console.log('\nKey insight:');
-    console.log('  Case 2 > Case 1: Bulk rq affects bottom corners more than plating rq affects sides');
-    const case2_vs_case1 = mode2.alpha_c - mode1.alpha_c;
-    console.log(`  Difference: ${case2_vs_case1.toFixed(6)} dB/m`);
-    if (case2_vs_case1 > 0) {
-        console.log('  ✓ CORRECT: Bottom corner roughness dominates (larger surface area)');
-    }
+    // Both roughness routes must ADD loss over the all-smooth reference. Their
+    // ORDERING is geometry-dependent, not a correctness invariant: the old
+    // dielectric-field loss integrand weighted substrate-side samples by √εr,
+    // which made bottom(-corner) roughness dominate here; the vacuum-field
+    // integrand weights faces by the real
+    // current distribution (validated per-face against tri MQS), and on this
+    // wrapped high-impedance trace (w=0.1mm on h=0.8mm) roughening top+sides
+    // legitimately adds more than roughening the bottom.
+    const loss_increase_case1 = mode1.alpha_c - mode3.alpha_c;
+    console.log('\nKey checks:');
+    console.log(`  Case 1 − Case 3 (plating rq on top/sides adds loss): ${loss_increase_case1.toFixed(6)} dB/m`);
+    console.log(`  Case 2 − Case 3 (bulk rq on bottom/corners adds loss): ${loss_increase_case2.toFixed(6)} dB/m`);
 
     console.log('\n' + '='.repeat(60));
     console.log('PHYSICAL INTERPRETATION:\n');
@@ -184,9 +189,10 @@ async function test_corner_roughness_parameter() {
 
     console.log('\n' + '='.repeat(60));
 
-    // Verify correctness: Case 2 should have more loss than Case 1
-    // because bulk.rq at bottom corners has more impact than plating.rq on sides
-    if (loss_increase_case2 > 0.01 && case2_vs_case1 > 0) {
+    // Verify correctness: EACH roughness route must reach its surfaces —
+    // bulk.rq the bottom/corners (Case 2) and plating.rq the plated top/sides
+    // (Case 1) — i.e. both raise loss over the all-smooth reference.
+    if (loss_increase_case2 > 0.01 && loss_increase_case1 > 0.01) {
         console.log('✓ TEST PASSED: Bottom corners use bulk.rq, sides use plating.rq');
         console.log('='.repeat(60));
         return true;

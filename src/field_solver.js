@@ -12,6 +12,14 @@ export const CONSTANTS = {
     PI: Math.PI
 };
 
+// Global calibration of the vacuum-field conductor-loss integrand, applied to
+// the AC sums (both Re and Im parts, the internal-inductance/roughness
+// reactance uses the same |H_t|^2 integral). Absorbs the uniform,
+// frequency-flat underestimate of the discrete surface integral. Minimax-fit vs
+// the tri-backend MQS. Recalibrate against the tri-backend MQS loss if the
+// integrand changes.
+export const VACUUM_LOSS_CAL = 1.093;
+
 // --- Math Utils ---
 
 export function diff(arr) {
@@ -897,12 +905,29 @@ export class FieldSolver2D {
      * - R_dc: DC resistance from conductor cross-sectional area
      * - R_ac: AC resistance from skin effect and surface roughness
      *
+     * Two integrand variants:
+     *
+     * vacuum_fields = true (production for rect-based solvers): Ex/Ey are the
+     * vacuum (C0) solve fields and Z0 is Z0_vac = 1/(c*C0). In the quasi-TEM
+     * skin-effect limit the H pattern is the harmonic conjugate of the vacuum
+     * potential (the same identity as L_ext = 1/(c^2*C0)), so H_t = E_n(vac)/η0,
+     * the surface current distribution, which is permittivity independent. The
+     * AC sums are scaled by VACUUM_LOSS_CAL. Algebraically identical to the
+     * legacy variant for homogeneous fill apart from the calibration.
+     *
+     * vacuum_fields = false (legacy): Ex/Ey are the dielectric solve fields,
+     * H_t = E_n*√εr(local)/η0, Z0 is the line impedance. For mixed dielectric
+     * this uses the charge distribution as a current proxy, it overestimates
+     * corner-dominated microstrip loss and its substrate-interface corner
+     * singularity makes the sum mesh-divergent.
+     *
      * @param {Array<Array<number>>} Ex - Electric field x-component
      * @param {Array<Array<number>>} Ey - Electric field y-component
-     * @param {number} Z0 - Characteristic impedance (real part)
+     * @param {number} Z0 - Line impedance (legacy) or vacuum impedance 1/(c*C0)
+     * @param {boolean} vacuum_fields - Ex/Ey are vacuum-solve fields
      * @returns {{R_ac: number, R_dc: number, R_total: number, L_internal: number}}
      */
-    calculate_conductor_loss(Ex, Ey, Z0) {
+    calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false) {
         if (!this.solution_valid) throw new Error("Fields invalid");
 
         const { signal_area, ground_area } = this._calculate_conductor_area();
@@ -1138,7 +1163,6 @@ export class FieldSolver2D {
                     if (ni < 0 || ni >= ny || nj < 0 || nj >= nx) continue;
 
                     if (isConductor(ni, nj)) {
-                        const eps_diel = this.epsilon_r[i][j];
                         const Ex_val = Ex[i][j];
                         const Ey_val = Ey[i][j];
 
@@ -1147,15 +1171,18 @@ export class FieldSolver2D {
                         else E_norm = Math.abs(Ey_val);
 
                         const Z0_freespace = 376.73;
-                        const H_tan = E_norm * Math.sqrt(eps_diel) / Z0_freespace;
+                        // Vacuum fields: H pattern is the vacuum dual, no eps factor.
+                        // Legacy: local plane-wave relation on the dielectric field.
+                        const eps_fac = vacuum_fields ? 1.0 : Math.sqrt(this.epsilon_r[i][j]);
+                        const H_tan = E_norm * eps_fac / Z0_freespace;
 
                         const dl = dl_func(dl_idx);
-                        const H2_dl = H_tan * H_tan * dl;
 
                         // Look up per-surface impedance (with plating if applicable)
                         const ci = this.conductor_id ? this.conductor_id[ni][nj] : -1;
                         const Z_surf = getZsurf(ci, direction, i, j, dl);
 
+                        const H2_dl = H_tan * H_tan * dl;
                         sum_H2_dl_R += Z_surf.re * H2_dl;
                         sum_H2_dl_L += Z_surf.im * H2_dl;
                     }
@@ -1167,7 +1194,11 @@ export class FieldSolver2D {
         // This is because we integrate over both traces but report normalized loss
         const power_factor = this.is_differential ? 0.5 : 1.0;
 
-        const Z0_sq = Z0 * Z0;
+        // Vacuum variant: |H|^2 per unit current is |H_vac per 1V|^2*Z0_vac^2, since the
+        // vacuum drive at 1V carries I_vac = 1/Z0_vac (legacy: same algebra with the
+        // line Z0). The calibration applies to both sums (same integral and same bias).
+        const cal = vacuum_fields ? VACUUM_LOSS_CAL : 1.0;
+        const Z0_sq = Z0 * Z0 * cal;
 
         // AC Resistance per unit length from skin effect (Ohm/m)
         const R_ac = power_factor * sum_H2_dl_R * Z0_sq;
@@ -1181,6 +1212,20 @@ export class FieldSolver2D {
         const R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
 
         return { R_ac, R_dc, R_total, L_internal };
+    }
+
+    // Conductor loss for a solved mode, choosing the integrand variant:
+    // rect-based solvers (conductor_id present) use the vacuum-field integrand
+    // when the mode's vacuum fields are available.
+    // The only production caller lacking vacuum fields on a rect solver is
+    // _solve_single_mode(vacuum_first=false), whose loss output is discarded
+    // and recomputed by the caller with the cached vacuum fields.
+    _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0) {
+        if (this.conductor_id && Ex0 && Ey0 && C0 > 0) {
+            const Z0_vac = 1 / (CONSTANTS.C * C0);
+            return this.calculate_conductor_loss(Ex0, Ey0, Z0_vac, true);
+        }
+        return this.calculate_conductor_loss(Ex, Ey, Z0);
     }
 
     calculate_dielectric_loss(Ex, Ey, Z0) {
@@ -1673,18 +1718,21 @@ export class FieldSolver2D {
             const v = modalVecs[li];
             const V = comb(v[0], A.V, v[1], B.V);
             const Ex = comb(v[0], A.Ex, v[1], B.Ex), Ey = comb(v[0], A.Ey, v[1], B.Ey);
+            // Same eigenvector combination of the vacuum drive fields: the mode's
+            // vacuum field, feeding the conductor-loss integrand (_mode_conductor_loss).
+            const Ex0 = comb(v[0], Av.Ex, v[1], Bv.Ex), Ey0 = comb(v[0], Av.Ey, v[1], Bv.Ey);
             const Ck = quad(Cm, v);          // ½·vᵀ·Cm·v  (mode capacitance, matches C_odd/C_even)
             const C0k = quad(Cm0, v);
             const eps_eff = Ck / C0k;
             const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
-            const { R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
+            const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0);
             const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
             const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, Ck, Z0);
             const alpha_c = 8.686 * R_total / (2 * Zc.re);
             results.push({
                 mode: label, Z0, eps_eff: eps_eff_mode, C: Ck, C0: C0k, RLGC: rlgc, Zc,
                 alpha_c, alpha_d, alpha_total: alpha_c + alpha_d, L_internal, L_external,
-                V, Ex, Ey, modalVec: v,
+                V, Ex, Ey, Ex0, Ey0, modalVec: v,
             });
         });
         return results;
@@ -1722,12 +1770,17 @@ export class FieldSolver2D {
          */
         let C0;
         let V;
+        let Ex0, Ey0;
 
         if (vacuum_first) {
             // Calculate C0 (vacuum capacitance)
             V = this._create_voltage_array(mode);
             V = await this.solve_laplace(V, true);
             C0 = this._signal_capacitance(V, true);
+            // Vacuum fields: the conductor-loss integrand for rect-based solvers
+            // (the quasi-TEM H pattern, see _mode_conductor_loss). Frequency- and
+            // ε-independent, so cached mode results reuse them across the sweep.
+            if (this.conductor_id) ({ Ex: Ex0, Ey: Ey0 } = this.compute_fields(V));
         }
 
         // Solve with dielectric
@@ -1746,7 +1799,7 @@ export class FieldSolver2D {
         }
 
         // Calculate conductor losses with surface roughness and DC resistance
-        const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
+        const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0);
 
         // Calculate dielectric loss (returns alpha in dB/m)
         const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
@@ -1766,7 +1819,8 @@ export class FieldSolver2D {
             RLGC: rlgc, Zc,
             alpha_c, alpha_d, alpha_total,
             L_internal, L_external,
-            V, Ex, Ey
+            V, Ex, Ey,
+            Ex0, Ey0
         };
     }
 
@@ -2548,9 +2602,17 @@ export class FieldSolver2D {
                 const oddMode = await this._solve_single_mode('odd', false);
                 const evenMode = await this._solve_single_mode('even', false);
 
-                // Use cached C0 values from initial solve (vacuum doesn't change)
-                oddMode.C0 = cachedResults.modes.find(m => m.mode === 'odd').C0;
-                evenMode.C0 = cachedResults.modes.find(m => m.mode === 'even').C0;
+                // Use cached C0 values from initial solve (vacuum doesn't
+                // change).  Same for the vacuum fields: permittivity- and
+                // frequency-independent, so the causal re-solve (which only
+                // shifts the dielectric fields) reuses them for the
+                // conductor-loss integrand.
+                const cachedOdd = cachedResults.modes.find(m => m.mode === 'odd');
+                const cachedEven = cachedResults.modes.find(m => m.mode === 'even');
+                oddMode.C0 = cachedOdd.C0;
+                evenMode.C0 = cachedEven.C0;
+                oddMode.Ex0 = cachedOdd.Ex0; oddMode.Ey0 = cachedOdd.Ey0;
+                evenMode.Ex0 = cachedEven.Ex0; evenMode.Ey0 = cachedEven.Ey0;
 
                 // Recalculate eps_eff and Z0 with new C and cached C0
                 oddMode.eps_eff = oddMode.C / oddMode.C0;
@@ -2560,7 +2622,8 @@ export class FieldSolver2D {
 
                 // Recalculate RLGC parameters with corrected Z0
                 const recalc = (mode) => {
-                    const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(mode.Ex, mode.Ey, mode.Z0);
+                    const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
+                        mode.Ex, mode.Ey, mode.Z0, mode.C0, mode.Ex0, mode.Ey0);
                     const alpha_d = this.calculate_dielectric_loss(mode.Ex, mode.Ey, mode.Z0);
                     const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, mode.C, mode.Z0);
                     mode.RLGC = rlgc;
@@ -2582,15 +2645,19 @@ export class FieldSolver2D {
                 // Solve single mode
                 const result = await this._solve_single_mode('single', false);
 
-                // Use cached C0 from initial solve
+                // Use cached C0 from initial solve and the cached vacuum fields
+                // (ε- and frequency-independent) for the conductor-loss integrand.
                 result.C0 = cachedResults.modes[0].C0;
+                result.Ex0 = cachedResults.modes[0].Ex0;
+                result.Ey0 = cachedResults.modes[0].Ey0;
 
                 // Recalculate eps_eff and Z0 with new C and cached C0
                 result.eps_eff = result.C / result.C0;
                 result.Z0 = 1 / (CONSTANTS.C * Math.sqrt(result.C * result.C0));
 
                 // Recalculate RLGC parameters with corrected Z0
-                const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(result.Ex, result.Ey, result.Z0);
+                const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
+                    result.Ex, result.Ey, result.Z0, result.C0, result.Ex0, result.Ey0);
                 const alpha_d = this.calculate_dielectric_loss(result.Ex, result.Ey, result.Z0);
                 const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, result.C, result.Z0);
 
@@ -2613,10 +2680,10 @@ export class FieldSolver2D {
         const modeResults = [];
 
         for (const cached of cachedResults.modes) {
-            const { mode, V, Ex, Ey, C, C0, Z0 } = cached;
+            const { mode, V, Ex, Ey, Ex0, Ey0, C, C0, Z0 } = cached;
 
             // Recalculate conductor losses with new frequency (affects skin depth)
-            const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
+            const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0);
 
             // Recalculate dielectric loss (affects omega)
             const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
@@ -2636,7 +2703,8 @@ export class FieldSolver2D {
                 RLGC: rlgc, Zc,
                 alpha_c, alpha_d, alpha_total,
                 L_internal, L_external,
-                V, Ex, Ey
+                V, Ex, Ey,
+                Ex0, Ey0
             });
         }
 
