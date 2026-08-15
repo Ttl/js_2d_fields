@@ -37,7 +37,25 @@ function makeSolver(erTop, backend = MESH_BACKEND, extra = {}) {
 
 // Solve and return the two modes' eps_eff / Z0. `force` ('on'|'off'|undefined) toggles the
 // modal path via the test hook in the guard so we can compare modal vs odd/even at the same point.
+//
+// Results are MEMOIZED per (geometry, backend, force): the sweep re-solves the εr_top
+// 5.0 / 5.1 / 7.0 points that other tests also need, and each duplicated solve is a full
+// adaptive mesh build (the triangular backend cannot use half-domain symmetry for a
+// broadside pair, so these are its most expensive solves). Only RESULTS are cached — every
+// actual solve still uses a fresh solver, because the tri backend evaluates the modal force
+// flag once at build time (in _prepareStatic), so a mesh may never be reused across force
+// values.
+const _resultCache = new Map();
 async function solveModes(solver, force) {
+    const key = JSON.stringify([solver.mesh_backend, force ?? 'auto',
+        solver.er_bottom, solver.er_middle, solver.er_top,
+        solver.h_bottom, solver.h_middle, solver.h_top, solver.x_offset]);
+    if (_resultCache.has(key)) return _resultCache.get(key);
+    const result = await _solveModesUncached(solver, force);
+    _resultCache.set(key, result);
+    return result;
+}
+async function _solveModesUncached(solver, force) {
     globalThis.__MODAL_FORCE__ = force;
     solver.use_causal_materials = false;
     const log = console.log, warn = console.warn;
