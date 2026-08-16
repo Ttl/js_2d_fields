@@ -927,16 +927,29 @@ export class FieldSolver2D {
      * @param {boolean} vacuum_fields - Ex/Ey are vacuum-solve fields
      * @returns {{R_ac: number, R_dc: number, R_total: number, L_internal: number}}
      */
-    calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false) {
+    calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false, mode = null) {
         if (!this.solution_valid) throw new Error("Fields invalid");
 
         const { signal_area, ground_area } = this._calculate_conductor_area();
 
-        // DC resistance per unit length for transmission line
-        // Current flows through signal conductor and returns through ground (series connection)
-        const R_signal = 1.0 / (this.sigma_cond * signal_area);
-        const R_ground = 1.0 / (this.sigma_cond * ground_area);
-        const R_dc = R_signal + R_ground;
+        // DC resistance per unit length, in the same per-line convention as the AC
+        // integral (power_factor below). For a differential pair signal_area sums
+        // both traces, and the two modes have different DC return paths:
+        //   odd  - current returns through the partner trace, the ground carries no
+        //          net current at DC: R_dc = R_one_trace = 2/(σ*signal_area).
+        //   even - both traces carry I, the ground returns 2I:
+        //          P = 2I^2*R_even = 2I^2*R_one_trace + (2I)^2*R_gnd
+        //          => R_dc = R_one_trace + 2*R_gnd.
+        // The mode-blind form 1/(σ*signal_area) + 1/(σ*ground_area) is ~2x low
+        // per line.
+        const R_gnd0 = ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
+        let R_dc;
+        if (this.is_differential && (mode === 'odd' || mode === 'even')) {
+            const R_trace = 2.0 / (this.sigma_cond * signal_area);
+            R_dc = mode === 'odd' ? R_trace : R_trace + 2.0 * R_gnd0;
+        } else {
+            R_dc = 1.0 / (this.sigma_cond * signal_area) + R_gnd0;
+        }
 
         // Handle DC case (frequency = 0)
         if (this.freq === 0) {
@@ -1209,7 +1222,32 @@ export class FieldSolver2D {
         // In practice very minimal error since DC can be solved correctly.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
-        const R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
+		// DC-skin transition correction (vacuum-calibrated path only): against
+		// tri-MQS the sqrt(R_dc^2+R_ac^2) is consistently high, a log-normal
+		// notch in δ/t, = −7% at δ/t = 0.4, gone below δ/t = 0.12 and decaying
+		// by δ/t = 1.3 (where R_dc takes over). Calibrated on ms/sl (w/h
+		// 0.125-1.9, εr 4.4-9.8, t 17-70 µm, σ 1e6-5.8e7, f 0.25-4 GHz). A δ/t
+		// sweep (0.12-1.3) over microstrip, stripline, diff microstrip and
+		// narrow-/wide-gap GCPW showed the same ~7% bump at δ/t 0.3-0.4 in
+		// every family, so the notch applies to all line types.
+        // Alternatives measured and rejected: no
+        // notch (microstrip +10% mid-transition), and slab/p-norm blends
+        // R_dc*Re[q*coth q] or (R_dc^4+R_ac^5)^0.25.
+        let transitionCal = 1.0;
+        if (vacuum_fields && this.t > 0 && this.freq > 0) {
+            const delta = Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * this.sigma_cond));
+            const lx = Math.log(delta / this.t / 0.4);
+            transitionCal = 1 - 0.07 * Math.exp(-(lx * lx) / (2 * 0.45 * 0.45));
+            const tMin = this.t_gnd > 0 ? Math.min(this.t, this.t_gnd) : this.t;
+            this._skinTransitionWarn = (delta > 0.5 * tMin)
+                ? { type: 'accuracy', mode: 'all', message:
+                    `Conductor loss and internal-inductance accuracy is reduced in the DC-skin ` +
+                    `transition (skin depth ${(delta * 1e6).toFixed(1)} µm vs conductor thickness ` +
+                    `${(tMin * 1e6).toFixed(1)} µm). The full-wave solver resolves the ` +
+                    `transition-region current accurately.` }
+                : null;
+        }
+        const R_total = Math.max(R_dc, transitionCal * Math.sqrt(R_dc * R_dc + R_ac * R_ac));
 
         return { R_ac, R_dc, R_total, L_internal };
     }
@@ -1220,12 +1258,12 @@ export class FieldSolver2D {
     // The only production caller lacking vacuum fields on a rect solver is
     // _solve_single_mode(vacuum_first=false), whose loss output is discarded
     // and recomputed by the caller with the cached vacuum fields.
-    _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0) {
+    _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode = null) {
         if (this.conductor_id && Ex0 && Ey0 && C0 > 0) {
             const Z0_vac = 1 / (CONSTANTS.C * C0);
-            return this.calculate_conductor_loss(Ex0, Ey0, Z0_vac, true);
+            return this.calculate_conductor_loss(Ex0, Ey0, Z0_vac, true, mode);
         }
-        return this.calculate_conductor_loss(Ex, Ey, Z0);
+        return this.calculate_conductor_loss(Ex, Ey, Z0, false, mode);
     }
 
     calculate_dielectric_loss(Ex, Ey, Z0) {
@@ -1725,7 +1763,7 @@ export class FieldSolver2D {
             const C0k = quad(Cm0, v);
             const eps_eff = Ck / C0k;
             const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
-            const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0);
+            const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0, label);
             const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
             const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, Ck, Z0);
             const alpha_c = 8.686 * R_total / (2 * Zc.re);
@@ -1799,7 +1837,7 @@ export class FieldSolver2D {
         }
 
         // Calculate conductor losses with surface roughness and DC resistance
-        const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0);
+        const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
         // Calculate dielectric loss (returns alpha in dB/m)
         const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
@@ -2358,12 +2396,15 @@ export class FieldSolver2D {
          */
         const result = { modes: modeResults };
 
-        // Failed verification certificate: surface as an accuracy warning on every
-        // result built from this grid, the same per-solve channel the triangular
-        // backend uses (result.warnings / solver.modeWarnings), so the UI logs it for
-        // the adaptive solve and for every sweep point alike.
-        if (this._certWarn) {
-            result.warnings = [this._certWarn];
+        // Failed verification certificate and/or DC-skin transition note: surface as
+        // accuracy warnings on every result built from this grid, the same per-solve
+        // channel the triangular backend uses (result.warnings / solver.modeWarnings),
+        // so the UI logs them for the adaptive solve and for every sweep point alike.
+        const warns = [];
+        if (this._certWarn) warns.push(this._certWarn);
+        if (this._skinTransitionWarn) warns.push(this._skinTransitionWarn);
+        if (warns.length) {
+            result.warnings = warns;
             this.modeWarnings = result.warnings;
         }
 
@@ -2623,7 +2664,7 @@ export class FieldSolver2D {
                 // Recalculate RLGC parameters with corrected Z0
                 const recalc = (mode) => {
                     const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
-                        mode.Ex, mode.Ey, mode.Z0, mode.C0, mode.Ex0, mode.Ey0);
+                        mode.Ex, mode.Ey, mode.Z0, mode.C0, mode.Ex0, mode.Ey0, mode.mode);
                     const alpha_d = this.calculate_dielectric_loss(mode.Ex, mode.Ey, mode.Z0);
                     const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, mode.C, mode.Z0);
                     mode.RLGC = rlgc;
@@ -2657,7 +2698,7 @@ export class FieldSolver2D {
 
                 // Recalculate RLGC parameters with corrected Z0
                 const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
-                    result.Ex, result.Ey, result.Z0, result.C0, result.Ex0, result.Ey0);
+                    result.Ex, result.Ey, result.Z0, result.C0, result.Ex0, result.Ey0, result.mode);
                 const alpha_d = this.calculate_dielectric_loss(result.Ex, result.Ey, result.Z0);
                 const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, result.C, result.Z0);
 
@@ -2683,7 +2724,7 @@ export class FieldSolver2D {
             const { mode, V, Ex, Ey, Ex0, Ey0, C, C0, Z0 } = cached;
 
             // Recalculate conductor losses with new frequency (affects skin depth)
-            const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0);
+            const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
             // Recalculate dielectric loss (affects omega)
             const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);

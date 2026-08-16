@@ -2091,8 +2091,19 @@ export class TriBackend {
             const a = shapeArea(c);
             if (c.is_signal) sigArea += a; else gndArea += a;
         }
-        const R_dc = (sigArea > 0 ? 1 / (sigmaDC * sigArea) : 0)
-                   + (gndArea > 0 ? 1 / (sigmaDC * gndArea) : 0);
+        // Mode-aware per-line convention for a differential pair (mirrors
+        // field_solver.calculate_conductor_loss): sigArea sums both traces, the odd
+        // mode's DC return is the partner trace (no net ground current), the even
+        // mode returns 2I through the ground.
+        let R_dc;
+        if (s.is_differential && (mode === 'odd' || mode === 'even')) {
+            const R_trace = sigArea > 0 ? 2 / (sigmaDC * sigArea) : 0;
+            R_dc = mode === 'odd' ? R_trace
+                 : R_trace + (gndArea > 0 ? 2 / (sigmaDC * gndArea) : 0);
+        } else {
+            R_dc = (sigArea > 0 ? 1 / (sigmaDC * sigArea) : 0)
+                 + (gndArea > 0 ? 1 / (sigmaDC * gndArea) : 0);
+        }
         if (f === 0) {
             // Pure DC point: no skin effect, R is the geometric DC resistance
             // (the FDM backend returns the same; this used to return R = 0).
