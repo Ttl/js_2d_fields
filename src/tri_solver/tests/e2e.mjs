@@ -47,13 +47,14 @@ try {
 } catch { ok = false; }
 
 // Wait for the frequency sweep to finish (full-wave eigensolve per point is slow).
+// Keyed on the Solve button leaving "Stop" mode, not on log text: the old /ERROR/i arm
+// matched the "Energy error=..." of every refinement pass and returned immediately.
 try {
-    await page.waitForFunction(() => {
-        const t = document.getElementById('console_out')?.textContent || '';
-        return /exact solves|frequency sweep \(/i.test(t) || /ERROR/i.test(t);
-    }, { timeout: 150000 });
+    await page.waitForFunction(
+        () => document.getElementById('btn_solve')?.textContent === 'Solve',
+        { timeout: 150000 });
 } catch {}
-await page.waitForTimeout(3000);
+await page.waitForTimeout(1000);
 
 const hasPlot = await page.$$eval('.js-plotly-plot, .plotly', els => els.length);
 const consoleOut = await page.$eval('#console_out', el => el.textContent).catch(() => '');

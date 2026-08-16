@@ -22,6 +22,21 @@ npx esbuild src/app_solver.js \
   --external:./tri_solver/* \
   --outfile=dist/app_solver.js
 
+# Solve worker: a second entry point, deliberately not bundled into app_solver.js.
+# app_solver constructs it with `new Worker(new URL("solve_worker.js", import.meta.url))`,
+# which esbuild leaves alone, the URL is resolved by the browser at runtime, relative to
+# the app bundle, so the two files must sit side by side in dist/. It carries its own copy
+# of the solver core (both threads need it). The tri_solver tree stays external and shared,
+# exactly as for the app bundle.
+npx esbuild src/solve_worker.js \
+  --bundle \
+  --minify \
+  --format=esm \
+  --sourcemap \
+  --platform=node \
+  --external:./tri_solver/* \
+  --outfile=dist/solve_worker.js
+
 # CSS
 npx postcss src/solver-style.css \
   --use cssnano \
@@ -77,8 +92,10 @@ cp src/wasm_solver/eigen_solver.js src/wasm_solver/eigen_solver.wasm \
    src/wasm_solver/gmsh.js src/wasm_solver/gmsh.wasm "$TRI_STAGE/wasm_solver/"
 TRI_HASH=$(cd "$TRI_STAGE" && find . -type f | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-8)
 mv "$TRI_STAGE" "dist/tri-${TRI_HASH}"
-# Point the bundle's lazy import at the versioned tree.
-sed -i "s|\./tri_solver/tri_backend\.js|./tri-${TRI_HASH}/tri_solver/tri_backend.js|g" dist/app_solver.js
+# Point both bundles' lazy import at the versioned tree. The worker sits next to the app
+# bundle, so the same relative path resolves for both.
+sed -i "s|\./tri_solver/tri_backend\.js|./tri-${TRI_HASH}/tri_solver/tri_backend.js|g" \
+  dist/app_solver.js dist/solve_worker.js
 
 # Cache-busting: append content hashes as query strings so browsers fetch
 # new versions when files change. The HTML must be served with no-cache headers
@@ -95,7 +112,12 @@ WASM_HASH=$(sha256sum dist/solver.wasm | cut -c1-8)
 # alter the bundle (and therefore its URL), or returning users would keep the
 # old immutable-cached bundle pointing at the old ?v= and never fetch the new
 # WASM.
-sed -i "s|\"solver\.wasm\"|\"solver.wasm?v=${WASM_HASH}\"|g" dist/app_solver.js
+sed -i "s|\"solver\.wasm\"|\"solver.wasm?v=${WASM_HASH}\"|g" dist/app_solver.js dist/solve_worker.js
+
+# The worker is fetched by URL from inside the app bundle, so its hash must be injected
+# BEFORE the app bundle is hashed — same ordering argument as solver.wasm above.
+WORKER_HASH=$(sha256sum dist/solve_worker.js | cut -c1-8)
+sed -i "s|\"solve_worker\.js\"|\"solve_worker.js?v=${WORKER_HASH}\"|g" dist/app_solver.js
 
 JS_HASH=$(sha256sum dist/app_solver.js | cut -c1-8)
 

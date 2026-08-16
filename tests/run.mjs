@@ -77,6 +77,7 @@ const TIERS = {
         { file: 'tests/fuzz_fullwave_interp.js', args: ['3', '1'], label: 'tests/fuzz_fullwave_interp.js [smoke N=3 seed=1]', cost: 176 },
     ],
     e2e: [
+        'src/tri_solver/tests/e2e_responsive.mjs',
         'src/tri_solver/tests/e2e.mjs',
         'src/tri_solver/tests/e2e_occ.mjs',
         'src/tri_solver/tests/e2e_modes.mjs',

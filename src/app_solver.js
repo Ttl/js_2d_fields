@@ -1,32 +1,28 @@
-import { MicrostripSolver } from './microstrip.js';
-import { BroadsideStriplineSolver } from './broadside_stripline.js';
-import { CoaxSolver } from './coax.js';
-import { RectWaveguideSolver } from './rect_waveguide.js';
+import { Complex } from './complex.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usableSweepPoints } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView } from './plot.js';
 import { InterpolatingSweep } from './interpolating_sweep.js';
+import { buildSolverFromParams as _buildSolverFromParams, platingOptions,
+    FULLWAVE_ONLY_TYPES } from './solver_factory.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
 
-// Line types with no quasi-static implementation. Coax: a rectilinear grid staircases a
-// circle. Rectangular waveguide: a hollow guide has no TEM mode at all, so there is
-// nothing for the Laplace solve to find. Both constructors throw on any other backend;
-// this set is the app-level guard, and field_solver.html keeps its own copy for the
-// Solver-dropdown lock (separate script scope).
-const FULLWAVE_ONLY_TYPES = new Set(['coax', 'rect_waveguide']);
+// The main thread's solver is a GEOMETRY/PLOT view model: it is built here so the
+// geometry preview and the field plots have something to read, but it never solves.
+// Every solve runs in the worker (see solve_worker.js) and its field arrays are grafted
+// back on. Construction is cheap (no meshing or linear algebra).
+const buildSolverFromParams = (p) => _buildSolverFromParams(p, log);
 
 let solver = null;
-let stopRequested = false;
 let isSimulating = false;
 let frequencySweepResults = null;  // Array of {freq, result} objects
 let currentTab = 'geometry';
 let geometryChanged = false;  // Track if geometry has changed since last solve
 let lastSolvedGeometry = null;  // Hash of geometry params from last solve
 let lastSolvedFrequency = null;  // Frequency params from last solve
-let sweepStopRequested = false;
 let isSweeping = false;
 let parameterSweepResults = null;
 let lastSweepGeometry = null;  // Geometry hash at sweep time (excluding swept param)
@@ -37,6 +33,7 @@ let lastSweepDisplayUnit = null; // Display unit used during last sweep
 let isSolvingModes = false;
 let modesResult = null;          // last solveModes() summary { modes, nconv, ... }
 let modesSelectedIdx = -1;       // index into modesResult.modes of the plotted mode
+let modesFieldCache = new Map(); // mode index, field grid fetched from the worker
 let modesSolver = null;          // INDEPENDENT solver for the Modes tab — built from the
                                  // sidebar geometry but kept separate from the main `solver`,
                                  // so solving modes never disturbs the main solve's results.
@@ -657,10 +654,172 @@ function loadSettingsFromURL() {
     return false;
 }
 
-function log(msg) {
+// Solver log.
+//
+// The naive version (`c.textContent += msg + '\n'; c.scrollTop = c.scrollHeight;`) had
+// problems that made the log the slowest thing on the page during a solve:
+//   * `textContent +=` reads the whole accumulated text, concatenates, and replaces the
+//     single text node. O(n) per line, O(n²) over a run, and it also destroyed any text
+//     the user had selected.
+//   * reading `scrollHeight` forces a synchronous layout on every line.
+//   * the unconditional scroll-to-bottom fought the user.
+// Now: lines are queued and flushed once per animation frame (one layout per frame, not
+// per line), appended as new text nodes, auto-scroll only when the view is already
+// pinned to the bottom, and the buffer is capped so scrollback stays cheap.
+const LOG_MAX_LINES = 5000;
+let _logQueue = [], _logFlushScheduled = false, _logLineCount = 0;
+
+function _flushLog() {
+    _logFlushScheduled = false;
+    if (!_logQueue.length) return;
     const c = document.getElementById('console_out');
-    c.textContent += msg + "\n";
-    c.scrollTop = c.scrollHeight;
+    if (!c) { _logQueue = []; return; }
+    // Sample the scroll position before mutating: within 4px of the bottom counts as
+    // "following the tail" (fractional device pixels never land exactly on 0).
+    const atBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 4;
+    const chunk = _logQueue.join('');
+    _logQueue = [];
+    c.appendChild(document.createTextNode(chunk));
+    _logLineCount += chunk.split('\n').length - 1;
+    if (_logLineCount > LOG_MAX_LINES) {
+        // Drop the oldest nodes wholesale rather than re-splitting text: keeping the
+        // node count and total text bounded is what keeps scrollback responsive.
+        while (c.childNodes.length > 1 && _logLineCount > LOG_MAX_LINES) {
+            const first = c.firstChild;
+            _logLineCount -= (first.textContent.split('\n').length - 1);
+            c.removeChild(first);
+        }
+    }
+    if (atBottom) c.scrollTop = c.scrollHeight;
+}
+
+function log(msg) {
+    _logQueue.push(msg + '\n');
+    if (_logFlushScheduled) return;
+    _logFlushScheduled = true;
+    // rAF coalesces a burst into one layout. It does not fire in a background tab, so
+    // fall back to a timer there rather than letting the queue grow unboundedly.
+    if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden')
+        requestAnimationFrame(_flushLog);
+    else setTimeout(_flushLog, 100);
+}
+
+// Solve worker client
+//
+// Every solve runs in solve_worker.js so a multi-second WASM call cannot freeze the tab.
+// This is the RPC layer: one long-lived module worker, jobs keyed by id, streamed
+// messages routed to per-job handlers.
+//
+// The worker is created lazily on the first solve rather than at load, so the page (and
+// the geometry preview, which needs no worker) is interactive immediately and a browser
+// that cannot construct a module worker fails at a point where we can report it.
+let _worker = null, _workerJobId = 0;
+const _workerJobs = new Map();   // id -> { resolve, reject, handlers }
+
+function getWorker() {
+    if (_worker) return _worker;
+    // The literal "solve_worker.js" is rewritten by build.sh to add a content hash. Keep
+    // it a plain string so that sed can find it.
+    _worker = new Worker(new URL("solve_worker.js", import.meta.url), { type: 'module' });
+    _worker.onmessage = (e) => {
+        const m = e.data;
+        // Log lines are printed regardless of whether the job is still being awaited (a
+        // stopped job can still emit its trailing messages).
+        if (m.type === 'log') { log(m.msg); return; }
+        const job = _workerJobs.get(m.id);
+        if (!job) return;
+        if (m.type === 'done') { _workerJobs.delete(m.id); job.resolve(m); return; }
+        if (m.type === 'error') { _workerJobs.delete(m.id); job.reject(new Error(m.message)); return; }
+        const h = job.handlers[m.type];
+        if (h) h(m);
+    };
+    _worker.onerror = (e) => {
+        // A worker-level failure (module load error, uncaught throw) never resolves the
+        // outstanding job, so fail them all rather than hanging the UI in "solving".
+        const err = new Error(e.message || 'Solver worker failed');
+        for (const [id, job] of _workerJobs) { _workerJobs.delete(id); job.reject(err); }
+        // The instance is unusable after an error, drop it so the next solve rebuilds.
+        _worker = null;
+    };
+    return _worker;
+}
+
+function workerJob(type, payload, handlers = {}) {
+    const w = getWorker();
+    const id = ++_workerJobId;
+    return new Promise((resolve, reject) => {
+        _workerJobs.set(id, { resolve, reject, handlers });
+        w.postMessage({ id, type, ...payload });
+    });
+}
+
+// Cancellation is cooperative: the worker polls this between WASM calls, exactly where
+// the old main-thread code polled `stopRequested`.
+function workerStop() {
+    if (_worker) _worker.postMessage({ type: 'stop' });
+}
+
+// Liveness indicator.
+//
+// A long solve gives no sign of life between phase messages. A ticking elapsed
+// time distinguishes the two at a glance.
+let _hbTimer = null, _hbStart = 0, _hbPhase = '', _hbEl = null;
+
+function _hbFormat(ms) {
+    const s = Math.floor(ms / 1000);
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+function _hbRender() {
+    if (!_hbEl) return;
+    const t = _hbFormat(Date.now() - _hbStart);
+    _hbEl.textContent = _hbPhase ? `${_hbPhase} · ${t}` : t;
+}
+
+function heartbeatStart(el) {
+    heartbeatStop();
+    _hbEl = el; _hbStart = Date.now(); _hbPhase = '';
+    _hbRender();
+    _hbTimer = setInterval(_hbRender, 1000);
+}
+
+// Phase text from the worker; the elapsed clock keeps running underneath it.
+function heartbeatPhase(text) {
+    _hbPhase = text || '';
+    _hbRender();
+}
+
+function heartbeatStop(finalText = null) {
+    if (_hbTimer) { clearInterval(_hbTimer); _hbTimer = null; }
+    if (_hbEl && finalText !== null) _hbEl.textContent = finalText;
+    _hbEl = null;
+}
+
+// Complex survives structured clone only as a bare {re, im}, the prototype is dropped.
+// sparameters.js does genuine complex arithmetic with mode.Zc, so rebuild the instances
+// on arrival here.
+function reviveResult(result) {
+    if (result && Array.isArray(result.modes)) {
+        for (const m of result.modes) {
+            if (m.Zc && !(m.Zc instanceof Complex)) m.Zc = new Complex(m.Zc.re, m.Zc.im);
+        }
+    }
+    return result;
+}
+const reviveSweep = (rows) => { for (const r of rows) reviveResult(r.result); return rows; };
+
+// Graft a worker solve's field arrays onto the main thread's view-model solver, so
+// plot.js keeps reading solver.x/y/V/Ex/Ey/triMesh unchanged.
+function applyFields(target, fields) {
+    if (!target || !fields) return;
+    target.x = fields.x;
+    target.y = fields.y;
+    target.V = fields.V;
+    target.Ex = fields.Ex;
+    target.Ey = fields.Ey;
+    if (fields.triMesh) target.triMesh = fields.triMesh;
+    target.solution_valid = true;
+    target.mesh_generated = true;
 }
 
 function getFrequencies() {
@@ -690,6 +849,16 @@ function getFrequencies() {
 /**
  * Get a hash of geometry parameters for change tracking
  */
+// Interpolating-sweep tolerance, as a fraction. Validated here (on the thread that owns
+// the input) so a bad value fails before the worker job starts.
+function interpTolerance() {
+    const tolPercent = parseFloat(document.getElementById('interp_tolerance')?.value);
+    if (isNaN(tolPercent) || tolPercent <= 0) {
+        throw new Error("Interpolation tolerance must be a positive number.");
+    }
+    return tolPercent / 100;
+}
+
 function getGeometryHash() {
     const p = getParams();
     return JSON.stringify({
@@ -947,6 +1116,7 @@ async function runModesSolve() {
     btn.disabled = true;
     modesResult = null; modesSelectedIdx = -1;
     setModesStatus('Meshing…');
+    heartbeatStart(document.getElementById('modes-status'));
     log(`Solving ${nev} modes at ${formatValueWithUnit(freq, 'GHz')}…`);
     // The modes solve treats open walls as radiating ABCs — same clearance concern.
     for (const w of modesSolver.openBoundaryWarnings()) log(`⚠ Warning: ${w}`);
@@ -968,14 +1138,14 @@ async function runModesSolve() {
     };
 
     try {
-        const onProgress = (pp) => {
-            setModesStatus(`Refinement pass ${pp.iteration}/${pp.max_iterations}: ` +
-                `param err=${(isFinite(pp.param_error) ? pp.param_error : 1).toExponential(2)}, ${pp.n_tris || 0} triangles…`);
-            log(`Modes pass ${pp.iteration}: param error=${(isFinite(pp.param_error) ? pp.param_error : 1).toExponential(3)}, Tris=${pp.n_tris || 0}`);
-        };
-        // Yield once so the "Meshing…" status paints before the synchronous eigensolve.
-        await new Promise(r => setTimeout(r, 0));
-        const result = await modesSolver.solveModes(freq, nev, onProgress, refineOpts);
+        // The eigensolve is the single worst blocking call in the app, so it
+        // runs in the worker. modesFieldCache is dropped here because the
+        // worker's mode grids belong to the solve that just started.
+        modesFieldCache = new Map();
+        const { result } = await workerJob('modes', { params: p, freq, nev, refineOpts }, {
+            progress: (m) => { if (m.text) heartbeatPhase(m.text); },
+        });
+        heartbeatStop();
         modesResult = result;
         // Record what the displayed modes were solved at, so the staleness notice can flag
         // a later geometry/frequency change.
@@ -1004,6 +1174,7 @@ async function runModesSolve() {
         log('Modes solve exception: ' + (e.message || e));
         console.error(e);
     } finally {
+        heartbeatStop();
         isSolvingModes = false;
         btn.disabled = false;
     }
@@ -1066,11 +1237,25 @@ function highlightSelectedMode() {
 
 // resetView=true recomputes the focused view (used right after a fresh solve); when
 // switching between modes we keep the user's current zoom/pan so the plot doesn't jump.
-function selectMode(idx, resetView = false) {
+// The per-mode field grid lives in the worker (it is resampled from the FEM mesh on
+// demand). Fetching is async and cached per index: with up to 30 modes, shipping every
+// grid with the solve would cost far more than the few the user clicks through.
+async function selectMode(idx, resetView = false) {
     if (!modesResult || !modesResult.modes || !modesResult.modes[idx]) return;
     modesSelectedIdx = idx;
     highlightSelectedMode();
-    const grid = modesSolver.getModeField(idx);
+    let grid = modesFieldCache.get(idx);
+    if (grid === undefined) {
+        try {
+            ({ grid } = await workerJob('modeField', { idx }));
+        } catch (e) {
+            log('Mode field fetch failed: ' + (e.message || e));
+            grid = null;
+        }
+        modesFieldCache.set(idx, grid);
+        // A click on another row while this one was in flight wins. Do not paint over it.
+        if (modesSelectedIdx !== idx) return;
+    }
     plotModesField(grid, modesResult.modes[idx], idx, resetView);
 }
 
@@ -1182,19 +1367,6 @@ function modesPlotLayout(title, view, shapes) {
 
 // Translate the "Solver" dropdown value into the backend + triangular loss options.
 // Accepts the legacy 'triangular' value (maps to the accurate MQS full-wave mode).
-function solverModeConfig(mode) {
-    switch (mode) {
-        case 'fullwave_pert':
-            return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'perturbation' } };
-        case 'fullwave_mqs':
-        case 'fullwave_occ':   // legacy saved value (the triangular backend now always uses OCC)
-        case 'triangular':     // legacy saved value
-            return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'auto' } };
-        default:             // 'rectilinear'
-            return { mesh_backend: 'rectilinear', tri_opts: null };
-    }
-}
-
 function getParams() {
     return {
         tl_type: document.getElementById('tl_type').value,
@@ -1295,67 +1467,6 @@ function getParams() {
 }
 
 // Helper function to add common optional geometry parameters
-function addCommonOptions(options, p) {
-    // Solder mask
-    if (p.use_sm) {
-        options.use_sm = true;
-        options.sm_t_sub = p.sm_t_sub;
-        options.sm_t_trace = p.sm_t_trace;
-        options.sm_t_side = p.sm_t_side;
-        options.sm_er = p.sm_er;
-        options.sm_tand = p.sm_tand;
-    }
-
-    // Top dielectric
-    if (p.use_top_diel) {
-        options.top_diel_h = p.top_diel_h;
-        options.top_diel_er = p.top_diel_er;
-        options.top_diel_tand = p.top_diel_tand;
-    }
-
-    // Ground cutout
-    if (p.use_gnd_cut) {
-        options.gnd_cut_width = p.gnd_cut_w;
-        options.gnd_cut_sub_h = p.gnd_cut_h;
-    }
-
-    // Enclosure
-    if (p.use_enclosure) {
-        options.enclosure_width = p.enclosure_width;
-        if (options.enclosure_height === undefined) {
-            options.enclosure_height = p.enclosure_height;
-        }
-
-        const left_bc = p.use_side_gnd ? "gnd" : "open";
-        const right_bc = p.use_side_gnd ? "gnd" : "open";
-        const top_bc = p.use_top_gnd ? "gnd" : (options.boundaries ? options.boundaries[2] : "open");
-        const bottom_bc = options.boundaries ? options.boundaries[3] : "gnd";
-        options.boundaries = [left_bc, right_bc, top_bc, bottom_bc];
-    }
-
-    // Surface plating
-    const plating = platingOptions(p);
-    if (plating) options.plating = plating;
-}
-
-// The plating block on its own, so line types that take plating but none of the other
-// board-stackup options (coax) can reuse it instead of duplicating it. `extra` carries a
-// type's own surface selection where top/sides/bottom has no meaning, coax passes
-// inner/outer (which conductor), and CoaxSolver reads those in place of the faces.
-function platingOptions(p, extra = null) {
-    if (!p.use_plating) return null;
-    return {
-        sigma: p.plating_sigma,
-        thickness: p.plating_t,
-        rq: p.plating_rq,
-        top: p.plating_top,
-        sides: p.plating_sides,
-        bottom: p.plating_bottom,
-        thick_corners: p.plating_thick_corners,
-        ...extra,
-    };
-}
-
 function updateGeometry() {
     setCurrentView("geometry");
 
@@ -1369,238 +1480,6 @@ function updateGeometry() {
 // updateGeometry() uses it to (re)build the main `solver`; the Modes tab uses it to build
 // its OWN independent solver (modesSolver), so solving modes never disturbs the main
 // solve's results. Returns the solver, or null if the parameters are invalid.
-function buildSolverFromParams(p) {
-    let solver = null;
-    try {
-        if (p.tl_type === 'gcpw') {
-            const options = {
-                substrate_height: p.h,
-                trace_width: p.w,
-                trace_thickness: p.t,
-                gnd_thickness: 35e-6,
-                epsilon_r: p.er,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Coplanar-specific
-                use_coplanar_gnd: true,
-                gap: p.gap,
-                via_gap: p.via_gap,
-                use_vias: true,
-                // Surface roughness
-                rq: p.rq,
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'diff_gcpw') {
-            const options = {
-                substrate_height: p.h,
-                trace_width: p.w,
-                trace_thickness: p.t,
-                trace_spacing: p.trace_spacing,  // Enables differential mode
-                gnd_thickness: 35e-6,
-                epsilon_r: p.er,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Coplanar-specific
-                use_coplanar_gnd: true,
-                gap: p.gap,
-                via_gap: p.via_gap,
-                use_vias: true,
-                // Surface roughness
-                rq: p.rq,
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'diff_microstrip') {
-            // Differential Microstrip
-            const options = {
-                trace_width: p.w,
-                substrate_height: p.h,
-                trace_thickness: p.t,
-                trace_spacing: p.trace_spacing,  // Enable differential mode
-                epsilon_r: p.er,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Surface roughness
-                rq: p.rq
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'stripline') {
-            const options = {
-                trace_width: p.w,
-                substrate_height: p.h,
-                trace_thickness: p.t,
-                epsilon_r: p.er,
-                epsilon_r_top: p.er_top,
-                tan_delta_top: p.tand_top,
-                enclosure_height: p.stripline_top_h,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "gnd", "gnd"],
-                // Surface roughness
-                rq: p.rq
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'coax') {
-            // Full-wave only; CoaxSolver throws on any other backend. addCommonOptions is
-            // deliberately NOT used — solder mask, top dielectric, ground cutout and the
-            // enclosure have no meaning inside a coax, where the shield IS the boundary.
-            // Plating and surface roughness do apply and are passed through. The plating
-            // is selected per conductor here rather than per face (each conductor is one
-            // continuous circular surface).
-            solver = new CoaxSolver({
-                inner_diameter: p.coax_d,
-                dielectric_diameter: p.coax_D,
-                epsilon_r: p.coax_er,
-                tan_delta: p.coax_tand,
-                sigma_cond: p.coax_sigma,
-                rq: p.rq,
-                plating: platingOptions(p, { inner: p.coax_plating_inner,
-                                             outer: p.coax_plating_outer }),
-                freq: p.freq,
-                mesh_backend: 'triangular',
-            });
-        } else if (p.tl_type === 'rect_waveguide') {
-            // Full-wave only, like coax, but for a different reason: a hollow guide has no
-            // TEM mode for the quasi-static Laplace solve to find. addCommonOptions is
-            // deliberately not used, solder mask, top dielectric, ground cutout and the
-            // enclosure have no meaning inside a waveguide, where the walls are the
-            // boundary. Plating and surface roughness do apply and are passed through.
-            solver = new RectWaveguideSolver({
-                width: p.wg_a,
-                height: p.wg_b,
-                epsilon_r: p.wg_er,
-                tan_delta: p.wg_tand,
-                sigma_cond: p.wg_sigma,
-                rq: p.rq,
-                plating: platingOptions(p),
-                freq: p.freq,
-                mesh_backend: 'triangular',
-            });
-        } else if (p.tl_type === 'broadside_stripline') {
-            const options = {
-                trace_width: p.bs_w,
-                trace_thickness: p.bs_t,
-                x_offset: p.bs_x_offset,
-                sigma_cond: p.bs_sigma,
-                h_bottom: p.bs_h_bottom,
-                er_bottom: p.bs_er_bottom,
-                tand_bottom: p.bs_tand_bottom,
-                h_middle: p.bs_h_middle,
-                er_middle: p.bs_er_middle,
-                tand_middle: p.bs_tand_middle,
-                h_top: p.bs_h_top,
-                er_top: p.bs_er_top,
-                tand_top: p.bs_tand_top,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                rq: p.rq,
-                boundaries: ["open", "open", "gnd", "gnd"],
-            };
-            // Enclosure: only side ground walls apply (top/bottom are intrinsic).
-            if (p.use_enclosure) {
-                options.enclosure_width = p.enclosure_width;
-                if (p.use_side_gnd) {
-                    options.boundaries = ["gnd", "gnd", "gnd", "gnd"];
-                }
-            }
-            // Plating
-            if (p.use_plating) {
-                options.plating = {
-                    sigma: p.plating_sigma,
-                    thickness: p.plating_t,
-                    rq: p.plating_rq,
-                    top: p.plating_top,
-                    sides: p.plating_sides,
-                    bottom: p.plating_bottom,
-                    thick_corners: p.plating_thick_corners
-                };
-            }
-            solver = new BroadsideStriplineSolver(options);
-        } else if (p.tl_type === 'diff_stripline') {
-            const options = {
-                trace_width: p.w,
-                substrate_height: p.h,
-                trace_thickness: p.t,
-                trace_spacing: p.trace_spacing,  // Enable differential mode
-                epsilon_r: p.er,
-                epsilon_r_top: p.er_top,
-                enclosure_height: p.stripline_top_h,
-                tan_delta: p.tand,
-                tan_delta_top: p.tand_top,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "gnd", "gnd"],
-                // Surface roughness
-                rq: p.rq
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else {
-            // Microstrip (with optional solder mask, top dielectric, ground cutout)
-            const options = {
-                trace_width: p.w,
-                substrate_height: p.h,
-                trace_thickness: p.t,
-                epsilon_r: p.er,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Surface roughness
-                rq: p.rq
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        }
-
-        // Store causal materials option on solver
-        if (solver) {
-            solver.use_causal_materials = p.use_causal_materials;
-            // Some media have no quasi-static implementation. A rectilinear grid cannot
-            // mesh a circle, and a hollow waveguide has no TEM mode for Laplace to find.
-            // Force the full-wave backend. The UI disables the option and the
-            // constructors throw, but a stale link can still arrive with 'rectilinear'.
-            const backend = FULLWAVE_ONLY_TYPES.has(p.tl_type) ? 'fullwave_mqs' : p.mesh_backend;
-            // Solver mode → numerical backend + triangular loss method:
-            //   'rectilinear'   = quasi-static FDM (fastest)
-            //   'fullwave_pert' = triangular full-wave, perturbation loss (~2× faster)
-            //   'fullwave_mqs'  = triangular full-wave, MQS volume loss (most accurate)
-            const cfg = solverModeConfig(backend);
-            solver.mesh_backend = cfg.mesh_backend;
-            solver.tri_opts = cfg.tri_opts;
-        }
-    } catch (error) {
-        // Log validation errors to the console
-        log('ERROR: ' + error.message);
-        // Set solver to null to prevent simulation from running with invalid parameters
-        solver = null;
-    }
-    return solver;
-}
-
 async function runSimulation() {
     // Check if solver is valid before attempting to run simulation
     if (!solver) {
@@ -1639,12 +1518,12 @@ async function runSimulation() {
     // Change button to "Stop" mode
     btn.textContent = 'Stop';
     btn.classList.add('stop-mode');
-    stopRequested = false;
     isSimulating = true;
     updateResultNotices();
     displayedProgress = 0;
     pbar.style.width = '0%';
     if (ptext) ptext.textContent = '';
+    heartbeatStart(ptext);
     log("Starting simulation...");
     for (const w of solver.openBoundaryWarnings()) log(`⚠ Warning: ${w}`);
     if (solver.mode_type === 'waveguide') {
@@ -1656,310 +1535,77 @@ async function runSimulation() {
     }
 
     try {
-
-        if (p.sigma < 1e4) {
-            throw new Error("Signal line conductivity is too low to be considered a conductor.");
-        }
-
-        // Validate surface roughness
-        if (p.rq < 0) {
-            throw new Error("Surface roughness cannot be negative.");
-        }
-
-        // Validate plating parameters
-        if (p.use_plating) {
-            if (p.plating_sigma < 1e4) {
-                throw new Error("Plating conductivity is too low to be considered a conductor.");
-            }
-            if (p.plating_t < 0) {
-                throw new Error("Plating thickness must be non-negative.");
-            }
-            if (p.plating_rq < 0) {
-                throw new Error("Plating roughness cannot be negative.");
-            }
-        }
-
-        // Clear previous results
-        frequencySweepResults = [];
-
-        // Use the highest frequency for mesh generation (skin depth calculation)
-        const maxFreq = Math.max(...frequencies);
-        solver.freq = maxFreq;
-
-        // Ensure mesh is generated before solving
-        log("Calculating mesh...");
-        solver.ensure_mesh();
-        // The triangular backend builds its mesh later (in solve_adaptive), so
-        // solver.x/y are not populated yet here.
-        log(solver.x ? ("Mesh generated: " + solver.x.length + "x" + solver.y.length)
-                      : "Triangular mesh will be generated by the solver...");
-
-        // Run adaptive refinement at highest frequency first
-        // Note: Causal materials will be applied during frequency sweep in computeAtFrequency()
-        log(`Running adaptive analysis (max ${p.max_iters} iterations, max ${p.max_nodes}k nodes, tolerance ${(100 * p.tolerance).toFixed(2)}%)...`);
-
-        // Progress-bar work model. Mesh refinement is a handful of passes on a
-        // coarse-until-the-end mesh and is MUCH faster than the frequency sweep,
-        // which runs ~EST_SWEEP_POINTS full-mesh solves. Split the bar by estimated
-        // work so it tracks wall-clock rather than 50/50: mesh owns only the small
-        // MESH_FRACTION early slice, the sweep owns the rest [MESH_FRACTION, 1].
-        const EST_MESH_PASSES = 4;    // typical adaptive passes before convergence
-        const EST_SWEEP_POINTS = 30;  // typical interpolating-sweep exact solves
-        const MESH_PASS_COST = 0.5;   // a coarse mesh pass ≈ half a full-mesh solve
-        const MESH_FRACTION = (EST_MESH_PASSES * MESH_PASS_COST) /
-            (EST_MESH_PASSES * MESH_PASS_COST + EST_SWEEP_POINTS); // ≈ 0.063
-
-        let results = await solver.solve_adaptive({
-            max_iters: p.max_iters,
-            energy_tol: p.tolerance,
-            param_tol: 0.05,
-            max_nodes: p.max_nodes*1000,
-            min_converged_passes: p.min_converged_passes,
-            certify: !!p.estimate_error,
-            onProgress: (info) => {
-                // Mesh usually converges in ~EST_MESH_PASSES passes (far fewer than
-                // p.max_iters), so estimate completion from that. Mesh owns only the
-                // small MESH_FRACTION early slice of the bar (it is fast + coarse).
-                const progress = Math.min(info.iteration / EST_MESH_PASSES, 1) * MESH_FRACTION;
-                setProgress(progress);
-                // Triangular backend reports a triangle count (n_tris); the rectilinear
-                // backend reports a structured node grid (nodes_x × nodes_y).
-                const meshStr = info.n_tris != null ? `Tris=${info.n_tris}` : `Grid=${info.nodes_x}x${info.nodes_y}`;
-                if (ptext) ptext.textContent =
-                    `Pass ${info.iteration}/${p.max_iters} · error ${info.energy_error.toExponential(2)}`;
-                log(`Pass ${info.iteration}: Energy error=${info.energy_error.toExponential(3)}, Param error=${info.param_error.toExponential(3)}, ${meshStr}`);
-            },
-            shouldStop: () => stopRequested
-        });
-
-        // Verification certificate (both backends TriBackend._certifyStatic and
-        // FieldSolver2D._certifyStatic): the per-pass errors logged above are
-        // pass-to-pass changes. The certificate is the verified remaining error
-        // measured against a uniform-refinement solve, so log it as the
-        // authoritative accuracy number. A failed certificate additionally arrives
-        // as an accuracy warning through logModeWarnings below.
-        if (solver.certification && solver.certification.pass) {
-            log(`Estimated remaining error ${(100 * solver.certification.err).toExponential(2)}% ` +
-                `(tolerance ${(100 * p.tolerance).toFixed(2)}%)`);
-        }
-
-        // Mesh quality warning (triangular backend): a high worst-case Q means a sliver
-        // triangle that can ill-condition the FEM solve and degrade accuracy.
-        if (solver.meshQuality && solver.meshQuality.maxQ > 100) {
-            log(`⚠ Mesh quality warning: worst triangle Q=${solver.meshQuality.maxQ.toFixed(0)} ` +
-                `results may be inaccurate. ` +
-                `Try adjusting geometry or enclosure size.`);
-        }
-
-        // Mode warnings (triangular full-wave backend): quasi-TEM pick ambiguity
-        // (fragmented near-degenerate modes) or a per-point eigensolve failure
-        // (silent fallback to the quasi-static ε). Logged once per distinct
-        // warning; sweep points report through the same channel below.
-        // The key must include `reason`: the rectilinear backend emits several
-        // distinct type:'accuracy' mode:'all' notes for one solve (certificate,
-        // skin-transition, broadside-proximity), and a type|mode key would show
-        // only the first of them.
+        // The whole solve pipeline (mesh refinement, causal recompute, interpolating or
+        // discrete sweep) runs in solve_worker.js. Parameter validation lives there too,
+        // so an invalid combination fails the job and lands in the catch below exactly as
+        // it used to. Here we only translate streamed messages into DOM updates.
         const seenModeWarnings = new Set();
         const logModeWarnings = (warnings) => {
             for (const mw of warnings || []) {
                 const key = `${mw.type || 'ambiguous'}|${mw.reason || ''}|${mw.mode}`;
                 if (seenModeWarnings.has(key)) continue;
                 seenModeWarnings.add(key);
-                log(`⚠ Mode warning: ${mw.message}`);
+                log(`\u26a0 Mode warning: ${mw.message}`);
             }
         };
-        logModeWarnings((results && results.warnings) || solver.modeWarnings);
 
-        if (stopRequested) {
+        const out = await workerJob('simulate', {
+            params: p,
+            frequencies,
+            opts: {
+                useInterpolation: !!document.getElementById('chk_interp_sweep')?.checked,
+                interpTolerance: interpTolerance(),
+            },
+        }, {
+            progress: (m) => {
+                setProgress(m.frac);
+                if (m.text) heartbeatPhase(m.text);
+            },
+            // Mesh refinement finished: surface the certificate and mesh-quality notes at
+            // the same point in the log as before the sweep output starts.
+            meshDone: (m) => {
+                if (m.meta.certification && m.meta.certification.pass) {
+                    log(`Estimated remaining error ${(100 * m.meta.certification.err).toExponential(2)}% ` +
+                        `(tolerance ${(100 * p.tolerance).toFixed(2)}%)`);
+                }
+                if (m.meta.meshQuality && m.meta.meshQuality.maxQ > 100) {
+                    log(`\u26a0 Mesh quality warning: worst triangle Q=${m.meta.meshQuality.maxQ.toFixed(0)} ` +
+                        `results may be inaccurate. Try adjusting geometry or enclosure size.`);
+                }
+                logModeWarnings(m.warnings);
+            },
+            warnings: (m) => logModeWarnings(m.warnings),
+            // Live plots while the sweep runs. Redrawing is cheap next to a solve, and
+            // now that the solve is off-thread these actually paint.
+            partial: (m) => {
+                if (m.fields) applyFields(solver, m.fields);
+                if (m.sweepResults) {
+                    frequencySweepResults = reviveSweep(m.sweepResults);
+                    drawResultsPlot();
+                    drawSParamPlot();
+                }
+                if (m.fields) draw();
+            },
+        });
+
+        applyFields(solver, out.fields);
+        solver.certification = out.meta.certification;
+        solver.meshQuality = out.meta.meshQuality;
+        solver.modeWarnings = out.meta.modeWarnings;
+        logModeWarnings(out.sweepWarnings);
+
+        if (out.stopped) {
             log("Simulation stopped by user");
             pbar.style.width = "0%";
             return;
         }
 
-        // Use the initial results as cache for frequency-dependent calculations
-        const cachedResults = results;
+        frequencySweepResults = reviveSweep(out.sweepResults);
+        const results = reviveResult(out.meshResult);
 
-        // If causal materials are enabled, recalculate max frequency with the model applied
-        // (solve_adaptive used non-causal materials during mesh refinement)
-        if (solver.use_causal_materials) {
-            const maxFreqResult = await solver.computeAtFrequency(maxFreq, cachedResults);
-            frequencySweepResults.push({ freq: maxFreq, result: maxFreqResult });
-        } else {
-            // Store the result from solve_adaptive (non-causal)
-            frequencySweepResults.push({ freq: maxFreq, result: results });
-        }
-
-        // Redraw to show E-field overlay on geometry
         draw();
         drawResultsPlot();
         drawSParamPlot();
-
-        // Check if interpolating sweep is enabled
-        const fMax = Math.max(...frequencies);
-        const nonZeroFreqs = frequencies.filter(f => f > 0);
-        const fMinNonZero = nonZeroFreqs.length > 0 ? Math.min(...nonZeroFreqs) : 0;
-        // The waveguide opts out: its shunt C crosses zero at cutoff, so the interpolator's
-        // relative-error test (denominator max(|C|, 1e-12)) explodes there and refines to
-        // maxPoints. It also gains nothing. After the single eigensolve every sweep point
-        // is analytic and costs ~50 ms.
-        const useInterpolation = document.getElementById('chk_interp_sweep')?.checked
-            && solver.allow_interp_sweep !== false
-            && nonZeroFreqs.length > 1
-            && fMax > fMinNonZero;
-
-        if (useInterpolation) {
-            // Interpolating sweep: adaptively sample RLGC, then interpolate
-            const tolPercent = parseFloat(document.getElementById('interp_tolerance')?.value);
-            if (isNaN(tolPercent) || tolPercent <= 0) {
-                throw new Error("Interpolation tolerance must be a positive number.");
-            }
-            const tolerance = tolPercent / 100;
-
-            // Handle DC point separately (can't use log-frequency axis)
-            const hasDC = frequencies.includes(0);
-            if (hasDC) {
-                const dcResult = await solver.computeAtFrequency(0, cachedResults);
-                frequencySweepResults.push({ freq: 0, result: dcResult });
-            }
-
-            log(`Interpolating sweep (tolerance ${tolPercent}%)...`);
-
-            const sweep = new InterpolatingSweep(solver, cachedResults, { tolerance });
-
-            // Progress mapping for the sweep portion of the bar. The sweep runs after
-            // mesh refinement (which owns [0, MESH_FRACTION]); it owns the rest,
-            // [MESH_FRACTION, 1.0] — the bulk of the bar, matching its dominant cost.
-            // A converged interpolating sweep typically needs ~EST_SWEEP_POINTS exact
-            // solves, so the point count gives a decent completion estimate from the
-            // very first (initial) point — well before any error data exists. It is
-            // capped at POINT_CAP so the last stretch is owned by error convergence,
-            // which knows when the sweep is actually done.
-            const SWEEP_START = MESH_FRACTION, EST_TOTAL_POINTS = EST_SWEEP_POINTS, POINT_CAP = 0.9;
-            const setSweep = (frac) =>
-                setProgress(SWEEP_START + (1 - SWEEP_START) * Math.max(0, Math.min(1, frac)));
-            // Refinement completion is estimated from how far the log-error has
-            // travelled from its starting value toward the tolerance. refineErr0
-            // is the first finalized iteration error; lastErrFrac caches the last
-            // computed fraction so per-midpoint reports (no finalized error) can
-            // still drive the bar.
-            let refineErr0 = null, lastErrFrac = 0, lastFinalErr = null;
-
-            const nSamples = await sweep.run(fMinNonZero, fMax, {
-                onProgress: (info) => {
-                    // Point-count estimate (assumes ~EST_TOTAL_POINTS total solves).
-                    const pointFloor = Math.min(POINT_CAP, info.totalSamples / EST_TOTAL_POINTS);
-
-                    if (info.phase === 'initial') {
-                        setSweep(pointFloor);
-                        if (ptext) ptext.textContent =
-                            `Solving initial points ${info.pointsComputed}/${info.initialPoints}`;
-                    } else {
-                        const tol = info.tolerance;
-                        const err = info.maxError;
-                        // Update the error-convergence fraction only from finalized
-                        // iteration errors (running mid-iteration maxima are noisy).
-                        if (info.final && isFinite(err)) {
-                            lastFinalErr = err;
-                            if (refineErr0 === null && err > tol) refineErr0 = err;
-                            if (err <= tol) {
-                                lastErrFrac = 1;
-                            } else if (refineErr0 !== null && refineErr0 > tol) {
-                                const num = Math.log10(refineErr0) - Math.log10(err);
-                                const den = Math.log10(refineErr0) - Math.log10(tol);
-                                if (den > 0) lastErrFrac = Math.max(0, Math.min(1, num / den));
-                            }
-                        }
-                        // Iteration-based floor: guarantees forward motion even when
-                        // the error is stubborn, and creeps within an iteration as its
-                        // midpoints are solved. This is the "estimated iterations" driver.
-                        const maxIt = info.maxIterations || 8;
-                        const within = info.midpointsTotal > 0
-                            ? Math.min(1, info.midpointsDone / info.midpointsTotal) : 1;
-                        const bandLo = Math.min(1, (info.iteration - 1) / maxIt);
-                        const bandHi = Math.min(1, info.iteration / maxIt);
-                        const iterFloor = bandLo + (bandHi - bandLo) * within;
-                        // Error-convergence fraction (0..1), scaled to leave a little
-                        // headroom so the bar only reaches full on real completion.
-                        const convFrac = Math.max(lastErrFrac, iterFloor * 0.9) * 0.98;
-                        setSweep(Math.max(pointFloor, convFrac));
-
-                        // Show only the last finalized iteration error — the value that
-                        // actually decides whether the sweep keeps going. Reporting the
-                        // running mid-iteration error would sometimes read below target
-                        // while the sweep is still refining, which looks contradictory.
-                        const errPart = lastFinalErr !== null
-                            ? ` · error ${(lastFinalErr * 100).toFixed(3)}%` : '';
-                        if (ptext) ptext.textContent = `${info.totalSamples} points solved${errPart}`;
-                    }
-
-                    // Update plots in real-time from current interpolation
-                    if (info.iteration > 0) {
-                        frequencySweepResults = hasDC
-                            ? [{ freq: 0, result: frequencySweepResults.find(r => r.freq === 0).result },
-                               ...sweep.buildResults(nonZeroFreqs)]
-                            : sweep.buildResults(nonZeroFreqs);
-                        frequencySweepResults.sort((a, b) => a.freq - b.freq);
-                        drawResultsPlot();
-                        drawSParamPlot();
-                    }
-                },
-                shouldStop: () => stopRequested
-            });
-
-            if (!stopRequested) {
-                // Build final results from converged interpolation
-                const interpResults = sweep.buildResults(nonZeroFreqs);
-                if (hasDC) {
-                    const dcEntry = frequencySweepResults.find(r => r.freq === 0);
-                    frequencySweepResults = [dcEntry, ...interpResults];
-                } else {
-                    frequencySweepResults = interpResults;
-                }
-                log(`Interpolating sweep: ${nSamples + (hasDC ? 1 : 0)} exact solves for ${frequencies.length} output points`);
-            }
-            logModeWarnings(sweep.warnings);
-        } else {
-            // Discrete sweep: compute at every frequency point
-            log(`Calculating frequency sweep (${frequencies.length} points)...`);
-
-            for (let i = 0; i < frequencies.length; i++) {
-                const freq = frequencies[i];
-
-                // Skip if this is the max frequency (already calculated above)
-                if (freq === maxFreq) {
-                    continue;
-                }
-
-                // Yield to event loop to allow UI updates
-                await new Promise(resolve => setTimeout(resolve, 0));
-
-                if (stopRequested) {
-                    log("Simulation stopped by user");
-                    break;
-                }
-
-                // Use optimized frequency sweep - only recalculates frequency-dependent losses
-                // (or full solve if causal materials are enabled)
-                const result = await solver.computeAtFrequency(freq, cachedResults);
-
-                logModeWarnings(result && result.warnings);
-                frequencySweepResults.push({ freq, result });
-
-                // Update progress: the discrete sweep owns [MESH_FRACTION, 1.0], the
-                // same band as the interpolating sweep (both are full-mesh solves).
-                const progress = MESH_FRACTION + (i + 1) / frequencies.length * (1 - MESH_FRACTION);
-                setProgress(progress);
-                if (ptext) ptext.textContent = `Frequency sweep: ${i + 1}/${frequencies.length} (${(freq / 1e9).toFixed(2)} GHz)`;
-
-                // Yield to event loop periodically and update plots in real time
-                if (i % 10 === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 0));
-                    frequencySweepResults.sort((a, b) => a.freq - b.freq);
-                    drawResultsPlot();
-                    drawSParamPlot();
-                }
-            }
-        }
 
         // Sort results by frequency
         frequencySweepResults.sort((a, b) => a.freq - b.freq);
@@ -2047,8 +1693,8 @@ async function runSimulation() {
         btn.textContent = 'Solve';
         btn.classList.remove('stop-mode');
         pbar.style.width = '100%';
-        if (ptext) ptext.textContent = '';
-        stopRequested = false;
+        // Keep the total on screen rather than blanking it.
+        heartbeatStop(`Done in ${_hbFormat(Date.now() - _hbStart)}`);
         isSimulating = false;
     }
 }
@@ -2255,7 +1901,6 @@ async function runParameterSweep() {
     runBtn.style.display = 'none';
     stopBtn.style.display = '';
     solveBtn.disabled = true;
-    sweepStopRequested = false;
     isSweeping = true;
     parameterSweepResults = [];
 
@@ -2269,64 +1914,51 @@ async function runParameterSweep() {
     lastSweepGeometry = getGeometryHashExcluding(xSel);
     updateSweepNotice();
 
+    heartbeatStart(progressText);
     log(`Parameter sweep: ${cfg.label} ${minDisplay}–${maxDisplay}${displayUnit ? ' ' + displayUnit : ''} (${nPoints} pts) @ ${(freqHz/1e9).toFixed(3)} GHz`);
 
     try {
+        // Every sweep point's params are resolved HERE, on the thread that owns the
+        // sidebar inputs: the worker has no DOM, so it cannot read the swept input
+        // itself. It receives a ready-made list and never touches the form.
+        const points = [];
         for (let i = 0; i < nPoints; i++) {
-            if (sweepStopRequested) { log('Sweep stopped.'); break; }
-
             // Interpolation reintroduces float noise (0.105 + 0.315/9 = 0.14000000000000001).
             const displayVal = trimFloat(minDisplay + (maxDisplay - minDisplay) * i / (nPoints - 1));
-            // Temporarily set value for updateGeometry to read, then restore
             inputEl.value = isUnitless ? displayVal : `${displayVal} ${displayUnit}`;
-            updateGeometry();
-            inputEl.value = originalValue;
+            points.push({ displayVal, params: getParams() });
+        }
+        inputEl.value = originalValue;
+        updateGeometry();
 
-            if (!solver) { log(`Point ${i+1}: solver init failed, skipping.`); continue; }
-
-            solver.ensure_mesh();
-            const cachedResults = await solver.solve_adaptive({
-                max_iters: p.max_iters,
-                energy_tol: p.tolerance,
-                param_tol: 0.05,
-                max_nodes: p.max_nodes * 1000,
-                min_converged_passes: p.min_converged_passes,
-                // Verify the first point only. Adjacent sweep points share the
-                // geometry family and mesh behavior, so one certificate is
-                // representative, while verifying every point would multiply the
-                // whole sweep by the verification overhead.
-                certify: !!p.estimate_error && i === 0,
-                onProgress: () => {},
-                shouldStop: () => sweepStopRequested
-            });
-
-            if (sweepStopRequested) { log('Sweep stopped.'); break; }
-
-            // Surface the first point's verification outcome once. Later points run
-            // the legacy per-pass gate with the same refinement settings.
-            if (i === 0 && p.estimate_error) {
-                const cert = solver.certification;
-                if (cert && cert.pass) {
-                    log(`Estimated remaining error (first-point) ${(100 * cert.err).toExponential(2)}%. ` +
+        const out = await workerJob('paramSweep', {
+            points, freqHz, opts: { estimateError: !!p.estimate_error },
+        }, {
+            // Surface the first point's verification outcome once. Later points run the
+            // legacy per-pass gate with the same refinement settings.
+            firstPointCert: (m) => {
+                if (m.certification && m.certification.pass) {
+                    log(`Estimated remaining error (first-point) ${(100 * m.certification.err).toExponential(2)}%. ` +
                         `Later sweep points are not re-verified.`);
                 }
-                // Every accuracy note, not just the first: one solve can carry a
-                // failed certificate and a loss-accuracy note (skin-transition,
+                // Every accuracy note, not just the first: one solve can carry a failed
+                // certificate and a loss-accuracy note (skin-transition,
                 // broadside-proximity) at once.
-                for (const aw of (cachedResults && cachedResults.warnings) || []) {
+                for (const aw of m.warnings || []) {
                     if (aw.type !== 'accuracy') continue;
-                    log(`⚠ First point: ${aw.message} Later sweep points are not re-verified.`);
+                    log(`\u26a0 First point: ${aw.message} Later sweep points are not re-verified.`);
                 }
-            }
+            },
+            partial: (m) => {
+                parameterSweepResults = m.sweepResults.map(r => ({ ...r, result: reviveResult(r.result) }));
+                heartbeatPhase(`${m.index + 1}/${m.total}`);
+                if (m.index === 0) updateSweepDiffCheckbox();
+                redrawSweepPlot();
+            },
+        });
 
-            const result = await solver.computeAtFrequency(freqHz, cachedResults);
-            parameterSweepResults.push({ paramValue: displayVal, result });
-            progressText.textContent = `${i + 1}/${nPoints}`;
-            if (i === 0) updateSweepDiffCheckbox();
-
-            redrawSweepPlot();
-            await new Promise(r => setTimeout(r, 0)); // yield to UI
-        }
+        parameterSweepResults = out.results.map(r => ({ ...r, result: reviveResult(r.result) }));
+        redrawSweepPlot();
         log(`Sweep complete: ${parameterSweepResults.length} points.`);
     } catch(e) {
         console.error(e);
@@ -2338,8 +1970,7 @@ async function runParameterSweep() {
         stopBtn.style.display = 'none';
         solveBtn.disabled = false;
         isSweeping = false;
-        sweepStopRequested = false;
-        progressText.textContent = '';
+        heartbeatStop('');
     }
 }
 
@@ -2356,8 +1987,9 @@ function bindEvents() {
     document.getElementById('btn_solve').onclick = () => {
         const btn = document.getElementById('btn_solve');
         if (btn.textContent === 'Stop') {
-            // Stop the simulation
-            stopRequested = true;
+            // Cancellation lives entirely in the worker, which polls the flag between
+            // WASM calls — the same granularity the main-thread loop had.
+            workerStop();
             log("Stop requested...");
         } else {
             // Start the simulation
@@ -2383,7 +2015,7 @@ function bindEvents() {
         runParameterSweep();
     });
     document.getElementById('btn-stop-sweep').addEventListener('click', () => {
-        sweepStopRequested = true;
+        workerStop();
         log('Sweep stop requested...');
     });
 

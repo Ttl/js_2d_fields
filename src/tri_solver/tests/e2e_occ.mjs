@@ -29,13 +29,19 @@ if (!solveBtn) { console.log('SOLVE BUTTON NOT FOUND'); await browser.close(); p
 await solveBtn.click();
 console.log('clicked solve — waiting for results...');
 
+// Wait for the solve to actually FINISH, signalled by the button flipping back out of
+// "Stop" mode. The previous condition scanned the log for /Z0:/ or /ERROR/i — and
+// /ERROR/i matches the "Energy error=..." in every refinement progress line, so it
+// returned on the first pass and then read a half-finished log. That only ever passed
+// because the solve froze the main thread and Playwright's poll could not run until it
+// was over; once the solve moved to a worker the race became visible. Do not match log
+// prose here: completion is a UI state, not a string.
 try {
-    await page.waitForFunction(() => {
-        const t = document.getElementById('console_out')?.textContent || '';
-        return /Z0:/i.test(t) || /ERROR/i.test(t);
-    }, { timeout: 150000 });
+    await page.waitForFunction(
+        () => document.getElementById('btn_solve')?.textContent === 'Solve',
+        { timeout: 150000 });
 } catch {}
-await page.waitForTimeout(3000);
+await page.waitForTimeout(1000);
 
 const hasPlot = await page.$$eval('.js-plotly-plot, .plotly', els => els.length);
 const consoleOut = await page.$eval('#console_out', el => el.textContent).catch(() => '');
