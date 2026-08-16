@@ -141,6 +141,20 @@ class Mesher {
         return result;
     }
 
+	// Merge interfaces that are numerically coincident. Geometry construction
+	// can produce the same physical edge through two float paths, creating
+	// a zero-width region that still receives the 5-point minimum allocation,
+	// wasted lines that are later removed as near-duplicates anyway.
+    _merge_interfaces(values, span) {
+        const tol = Math.max(1e-12, span * 1e-9);
+        const sorted = Array.from(values).sort((a, b) => a - b);
+        const out = [sorted[0]];
+        for (let i = 1; i < sorted.length; i++) {
+            if (sorted[i] - out[out.length - 1] > tol) out.push(sorted[i]);
+        }
+        return out;
+    }
+
     _collect_interfaces_x() {
         const x_if = new Set([this.x_min, this.x_max]);
 
@@ -158,7 +172,7 @@ class Mesher {
             }
         }
 
-        return Array.from(x_if).sort((a, b) => a - b);
+        return this._merge_interfaces(x_if, this.x_max - this.x_min);
     }
 
     _collect_interfaces_y() {
@@ -178,7 +192,7 @@ class Mesher {
             }
         }
 
-        return Array.from(y_if).sort((a, b) => a - b);
+        return this._merge_interfaces(y_if, this.y_max - this.y_min);
     }
 
     _region_weight_x(x0, x1) {
@@ -331,13 +345,25 @@ class Mesher {
 
     _generate_axis_mesh(axis) {
         const interfaces = axis === 'x' ? this._collect_interfaces_x() : this._collect_interfaces_y();
-        const n_points = axis === 'x' ? this.nx : this.ny;
+        const base_points = axis === 'x' ? this.nx : this.ny;
         const domain_size = axis === 'x' ? this.domain_width : this.domain_height;
         const weight_func = axis === 'x' ?
             (a, b) => this._region_weight_x(a, b) :
             (a, b) => this._region_weight_y(a, b);
 
         const n_regions = interfaces.length - 1;
+
+		// Every region receives at least 5 lines (the signal reservation and
+		// the max(5, ...) floor below). A geometry with many thin regions
+		// (solder-mask) can have those floors consume the entire per-axis
+		// target, leaving zero weight-driven points: far-field region then gets
+		// the same 5 lines as a thin band causing large error.
+        // When the floors saturate the target, grow the
+        // axis budget to 10 lines/region so the weights stay in control, capped
+        // at 2x the requested target.
+        const n_points = 5 * n_regions >= base_points
+            ? Math.min(10 * n_regions, 2 * base_points)
+            : base_points;
 
         // Calculate weights for each region
         const region_weights = [];
@@ -545,6 +571,30 @@ class Mesher {
                 }
                 if (cond_min < inside_line && inside_line < cond_max) {
                     boundary_lines.push([inside_line, boundary_offset]);
+                }
+            }
+        }
+
+		// Thin dielectric sheets (solder-mask bands) get the same bracket-line
+		// treatment as conductor edges. Thick slabs (substrate, top dielectric,
+		// stripline cover) are excluded. Faces coincident with conductor
+		// surfaces are naturally skipped by the min-distance dedup below.
+        const min_cond_dim = this._min_conductor_dimension();
+        for (const diel of this.dielectrics) {
+            const dmin = Math.min(Math.abs(diel.x_max - diel.x_min),
+                                  Math.abs(diel.y_max - diel.y_min));
+            if (dmin <= 0 || dmin >= min_cond_dim) continue;
+            const offset = dmin / 10;
+            const lo = axis === 'x' ? Math.min(diel.x_min, diel.x_max) : Math.min(diel.y_min, diel.y_max);
+            const hi = axis === 'x' ? Math.max(diel.x_min, diel.x_max) : Math.max(diel.y_min, diel.y_max);
+            for (const edge of [lo, hi]) {
+                if (Math.abs(edge - axis_min) < 1e-15 || Math.abs(edge - axis_max) < 1e-15) {
+                    continue;
+                }
+                for (const line of [edge - offset, edge + offset]) {
+                    if (axis_min < line && line < axis_max) {
+                        boundary_lines.push([line, offset]);
+                    }
                 }
             }
         }
