@@ -16,8 +16,13 @@ export const CONSTANTS = {
 // the AC sums (both Re and Im parts, the internal-inductance/roughness
 // reactance uses the same |H_t|^2 integral). Absorbs the uniform,
 // frequency-flat underestimate of the discrete surface integral. Minimax-fit vs
-// the tri-backend MQS. Recalibrate against the tri-backend MQS loss if the
-// integrand changes.
+// the tri-backend MQS across frequency as well as geometry, do not re-center it
+// on a single-frequency measurement. Measured bias structure vs tri MQS (2026-08-16,
+// blend-metric meshes, app budgets): at 1-5 GHz the sweep reads −0.6 to +8.6%
+// (median +3.7%, wide traces high, narrow ~0), at 20 GHz the same integrand
+// reads -7% low (skin-scale surface detail under-resolved, MQS's f-dependent
+// crowding missed). The current value is a compromise. A 2026-08-16 attempt to
+// rescale to the 1-5 GHz median (1.054) broke the 20 GHz end and was reverted.
 export const VACUUM_LOSS_CAL = 1.093;
 
 // --- Math Utils ---
