@@ -1438,10 +1438,12 @@ export class FieldSolver2D {
     }
 
     // Adaptive Meshing
-    _compute_refine_metrics(V, Ex, Ey) {
+    _compute_refine_metrics(V, Ex, Ey, vacuum = false) {
         /**
          * For each grid interval, compute a metric indicating how much refinement
          * would help, based on voltage gradients and field energy in adjacent cells.
+         *
+         * vacuum: the fields are from the vacuum (C0) solve.
          */
         const ny = V.length;
         const nx = V[0].length;
@@ -1460,7 +1462,7 @@ export class FieldSolver2D {
                     continue;
                 }
 
-                const eps = this.epsilon_r[i][j];
+                const eps = vacuum ? 1.0 : this.epsilon_r[i][j];
 
                 // Voltage differences across this cell
                 const dV_x = j < nx - 1 ? Math.abs(V[i][j + 1] - V[i][j]) : 0;
@@ -1652,8 +1654,8 @@ export class FieldSolver2D {
         const x_combined = new Float64Array(nx_intervals);
         const y_combined = new Float64Array(ny_intervals);
 
-        for (const { V, Ex, Ey } of modes) {
-            const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey);
+        for (const { V, Ex, Ey, vacuum } of modes) {
+            const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey, vacuum);
             const total = x_metrics.reduce((s, v) => s + v, 0) +
                           y_metrics.reduce((s, v) => s + v, 0);
             const scale = total > 0 ? 1 / total : 1;
@@ -1808,17 +1810,20 @@ export class FieldSolver2D {
          */
         let C0;
         let V;
-        let Ex0, Ey0;
+        let V0, Ex0, Ey0;
 
         if (vacuum_first) {
             // Calculate C0 (vacuum capacitance)
-            V = this._create_voltage_array(mode);
-            V = await this.solve_laplace(V, true);
-            C0 = this._signal_capacitance(V, true);
+            V0 = this._create_voltage_array(mode);
+            V0 = await this.solve_laplace(V0, true);
+            C0 = this._signal_capacitance(V0, true);
             // Vacuum fields: the conductor-loss integrand for rect-based solvers
             // (the quasi-TEM H pattern, see _mode_conductor_loss). Frequency- and
             // ε-independent, so cached mode results reuse them across the sweep.
-            if (this.conductor_id) ({ Ex: Ex0, Ey: Ey0 } = this.compute_fields(V));
+            // V0 is kept as well: adaptive refinement feeds the vacuum solve
+            // into its metrics so C0 (which the certificate certifies)
+            // converges alongside C, see solve_adaptive.
+            if (this.conductor_id) ({ Ex: Ex0, Ey: Ey0 } = this.compute_fields(V0));
         }
 
         // Solve with dielectric
@@ -1858,7 +1863,7 @@ export class FieldSolver2D {
             alpha_c, alpha_d, alpha_total,
             L_internal, L_external,
             V, Ex, Ey,
-            Ex0, Ey0
+            V0, Ex0, Ey0
         };
     }
 
@@ -2051,7 +2056,32 @@ export class FieldSolver2D {
         const d1 = maxDiff(q0, q1);
         const base = { nodes: this.x.length * this.y.length, d1, safety };
         if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
-        if (d1 * safety >= tol) return { ...base, pass: false, err: d1, r: null, levels: 1 };
+        if (d1 * safety >= tol) {
+            // Already failing on d1 alone. Still measure r when the level-2 grid
+            // is affordable: err = d1/(1-r) is more accurate than d1
+            // lower bound, and the measured r is reused (knownR) by every later
+            // certificate in this solve, otherwise the final certificate on a
+            // large grid is stuck with the conservative r=0.5
+            // fallback even when the true ratio is ~0.3. This branch runs at
+            // most once per adaptive solve (knownR caches the result), so it
+            // affords a larger L2 cap than the per-certificate one: app-budget
+            // solves fail their first certificate at ~10–25k nodes, i.e. L2 at
+            // 160–400k.
+            if (knownR == null && bisectedNodes(x1, y1) <= Math.max(l2MaxNodes, 400000)) {
+                const x2 = bisect(x1), y2 = bisect(y1);
+                const q2 = await this._withGrid(x2, y2, () => this._staticCapacitances());
+                const r = maxDiff(q1, q2) / d1;
+                if (r >= rMax)
+                    return { ...base, pass: false, err: d1, r, levels: 2, rSource: 'measured', preAsymptotic: true };
+                return { ...base, pass: false, err: d1 / (1 - r), r, levels: 2, rSource: 'measured' };
+            }
+            const rEst = knownR != null ? knownR : null;
+            return {
+                ...base, pass: false,
+                err: rEst != null ? d1 / (1 - Math.min(rEst, rMax)) : d1,
+                r: rEst, levels: 1, rSource: rEst != null ? 'reused' : null,
+            };
+        }
         let r = 0.5, levels = 1, rSource = 'fallback';
         if (knownR != null) {
             r = knownR;
@@ -2303,14 +2333,18 @@ export class FieldSolver2D {
             }
 
             // Refine mesh using combined fields from all modes so that regions
-            // important for any mode (e.g. even mode near ground planes) get refined.
+            // important for any mode (e.g. even mode near ground planes) get
+            // refined. Each mode contributes both its dielectric solve and its
+            // vacuum (C0) solve: the certificate certifies C and C0.
             if (it !== max_iters - 1) {
-                if (modeResults.length > 1) {
-                    this.refine_mesh_multi(modeResults, refineFrac);
-                } else {
-                    const refineMode = modeResults[0];
-                    this.refine_mesh(refineMode.V, refineMode.Ex, refineMode.Ey, refineFrac);
-                }
+                const refineSets = modeResults.flatMap(m => {
+                    const sets = [{ V: m.V, Ex: m.Ex, Ey: m.Ey }];
+                    if (m.V0 && m.Ex0 && m.Ey0) {
+                        sets.push({ V: m.V0, Ex: m.Ex0, Ey: m.Ey0, vacuum: true });
+                    }
+                    return sets;
+                });
+                this.refine_mesh_multi(refineSets, refineFrac);
                 this._setup_geometry();
             }
         }
