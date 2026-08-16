@@ -13,15 +13,16 @@
 //   - GCPW: passive pours + via slabs as C = 0 return conductors
 //   - stripline cover, closed enclosure walls, ground cutout centered on the plane
 //
-// Loss methods are matched between the two sides (auto takes MQS only WITH
-// symmetry, so a naive R comparison would compare MQS against perturbation):
+// Loss methods are matched between the two sides:
 //   - single-ended: half {auto → MQS} vs full {lossMethod 'mqs'} — MQS identity
-//   - differential: half {lossMethod 'perturbation'} vs full {auto →
-//     perturbation} — perturbation identity (full-domain diff MQS is refused,
-//     see below)
-// Also pins the mqs-asym-pair refusal: forcing 'mqs' on a full-domain
-// differential pair must warn and fall back, not return the silently ~4×-low
-// parallel-drive answer it used to.
+//   - differential: half {auto → MQS via mode walls} vs full {auto →
+//     per-conductor-drive MQS, modeCurrents} — MQS identity across the two
+//     entirely different mode-selection mechanisms, plus half vs full
+//     {lossMethod 'perturbation'} — perturbation identity
+// Also pins the full-domain differential MQS drive normalization: forcing
+// 'mqs' on a full-domain pair must take the per-conductor-drive path and match
+// the half-domain MQS answer, not return the silently ~4×-low parallel-drive
+// answer the single shared drive used to produce.
 import { MicrostripSolver } from '../src/microstrip.js';
 
 let failures = 0;
@@ -110,33 +111,44 @@ for (const fam of FAMILIES) {
             relDiff(h.RLGC.R, f.RLGC.R) < fam.rTol,
             `${h.RLGC.R.toFixed(2)} vs ${f.RLGC.R.toFixed(2)} Ω/m`);
     } else {
-        // 3 solves: half/full auto for C/Z0; half-perturbation vs full-auto for R
+        // 4 solves: half/full auto (MQS on both sides — mode walls vs
+        // per-conductor drives) for C/Z0 and MQS R; half/full forced
+        // perturbation for the perturbation R identity.
         const half = await solve(fam.geom, {});
-        const full = await solve(fam.geom, { symmetry: false });                // auto → perturbation on full
+        const full = await solve(fam.geom, { symmetry: false });                // auto → multi-drive MQS on full
         const halfP = await solve(fam.geom, { lossMethod: 'perturbation' });
+        const fullP = await solve(fam.geom, { symmetry: false, lossMethod: 'perturbation' });
         for (let i = 0; i < half.modes.length; i++) {
             const mode = half.modes[i].mode;
             check(`${fam.name} ${mode}: half C == full C (±${100 * fam.cTol}%)`,
                 relDiff(half.modes[i].RLGC.C, full.modes[i].RLGC.C) < fam.cTol,
                 `${(half.modes[i].RLGC.C * 1e12).toFixed(2)} vs ${(full.modes[i].RLGC.C * 1e12).toFixed(2)} pF/m`);
+            check(`${fam.name} ${mode}: half MQS R == full MQS R (±${100 * fam.rTol}%)`,
+                relDiff(half.modes[i].RLGC.R, full.modes[i].RLGC.R) < fam.rTol,
+                `${half.modes[i].RLGC.R.toFixed(2)} vs ${full.modes[i].RLGC.R.toFixed(2)} Ω/m`);
             check(`${fam.name} ${mode}: half pert R == full pert R (±${100 * fam.rTol}%)`,
-                relDiff(halfP.modes[i].RLGC.R, full.modes[i].RLGC.R) < fam.rTol,
-                `${halfP.modes[i].RLGC.R.toFixed(2)} vs ${full.modes[i].RLGC.R.toFixed(2)} Ω/m`);
+                relDiff(halfP.modes[i].RLGC.R, fullP.modes[i].RLGC.R) < fam.rTol,
+                `${halfP.modes[i].RLGC.R.toFixed(2)} vs ${fullP.modes[i].RLGC.R.toFixed(2)} Ω/m`);
         }
+        const mqsFallbacks = ['mqs-asym-pair', 'mqs-no-interior', 'mqs-solve-failed', 'mqs-shape'];
+        check(`${fam.name}: full-domain auto takes MQS (no fallback warning)`,
+            !full.warns.some(w => mqsFallbacks.includes(w)), full.warns.join(',') || 'none');
     }
 }
 
-// Forced 'mqs' on a full-domain differential pair: must warn and fall back to
-// perturbation (it used to silently return both modes ~4× low).
+// Forced 'mqs' on a full-domain differential pair: must take the
+// per-conductor-drive path (no refusal warning) and match the half-domain MQS
+// answer (the single shared drive used to return both modes silently ~4× low).
 {
     const fam = FAMILIES[2];   // diff stripline
-    const full = await solve(fam.geom, { symmetry: false });                    // perturbation reference
+    const half = await solve(fam.geom, {});                                     // half-domain MQS reference
     const fullM = await solve(fam.geom, { symmetry: false, lossMethod: 'mqs' });
-    check('full-domain diff + forced mqs warns (mqs-asym-pair)',
-        fullM.warns.includes('mqs-asym-pair'), fullM.warns.join(',') || 'no warnings');
-    check('full-domain diff + forced mqs falls back to perturbation R',
-        relDiff(fullM.modes[0].RLGC.R, full.modes[0].RLGC.R) < 0.01,
-        `${fullM.modes[0].RLGC.R.toFixed(2)} vs ${full.modes[0].RLGC.R.toFixed(2)} Ω/m`);
+    check('full-domain diff + forced mqs takes multi-drive MQS (no warnings)',
+        !fullM.warns.includes('mqs-asym-pair') && !fullM.warns.includes('mqs-no-interior')
+        && !fullM.warns.includes('mqs-solve-failed'), fullM.warns.join(',') || 'no warnings');
+    check('full-domain diff + forced mqs R == half-domain MQS R (±3%)',
+        relDiff(fullM.modes[0].RLGC.R, half.modes[0].RLGC.R) < 0.03,
+        `${fullM.modes[0].RLGC.R.toFixed(2)} vs ${half.modes[0].RLGC.R.toFixed(2)} Ω/m`);
 }
 
 console.log(failures === 0 ? '\nALL HALF≡FULL IDENTITY TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

@@ -913,12 +913,18 @@ export class TriBackend {
         // a surviving signal rect must exist to drive.
         const shapedPre = s.conductors.some(c => c.shape);
         const sigCondPre = s.conductors.some(c => c.is_signal && survives(c));
-        // A differential pair without the symmetry-plane mode walls falls back
-        // to perturbation, whose corner-dominated R needs the finer 1.5t
-        // sizing, an MQS-sized mesh there read R ~1.5× high on the fallback.
+        // A differential pair without the symmetry-plane mode walls runs the
+        // per-conductor-drive MQS (modeCurrents) when both polarity groups
+        // are in the meshed domain, broadside/asymmetric pairs and
+        // symmetry-disabled solves included. Only when a polarity group is
+        // missing does it fall back to perturbation, whose corner-dominated R
+        // needs the finer 1.5t sizing.
+        const diffMultiPre = s.is_differential
+            && s.conductors.some(c => c.is_signal && (c.polarity || 1) > 0 && survives(c))
+            && s.conductors.some(c => c.is_signal && (c.polarity || 1) < 0 && survives(c));
         const mqsPre = ((lmPre === 'mqs' && !shapedPre && sigCondPre)
-            || (lmPre === 'auto' && this.symmetry && !shapedPre && sigCondPre))
-            && (!s.is_differential || this.symmetry);
+            || (lmPre === 'auto' && (this.symmetry || diffMultiPre) && !shapedPre && sigCondPre))
+            && (!s.is_differential || this.symmetry || diffMultiPre);
         // A medium may supply its own base sizing (coax: derived from the conductor
         // radii, since w/t have no meaning for a round conductor).
         const hints = s.tri_mesh_hints || {};
@@ -1688,6 +1694,24 @@ export class TriBackend {
         return true;
     }
 
+    // Target net currents for the full-domain (per-conductor-drive) MQS solve,
+    // ordered [positive-polarity group, negative-polarity group] to match
+    // mqsPrecompute's group order. Symmetric pair: the odd/even unit vectors.
+    // Asymmetric pair with a modal decomposition (_prepareStaticModal): the
+    // genuine modal current vector i \propto C*v (v = the modal voltage eigenvector,
+    // C = the SI capacitance matrix, γI = YV makes i an eigenvector of YZ),
+    // normalized to Σ|I|^2 = 2 so the per-line power convention matches +-1.
+    _mqsModeCurrents(mode, st) {
+        const v = st.modalVec, Cm = this._modalPhys && this._modalPhys.C;
+        if (v && Cm) {
+            const i0 = Cm[0][0] * v[0] + Cm[0][1] * v[1];
+            const i1 = Cm[1][0] * v[0] + Cm[1][1] * v[1];
+            const n = Math.sqrt(2 / (i0 * i0 + i1 * i1));
+            if (isFinite(n) && n > 0) return [i0 * n, i1 * n];
+        }
+        return mode === 'odd' ? [1, -1] : [1, 1];
+    }
+
     // Per-mode result at frequency f, reusing the cached static solve.
     // eps_eff comes from the full-wave eigenmode (f ≥ 100 MHz) or the static
     // solve (below); conductor loss is from the robust static-field method.
@@ -1732,19 +1756,23 @@ export class TriBackend {
                 message: 'MQS conductor loss is not applicable to this geometry ' +
                          '(shaped conductors or no signal conductor), using the perturbation method instead.' });
         }
-        // A differential pair without the symmetry-plane mode walls cannot select
-        // odd/even for the MQS drive, the two traces act as one parallel
-        // conductor and both modes come back ~4× low (measured on a full-domain
-        // diff stripline: R_half/R_full = 3.7-4.0). The 'auto' path already
-        // requires this.symmetry, a forced 'mqs' must refuse too, not silently
-        // mis-normalize. The perturbation path handles asymmetric pairs.
-        const mqsModeSelectable = !this.solver.is_differential || this.symmetry;
+        // A differential pair without the symmetry-plane mode walls uses the
+        // per-conductor-drive MQS: one unit solve per polarity group and an NxN
+        // current-matrix solve for the drives realizing the target mode currents
+        // (mqs_loss opts.modeCurrents). A single shared drive there would make
+        // the two traces one parallel conductor.
+        // The multi-drive path needs both polarity groups present in the meshed
+        // domain. If one was clipped away, refuse rather than mis-normalize.
+        const hasPol = p => cr.rectRoles.some(r => r.is_signal && (r.polarity || 1) * p > 0);
+        const mqsMulti = this.solver.is_differential && !this.symmetry
+            && mqsOk && hasPol(1) && hasPol(-1);
+        const mqsModeSelectable = !this.solver.is_differential || this.symmetry || mqsMulti;
         if (lossMethod === 'mqs' && mqsOk && !mqsModeSelectable && this._modeWarnings
             && !this._modeWarnings.some(w => w.type === 'mqs-asym-pair')) {
             this._modeWarnings.push({ type: 'mqs-asym-pair', mode, freq: f,
-                message: 'MQS conductor loss needs the symmetry-plane mode walls for a ' +
-                         'differential pair. This solve runs on the full domain (asymmetric ' +
-                         'pair or symmetry disabled), using the perturbation method instead.' });
+                message: 'MQS conductor loss on a full-domain differential pair needs both ' +
+                         'traces present in the solved domain, but one polarity group is ' +
+                         'missing. Using the perturbation method instead.' });
         }
         // The volume eddy-current solve reads the elements INSIDE the metal, which the
         // mesher only emits when buildMesh's own applicability test (mqsPre) said MQS
@@ -1753,7 +1781,7 @@ export class TriBackend {
         // disagree, on a mesh with no conductor interior MQS would return a plausible
         // but wrong R rather than fail, so fall back to perturbation and say so.
         let useMQS = ((lossMethod === 'mqs' && mqsOk)
-            || (lossMethod === 'auto' && this.symmetry && mqsOk))
+            || (lossMethod === 'auto' && (this.symmetry || mqsMulti) && mqsOk))
             && mqsModeSelectable;
         if (useMQS && mesh.condInteriorMeshed === false) {
             useMQS = false;
@@ -2039,12 +2067,20 @@ export class TriBackend {
             } else {
             // Per-face plating ⇒ weight each face's smooth current by its own surface
             // impedance (surfaceZs); otherwise the uniform roughness factor (Rq).
-            const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: mode === 'odd',
+            // oddSymmetry (the A = 0 wall at x = 0) only exists on a half-domain
+            // solve, the full-domain differential path selects the mode via
+            // modeCurrents instead, and shares one cache across both modes. The
+            // assembly and the per-frequency unit solves are mode-independent
+            // there, so the second mode at each frequency skips the block LU.
+            const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top),
+                              oddSymmetry: this.symmetry && mode === 'odd',
                               diffPair: !!s.is_differential,
-                              // Frequency-invariant assembly cache (per mode; validated
+                              // Frequency-invariant assembly cache (validated
                               // against the mesh object inside mqsConductorLoss, so a
                               // skin-mesh rebuild invalidates it automatically).
-                              cache: st.mqsCache || (st.mqsCache = {}) };
+                              cache: mqsMulti ? (this._mqsMultiCache || (this._mqsMultiCache = {}))
+                                              : (st.mqsCache || (st.mqsCache = {})) };
+            if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st);
             if (anyPlating) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
             else mqsOpts.Rq = rq;
             let mqs = null;

@@ -2536,6 +2536,11 @@ export class FieldSolver2D {
         const warns = [];
         if (this._certWarn) warns.push(this._certWarn);
         if (this._skinTransitionWarn) warns.push(this._skinTransitionWarn);
+        // Geometry-level accuracy note a subclass may set at construction (e.g. the
+        // broadside strong-coupling warning). Like the two above, this only reaches
+        // rectilinear results: the triangular backend returns from solveAt before
+        // _build_results and models these regimes accurately (MQS).
+        if (this._proximityWarn) warns.push(this._proximityWarn);
         if (warns.length) {
             result.warnings = warns;
             this.modeWarnings = result.warnings;

@@ -107,6 +107,23 @@ class BroadsideStriplineSolver extends FieldSolver2D {
         this.dx = null;
         this.dy = null;
         this.mesh_generated = false;
+
+        // Strong broadside coupling: reduced conductor-loss accuracy on this
+        // (rectilinear) backend: the pertrubation surface intergral
+        // over-weights the facing surfaces relative to the true current
+        // distribution once the traces couple strongly. Measured vs the
+        // tri-backend multi-drive MQS reference (2026-08-16, 20 fuzzer specs):
+        // rows with w/facing-gap > 1.75 read R +10 to +45% high (growing with
+        // coupling). The full trace width is deliberately used even with
+        // x_offset, the worst measured case had zero vertical overlap.
+        const facing_gap = this.h_middle - 2 * Math.abs(this.t);
+        this._proximityWarn = (facing_gap > 0 && this.w / facing_gap >= 1.75)
+            ? { type: 'accuracy', mode: 'all', message:
+                `Strongly coupled broadside pair (trace width ${(this.w * 1e6).toFixed(0)} µm vs ` +
+                `${(facing_gap * 1e6).toFixed(0)} µm facing gap): conductor loss accuracy is reduced. ` +
+                `R typically reads up to 50% high in this regime. The full-wave solver models the ` +
+                `broadside proximity effect accurately.` }
+            : null;
     }
 
     _validate_parameters(options) {

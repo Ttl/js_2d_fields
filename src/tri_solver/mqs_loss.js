@@ -27,6 +27,16 @@
 // solved as the real symmetric indefinite block
 // [[S, −βM],[−βM, −S]]·[Ar; Ai] = [μ₀σFc; 0], symmetry is required because
 // the WASM solver's LDLT fast path assumes a symmetric matrix.
+//
+// Per-conductor drives (opts.modeCurrents): a differential pair with no
+// symmetry walls, or asymmetric pair, cannot use the single shared drive: both
+// traces would act as a parallel conductor. Instead the signal rects are
+// grouped by polarity (one group per net), each group gets its own drive C_k,
+// and linearity gives A = Σ C_k*A_k from one unit solve per group (same
+// factorization, solveSparseMulti takes all RHS at once). The small NxN current
+// matrix D_jk = σ(δ_jk*area_j - jω*Fc_j*A_k) maps drives to net currents,
+// solving D*C = I_target realizes the requested mode currents (+1/-1 odd, +1/+1
+// even, or the modal current vector for an asymmetric pair).
 
 import { tripletsToCSR, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
@@ -133,6 +143,14 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   x = xmin_domain instead of the natural (even-mode) BC. For a centered
 //   differential pair meshed as a half domain with one full trace, this solves
 //   the odd mode; the default natural BC solves the even mode.
+//   opts.modeCurrents — per-conductor-drive path (full domain only): array of
+//   target net currents, one per signal polarity group (positive-polarity group
+//   first, pre.groups order). Use [1, -1] for the odd mode, [1, 1] for even, or
+//   the modal current vector (normalized to Σ|I|^2 = 2) for an asymmetric pair.
+//   Replaces the symmetry-plane mode selection: broadside/asymmetric pairs and
+//   symmetry-disabled solves get a per-mode MQS answer instead of the
+//   perturbation fallback. R_total/X_total keep the differential convention
+//   (both traces, per-line mode R = R_total/2), L_loop is per-line.
 //   opts.Rq — RMS surface roughness (m), gradient model (single layer, same Rq on
 //   all surfaces). The dissipation is scaled by Ψ_R(f) = Re(Z_rough)/Rs and the
 //   loop inductance gets the matching surface-reactance increment
@@ -175,14 +193,32 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     // (passive, C = 0). Without rectRoles every rect is driven.
     // Signal wins where rects overlap; ground rects may overlap each other (GCPW
     // via slab under the coplanar ground), same class either way.
-    const sigRects = roles ? rects.filter((_, i) => roles[i].is_signal) : rects;
+    const sigRects = [], sigPol = [];
+    rects.forEach((r, i) => {
+        if (!roles || roles[i].is_signal) { sigRects.push(r); sigPol.push(roles ? (roles[i].polarity || 0) : 0); }
+    });
     const gndRects = roles ? rects.filter((_, i) => !roles[i].is_signal) : [];
+    // Drive groups: one per distinct signal polarity (positive first). A
+    // single-ended line has one group; a differential pair two (+/-). Used by
+    // the per-conductor-drive path (opts.modeCurrents), the single-drive path
+    // ignores the grouping entirely.
+    const groups = [...new Set(sigPol)].sort((a, b) => b - a);
+    const groupOfSig = sigPol.map(p => groups.indexOf(p));
     const isCondTri = new Uint8Array(nTris);
+    const triGroup = new Int32Array(nTris).fill(-1);
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const xc = (nodes[2*v0]+nodes[2*v1]+nodes[2*v2])/3;
         const yc = (nodes[2*v0+1]+nodes[2*v1+1]+nodes[2*v2+1])/3;
-        if (inAnyRect(sigRects, xc, yc, TOL)) isCondTri[t] = 1;
+        // Same containment test as inAnyRect, but keeping the matching rect's
+        // index so the triangle lands in its polarity group (first match wins,
+        // identical iteration order = identical classification).
+        let si = -1;
+        for (let i = 0; i < sigRects.length; i++) {
+            const r = sigRects[i];
+            if (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL) { si = i; break; }
+        }
+        if (si >= 0) { isCondTri[t] = 1; triGroup[t] = groupOfSig[si]; }
         else if (gndRects.length && inAnyRect(gndRects, xc, yc, TOL)) isCondTri[t] = 2;
     }
 
@@ -215,6 +251,11 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     // signal cross-section: it is only used to normalize the signal current.
     const sR = [], sC = [], sV = [], mR = [], mC = [], mV = [];
     const Fc = new Float64Array(nF);
+    // Per-group source vectors / areas for the per-conductor-drive path. The
+    // combined Fc/condArea keep their own accumulation (not a sum of these) so
+    // the single-drive path's floating-point stream is unchanged.
+    const FcG = groups.map(() => new Float64Array(nF));
+    const areaG = new Float64Array(groups.length);
     let condArea = 0;
     const lg = new Int32Array(6);
     for (let t = 0; t < nTris; t++) {
@@ -226,7 +267,7 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         const ys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
         const cond = isCondTri[t];
         const driven = cond === 1;
-        if (driven) condArea += Area;
+        if (driven) { condArea += Area; areaG[triGroup[t]] += Area; }
         const Sl = new Float64Array(36), Ml = new Float64Array(36), Fl = new Float64Array(6);
         for (let q = 0; q < NQ; q++) {
             const w = QW[q] * Area;
@@ -250,7 +291,7 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         }
         for (let i = 0; i < 6; i++) {
             const gi = lg[i]; if (gi < 0) continue;
-            if (driven) Fc[gi] += Fl[i];
+            if (driven) { Fc[gi] += Fl[i]; FcG[triGroup[t]][gi] += Fl[i]; }
             for (let j = 0; j < 6; j++) {
                 const gj = lg[j]; if (gj < 0) continue;
                 if (Sl[6*i+j] !== 0) { sR.push(gi); sC.push(gj); sV.push(Sl[6*i+j]); }
@@ -283,9 +324,44 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
 
     return {
         isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri,
+        groups, triGroup, FcG, areaG,
         rowPtr: csrS.rowPtr, colIdx: csrS.colIdx,
         valS: csrS.valRe, valM: csrM.valRe, valIm: csrS.valIm,   // valIm stays zero
     };
+}
+
+// Dense complex NxN solve (Gauss-Jordan, partial pivot) for the drive-to-current
+// matrix, N is the number of driven nets (2 for a differential pair).
+// A: rows of {re, im}; b: array of {re, im}. Returns array of {re, im}.
+function solveComplexLinear(A, b) {
+    const n = b.length;
+    const M = A.map((row, i) => row.map(z => [z.re, z.im]).concat([[b[i].re, b[i].im]]));
+    for (let c = 0; c < n; c++) {
+        let p = c, best = M[c][c][0] ** 2 + M[c][c][1] ** 2;
+        for (let r = c + 1; r < n; r++) {
+            const m = M[r][c][0] ** 2 + M[r][c][1] ** 2;
+            if (m > best) { best = m; p = r; }
+        }
+        if (!(best > 0)) throw new Error('mqs: singular drive-current matrix');
+        const tmp = M[c]; M[c] = M[p]; M[p] = tmp;
+        const ar = M[c][c][0], ai = M[c][c][1], den = ar * ar + ai * ai;
+        for (let r = 0; r < n; r++) {
+            if (r === c) continue;
+            const br = M[r][c][0], bi = M[r][c][1];
+            const fr = (br * ar + bi * ai) / den, fi = (bi * ar - br * ai) / den;
+            if (fr === 0 && fi === 0) continue;
+            for (let k = c; k <= n; k++) {
+                const mr = M[c][k][0], mi = M[c][k][1];
+                M[r][k][0] -= fr * mr - fi * mi;
+                M[r][k][1] -= fr * mi + fi * mr;
+            }
+        }
+    }
+    return M.map((row, i) => {
+        const ar = row[i][0], ai = row[i][1], den = ar * ar + ai * ai;
+        return { re: (row[n][0] * ar + row[n][1] * ai) / den,
+                 im: (row[n][1] * ar - row[n][0] * ai) / den };
+    });
 }
 
 export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, Z0 = 0, opts = {}) {
@@ -308,7 +384,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         pre = mqsPrecompute(mesh, condRect, opts);
         if (cc) { cc.mesh = mesh; cc.odd = !!opts.oddSymmetry; cc.pre = pre; }
     }
-    const { isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri } = pre;
+    const { isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri, triGroup } = pre;
     const lg = new Int32Array(6);
 
     // Per-frequency system: values = valS + β·valM on the cached pattern.
@@ -316,25 +392,87 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     const val = new Float64Array(pre.valS.length);
     for (let k = 0; k < val.length; k++) val[k] = pre.valS[k] + beta * pre.valM[k];
     const csr = { rowPtr: pre.rowPtr, colIdx: pre.colIdx, valRe: val, valIm: pre.valIm };
-    const rhs = new Float64Array(Nb);
-    for (let i = 0; i < nF; i++) rhs[i] = MU0 * sigma * Fc[i];
-    const [sol] = solveSparseMulti(Nb, csr, [rhs]);
 
-    // Rescale C for trace current 1 A. When the signal conductor straddles the
-    // symmetry plane (single-ended half mesh), the meshed part carries half the
-    // current. When it lies entirely inside the half domain (differential pair,
-    // one full trace meshed), it carries the full per-trace current. Ground rects
-    // are excluded. They carry return current, not the normalized drive current.
-    const rolesCR = condRect.rectRoles || null;
-    const straddles = rects.some((r, i) =>
-        (!rolesCR || rolesCR[i].is_signal) && r.xmin <= xmin_d + 1e-12);
-    const I_mesh = (sym === 2 && straddles) ? 0.5 : 1;
-    let fr = 0, fi = 0;
-    for (let i = 0; i < nF; i++) { fr += Fc[i] * sol[i]; fi += Fc[i] * sol[nF + i]; }
-    const dR = sigma * (condArea + omega * fi);
-    const dI = -sigma * omega * fr;
-    const dMag2 = dR*dR + dI*dI;
-    const Cr = I_mesh * dR / dMag2, Ci = -I_mesh * dI / dMag2;
+    // Per-conductor-drive path (opts.modeCurrents, full domain only): one unit
+    // solve per polarity group, then the NxN current-matrix solve for the drive
+    // constants that realize the target net currents.
+    const multiI = (opts.modeCurrents && sym === 1 && pre.groups.length > 1
+        && opts.modeCurrents.length === pre.groups.length) ? opts.modeCurrents : null;
+    if (opts.modeCurrents && !multiI) throw new Error('mqs: modeCurrents needs a full-domain mesh with one signal group per entry');
+    let sol, Cr, Ci, Zmode = null, CgR = null, CgI = null;
+    if (multiI) {
+        const nG = pre.groups.length;
+        // Unit solutions A_k are mode-independent, cache them per (mesh, beta) so
+        // the second mode of the pair at the same frequency skips the block LU.
+        let sols = (cc && cc.sols && cc.solsMesh === mesh && cc.solsBeta === beta) ? cc.sols : null;
+        if (!sols) {
+            const rhsList = pre.FcG.map(F => {
+                const r = new Float64Array(Nb);
+                for (let i = 0; i < nF; i++) r[i] = MU0 * sigma * F[i];
+                return r;
+            });
+            sols = solveSparseMulti(Nb, csr, rhsList);
+            if (cc) { cc.sols = sols; cc.solsMesh = mesh; cc.solsBeta = beta; }
+        }
+        // Net current in group j for unit drive on group k:
+        // D_jk = σ(δ_jk·area_j − jω·Fc_j·A_k)
+        const D = [];
+        for (let j = 0; j < nG; j++) {
+            const row = [];
+            const F = pre.FcG[j];
+            for (let k = 0; k < nG; k++) {
+                const A = sols[k];
+                let fr = 0, fi = 0;
+                for (let i = 0; i < nF; i++) { fr += F[i] * A[i]; fi += F[i] * A[nF + i]; }
+                row.push({ re: sigma * ((j === k ? pre.areaG[j] : 0) + omega * fi),
+                           im: -sigma * omega * fr });
+            }
+            D.push(row);
+        }
+        const Cg = solveComplexLinear(D, multiI.map(v => ({ re: v, im: 0 })));
+        // Combined physical field A = Σ C_k*A_k, downstream integrals then run
+        // with unit scale (Cr = 1) and the per-group complex drive in CgR/CgI.
+        const comb = new Float64Array(Nb);
+        for (let k = 0; k < nG; k++) {
+            const A = sols[k], cRk = Cg[k].re, cIk = Cg[k].im;
+            for (let i = 0; i < nF; i++) {
+                comb[i] += cRk * A[i] - cIk * A[nF + i];
+                comb[nF + i] += cRk * A[nF + i] + cIk * A[i];
+            }
+        }
+        sol = comb;
+        CgR = Cg.map(z => z.re); CgI = Cg.map(z => z.im);
+        Cr = 1; Ci = 0;
+        // Per-line mode impedance Z = Σ C_k*conj(I_k) / Σ|I_k|^2 (C = −dV/dz): the
+        // multi-net twin of the single-drive Z = C/I. Re(Z) is the per-line mode
+        // R (power balance), Im(Z)/ω the per-line loop L.
+        let numR = 0, numI = 0, den = 0;
+        for (let k = 0; k < nG; k++) {
+            numR += Cg[k].re * multiI[k]; numI += Cg[k].im * multiI[k];
+            den += multiI[k] * multiI[k];
+        }
+        Zmode = { re: numR / den, im: numI / den };
+    } else {
+        const rhs = new Float64Array(Nb);
+        for (let i = 0; i < nF; i++) rhs[i] = MU0 * sigma * Fc[i];
+        [sol] = solveSparseMulti(Nb, csr, [rhs]);
+
+        // Rescale C for trace current 1 A. When the signal conductor straddles the
+        // symmetry plane (single-ended half mesh), the meshed part carries half the
+        // current. When it lies entirely inside the half domain (differential pair,
+        // one full trace meshed), it carries the full per-trace current. Ground rects
+        // are excluded. They carry return current, not the normalized drive current.
+        const rolesCR = condRect.rectRoles || null;
+        const straddles = rects.some((r, i) =>
+            (!rolesCR || rolesCR[i].is_signal) && r.xmin <= xmin_d + 1e-12);
+        const I_mesh = (sym === 2 && straddles) ? 0.5 : 1;
+        let fr = 0, fi = 0;
+        for (let i = 0; i < nF; i++) { fr += Fc[i] * sol[i]; fi += Fc[i] * sol[nF + i]; }
+        const dR = sigma * (condArea + omega * fi);
+        const dI = -sigma * omega * fr;
+        const dMag2 = dR*dR + dI*dI;
+        Cr = I_mesh * dR / dMag2; Ci = -I_mesh * dI / dMag2;
+    }
     const Cmag2 = Cr*Cr + Ci*Ci;
 
     // Conductor dissipation: J/σ = C*(u - jωA1) with the drive u = 1 in the
@@ -351,7 +489,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*t+k]];
         const xs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
         const ys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
-        const drive = cls === 1 ? 1 : 0;
+        // Drive term: 1 (single) or the group's complex C_k (multi) in the
+        // signal, 0 in passive ground rects (pure eddy / return current).
+        let dvR = 0, dvI = 0;
+        if (cls === 1) { if (CgR) { const g = triGroup[t]; dvR = CgR[g]; dvI = CgI[g]; } else dvR = 1; }
         let Ptri = 0;
         for (let q = 0; q < NQ; q++) {
             const w = QW[q] * Area;
@@ -363,7 +504,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
                 const Nk = k < 3 ? lv(coeff, k, xq, yq) : le(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
                 aR += Nk * sol[g]; aI += Nk * sol[nF + g];
             }
-            const uR = drive + omega * aI, uI = -omega * aR;
+            const uR = dvR + omega * aI, uI = dvI - omega * aR;
             const eR = Cr * uR - Ci * uI, eI = Cr * uI + Ci * uR;
             Ptri += 0.5 * sigma * (eR*eR + eI*eI) * w;
         }
@@ -487,7 +628,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     let R_trace = 2 * sym * Psig;
     let R_gr = 2 * sym * PgndRect;
     let R_gw = 2 * sym * Pgnd;
-    let L_loop = Ci / omega;  // Z_pul = C/I = R + jωL (trace internal L included)
+    // Z_pul = C/I = R + jωL (trace internal L included). On the multi-drive path
+    // the per-line mode impedance Zmode plays the role of C (per-line current
+    // normalized to the target vector), same convention.
+    let L_loop = (Zmode ? Zmode.im : Ci) / omega;
 
     // Surface roughness / plating post-processing. Scale the smooth-σ loss by the
     // effective surface impedance and add the matching surface-reactance increment
@@ -554,6 +698,6 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     return {
         R_trace, R_gnd, R_total, X_total, L_loop, PsiR,
         alpha_c, alpha_c_dBm: alpha_c * 8.686,
-        Rs, delta, nDofs: Nb,
+        Rs, delta, nDofs: Nb, modeZ: Zmode,
     };
 }
