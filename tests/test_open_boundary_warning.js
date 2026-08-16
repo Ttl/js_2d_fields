@@ -73,6 +73,28 @@ check('sides clear, low top: warns only for top', wl.length === 1 && /on the top
 const wide = ms({ enclosure_width: 30e-3, enclosure_height: 20e-3 });
 check('wall-touching ground plane ignored', wide.openBoundaryWarnings().length === 0);
 
+// GCPW shielding: the coplanar pour touches the side walls AND lies between the
+// trace and the wall at trace level, so the open side boundary sees no field —
+// no side warning even when the raw trace-to-wall clearance is under 3·h. (The
+// real-world trigger: solder mask inflates the dielectric-stack h to the trace
+// top + mask, and the UI-default GCPW's clearance — measured THROUGH the pour —
+// fell under the threshold.) The same clearance without the pour must still warn.
+const smOpts = { use_sm: true, sm_t_sub: 20e-6, sm_t_trace: 20e-6, sm_t_side: 20e-6, sm_er: 3.5, sm_tand: 0.02 };
+const gcpwGeom = {
+    substrate_height: 0.21e-3, trace_width: 0.35e-3, trace_thickness: 35e-6,
+    gnd_thickness: 35e-6, epsilon_r: 4.4, freq: 1e9,
+    boundaries: ["open", "open", "open", "gnd"], ...smOpts,
+    enclosure_width: 1.75e-3,   // trace 0.70 mm from each side wall < 3·h = 0.795 mm
+};
+const gcpwShielded = new MicrostripSolver({ ...gcpwGeom,
+    use_coplanar_gnd: true, gap: 0.1e-3, via_gap: 0.1e-3, use_vias: true });
+const wg = gcpwShielded.openBoundaryWarnings();
+check('gcpw: pour shields the open sides (no warning)', wg.length === 0, wg.join(' | '));
+const msSameClearance = new MicrostripSolver(gcpwGeom);
+const wm = msSameClearance.openBoundaryWarnings();
+check('same clearance without the pour still warns for the sides',
+    wm.length === 1 && /on the sides/.test(wm[0]), wm.join(' | '));
+
 // Broadside pair (different line type, same rule): auto-sized is quiet, a narrow
 // enclosure warns for the open sides. Substrate stack = h_bottom+h_middle+h_top = 0.9 mm.
 function bs(opts = {}) {

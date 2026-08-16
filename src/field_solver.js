@@ -333,20 +333,32 @@ export class FieldSolver2D {
         if (!(h > 0)) return out;
         const OPEN_CLEARANCE = 3;
         const tol = Math.max(xMax - xMin, yMax - yMin) * 1e-9;
+        // Each wall: [name, bc, distance-to-wall, "g lies strictly between c and
+        // this wall", "g covers c's extent along the wall direction"]. The last
+        // two implement shielding: a grounded conductor that touches the wall and
+        // sits between a conductor and that wall (GCPW), screens the fields and
+        // the open boundary behind it is fine.
         const walls = [
-            ['left', b[0], c => c.x_min - xMin],
-            ['right', b[1], c => xMax - c.x_max],
-            ['top', b[2], c => yMax - c.y_max],
-            ['bottom', b[3], c => c.y_min - yMin],
+            ['left', b[0], c => c.x_min - xMin,
+                (g, c) => g.x_max <= c.x_min + tol, (g, c) => g.y_min <= c.y_min + tol && g.y_max >= c.y_max - tol],
+            ['right', b[1], c => xMax - c.x_max,
+                (g, c) => g.x_min >= c.x_max - tol, (g, c) => g.y_min <= c.y_min + tol && g.y_max >= c.y_max - tol],
+            ['top', b[2], c => yMax - c.y_max,
+                (g, c) => g.y_min >= c.y_max - tol, (g, c) => g.x_min <= c.x_min + tol && g.x_max >= c.x_max - tol],
+            ['bottom', b[3], c => c.y_min - yMin,
+                (g, c) => g.y_max <= c.y_min + tol, (g, c) => g.x_min <= c.x_min + tol && g.x_max >= c.x_max - tol],
         ];
         const mm = (v) => `${(v * 1000).toPrecision(3)} mm`;
-        const close = new Map();   // wall name → distance of nearest (non-touching) conductor
-        for (const [name, bc, dist] of walls) {
+        const close = new Map();   // wall name → distance of nearest (non-touching, unshielded) conductor
+        for (const [name, bc, dist, between, covers] of walls) {
             if (bc !== 'open') continue;
+            const shields = this.conductors.filter(g => !g.is_signal && dist(g) <= tol);
             let dMin = Infinity;
             for (const c of this.conductors) {
                 const d = dist(c);
-                if (d > tol && d < dMin) dMin = d;   // ≤ tol: touches this wall — intentional
+                if (d <= tol || d >= dMin) continue;   // ≤ tol: touches this wall — intentional
+                if (shields.some(g => between(g, c) && covers(g, c))) continue;
+                dMin = d;
             }
             if (dMin < OPEN_CLEARANCE * h) close.set(name, dMin);
         }
