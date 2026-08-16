@@ -128,6 +128,11 @@ function runOne(t) {
         const t0 = Date.now();
         const p = spawn('node', [file, ...args], { env: { ...process.env, ...env } });
         let out = '';
+        // setEncoding, not `out += buffer`: the tests print ✓ ✗ µ Ω δ, and per-chunk
+        // Buffer.toString() mangles any multi-byte character that straddles a chunk
+        // boundary. A decoding stream carries the partial sequence across chunks.
+        p.stdout.setEncoding('utf8');
+        p.stderr.setEncoding('utf8');
         p.stdout.on('data', d => { out += d; });
         p.stderr.on('data', d => { out += d; });
         const killer = setTimeout(() => { p.kill('SIGKILL'); out += '\n[runner] TIMEOUT after 15 min — killed\n'; }, 15 * 60 * 1000);

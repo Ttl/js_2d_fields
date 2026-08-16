@@ -80,8 +80,9 @@ const QS_GEOM = {
     ...GEOM, mesh_backend: 'rectilinear', freq: 1e8, nx: 40, ny: 40,
 };
 
-async function solveTolQS(tol, { maxIters = 12, maxNodes = 60000, extra = {} } = {}) {
+async function solveTolQS(tol, { maxIters = 12, maxNodes = 60000, extra = {}, metric = null } = {}) {
     const s = new MicrostripSolver(QS_GEOM);
+    if (metric) s.refine_metric = metric;
     const log = console.log;
     console.log = () => {};
     let r;
@@ -119,6 +120,22 @@ check('capped solve surfaces an accuracy warning', !!qsWarn, qsWarn ? qsWarn.mes
 const qsLegacy = await solveTolQS(0.01, { extra: { certify: false } });
 check('certify:false leaves no certification', qsLegacy.s.certification == null,
     JSON.stringify(qsLegacy.s.certification ?? null));
+
+// 5: the refinement-metric escape hatches still work. solver.refine_metric selects the
+// marking metric: 'blend' (default, flux-jump error indicator + a conductor-surface
+// intensity term), 'jump' (error indicator only) or 'intensity' (the legacy metric).
+// They are debug/opt-out knobs with no UI, so this only pins that each one drives a
+// solve to a passing certificate and lands on the same C — a metric only chooses WHERE
+// to refine, never what the converged answer is. The band is loose because each metric
+// converges along its own mesh sequence and the tolerance is 1%.
+for (const metric of ['jump', 'intensity']) {
+    const alt = await solveTolQS(0.01, { metric });
+    const dC = Math.abs(alt.m.C - qsCoarse.m.C) / qsCoarse.m.C;
+    check(`refine_metric '${metric}' certifies`, alt.s.certification && alt.s.certification.pass,
+        alt.s.certification ? `err=${(100 * alt.s.certification.err).toFixed(3)}%` : 'no certificate');
+    check(`refine_metric '${metric}' agrees with the default blend on C (±2%)`, dC < 0.02,
+        `dC=${(100 * dC).toFixed(3)}%`);
+}
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll certification tests passed.');
 process.exit(failures ? 1 : 0);

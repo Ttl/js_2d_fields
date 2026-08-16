@@ -327,7 +327,8 @@ function fmtSpec(spec) {
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
 
 async function main() {
-    console.log(`\n### Fuzz QS vs full-wave — N=${N} seed=${SEED} flag>${(THRESH * 100).toFixed(0)}% Qmax>${BAD_Q} ###`);
+    console.log(`\n### Fuzz QS vs full-wave — N=${N} seed=${SEED} flag>${(THRESH * 100).toFixed(0)}% ` +
+        `R>${(R_THRESH * 100).toFixed(0)}% (warned ${(R_RELAX * 100).toFixed(0)}%) Qmax>${BAD_Q} ###`);
     console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
     const rng = createRng(SEED);
     const flagged = { discrepancy: [], loss: [], badMesh: [], crash: [] };
@@ -426,9 +427,20 @@ async function main() {
 
     console.log(`\n${'='.repeat(72)}`);
     console.log(`coverage: ${Object.entries(byType).map(([k, v]) => `${k}:${v}`).join('  ')}`);
+    // Split the loss failures by gate: an UNWARNED one is the interesting kind — it
+    // extends the known bias envelope rather than re-confirming a regime both backends
+    // already flag as approximate (see the R_THRESH note above).
+    const lossUnwarned = flagged.loss.filter(f => !f.relaxed).length;
+    const lossWarned = flagged.loss.length - lossUnwarned;
     console.log(`SUMMARY: ${ok}/${N} clean | ${flagged.discrepancy.length} discrepancy | ` +
-        `${flagged.loss.length} loss-discrepancy | ${flagged.badMesh.length} bad-mesh | ` +
+        `${flagged.loss.length} loss-discrepancy (${lossUnwarned} unwarned, ${lossWarned} warned) | ` +
+        `${flagged.badMesh.length} bad-mesh | ` +
         `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid)`);
+    if (lossUnwarned) {
+        console.log(`unwarned loss rows (investigate, do not just raise the gate):`);
+        for (const f of flagged.loss.filter(x => !x.relaxed))
+            console.log(`  [${f.i}] ${(100 * f.dR).toFixed(0)}%${f.mode ? ` [${f.mode}]` : ''}  ${fmtSpec(f.spec)}`);
+    }
     console.log(`${'='.repeat(72)}`);
     if (flagged.discrepancy.length || flagged.loss.length || flagged.badMesh.length || flagged.crash.length) process.exitCode = 1;
 }

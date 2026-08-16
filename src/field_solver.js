@@ -25,6 +25,12 @@ export const CONSTANTS = {
 // rescale to the 1-5 GHz median (1.054) broke the 20 GHz end and was reverted.
 export const VACUUM_LOSS_CAL = 1.093;
 
+// Node cap for the certificate's one-shot convergence-ratio measurement (see
+// _certifyStatic's l2OnceMaxNodes). Larger than the per-certificate l2MaxNodes
+// because it is paid at most once per adaptive solve and the r it yields is then
+// reused by every later certificate.
+const CERT_L2_ONCE_MAX_NODES = 400000;
+
 // --- Math Utils ---
 
 export function diff(arr) {
@@ -592,10 +598,9 @@ export class FieldSolver2D {
      * Solve Laplace equation for the given voltage array.
      * @param {Array<Float64Array>} V - 2D voltage array with conductor boundary conditions set
      * @param {boolean} vacuum - If true, solve with vacuum permittivity
-     * @param {function} onProgress - Optional progress callback
      * @returns {Array<Float64Array>} - The solved voltage array (same reference as input)
      */
-    async solve_laplace(V, vacuum = false, onProgress = null) {
+    async solve_laplace(V, vacuum = false) {
         return (await this.solve_laplace_multi([V], vacuum))[0];
     }
 
@@ -612,20 +617,13 @@ export class FieldSolver2D {
 
         for (const V of Vs) {
             const errors = validate_laplace_inputs(
-                    V,
-                    this.x,
-                    this.y,
-                    this.epsilon_r,
-                    this.conductor_mask,
-                    vacuum
-                );
-
+                V, this.x, this.y, this.epsilon_r, this.conductor_mask, vacuum);
             if (errors.length > 0) {
-                    throw new Error(
-                        "Laplace solver input validation failed:\n" +
-                        errors.map(e => " - " + e).join("\n")
-                    );
-                }
+                throw new Error(
+                    "Laplace solver input validation failed:\n" +
+                    errors.map(e => " - " + e).join("\n")
+                );
+            }
         }
 
         const ny = this.y.length, nx = this.x.length;
@@ -1407,64 +1405,6 @@ export class FieldSolver2D {
         };
     }
 
-    async perform_analysis(onProgress = null) {
-        const totalSteps = 2; // Two main solve_laplace calls
-        let currentStep = 0;
-
-        const updateProgress = (stepFraction, overallStep) => {
-            if (onProgress) {
-                const totalProgress = ((overallStep - 1) / totalSteps) + (stepFraction / totalSteps);
-                onProgress(totalProgress);
-            }
-        };
-
-        // 1. Calculate C0 (vacuum capacitance)
-        currentStep = 1;
-        let V = this._create_voltage_array('single');
-        V = await this.solve_laplace(V, true, (i, max) => updateProgress(i / max, currentStep));
-        const C0 = this.calculate_capacitance(V, true);
-
-        // 2. Calculate C (with dielectric capacitance)
-        currentStep = 2;
-        V = this._create_voltage_array('single');
-        V = await this.solve_laplace(V, false, (i, max) => updateProgress(i / max, currentStep));
-        const C_with_diel = this.calculate_capacitance(V, false);
-
-        // 3. Calculate Z0 and effective permittivity
-        const eps_eff = C_with_diel / C0;
-        const Z0 = 1 / (CONSTANTS.C * Math.sqrt(C_with_diel * C0));
-
-        // 4. Compute fields Ex, Ey
-        const { Ex, Ey } = this.compute_fields(V);
-
-        // 5. Calculate losses
-        // Conductor loss with surface roughness and DC resistance
-        const { R_ac, R_dc, R_total, L_internal } = this.calculate_conductor_loss(Ex, Ey, Z0);
-
-        // Dielectric loss depends on Ex, Ey, Z0, omega, epsilon_r, tan_delta
-        const alpha_diel_db_m = this.calculate_dielectric_loss(Ex, Ey, Z0);
-
-        // 6. Calculate RLGC and complex Z0
-        const { Zc, rlgc, eps_eff_mode } = this.rlgc(R_total, L_internal, alpha_diel_db_m, C_with_diel, Z0);
-
-        // Calculate conductor loss alpha from R_total for reporting
-        const alpha_cond_db_m = 8.686 * R_total / (2 * Z0);
-        const total_alpha_db_m = alpha_cond_db_m + alpha_diel_db_m;
-
-        return {
-            Z0: Z0, // Characteristic Impedance (static approximation)
-            Zc: Zc, // Complex Characteristic Impedance (includes loss)
-            eps_eff: eps_eff,
-            RLGC: rlgc,
-            alpha_cond_db_m: alpha_cond_db_m,
-            alpha_diel_db_m: alpha_diel_db_m,
-            total_alpha_db_m: total_alpha_db_m,
-            V: V,  // Return V for storage
-            Ex: Ex,
-            Ey: Ey
-        };
-    }
-
     // Adaptive Meshing
     // Discrete flux-jump refinement indicator (FDM analog of the tri backend's
     // Kelly marker). At each interior node the jump in ε*dV/dh between the two
@@ -1800,19 +1740,6 @@ export class FieldSolver2D {
         return { energy, rel_error };
     }
 
-    _compute_parameter_error(Z0, C, prev_Z0, prev_C) {
-        /**
-         * Track convergence of Z0 and C parameters.
-         */
-        if (prev_Z0 === null) {
-            return 1.0;
-        }
-
-        const z_err = Math.abs(Z0 - prev_Z0) / Math.max(Math.abs(prev_Z0), 1e-12);
-        const c_err = Math.abs(C - prev_C) / Math.max(Math.abs(prev_C), 1e-12);
-        return Math.max(z_err, c_err);
-    }
-
     // General two-conductor modal analysis for a differential pair, run on the converged
     // mesh as a post-pass. Drives each trace independently to assemble the full 2×2
     // capacitance matrices [C] (dielectric) and [C0] (vacuum), diagonalises [C0]⁻¹[C] to
@@ -2130,7 +2057,14 @@ export class FieldSolver2D {
     //     refinement, so an earlier genuine measurement used on a finer grid errs
     //     conservative, and the x1.5 safety still covers a moderately larger true r.
     //     Only genuinely measured, non-pre-asymptotic r values are reused.
-    async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = 150000, rMax = 0.7, safety = 1.5,
+    //   * l2OnceMaxNodes: the level-2 cap for the one-shot r measurement in the
+    //     already-failing branch below. It runs at most once per adaptive solve
+    //     (knownR caches the result), so it affords a larger grid than the
+    //     per-certificate l2MaxNodes. The effective cap is the larger of the two, so
+    //     the one-shot measurement is never stingier than the routine one.
+    async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = 150000,
+                                l2OnceMaxNodes = CERT_L2_ONCE_MAX_NODES,
+                                rMax = 0.7, safety = 1.5,
                                 q0 = null, knownR = null } = {}) {
         const maxDiff = (a, b) => {
             let m = 0;
@@ -2154,7 +2088,7 @@ export class FieldSolver2D {
         const q1 = await this._withGrid(x1, y1, () => this._staticCapacitances());
         const d1 = maxDiff(q0, q1);
         const base = { nodes: this.x.length * this.y.length, d1, safety };
-        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
+        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, rSource: null, levels: 1 };
         if (d1 * safety >= tol) {
             // Already failing on d1 alone. Still measure r when the level-2 grid
             // is affordable: err = d1/(1-r) is more accurate than d1
@@ -2163,10 +2097,9 @@ export class FieldSolver2D {
             // large grid is stuck with the conservative r=0.5
             // fallback even when the true ratio is ~0.3. This branch runs at
             // most once per adaptive solve (knownR caches the result), so it
-            // affords a larger L2 cap than the per-certificate one: app-budget
-            // solves fail their first certificate at ~10–25k nodes, i.e. L2 at
-            // 160–400k.
-            if (knownR == null && bisectedNodes(x1, y1) <= Math.max(l2MaxNodes, 400000)) {
+            // affords the larger l2OnceMaxNodes cap: app-budget solves fail their
+            // first certificate at ~10-25k nodes, i.e. L2 at 160-400k.
+            if (knownR == null && bisectedNodes(x1, y1) <= Math.max(l2MaxNodes, l2OnceMaxNodes)) {
                 const x2 = bisect(x1), y2 = bisect(y1);
                 const q2 = await this._withGrid(x2, y2, () => this._staticCapacitances());
                 const r = maxDiff(q1, q2) / d1;
@@ -2267,6 +2200,7 @@ export class FieldSolver2D {
             certify = true,
             certify_max_nodes = 600000,
             certify_l2_max_nodes = 150000,
+            certify_l2_once_max_nodes = CERT_L2_ONCE_MAX_NODES,
             onProgress = null,
             shouldStop = null,
             skip_mesh = false
@@ -2295,7 +2229,8 @@ export class FieldSolver2D {
         // Verification certificate state (see _certifyStatic). Mirrors the triangular
         // backend: a tripped pass-to-pass gate is only a CANDIDATE stop until the
         // certified remaining error passes the tolerance.
-        const certOpts = { maxNodes: certify_max_nodes, l2MaxNodes: certify_l2_max_nodes };
+        const certOpts = { maxNodes: certify_max_nodes, l2MaxNodes: certify_l2_max_nodes,
+                           l2OnceMaxNodes: certify_l2_once_max_nodes };
         this.certification = null;
         this._certWarn = null;
 
@@ -2447,6 +2382,12 @@ export class FieldSolver2D {
                 this._setup_geometry();
             }
         }
+
+        // V0 is only needed by the refinement metrics above. Ex0/Ey0 are what
+        // the conductor-loss calculation reuses across the frequency sweep.
+        // Drop the vacuum potential so a converged mode result to save some
+        // memory. (~5 MB/mode on a 600k-node grid).
+        for (const m of modeResults) m.V0 = null;
 
         // Accuracy report: if refinement ended without a passing certificate
         // (iteration cap, node budget), measure the final grid once so the user gets

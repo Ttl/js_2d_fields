@@ -1244,7 +1244,9 @@ function getParams() {
         // and share links (which diff against DEFAULT_SETTINGS.tolerance) unchanged.
         tolerance: getInputValueUnitless('inp_tolerance') / 100,
         min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
-        estimate_error: document.getElementById('chk_estimate_error').checked,
+        // 1/0 like every other checkbox here and in getUISettings, the same key must not
+        // be a boolean in one params object and a number in the other.
+        estimate_error: document.getElementById('chk_estimate_error').checked ? 1 : 0,
         max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
         // Surface roughness parameter
         rq: getInputValue('inp_rq'),

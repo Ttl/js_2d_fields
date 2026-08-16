@@ -1,4 +1,4 @@
-import { FieldSolver2D, CONSTANTS, diff } from './field_solver.js';
+import { FieldSolver2D } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
 
 class MicrostripSolver extends FieldSolver2D {

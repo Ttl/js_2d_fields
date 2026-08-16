@@ -1230,7 +1230,10 @@ export class TriBackend {
                         ? `about ${pct(cert.err)}%, within the tolerance but without the ` +
                           `×${cert.safety ?? 1.5} margin needed to certify it`
                         : `about ${pct(cert.err)}%`;
-                this._certWarn = { type: 'accuracy', mode: 'all', message:
+                // `reason` matches the rectilinear backend's certificate warning: machine
+                // consumers (the fuzzer's R-gate relaxation, the UI's warning dedup) key
+                // on it to tell a certificate note from a loss-accuracy note.
+                this._certWarn = { type: 'accuracy', reason: 'certificate', mode: 'all', message:
                     `Full-wave mesh refinement could not verify the requested tolerance ` +
                     `(${pct(refTol)}%): estimated remaining error is ${estStr}. ` +
                     `Increase Max Nodes / Max Iterations, or relax Tolerance.` };
@@ -1274,6 +1277,13 @@ export class TriBackend {
     // The pass decision applies certifySafety (x1.5) on top of the estimate: the static
     // certificate does not see the eigensolve eps_eff part of the reported error.
     // `err` stays the un-inflated best estimate (it is what warnings report).
+    //
+    // Result shape is the same as FieldSolver2D._certifyStatic so the UI and tests can
+    // read either backend's `solver.certification` the same way:
+    //   { pass, err, d1, r, rSource, levels, safety, preAsymptotic?, <size> }
+    // rSource is 'measured' (level-2 ratio), 'fallback' (the r = 0.5
+    // assumption) or null (no r, the d1-alone failure branch). The size field is
+    // deliberately named in each backend's own unit (tris or nodes).
     _uniformBisect(mesh) {
         const refined = refineTriMesh(mesh, new Uint8Array(mesh.nTris).fill(1));
         refined.condRect = this.condRect;
@@ -1315,19 +1325,21 @@ export class TriBackend {
         const q1 = this._staticEnergies(m1);
         const d1 = maxDiff(q0, q1);
         const base = { tris: mesh.nTris, d1, safety };
-        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, levels: 1 };
-        if (d1 * safety >= tol) return { ...base, pass: false, err: d1, r: null, levels: 1 };
-        let r = 0.5, levels = 1;
+        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, rSource: null, levels: 1 };
+        if (d1 * safety >= tol)
+            return { ...base, pass: false, err: d1, r: null, rSource: null, levels: 1 };
+        let r = 0.5, levels = 1, rSource = 'fallback';
         if (m1.nTris * GROW <= cap) {
             const m2 = this._uniformBisect(m1);
             const q2 = this._staticEnergies(m2);
             r = maxDiff(q1, q2) / d1;
             levels = 2;
+            rSource = 'measured';
             if (r >= rMax)
-                return { ...base, pass: false, err: d1, r, levels, preAsymptotic: true };
+                return { ...base, pass: false, err: d1, r, rSource, levels, preAsymptotic: true };
         }
         const err = d1 / (1 - Math.min(r, rMax));
-        return { ...base, pass: err * safety < tol, err, r, levels };
+        return { ...base, pass: err * safety < tol, err, r, rSource, levels };
     }
 
     // Rectangular waveguide path
