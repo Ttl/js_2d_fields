@@ -1256,8 +1256,10 @@ export class FieldSolver2D {
             const lx = Math.log(delta / this.t / 0.4);
             transitionCal = 1 - 0.07 * Math.exp(-(lx * lx) / (2 * 0.45 * 0.45));
             const tMin = this.t_gnd > 0 ? Math.min(this.t, this.t_gnd) : this.t;
+            // reason distinguishes loss-accuracy notes from certificate notes for
+            // machine consumers (the fuzzer relaxes its R gate on loss reasons).
             this._skinTransitionWarn = (delta > 0.5 * tMin)
-                ? { type: 'accuracy', mode: 'all', message:
+                ? { type: 'accuracy', reason: 'skin-transition', mode: 'all', message:
                     `Conductor loss and internal-inductance accuracy is reduced in the DC-skin ` +
                     `transition (skin depth ${(delta * 1e6).toFixed(1)} µm vs conductor thickness ` +
                     `${(tMin * 1e6).toFixed(1)} µm). The full-wave solver resolves the ` +
@@ -2476,7 +2478,7 @@ export class FieldSolver2D {
                         ? `about ${pct(cert.err)}%, within the tolerance but without the ` +
                           `×${cert.safety ?? 1.5} margin needed to certify it`
                         : `about ${pct(cert.err)}%`;
-                this._certWarn = { type: 'accuracy', mode: 'all', message:
+                this._certWarn = { type: 'accuracy', reason: 'certificate', mode: 'all', message:
                     `Quasi-static mesh refinement could not verify the requested tolerance ` +
                     `(${pct(energy_tol)}%): estimated remaining error is ${estStr}. ` +
                     `Increase Max Nodes / Max Iterations, or relax Tolerance.` };

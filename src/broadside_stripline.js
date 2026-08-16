@@ -116,9 +116,12 @@ class BroadsideStriplineSolver extends FieldSolver2D {
         // rows with w/facing-gap > 1.75 read R +10 to +45% high (growing with
         // coupling). The full trace width is deliberately used even with
         // x_offset, the worst measured case had zero vertical overlap.
+        // Threshold lowered 1.75 -> 1.5 after a fuzzer sweep. The bias
+        // already reaches +21% at w/gap 1.68 and +26% at 1.70
+        // (seeds 1/4), while 1.5-1.6 rows sit ~5-11% (conservative warns).
         const facing_gap = this.h_middle - 2 * Math.abs(this.t);
-        this._proximityWarn = (facing_gap > 0 && this.w / facing_gap >= 1.75)
-            ? { type: 'accuracy', mode: 'all', message:
+        this._proximityWarn = (facing_gap > 0 && this.w / facing_gap >= 1.5)
+            ? { type: 'accuracy', reason: 'broadside-proximity', mode: 'all', message:
                 `Strongly coupled broadside pair (trace width ${(this.w * 1e6).toFixed(0)} µm vs ` +
                 `${(facing_gap * 1e6).toFixed(0)} µm facing gap): conductor loss accuracy is reduced. ` +
                 `R typically reads up to 50% high in this regime. The full-wave solver models the ` +

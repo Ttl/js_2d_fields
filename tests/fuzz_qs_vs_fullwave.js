@@ -4,32 +4,42 @@
 // features, solves each with BOTH backends, and flags:
 //   • large discrepancies in the field-driven quantities (Z0, eps_eff, C) the two
 //     methods should agree on,
-//   • geometries whose triangular mesh comes out poor (sliver Qmax, degenerate, NaN),
+//   • geometries whose triangular mesh comes out structurally poor (degenerate/NaN,
+//     constraint crossings, missing constraint edges, extreme area ratio, >5% bad
+//     triangles, or an extreme Q>2000 sliver),
 //   • geometries that make ONE backend throw while the other succeeds (a backend bug).
 //
 // Coverage:
 //   line types — microstrip, diff_microstrip, stripline, diff_stripline,
 //                gcpw, diff_gcpw, broadside_stripline
 //   features   — solder mask (incl. coplanar mask on gcpw; er 2–10, thicknesses
-//                10–30 µm), top dielectric (material from the substrate range),
-//                ground cutout, enclosure (closed gnd box), surface plating
-//                (σ 1e6–6e7 independent of the bulk — both better- and
-//                worse-conducting; thickness 1–8 µm), surface roughness (rq up
-//                to 3 µm), differential gaps, causal (Djordjevic-Sarkar)
-//                dielectric dispersion
+//                10–30 µm, coverage style: full conformal / trace top exposed /
+//                no side coverage / trace-only), top dielectric (material from
+//                the substrate range), ground cutout, enclosure (closed gnd box),
+//                surface plating (σ 1e6–6e7 independent of the bulk — both
+//                better- and worse-conducting; thickness 1–8 µm; random face
+//                combo top/sides/bottom; plating rq up to 2 µm), surface
+//                roughness (rq up to 3 µm), differential gaps, causal
+//                (Djordjevic-Sarkar) dielectric dispersion
 //   materials  — bulk conductor σ 1e6–6e7 S/m; substrate er 2.2–10 (broadside
 //                layers 2.2–6), tanδ 0.001–0.02
 //   modes      — single-ended lines compare the one quasi-TEM mode; differential pairs
 //                compare BOTH the odd and the even mode (the worst of the two is flagged)
 //
-// Loss (R / alpha_c) is intentionally NOT compared — the two methods model conductor
-// loss differently (full-wave MQS captures proximity the quasi-static perturbation
-// under-predicts), so they legitimately diverge there. Geometries that BOTH backends
-// reject (invalid random combos) are skipped, not flagged.
+// Conductor loss (R per mode) IS compared (since 2026-08-16, after the multi-drive-MQS
+// broadside reference and the skin-transition/plating/GCPW loss fixes): gate R_THRESH
+// (default 25%), RELAXED to R_RELAX (default 60%) when a solve carries a loss-accuracy
+// note — QS reason 'skin-transition' (δ deep into the conductor thickness) or
+// 'broadside-proximity' (strongly coupled pair, QS reads up to ~50% high), or a tri
+// mqs-* fallback warning (reference degraded to perturbation). Certificate warnings do
+// NOT relax the gate (they describe C, not R). Geometries that BOTH backends reject
+// (invalid random combos) are skipped, not flagged.
 //
-// Usage:   node tests/fuzz_qs_vs_fullwave.js [N] [seed] [threshold%]
-//   e.g.   node tests/fuzz_qs_vs_fullwave.js 40 1 15
-// Reproduce a flagged case: rerun with the same N and seed (generation is deterministic).
+// Usage:   node tests/fuzz_qs_vs_fullwave.js [N] [seed] [threshold%] [R-threshold%]
+//   e.g.   node tests/fuzz_qs_vs_fullwave.js 40 1 15 25
+// Reproduce a flagged case: rerun with the same N and seed (generation is deterministic;
+// NOTE the 2026-08-16 generator extension shifted every seed's stream — older seed/case
+// references, incl. the ones in docs/backend_agreement_handover.md, no longer reproduce).
 
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
@@ -37,7 +47,28 @@ import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
 const N      = parseInt(process.argv[2]) || 40;
 const SEED   = process.argv[3] !== undefined ? parseInt(process.argv[3]) : 1;
 const THRESH = (parseFloat(process.argv[4]) || 15) / 100;
-const BAD_Q  = 100;
+// Bad-mesh gate: structural errors (degenerate/NaN/constraint crossings/missing
+// constraint edges/extreme area ratio), systemic quality collapse (>5% of
+// triangles with Q>5 — checkMeshQuality's own warning threshold), or a single
+// extreme sliver. The singleton cap was 100 and is now 2000: coarse-budget
+// meshes on wide-domain thin-layer geometries (wide trace + solder mask)
+// legitimately stretch far-field cap triangles to Q ~120-300 inside the 10-25 µm
+// mask/trace bands, where the field is ~0 — verified benign (C/Z0 within 0.06%,
+// R within 0.5% of a 60k sliver-free mesh, all structural checks clean) and
+// self-healing with budget. The structural signals above are the ones a genuine
+// mesh breakdown trips.
+const BAD_Q  = 2000;
+// Conductor-loss (R) gates: base, and relaxed for solves carrying a
+// loss-accuracy note (see header). Calibrated 2026-08-16 on seeds 1-13
+// (360 specs, app settings): unwarned median ~6% / max 17.2% (a low-coupling
+// broadside; the sweep found the broadside bias crossing 26% at w/gap 1.70,
+// which is why the proximity-warning threshold sits at 1.5); warned max 47.8%
+// (deep-skin-transition plated stripline — QS ~2× high — and strongly-coupled
+// broadside). New unwarned rows above 25% are worth investigating, not just
+// gate-bumping: they'd extend the known bias envelope (issue-9 pour faces,
+// VACUUM_LOSS_CAL tilt, broadside proximity below the warning threshold).
+const R_THRESH = (parseFloat(process.argv[5]) || 25) / 100;
+const R_RELAX  = 0.60;
 
 // --- Seeded PRNG (deterministic, reproducible) ---
 export function createRng(seed) {
@@ -68,6 +99,14 @@ export function randomSpec(rng) {
         if (!rng.bool(0.2)) return false;
         spec.plating_sigma = rng.logf(1e6, 6e7);
         spec.plating_t = rng.logf(1e-6, 8e-6);
+        // Face combo (top/sides/bottom independent, at least one guaranteed) and
+        // plated-surface roughness — both were fixed (top+sides, rq 0) before
+        // 2026-08-16; the app exposes all of them.
+        spec.plating_top = rng.bool(0.8);
+        spec.plating_sides = rng.bool(0.7);
+        spec.plating_bottom = rng.bool(0.25);
+        if (!spec.plating_top && !spec.plating_sides && !spec.plating_bottom) spec.plating_top = true;
+        spec.plating_rq = rng.bool(0.4) ? rng.logf(0.1e-6, 2e-6) : 0;
         return true;
     };
     // Causal (Djordjevic-Sarkar) dielectric dispersion — applies to every line type and to
@@ -123,6 +162,14 @@ export function randomSpec(rng) {
             spec.sm_er = rng.f(2, 10); spec.sm_tand = rng.f(0.001, 0.03);
             spec.sm_t_sub = rng.f(10e-6, 30e-6); spec.sm_t_trace = rng.f(10e-6, 30e-6);
             spec.sm_t_side = rng.f(10e-6, 30e-6);
+            // Coverage style (was always full conformal): half the time zero one
+            // component — trace top exposed, no side coverage, or trace-only
+            // (bare substrate). Both backends verified to handle the degenerate
+            // (zero-thickness) mask rects.
+            spec.sm_style = rng.pick(['full', 'full', 'full', 'no-trace-top', 'no-sides', 'trace-only']);
+            if (spec.sm_style === 'no-trace-top') spec.sm_t_trace = 0;
+            else if (spec.sm_style === 'no-sides') spec.sm_t_side = 0;
+            else if (spec.sm_style === 'trace-only') spec.sm_t_sub = 0;
         }
     }
     if (tl === 'microstrip' || tl === 'diff_microstrip') {
@@ -175,7 +222,8 @@ function addCommon(o, spec) {
         const bot = o.boundaries ? o.boundaries[3] : 'gnd';
         o.boundaries = [lr, lr, top, bot];
     }
-    if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
+    if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: spec.plating_rq ?? 0,
+        top: spec.plating_top ?? true, sides: spec.plating_sides ?? true, bottom: spec.plating_bottom ?? false, thick_corners: true };
 }
 
 export function buildSolver(spec, backend) {
@@ -189,7 +237,8 @@ export function buildSolver(spec, backend) {
             nx: 30, ny: 30,   // coarse initial grid (matches the app) so adaptive refinement has headroom
         };
         if (spec.use_enclosure) { o.enclosure_width = spec.enclosure_width; if (spec.use_side_gnd) o.boundaries = ['gnd', 'gnd', 'gnd', 'gnd']; }
-        if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
+        if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: spec.plating_rq ?? 0,
+        top: spec.plating_top ?? true, sides: spec.plating_sides ?? true, bottom: spec.plating_bottom ?? false, thick_corners: true };
         const s = new BroadsideStriplineSolver(o);
         s.use_causal_materials = !!spec.use_causal;
         return s;
@@ -234,10 +283,18 @@ async function solveOn(spec, backend) {
         // Compare every mode the backend returns: single-ended → [single]; differential →
         // [odd, even], in that fixed order from the shared FieldSolver2D path on both backends.
         return {
-            modes: r.modes.map(m => ({ Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C, mode: m.mode })),
+            modes: r.modes.map(m => ({ Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C, R: m.RLGC.R, mode: m.mode })),
+            // Warning tags for the R-gate relaxation: QS loss-accuracy reasons
+            // ('skin-transition' / 'broadside-proximity') and tri fallback types.
+            warns: (r.warnings || []).map(w => ({ type: w.type, reason: w.reason || null })),
             maxQ: s.meshQuality ? s.meshQuality.maxQ : null,
             degenerate: s.meshQuality ? s.meshQuality.degenerateCount : 0,
             nan: s.meshQuality ? s.meshQuality.nanNodes : 0,
+            // Structural quality signals for the bad-mesh gate (see BAD_Q note).
+            crossings: s.meshQuality ? s.meshQuality.crossings : 0,
+            missingEdges: s.meshQuality ? s.meshQuality.missingEdges : 0,
+            areaRatio: s.meshQuality ? s.meshQuality.areaRatio : 0,
+            badFraction: s.meshQuality ? s.meshQuality.badFraction : 0,
         };
     } catch (e) {
         return { error: e.message || String(e) };
@@ -254,7 +311,15 @@ function fmtSpec(spec) {
     s += ` sig=${((spec.sigma ?? spec.bs_sigma) / 1e6).toFixed(1)}e6 f=${(spec.freq / 1e9).toFixed(2)}GHz`;
     if (spec.trace_spacing) s += ` gap=${u(spec.trace_spacing)}mm`;
     const feats = ['use_sm', 'use_top_diel', 'use_gnd_cut', 'use_enclosure', 'use_side_gnd', 'use_top_gnd', 'use_plating', 'use_causal']
-        .filter(k => spec[k]).map(k => k.replace('use_', ''));
+        .filter(k => spec[k]).map(k => {
+            if (k === 'use_sm' && spec.sm_style && spec.sm_style !== 'full') return `sm:${spec.sm_style}`;
+            if (k === 'use_plating') {
+                const faces = [spec.plating_top && 't', spec.plating_sides && 's', spec.plating_bottom && 'b']
+                    .filter(Boolean).join('');
+                return `plating:${faces || 'ts'}${spec.plating_rq ? '+rq' : ''}`;
+            }
+            return k.replace('use_', '');
+        });
     if (feats.length) s += ` [${feats.join(',')}]`;
     return s;
 }
@@ -265,7 +330,7 @@ async function main() {
     console.log(`\n### Fuzz QS vs full-wave — N=${N} seed=${SEED} flag>${(THRESH * 100).toFixed(0)}% Qmax>${BAD_Q} ###`);
     console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
     const rng = createRng(SEED);
-    const flagged = { discrepancy: [], badMesh: [], crash: [] };
+    const flagged = { discrepancy: [], loss: [], badMesh: [], crash: [] };
     let ok = 0, skipped = 0, rejected = 0;
     const byType = {};
     for (let i = 0; i < N; i++) {
@@ -292,10 +357,18 @@ async function main() {
             continue;
         }
 
-        const badMesh = (fw.maxQ != null && fw.maxQ > BAD_Q) || fw.degenerate > 0 || fw.nan > 0;
+        // areaRatio is deliberately NOT gated: adaptive skin-band refinement
+        // routinely produces max/min element-area ratios of 1e6-1e7 (µm-scale
+        // skin elements vs mm-scale far field) on perfectly healthy meshes —
+        // measured on cases with Qmax 3-6 and badFraction ~0 — and the direct
+        // factorization handles it; the ratio separates nothing here.
+        const badMesh = (fw.maxQ != null && fw.maxQ > BAD_Q) || fw.degenerate > 0 || fw.nan > 0
+            || fw.crossings > 0 || fw.missingEdges > 0 || fw.badFraction > 0.05;
         if (badMesh) {
             flagged.badMesh.push({ spec, maxQ: fw.maxQ });
-            console.log(`[${i}] ✗ BAD MESH (Qmax=${fw.maxQ?.toFixed(0)} degen=${fw.degenerate} nan=${fw.nan})\n      ${fmtSpec(spec)}`);
+            console.log(`[${i}] ✗ BAD MESH (Qmax=${fw.maxQ?.toFixed(0)} degen=${fw.degenerate} nan=${fw.nan} ` +
+                `cross=${fw.crossings} missEdge=${fw.missingEdges} areaRatio=${fw.areaRatio?.toExponential(1)} ` +
+                `badFrac=${(fw.badFraction * 100).toFixed(1)}%)\n      ${fmtSpec(spec)}`);
         }
 
         // Flag on the field-driven quantities Z0 and C only. eps_eff is reported with
@@ -323,16 +396,41 @@ async function main() {
                 `      qs: Z0=${worst.q.Z0.toFixed(2)} eps=${worst.q.eps_eff.toFixed(3)} C=${(worst.q.C * 1e12).toFixed(1)}pF | ` +
                 `fw: Z0=${worst.w.Z0.toFixed(2)} eps=${worst.w.eps_eff.toFixed(3)} C=${(worst.w.C * 1e12).toFixed(1)}pF`);
         }
-        if (!badMesh && (!worst || worst.dMax <= THRESH)) ok++;
+
+        // Conductor-loss gate (R per mode). Relaxed when either backend flagged
+        // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
+        // 'broadside-proximity', or the tri backend downgrading MQS to
+        // perturbation (mqs-* fallback warnings). Certificate warnings describe
+        // C, not R, and do NOT relax the gate.
+        const lossRelaxed =
+            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity')
+            || fw.warns.some(w => /^mqs-/.test(w.type));
+        const rGate = lossRelaxed ? R_RELAX : R_THRESH;
+        let worstR = null;
+        for (let mi = 0; mi < nModes; mi++) {
+            const q = qs.modes[mi], w = fw.modes[mi];
+            if (!(q.R > 0) || !(w.R > 0)) continue;
+            const dR = relDiff(q.R, w.R);
+            if (!worstR || dR > worstR.dR) worstR = { mode: q.mode, dR, q, w };
+        }
+        if (worstR && worstR.dR > rGate) {
+            flagged.loss.push({ i, spec, mode: worstR.mode, dR: worstR.dR, relaxed: lossRelaxed });
+            const tag = nModes > 1 ? ` [${worstR.mode}]` : '';
+            console.log(`[${i}] ✗ LOSS DISCREPANCY ${(worstR.dR * 100).toFixed(0)}%${tag}` +
+                `${lossRelaxed ? ' (relaxed gate)' : ''}\n` +
+                `      ${fmtSpec(spec)}\n` +
+                `      R qs=${worstR.q.R.toFixed(2)} vs fw=${worstR.w.R.toFixed(2)} Ω/m`);
+        }
+        if (!badMesh && (!worst || worst.dMax <= THRESH) && (!worstR || worstR.dR <= rGate)) ok++;
     }
 
     console.log(`\n${'='.repeat(72)}`);
     console.log(`coverage: ${Object.entries(byType).map(([k, v]) => `${k}:${v}`).join('  ')}`);
     console.log(`SUMMARY: ${ok}/${N} clean | ${flagged.discrepancy.length} discrepancy | ` +
-        `${flagged.badMesh.length} bad-mesh | ` +
+        `${flagged.loss.length} loss-discrepancy | ${flagged.badMesh.length} bad-mesh | ` +
         `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid)`);
     console.log(`${'='.repeat(72)}`);
-    if (flagged.discrepancy.length || flagged.badMesh.length || flagged.crash.length) process.exitCode = 1;
+    if (flagged.discrepancy.length || flagged.loss.length || flagged.badMesh.length || flagged.crash.length) process.exitCode = 1;
 }
 
 import { pathToFileURL } from 'url';
