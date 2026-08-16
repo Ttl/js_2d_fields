@@ -3,9 +3,7 @@ import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usab
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView } from './plot.js';
-import { InterpolatingSweep } from './interpolating_sweep.js';
-import { buildSolverFromParams as _buildSolverFromParams, platingOptions,
-    FULLWAVE_ONLY_TYPES } from './solver_factory.js';
+import { buildSolverFromParams as _buildSolverFromParams, platingOptions } from './solver_factory.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -704,6 +702,14 @@ function log(msg) {
     else setTimeout(_flushLog, 100);
 }
 
+// Going to the background does not cancel an already-scheduled rAF, it just
+// stops it from ever firing so a flush scheduled while visible would strand the
+// queue until the tab came back. Drain it on the transition. Lines queued from
+// then on pick the timer path above by themselves.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && _logFlushScheduled) _flushLog();
+});
+
 // Solve worker client
 //
 // Every solve runs in solve_worker.js so a multi-second WASM call cannot freeze the tab.
@@ -716,11 +722,19 @@ function log(msg) {
 let _worker = null, _workerJobId = 0;
 const _workerJobs = new Map();   // id -> { resolve, reject, handlers }
 
+// Fail every outstanding job. Used on the worker-level failures that can never produce a
+// 'done'/'error' reply of their own. Without it the UI would sit in "solving" forever.
+function failAllJobs(message) {
+    const err = new Error(message);
+    for (const [id, job] of _workerJobs) { _workerJobs.delete(id); job.reject(err); }
+}
+
 function getWorker() {
     if (_worker) return _worker;
     // The literal "solve_worker.js" is rewritten by build.sh to add a content hash. Keep
     // it a plain string so that sed can find it.
-    _worker = new Worker(new URL("solve_worker.js", import.meta.url), { type: 'module' });
+    const w = new Worker(new URL("solve_worker.js", import.meta.url), { type: 'module' });
+    _worker = w;
     _worker.onmessage = (e) => {
         const m = e.data;
         // Log lines are printed regardless of whether the job is still being awaited (a
@@ -736,10 +750,18 @@ function getWorker() {
     _worker.onerror = (e) => {
         // A worker-level failure (module load error, uncaught throw) never resolves the
         // outstanding job, so fail them all rather than hanging the UI in "solving".
-        const err = new Error(e.message || 'Solver worker failed');
-        for (const [id, job] of _workerJobs) { _workerJobs.delete(id); job.reject(err); }
-        // The instance is unusable after an error, drop it so the next solve rebuilds.
-        _worker = null;
+        failAllJobs(e.message || 'Solver worker failed');
+        // Treat the instance as unusable and let the next solve build a fresh one. It has
+        // to be terminated explicitly: dropping the reference does not stop a worker, and
+        // this one is holding a multi-hundred-MB WASM heap.
+        w.terminate();
+        if (_worker === w) _worker = null;
+    };
+    _worker.onmessageerror = () => {
+        // A reply that could not be deserialized (structured clone refused something in a
+        // result). The job it belonged to is unidentifiable — its id was in the message —
+        // so nothing can ever settle it. The worker itself is still healthy, so keep it.
+        failAllJobs('Solver worker sent a result that could not be read.');
     };
     return _worker;
 }
@@ -1110,6 +1132,10 @@ async function runModesSolve() {
     // S-parameters all stay intact).
     modesSolver = buildSolverFromParams(getParams());
     if (!modesSolver) { setModesStatus('Geometry is invalid — check parameters.'); return; }
+    // Stamp what is being solved now, not what the sidebar reads when the worker
+    // returns: the UI stays interactive during the eigensolve, so an edit made while it
+    // runs must still trip the staleness notice.
+    const solvedGeometry = getGeometryHash();
 
     const btn = document.getElementById('btn-solve-modes');
     isSolvingModes = true;
@@ -1149,7 +1175,7 @@ async function runModesSolve() {
         modesResult = result;
         // Record what the displayed modes were solved at, so the staleness notice can flag
         // a later geometry/frequency change.
-        lastModesGeometry = getGeometryHash();
+        lastModesGeometry = solvedGeometry;
         lastModesFrequency = freq;
         updateModesNotice();
         if (result.error) {
@@ -1252,7 +1278,10 @@ async function selectMode(idx, resetView = false) {
             log('Mode field fetch failed: ' + (e.message || e));
             grid = null;
         }
-        modesFieldCache.set(idx, grid);
+        // Cache successes only. Remembering a failure would leave the row permanently
+        // blank with no way to retry short of re-solving. Re-asking on the next click
+        // costs one worker round trip and lets a transient failure heal itself.
+        if (grid) modesFieldCache.set(idx, grid);
         // A click on another row while this one was in flight wins. Do not paint over it.
         if (modesSelectedIdx !== idx) return;
     }
@@ -1481,6 +1510,17 @@ function updateGeometry() {
 // its OWN independent solver (modesSolver), so solving modes never disturbs the main
 // solve's results. Returns the solver, or null if the parameters are invalid.
 async function runSimulation() {
+    // One solve at a time. The Modes tab already guards itself this way
+    // (runModesSolve). Both can be in flight at once: the worker would
+    // serialize them behind its job queue while the button already read "Stop"
+    // for a job that had not started, the two solves would fight over the
+    // single heartbeat element, and Stop, one worker-wide flag, could land on
+    // the wrong job.
+    if (isSimulating || isSweeping || isSolvingModes) {
+        log('Cannot start a solve while another solve is running.');
+        return;
+    }
+
     // Check if solver is valid before attempting to run simulation
     if (!solver) {
         log("ERROR: Cannot run simulation - solver initialization failed due to invalid parameters.");
@@ -1501,6 +1541,16 @@ async function runSimulation() {
             return;
         }
     }
+    // Calculate hash at the start of the solve. UI can be edited during the
+    // solve.
+    const solvedGeometry = getGeometryHash();
+    const solvedFrequency = getFrequencyHash();
+    // The view model these fields belong to. A mid-solve edit runs
+    // updateGeometry(), which replaces `solver` with one describing a different
+    // cross-section. Identity is the exact test: updateGeometry() always
+    // assigns a fresh object.
+    const solvedSolver = solver;
+
     const btn = document.getElementById('btn_solve');
     const pbar = document.getElementById('progress_bar');
     const ptext = document.getElementById('progress_text');
@@ -1533,6 +1583,10 @@ async function runSimulation() {
             `${(solver.fc2 / 1e9).toFixed(3)} GHz).`);
         for (const w of solver.waveguideWarnings(Math.max(...frequencies))) log(`⚠ Warning: ${w}`);
     }
+
+    // How the run ended, so the finally block can report it honestly instead of
+    // announcing "Done" over a failure or a cancellation.
+    let outcome = 'error';
 
     try {
         // The whole solve pipeline (mesh refinement, causal recompute, interpolating or
@@ -1578,25 +1632,21 @@ async function runSimulation() {
             // Live plots while the sweep runs. Redrawing is cheap next to a solve, and
             // now that the solve is off-thread these actually paint.
             partial: (m) => {
-                if (m.fields) applyFields(solver, m.fields);
+                if (m.fields && solver === solvedSolver) { applyFields(solver, m.fields); draw(); }
                 if (m.sweepResults) {
                     frequencySweepResults = reviveSweep(m.sweepResults);
                     drawResultsPlot();
                     drawSParamPlot();
                 }
-                if (m.fields) draw();
             },
         });
 
-        applyFields(solver, out.fields);
-        solver.certification = out.meta.certification;
-        solver.meshQuality = out.meta.meshQuality;
-        solver.modeWarnings = out.meta.modeWarnings;
+        if (solver === solvedSolver) applyFields(solver, out.fields);
         logModeWarnings(out.sweepWarnings);
 
         if (out.stopped) {
+            outcome = 'stopped';
             log("Simulation stopped by user");
-            pbar.style.width = "0%";
             return;
         }
 
@@ -1680,10 +1730,12 @@ async function runSimulation() {
         drawResultsPlot();
         drawSParamPlot();
 
-        // Save geometry and frequency hash for change tracking
-        lastSolvedGeometry = getGeometryHash();
-        lastSolvedFrequency = getFrequencyHash();
+        // Save geometry and frequency hash for change tracking. Both were sampled when
+        // the solve started, so a mid-solve edit correctly reads as a change.
+        lastSolvedGeometry = solvedGeometry;
+        lastSolvedFrequency = solvedFrequency;
         updateResultNotices();
+        outcome = 'done';
 
     } catch (e) {
         console.error(e);
@@ -1692,9 +1744,13 @@ async function runSimulation() {
         // Restore button to "Solve" mode
         btn.textContent = 'Solve';
         btn.classList.remove('stop-mode');
-        pbar.style.width = '100%';
-        // Keep the total on screen rather than blanking it.
-        heartbeatStop(`Done in ${_hbFormat(Date.now() - _hbStart)}`);
+        // A full bar and a "Done" only for a run that actually produced results; a
+        // cancelled or failed solve rewinds the bar instead of claiming completion.
+        pbar.style.width = outcome === 'done' ? '100%' : '0%';
+        // Keep the elapsed total on screen rather than blanking it.
+        const elapsed = _hbFormat(Date.now() - _hbStart);
+        heartbeatStop(outcome === 'done' ? `Done in ${elapsed}`
+                    : outcome === 'stopped' ? `Stopped after ${elapsed}` : '');
         isSimulating = false;
     }
 }
@@ -2011,7 +2067,10 @@ function bindEvents() {
 
     // Parameter sweep events
     document.getElementById('btn-run-sweep').addEventListener('click', () => {
-        if (isSweeping || isSimulating) { log('Cannot sweep while simulation is running.'); return; }
+        if (isSweeping || isSimulating || isSolvingModes) {
+            log('Cannot sweep while another solve is running.');
+            return;
+        }
         runParameterSweep();
     });
     document.getElementById('btn-stop-sweep').addEventListener('click', () => {

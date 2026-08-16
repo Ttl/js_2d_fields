@@ -81,13 +81,12 @@ function fieldPayload(solver) {
     };
 }
 
-// Metadata the main thread cannot derive from its own (never-solved) view model.
+// The accuracy notes the main thread cannot derive from its own (never-solved) view
+// model. Reported once, from the 'meshDone' message, at the point in the log where the
+// main-thread version used to print them.
 const solveMeta = (solver) => ({
     certification: solver.certification || null,
     meshQuality: solver.meshQuality || null,
-    modeWarnings: solver.modeWarnings || null,
-    nx: solver.x ? solver.x.length : null,
-    ny: solver.y ? solver.y.length : null,
 });
 
 function makeSolver(params) {
@@ -150,7 +149,7 @@ async function jobSimulate({ params, frequencies, opts }) {
     post({ id: currentId, type: 'meshDone', meta: solveMeta(solver),
            warnings: (results && results.warnings) || solver.modeWarnings || null });
 
-    if (stopRequested) return { stopped: true, sweepResults: [], fields: null, meta: solveMeta(solver) };
+    if (stopRequested) return { stopped: true, sweepResults: [], fields: null };
 
     const cachedResults = results;
     if (solver.use_causal_materials) {
@@ -240,7 +239,19 @@ async function jobSimulate({ params, frequencies, opts }) {
         for (let i = 0; i < frequencies.length; i++) {
             const freq = frequencies[i];
             if (freq === maxFreq) continue;
-            if (stopRequested) { log('Simulation stopped by user'); break; }
+            // Hand the worker's event loop a turn so the pending `stop` message
+            // is actually delivered. `stop` arrives as a message and nothing in
+            // this loop yields to the task queue on its own: the FDM backend's
+            // only yield lives inside solve_adaptive, and TriBackend.solveAt is
+            // synchronous.  Without this the flag is not read until the whole
+            // sweep has finished, and Stop silently does nothing. (The
+            // interpolating branch is safe sweep.run yields once per exact
+            // solve.)
+            await new Promise(r => setTimeout(r, 0));
+            // No log line here: the main thread prints "Simulation stopped by
+            // user" for every stopped job, from the `stopped` flag in the
+            // reply.
+            if (stopRequested) break;
 
             const result = await solver.computeAtFrequency(freq, cachedResults);
             if (result && result.warnings)
@@ -266,7 +277,6 @@ async function jobSimulate({ params, frequencies, opts }) {
         // rebuilt from the interpolant, not from a full solve).
         meshResult: stripResult(results),
         fields: fieldPayload(solver),
-        meta: solveMeta(solver),
         sweepWarnings,
     };
 }
