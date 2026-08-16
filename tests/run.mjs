@@ -91,10 +91,21 @@ const TIERS = {
 // ---- CLI ----
 const argv = process.argv.slice(2);
 let tier = 'fast', jobsArg = null;
+// A malformed -j must fail. parseInt(undefined) is NaN and a NaN job count
+// silently produced zero workers.
+const parseJobs = (v, flag) => {
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || n < 1) {
+        console.error(`Invalid ${flag} value "${v ?? ''}" — expected a positive integer.`);
+        process.exit(2);
+    }
+    return n;
+};
 for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '-j' || a === '--jobs') jobsArg = parseInt(argv[++i]);
-    else if (/^-j\d+$/.test(a)) jobsArg = parseInt(a.slice(2));
+    if (a === '-j' || a === '--jobs') jobsArg = parseJobs(argv[++i], a);
+    else if (/^-j/.test(a)) jobsArg = parseJobs(a.slice(2), '-j');
+    else if (/^-/.test(a)) { console.error(`Unknown option "${a}".`); process.exit(2); }
     else tier = a;
 }
 const tests = tier === 'all' ? [...TIERS.fast, ...TIERS.slow] : TIERS[tier];

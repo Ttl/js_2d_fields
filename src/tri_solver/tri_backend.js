@@ -170,8 +170,8 @@ function effectiveSurface(solver) {
 // gradient impedance matching the FDM backend's per-face model and bare faces
 // and grounded walls use the base metal. Thick-corner plating (geometric wrap
 // of side plating onto the bottom face within one plating thickness of each
-// corner) and the top-only side coverage are modeled position-aware via zAt
-// the same rule as the FDM getZsurf.
+// corner) is additionally modeled position-aware via zAt. See zAt for FDM
+// getZsurf differences.
 //
 // Two consumers, sharing makePlatingZs:
 //   * buildSurfaceGroups (pertrubation path) groups loss edges by surface
@@ -219,8 +219,14 @@ function makePlatingZs(solver, condRect, freq) {
     // of each corner (sides plated, bottom not, thick_corners on). Single-layer
     // plating σ with the bulk rq (the surface prep is the original bottom).
     //
-    // The FDM's other coverage rule, top-only plating extending down the sides by
-    // one thickness, is not implemented.
+    // Two deliberate differences from the FDM getZsurf:
+    //   * The FDM's other coverage rule: top-only plating extending down the
+    //     sides by one thickness is not implemented here.
+    //   * The wrap is a hard step at the query point (edge midpoint / face
+    //     midpoint), where the FDM blends fractional cell coverage. Under a
+    //     plating-thickness sweep the tri answer therefore steps where the FDM
+    //     ramps, the two agree once the wrap is resolved by more than one
+    //     element, which the skin-band refinement gives at the corners.
     const zAt = (ri, face, x, y) => {
         const pl = roles[ri] && roles[ri].plating;
         const r = rects[ri];
@@ -947,8 +953,17 @@ export class TriBackend {
         // with elements bigger than the trace. Signal resolution is what the
         // solved quantities live on, so it is the last thing the budget may
         // take.
+        //
+        // The two mechanisms get separate pass budgets. Sharing one counter let a
+        // geometry spend the whole budget relaxing grounds and then hard-stop with
+        // an over-budget mesh, never having coarsened globally at all and maxTris
+        // is a memory guard not a preference. Worst case is now
+        // COARSEN_MAX_PASSES + GND_MAX_PASSES + 1 gmsh runs, and a geometry with no
+        // relaxable ground curves builds exactly the same meshes as before.
+        const COARSEN_MAX_PASSES = 4, GND_MAX_PASSES = 3;
         let gndScale = 1, gndStalled = false, gndPrevN = null;
-        for (let attempt = 0; ; attempt++) {
+        let coarsenPasses = 0, gndPasses = 0;
+        for (;;) {
             mesh = buildOccMeshFromGeometry(this.ctx.G, {
                 conductors: s.conductors, dielectrics: s.dielectrics,
                 domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
@@ -965,7 +980,7 @@ export class TriBackend {
                 gndSizeScale: gndScale,
                 gmshOptions: this.opts.gmshOptions,
             });
-            if (mesh.nTris <= maxTris || attempt >= 4) break;
+            if (mesh.nTris <= maxTris || coarsenPasses >= COARSEN_MAX_PASSES) break;
             // Accept a near-budget mesh before any relaxation/coarsening. This is the
             // same OVERSHOOT_OK acceptance as below, hoisted so a mesh that today gets
             // accepted at, say, 1.2x budget is still accepted identically rather than
@@ -980,20 +995,21 @@ export class TriBackend {
             // relaxing and let the global path take over.
             const surfScaleB = this.opts.occSurfScale ?? 0.35;
             const gndCap = hCoarse / (hFine * surfScaleB);
-            if (!gndStalled && mesh.nGndCurves > 0 && gndScale < gndCap) {
+            if (!gndStalled && gndPasses < GND_MAX_PASSES && mesh.nGndCurves > 0 && gndScale < gndCap) {
                 if (gndPrevN !== null && mesh.nTris > gndPrevN * 0.9) {
                     gndStalled = true;
                 } else {
                     gndPrevN = mesh.nTris;
                     gndScale = Math.min(gndScale * (mesh.nTris / maxTris) * 1.05, gndCap);
+                    gndPasses++;
                     continue;
                 }
             }
             // Element count vs element size is NOT the uniform-fill nTris ∝ 1/h². The
             // conductor-surface size field makes the mesh a graded band around the
             // metal, so the true exponent is shallower — measured ~0.75 on coax, where
-            // assuming 2 under-coarsens so badly that the loop burns all 5 attempts,
-            // never reaches the budget, and ends up SLOWER with a SMALL "Max Nodes"
+            // assuming 2 under-coarsens so badly that the loop burns every coarsening
+            // pass, never reaches the budget, and ends up SLOWER with a SMALL "Max Nodes"
             // than a large one (7.6 s vs 4.1 s). Learn the exponent from the last two
             // attempts instead; the first step has no data and keeps the 1/h² guess.
             let p = 2;
@@ -1014,6 +1030,7 @@ export class TriBackend {
             if (mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
             prevAtt = { h: hFine, n: mesh.nTris };
             hFine *= factor; hCoarse *= factor;
+            coarsenPasses++;
         }
         this.condRect = mesh.condRect;
         // A shaped domain does not fill the solver's bounding box, so tighten the

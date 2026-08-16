@@ -970,6 +970,10 @@ export class FieldSolver2D {
 
         // Handle DC case (frequency = 0)
         if (this.freq === 0) {
+            // Returning before the skin-transition block below, so clear its warning
+            // explicitly, otherwise a DC point in a sweep inherits the previous
+            // frequency's note.
+            this._skinTransitionWarn = null;
             return {
                 R_ac: 0,
                 R_dc: R_dc,
@@ -1251,6 +1255,11 @@ export class FieldSolver2D {
         // notch (microstrip +10% mid-transition), and slab/p-norm blends
         // R_dc*Re[q*coth q] or (R_dc^4+R_ac^5)^0.25.
         let transitionCal = 1.0;
+        // Cleared unconditionally: the warning describes this call's frequency, and
+        // the branch below is skipped on the legacy integrand and on solvers without
+        // a rectangular conductor thickness. Leaving it set would carry a stale note
+        // into the next sweep point.
+        this._skinTransitionWarn = null;
         if (vacuum_fields && this.t > 0 && this.freq > 0) {
             const delta = Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * this.sigma_cond));
             const lx = Math.log(delta / this.t / 0.4);
@@ -1729,20 +1738,9 @@ export class FieldSolver2D {
         this.y = Float64Array.from([...all_y].sort((a, b) => a - b));
     }
 
-    refine_mesh(V, Ex, Ey, frac = 0.15) {
-        /**
-         * Main mesh refinement routine.
-         */
-        const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey);
-        const { selected_x, selected_y } = this._select_lines_to_refine(x_metrics, y_metrics, frac);
-        this._refine_selected_lines(selected_x, selected_y);
-
-        // Invalidate solution since mesh has changed
-        this.solution_valid = false;
-        this.Ex = null;
-        this.Ey = null;
-    }
-
+    // Mesh refinement. solve_adaptive always goes through the multi-set form (one
+    // set per mode plus one per mode's vacuum solve), so there is no single-set
+    // variant, pass [{V, Ex, Ey}] for one field.
     refine_mesh_multi(modes, frac = 0.15) {
         /**
          * Mesh refinement using combined metrics from multiple modes.

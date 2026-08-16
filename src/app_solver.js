@@ -1753,10 +1753,14 @@ async function runSimulation() {
         // (fragmented near-degenerate modes) or a per-point eigensolve failure
         // (silent fallback to the quasi-static ε). Logged once per distinct
         // warning; sweep points report through the same channel below.
+        // The key must include `reason`: the rectilinear backend emits several
+        // distinct type:'accuracy' mode:'all' notes for one solve (certificate,
+        // skin-transition, broadside-proximity), and a type|mode key would show
+        // only the first of them.
         const seenModeWarnings = new Set();
         const logModeWarnings = (warnings) => {
             for (const mw of warnings || []) {
-                const key = `${mw.type || 'ambiguous'}|${mw.mode}`;
+                const key = `${mw.type || 'ambiguous'}|${mw.reason || ''}|${mw.mode}`;
                 if (seenModeWarnings.has(key)) continue;
                 seenModeWarnings.add(key);
                 log(`⚠ Mode warning: ${mw.message}`);
@@ -2304,8 +2308,13 @@ async function runParameterSweep() {
                     log(`Estimated remaining error (first-point) ${(100 * cert.err).toExponential(2)}%. ` +
                         `Later sweep points are not re-verified.`);
                 }
-                const aw = ((cachedResults && cachedResults.warnings) || []).find(w => w.type === 'accuracy');
-                if (aw) log(`⚠ First point: ${aw.message} Later sweep points are not re-verified.`);
+                // Every accuracy note, not just the first: one solve can carry a
+                // failed certificate and a loss-accuracy note (skin-transition,
+                // broadside-proximity) at once.
+                for (const aw of (cachedResults && cachedResults.warnings) || []) {
+                    if (aw.type !== 'accuracy') continue;
+                    log(`⚠ First point: ${aw.message} Later sweep points are not re-verified.`);
+                }
             }
 
             const result = await solver.computeAtFrequency(freqHz, cachedResults);
