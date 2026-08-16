@@ -1438,13 +1438,88 @@ export class FieldSolver2D {
     }
 
     // Adaptive Meshing
+    // Discrete flux-jump refinement indicator (FDM analog of the tri backend's
+    // Kelly marker). At each interior node the jump in ε*dV/dh between the two
+    // adjacent intervals measures local discretization error. It vanishes where
+    // the discrete solution resolves the field and concentrates where curvature
+    // is under-resolved. The legacy dV*|E|*ε metric is a field intensity
+    // indicator, it keeps refining strong-field intervals. Jumps at
+    // conductor-adjacent nodes are physical surface charge and are skipped, the
+    // same rule as the tri Kelly indicator's Dirichlet-edge skip.
+    _compute_refine_metrics_jump(V, vacuum = false) {
+        const ny = this.y.length, nx = this.x.length;
+        const x_metrics = new Float64Array(nx - 1);
+        const y_metrics = new Float64Array(ny - 1);
+        const dx = diff(this.x), dy = diff(this.y);
+        const er = (i, j) => vacuum ? 1.0 : this.epsilon_r[i][j];
+        const cm = this.conductor_mask;
+
+        for (let i = 0; i < ny; i++) {
+            // transverse control width so the accumulation approximates an area integral
+            const wy = ((i + 1 < ny ? this.y[i + 1] : this.y[i]) - (i > 0 ? this.y[i - 1] : this.y[i])) / 2;
+            for (let j = 1; j < nx - 1; j++) {
+                if (cm[i][j] || cm[i][j - 1] || cm[i][j + 1]) continue;
+                const eL = 0.5 * (er(i, j - 1) + er(i, j));
+                const eR = 0.5 * (er(i, j) + er(i, j + 1));
+                const J = Math.abs(eR * (V[i][j + 1] - V[i][j]) / dx[j] -
+                                   eL * (V[i][j] - V[i][j - 1]) / dx[j - 1]);
+                x_metrics[j - 1] += J * dx[j - 1] * wy;
+                x_metrics[j] += J * dx[j] * wy;
+            }
+        }
+        for (let j = 0; j < nx; j++) {
+            const wx = ((j + 1 < nx ? this.x[j + 1] : this.x[j]) - (j > 0 ? this.x[j - 1] : this.x[j])) / 2;
+            for (let i = 1; i < ny - 1; i++) {
+                if (cm[i][j] || cm[i - 1][j] || cm[i + 1][j]) continue;
+                const eD = 0.5 * (er(i - 1, j) + er(i, j));
+                const eU = 0.5 * (er(i, j) + er(i + 1, j));
+                const J = Math.abs(eU * (V[i + 1][j] - V[i][j]) / dy[i] -
+                                   eD * (V[i][j] - V[i - 1][j]) / dy[i - 1]);
+                y_metrics[i - 1] += J * dy[i - 1] * wx;
+                y_metrics[i] += J * dy[i] * wx;
+            }
+        }
+        return { x_metrics, y_metrics };
+    }
+
     _compute_refine_metrics(V, Ex, Ey, vacuum = false) {
         /**
-         * For each grid interval, compute a metric indicating how much refinement
-         * would help, based on voltage gradients and field energy in adjacent cells.
+         * For each grid interval, compute a metric indicating how much
+         * refinement would help. Default ('blend'): the flux-jump error
+         * indicator plus the legacy dV*|E|*ε field-intensity metric. The jump
+         * metric targets the static discretization error (C, C0).  But the
+         * intensity metric's conductor-surface emphasis is important for the
+         * conductor-loss integral. The blend keeps both. Opt-outs:
+         * solver.refine_metric = 'intensity' (legacy) or 'jump' (static-only).
          *
          * vacuum: the fields are from the vacuum (C0) solve.
          */
+        const metric = this.refine_metric ?? 'blend';
+        if (metric === 'jump') {
+            return this._compute_refine_metrics_jump(V, vacuum);
+        }
+        if (metric === 'blend') {
+            // Surface component restricted to conductor-adjacent cells.
+            const alpha = this.refine_surface_weight ?? 0.35;
+            const j = this._compute_refine_metrics_jump(V, vacuum);
+            const f = this._compute_refine_metrics_intensity(V, Ex, Ey, vacuum, true);
+            const norm = (m) => {
+                const t = m.x_metrics.reduce((s, v) => s + v, 0) + m.y_metrics.reduce((s, v) => s + v, 0);
+                return t > 0 ? 1 / t : 0;
+            };
+            const nj = norm(j), nf = norm(f) * alpha;
+            const x_metrics = j.x_metrics.map((v, k) => v * nj + f.x_metrics[k] * nf);
+            const y_metrics = j.y_metrics.map((v, k) => v * nj + f.y_metrics[k] * nf);
+            return { x_metrics, y_metrics };
+        }
+        return this._compute_refine_metrics_intensity(V, Ex, Ey, vacuum);
+    }
+
+    // Legacy field-intensity metric: dV * |E| * ε with a x2 conductor-boundary
+    // boost. Not an error indicator (it keeps refining strong-field intervals
+    // after they converge) but its surface emphasis resolves the conductor-loss
+    // integrand.
+    _compute_refine_metrics_intensity(V, Ex, Ey, vacuum = false, boundaryOnly = false) {
         const ny = V.length;
         const nx = V[0].length;
 
@@ -1459,6 +1534,13 @@ export class FieldSolver2D {
                 if (this.conductor_mask[i][j] &&
                     this.conductor_mask[Math.min(i + 1, ny - 1)][j] &&
                     this.conductor_mask[i][Math.min(j + 1, nx - 1)]) {
+                    continue;
+                }
+                if (boundaryOnly && !(!this.conductor_mask[i][j] && (
+                    (i > 0 && this.conductor_mask[i - 1][j]) ||
+                    (i < ny - 1 && this.conductor_mask[i + 1][j]) ||
+                    (j > 0 && this.conductor_mask[i][j - 1]) ||
+                    (j < nx - 1 && this.conductor_mask[i][j + 1])))) {
                     continue;
                 }
 
