@@ -913,8 +913,12 @@ export class TriBackend {
         // a surviving signal rect must exist to drive.
         const shapedPre = s.conductors.some(c => c.shape);
         const sigCondPre = s.conductors.some(c => c.is_signal && survives(c));
-        const mqsPre = (lmPre === 'mqs' && !shapedPre && sigCondPre)
-            || (lmPre === 'auto' && this.symmetry && !shapedPre && sigCondPre);
+        // A differential pair without the symmetry-plane mode walls falls back
+        // to perturbation, whose corner-dominated R needs the finer 1.5t
+        // sizing, an MQS-sized mesh there read R ~1.5× high on the fallback.
+        const mqsPre = ((lmPre === 'mqs' && !shapedPre && sigCondPre)
+            || (lmPre === 'auto' && this.symmetry && !shapedPre && sigCondPre))
+            && (!s.is_differential || this.symmetry);
         // A medium may supply its own base sizing (coax: derived from the conductor
         // radii, since w/t have no meaning for a round conductor).
         const hints = s.tri_mesh_hints || {};
@@ -1728,14 +1732,29 @@ export class TriBackend {
                 message: 'MQS conductor loss is not applicable to this geometry ' +
                          '(shaped conductors or no signal conductor), using the perturbation method instead.' });
         }
+        // A differential pair without the symmetry-plane mode walls cannot select
+        // odd/even for the MQS drive, the two traces act as one parallel
+        // conductor and both modes come back ~4× low (measured on a full-domain
+        // diff stripline: R_half/R_full = 3.7-4.0). The 'auto' path already
+        // requires this.symmetry, a forced 'mqs' must refuse too, not silently
+        // mis-normalize. The perturbation path handles asymmetric pairs.
+        const mqsModeSelectable = !this.solver.is_differential || this.symmetry;
+        if (lossMethod === 'mqs' && mqsOk && !mqsModeSelectable && this._modeWarnings
+            && !this._modeWarnings.some(w => w.type === 'mqs-asym-pair')) {
+            this._modeWarnings.push({ type: 'mqs-asym-pair', mode, freq: f,
+                message: 'MQS conductor loss needs the symmetry-plane mode walls for a ' +
+                         'differential pair. This solve runs on the full domain (asymmetric ' +
+                         'pair or symmetry disabled), using the perturbation method instead.' });
+        }
         // The volume eddy-current solve reads the elements INSIDE the metal, which the
         // mesher only emits when buildMesh's own applicability test (mqsPre) said MQS
         // could apply. That test is derived from the pre-mesh geometry and this one from
         // the built condRect, so they are computed independently and could in principle
         // disagree, on a mesh with no conductor interior MQS would return a plausible
         // but wrong R rather than fail, so fall back to perturbation and say so.
-        let useMQS = (lossMethod === 'mqs' && mqsOk)
-            || (lossMethod === 'auto' && this.symmetry && mqsOk);
+        let useMQS = ((lossMethod === 'mqs' && mqsOk)
+            || (lossMethod === 'auto' && this.symmetry && mqsOk))
+            && mqsModeSelectable;
         if (useMQS && mesh.condInteriorMeshed === false) {
             useMQS = false;
             if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'mqs-no-interior')) {
