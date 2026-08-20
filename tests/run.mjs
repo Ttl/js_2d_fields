@@ -50,6 +50,7 @@ const TIERS = {
         { file: 'tests/test_gcpw_mqs.js', cost: 82 },
         { file: 'tests/test_symmetry_plane_mask.js', cost: 61 },
         { file: 'tests/test_symmetry_half_full.js', cost: 177 },
+        { file: 'tests/test_qs_symmetry_half_full.js', cost: 61 },
         { file: 'src/tri_solver/tests/modes_test.mjs', cost: 15 },
         { file: 'src/tri_solver/tests/plating_perside_test.mjs', cost: 138 },
         { file: 'tests/test_vs_ref.js', cost: 44 },

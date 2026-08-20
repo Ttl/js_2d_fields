@@ -67,13 +67,16 @@ const modesReject = (s, freq, label) => {
 // Wide, thin domain with a fine feature: the FDM tensor-grid estimate rejects it
 // (graded lines × wide axis blow the node budget) but the triangular mesher grades
 // locally and handles it easily — the modes guard must use the latter even with
-// 'rectilinear' selected in the sidebar.
+// 'rectilinear' selected in the sidebar. symmetry:false — with the default
+// half-domain symmetry solve the FDM estimate (correctly) halves and fits the
+// budget, so the rejection premise needs the full-domain path.
 function wideThin(backend) {
     return new MicrostripSolver({
         substrate_height: 0.2e-3, trace_width: 0.2e-3, trace_thickness: 1e-6,
         gnd_thickness: 35e-6, epsilon_r: 4.3, tan_delta: 0.02, freq: 1e9,
         enclosure_width: 100e-3, enclosure_height: 0.5e-3,
         mesh_backend: backend, boundaries: ["gnd", "gnd", "gnd", "gnd"],
+        symmetry: false,
     });
 }
 // Electrically large box at the modes frequency: fits the main-solve budget (the

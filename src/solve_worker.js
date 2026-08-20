@@ -72,8 +72,11 @@ const stripSweep = (rows) => rows.map(({ freq, result }) => ({ freq, result: str
 
 // Exactly the set of properties both backends graft onto the solver for plotting
 // (FieldSolver2D.solve_adaptive and TriBackend.solveAt agree on this list).
+// getPlotFields mirrors half-domain (sym_half) FDM solves onto the full domain,
+// for everything else it returns the same properties unchanged.
 function fieldPayload(solver) {
     if (!solver || !solver.solution_valid) return null;
+    if (solver.getPlotFields) return solver.getPlotFields();
     return {
         x: solver.x, y: solver.y,
         V: solver.V, Ex: solver.Ex, Ey: solver.Ey,

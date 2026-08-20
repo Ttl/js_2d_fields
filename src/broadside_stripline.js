@@ -89,6 +89,8 @@ class BroadsideStriplineSolver extends FieldSolver2D {
         this.conductors = conductors;
 
         // Symmetric mesh only when x_offset is zero — otherwise geometry isn't mirror-symmetric.
+        // No half-domain (sym_half) meshing. A broadside pair traces are on top
+        // of each other so the plane can't separate the modes.
         const symmetric = (this.x_offset === 0);
 
         this.mesher = new Mesher(

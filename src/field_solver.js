@@ -526,7 +526,9 @@ export class FieldSolver2D {
             const GROWTH = 1.3;                                    // graded neighbour ratio
             const gradeLines = Math.max(0, Math.log(geomCoarse / hFine) / Math.log(GROWTH));
             const axisLines = (L, La) => L / geomCoarse + (lambdaLimited ? La / hWave : 0) + 2 * gradeLines;
-            const nx = axisLines(W, Lx), ny = axisLines(H, Ly);
+            // Half-domain symmetry solve meshes only x in [0, W/2].
+            const symK = this.sym_half ? 0.5 : 1;
+            const nx = axisLines(symK * W, symK * Lx), ny = axisLines(H, Ly);
             const nodes = nx * ny;
             if (nodes > maxNodes) {
                 throw new Error(
@@ -600,8 +602,15 @@ export class FieldSolver2D {
      * @param {boolean} vacuum - If true, solve with vacuum permittivity
      * @returns {Array<Float64Array>} - The solved voltage array (same reference as input)
      */
-    async solve_laplace(V, vacuum = false) {
-        return (await this.solve_laplace_multi([V], vacuum))[0];
+    async solve_laplace(V, vacuum = false, planeBC = null) {
+        return (await this.solve_laplace_multi([V], vacuum, planeBC))[0];
+    }
+
+    // Symmetry-plane boundary condition at x=0 for a half-domain solve: the odd
+    // mode sees an electric wall (V=0), everything else the magnetic wall the
+    // FDM's natural boundary treatment already provides.
+    _plane_bc(mode) {
+        return this.sym_half ? (mode === 'odd' ? 'pec' : 'pmc') : null;
     }
 
     // Solve the same operator (grid + epsilon + conductor mask) for several sets
@@ -609,7 +618,12 @@ export class FieldSolver2D {
     // drive, only the right-hand side does, so all systems share a single
     // assembly and a single factorization (see solveWithWASMMulti). Each Vs[m]
     // is filled in place and the array of solutions is returned.
-    async solve_laplace_multi(Vs, vacuum = false) {
+    //
+    // planeBC (half-domain solves only): 'pec' x=0 column set to V=0 (odd
+    // mode). Anything else leaves the natural zero-flux treatment (magnetic
+    // wall). The matrix depends on it, so drives batched into one call must
+    // share the same planeBC.
+    async solve_laplace_multi(Vs, vacuum = false, planeBC = null) {
         // Ensure mesh is generated
         if (this.ensure_mesh) {
             this.ensure_mesh();
@@ -633,6 +647,9 @@ export class FieldSolver2D {
 
         const get_er = (i, j) => vacuum ? 1.0 : this.epsilon_r[i][j];
         const is_cond = (i, j) => this.conductor_mask[i][j];
+        // PEC symmetry plane: the j=0 column is set to V=0 like a conductor.
+        const pec = planeBC === 'pec';
+        const pinned = (i, j) => is_cond(i, j) || (pec && j === 0);
 
         // Remove mesh nodes internal to conductors
         // E-field inside conductors is 0.
@@ -642,7 +659,7 @@ export class FieldSolver2D {
         for (let i = 0; i < ny; i++)
             for (let j = 0; j < nx; j++) {
                 const n = idx(i, j);
-                if (!is_cond(i, j)) {
+                if (!pinned(i, j)) {
                     is_unknown[n] = 1;
                     N_unknown++;
                 }
@@ -680,7 +697,7 @@ export class FieldSolver2D {
 
         for (let i = 0; i < ny; i++) {
             for (let j = 0; j < nx; j++) {
-                if (is_cond(i, j)) continue;
+                if (pinned(i, j)) continue;
 
                 const fn = idx(i, j);
                 const n = full_to_red[fn];
@@ -706,7 +723,17 @@ export class FieldSolver2D {
                     err = erl = eru = erd = 1.0;
                 } else {
                     const erc = get_er(i, j);
-                    if (boundary) {
+                    // The symmetry-plane column is an interior column of the
+                    // mirrored full domain, so it must use the conductor-aware
+                    // interior averaging. The generic boundary rule reads the
+                    // epsilon inside a conductor neighbor.
+                    const symPlane = this.sym_half && j === 0 && i > 0 && i < ny - 1;
+                    if (symPlane) {
+                        err = is_cond(i, j + 1) ? erc : 0.5 * (erc + get_er(i, j + 1));
+                        erl = erc;   // cl = 0 at the plane; unused
+                        eru = is_cond(i + 1, j) ? erc : 0.5 * (erc + get_er(i + 1, j));
+                        erd = is_cond(i - 1, j) ? erc : 0.5 * (erc + get_er(i - 1, j));
+                    } else if (boundary) {
                         err = 0.5 * (erc + get_er(i, Math.min(j + 1, nx - 1)));
                         erl = 0.5 * (erc + get_er(i, Math.max(j - 1, 0)));
                         eru = 0.5 * (erc + get_er(Math.min(i + 1, ny - 1), j));
@@ -728,6 +755,11 @@ export class FieldSolver2D {
                     cl = j > 0 ? -erl * area_i / dxl : 0;
                     cu = i < ny - 1 ? -eru * area_j / dyu : 0;
                     cd = i > 0 ? -erd * area_j / dyd : 0;
+                    // Magnetic-wall symmetry plane. The mirrored
+                    // ghost (V[-1]=V[1], dxl=dxr) folds the left flux into the
+                    // right one, so the full-domain row restricted to x>=0 is
+                    // 2*cr*(V1-V0) + vertical terms over the full area dx[0].
+                    if (this.sym_half && j === 0 && !pec) cr *= 2;
                 } else {
                     cr = -err * area_i / dxr;
                     cl = -erl * area_i / dxl;
@@ -740,7 +772,7 @@ export class FieldSolver2D {
 
                 const handle = (ii, jj, c) => {
                     const fn2 = idx(ii, jj);
-                    if (!is_cond(ii, jj)) {
+                    if (!pinned(ii, jj)) {
                         addA(n, full_to_red[fn2], c);
                     } else {
                         for (let m = 0; m < Vs.length; m++)
@@ -776,9 +808,10 @@ export class FieldSolver2D {
     /**
      * Compute E-field from voltage distribution.
      * @param {Array<Float64Array>} V - 2D voltage array
+     * @param {string|null} planeBC - symmetry-plane BC at x=0 ('pec'|'pmc'|null).
      * @returns {{Ex: Array<Float64Array>, Ey: Array<Float64Array>}} - E-field components
      */
-    compute_fields(V) {
+    compute_fields(V, planeBC = null) {
         const ny = this.y.length;
         const nx = this.x.length;
         const dx = diff(this.x);
@@ -809,6 +842,27 @@ export class FieldSolver2D {
                 );
             }
         }
+        // Symmetry plane at x=0: the loss/dielectric integrands read the j=0
+        // column, so fill it with the parity-exact values instead of zeros.
+        // PMC (even/single): V mirrors evenly -> Ex=0, Ey from the same 3-point
+        // y-formula. PEC (odd): V mirrors oddly (V[-1]=-V[1], V[0]=0) -> Ey=0,
+        // and the central x-difference collapses to -V[1]/dx[0].
+        if (this.sym_half && planeBC) {
+            for (let i = 1; i < ny - 1; i++) {
+                if (this.conductor_mask[i][0]) continue;
+                if (planeBC === 'pec') {
+                    Ex[i][0] = -V[i][1] / dx[0];
+                } else {
+                    const dyd = dy[i-1];
+                    const dyu = dy[i];
+                    Ey[i][0] = -(
+                        (dyd / (dyu * (dyd + dyu))) * V[i+1][0] +
+                        ((dyu - dyd) / (dyd * dyu)) * V[i][0] -
+                        (dyu / (dyd * (dyd + dyu))) * V[i-1][0]
+                    );
+                }
+            }
+        }
         this.solution_valid = true;
         return { Ex, Ey };
     }
@@ -829,9 +883,13 @@ export class FieldSolver2D {
         const get_dx = j => j < dx.length ? dx[j] : dx[dx.length-1];
         const get_dy = i => i < dy.length ? dy[i] : dy[dy.length-1];
 
-        // Iterate over signal trace interface
+        // Iterate over signal trace interface. On a half-domain (sym_half) solve
+        // the plane column j=0 is included: a mirrored signal has
+        // real top/bottom flux there (area = the half cell dx[0]/2), and no flux
+        // crosses the plane itself.
+        const j0 = this.sym_half ? 0 : 1;
         for (let i = 1; i < ny - 1; i++) {
-            for (let j = 1; j < nx - 1; j++) {
+            for (let j = j0; j < nx - 1; j++) {
                 if (!this.signal_mask[i][j]) continue;
 
                 // Check 4 neighbors
@@ -848,8 +906,8 @@ export class FieldSolver2D {
                          // Neighbor is Top/Bottom
                          dist = Math.abs(this.y[i] - this.y[ni]);
                          En = (V[i][j] - V[ni][nj]) / dist;
-                         // Average dx for area
-                         area = (get_dx(j-1) + get_dx(j)) / 2;
+                         // Average dx for area (half cell at the symmetry plane)
+                         area = j > 0 ? (get_dx(j-1) + get_dx(j)) / 2 : get_dx(0) / 2;
                     } else {
                         // Neighbor is Left/Right
                         dist = Math.abs(this.x[j] - this.x[nj]);
@@ -867,7 +925,7 @@ export class FieldSolver2D {
                     check_neighbor(i, j + 1, false);
                 }
                 // Left neighbor
-                if (!this.signal_mask[i][j - 1]) {
+                if (j > 0 && !this.signal_mask[i][j - 1]) {
                     check_neighbor(i, j - 1, false);
                 }
                 // Top neighbor
@@ -880,7 +938,11 @@ export class FieldSolver2D {
                 }
             }
         }
-        return Math.abs(Q);
+        // A signal cut in half by the symmetry plane captures exactly half the
+        // charge. A signal entirely inside x > 0 (one trace of a differential
+        // pair) keeps its full contour.
+        const scale = (this.sym_half && this._sym_signal_straddles) ? 2 : 1;
+        return scale * Math.abs(Q);
     }
 
     /**
@@ -1011,7 +1073,9 @@ export class FieldSolver2D {
 
         // Helper: get surface impedance for a conductor boundary segment
         // Now with corner detection and geometric coverage from thick side plating
-        const getZsurf = (ci, direction, i, j, dl) => {
+        // xStart overrides the segment's x origin (half-domain solves evaluate the
+        // mirror image of a node's left segment [x[j-1], x[j]]).
+        const getZsurf = (ci, direction, i, j, dl, xStart = null) => {
             if (!this.conductors || ci < 0) return Z_surf_default;
             const cond = this.conductors[ci];
             if (!cond || !cond.plating) return Z_surf_default;
@@ -1064,7 +1128,7 @@ export class FieldSolver2D {
             if (direction === 'u' && cond.plating.sides && !cond.plating.bottom && cond.plating.thick_corners) {
                 const t = cond.plating.thickness;
                 // Cell spans [x[j], x[j] + dl] in x-direction
-                const x_start = this.x[j];
+                const x_start = xStart ?? this.x[j];
                 const x_end = x_start + dl;
                 // Left side plating covers [x_min, x_min + t]
                 const left_overlap = Math.max(0, Math.min(cond.x_min + t, x_end) - Math.max(cond.x_min, x_start));
@@ -1180,8 +1244,14 @@ export class FieldSolver2D {
         const isGround = (i, j) => this.ground_mask[i][j];
         const isConductor = (i, j) => isSignal(i,j) || isGround(i,j);
 
+        // Half-domain solve: include the plane column j=0 so the first
+        // top/bottom face segment next to the plane is not dropped. The nj
+        // bounds check below keeps j=0 from probing a left neighbor, and the
+        // plane itself is not a conductor face (PEC pinning is not in
+        // conductor_mask), so no spurious cut faces can enter the integral.
+        const jlo = this.sym_half ? 0 : 1;
         for (let i = 1; i < ny - 1; i++) {
-            for (let j = 1; j < nx - 1; j++) {
+            for (let j = jlo; j < nx - 1; j++) {
                 if (isConductor(i, j)) continue;
 
                 const neighbors = [
@@ -1208,18 +1278,49 @@ export class FieldSolver2D {
                         const eps_fac = vacuum_fields ? 1.0 : Math.sqrt(this.epsilon_r[i][j]);
                         const H_tan = E_norm * eps_fac / Z0_freespace;
 
-                        const dl = dl_func(dl_idx);
-
                         // Look up per-surface impedance (with plating if applicable)
                         const ci = this.conductor_id ? this.conductor_id[ni][nj] : -1;
-                        const Z_surf = getZsurf(ci, direction, i, j, dl);
 
-                        const H2_dl = H_tan * H_tan * dl;
-                        sum_H2_dl_R += Z_surf.re * H2_dl;
-                        sum_H2_dl_L += Z_surf.im * H2_dl;
+                        if (this.sym_half && (direction === 'u' || direction === 'd')) {
+                            // Half-domain solve, horizontal faces: the full-domain
+                            // quadrature weights each node by the segment to its
+                            // right. Mirroring flips that orientation, so on a
+                            // symmetric grid a node collects its own right segment
+                            // and the mirror image of its left segment. Each at
+                            // half weight (the global x2 compensates it),
+                            // with the true segment span passed to getZsurf so
+                            // plating-coverage fractions see the correct geometry.
+                            // The plane node (j=0) has only its right segment,
+                            // the mirror of [-x1, 0] belongs to node 1's left term.
+                            const segs = j > 0
+                                ? [[j, get_dx(j)], [j - 1, get_dx(j - 1)]]
+                                : [[0, get_dx(0)]];
+                            for (const [js, dseg] of segs) {
+                                const Zs = getZsurf(ci, direction, i, j, dseg, this.x[js]);
+                                const H2 = H_tan * H_tan * dseg / 2;
+                                sum_H2_dl_R += Zs.re * H2;
+                                sum_H2_dl_L += Zs.im * H2;
+                            }
+                        } else {
+                            const dl = dl_func(dl_idx);
+                            const Z_surf = getZsurf(ci, direction, i, j, dl);
+
+                            const H2_dl = H_tan * H_tan * dl;
+                            sum_H2_dl_R += Z_surf.re * H2_dl;
+                            sum_H2_dl_L += Z_surf.im * H2_dl;
+                        }
                     }
                 }
             }
+        }
+
+        // Half-domain solve: the surface integral covered only x >= 0. The
+        // mirror half contributes the same power. After this the sums mean
+        // "full domain" again, so the existing power_factor convention applies
+        // unchanged.
+        if (this.sym_half) {
+            sum_H2_dl_R *= 2;
+            sum_H2_dl_L *= 2;
         }
 
         // Power normalization factor: differential has 0.5 factor
@@ -1317,15 +1418,36 @@ export class FieldSolver2D {
             : (i, j) => this.conductor_mask[i][j];
 
         let Pd = 0.0;
+        const wPd = 0.5 * (2 * Math.PI * this.freq) * CONSTANTS.EPS0;
 
-        for (let i = 0; i < ny - 1; i++) {
-            for (let j = 0; j < nx - 1; j++) {
-                if (isConductor(i, j)) continue;
-
+        if (this.sym_half) {
+            // Half-domain solve: the full-domain loop samples each cell at its
+            // lower-left corner. A mirrored left-half cell's sample lands on the
+            // mirror of the right corner. Averaging both x-corners (each gated
+            // by its own conductor test) makes 2x the half sum reproduce the
+            // full-domain sum exactly on a symmetric grid.
+            const term = (i, j) => {
+                if (isConductor(i, j)) return 0;
                 const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
-                const dA = get_dx(j) * get_dy(i);
+                return this.epsilon_r[i][j] * this.tand[i][j] * E2;
+            };
+            for (let i = 0; i < ny - 1; i++) {
+                for (let j = 0; j < nx - 1; j++) {
+                    const dA = get_dx(j) * get_dy(i);
+                    Pd += wPd * 0.5 * (term(i, j) + term(i, j + 1)) * dA;
+                }
+            }
+            Pd *= 2;
+        } else {
+            for (let i = 0; i < ny - 1; i++) {
+                for (let j = 0; j < nx - 1; j++) {
+                    if (isConductor(i, j)) continue;
 
-                Pd += 0.5 * (2 * Math.PI * this.freq) * CONSTANTS.EPS0 * this.epsilon_r[i][j] * this.tand[i][j] * E2 * dA;
+                    const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
+                    const dA = get_dx(j) * get_dy(i);
+
+                    Pd += wPd * this.epsilon_r[i][j] * this.tand[i][j] * E2 * dA;
+                }
             }
         }
 
@@ -1583,7 +1705,9 @@ export class FieldSolver2D {
          * Select which grid intervals to split, respecting left-right symmetry.
          */
         const x_center = (this.x[0] + this.x[this.x.length - 1]) / 2;
-        const x_symmetric = this._check_symmetry(this.x, x_center);
+        // A half-domain grid is not mirror-symmetric about its own center. A
+        // coincidental match would mis-symmetrize the metrics about W/4.
+        const x_symmetric = !this.sym_half && this._check_symmetry(this.x, x_center);
 
         let x_metrics_proc = x_metrics;
         if (x_symmetric) {
@@ -1643,7 +1767,7 @@ export class FieldSolver2D {
          * Add new grid lines at midpoints of selected intervals.
          */
         const x_center = (this.x[0] + this.x[this.x.length - 1]) / 2;
-        const x_symmetric = this._check_symmetry(this.x, x_center);
+        const x_symmetric = !this.sym_half && this._check_symmetry(this.x, x_center);
 
         const new_x = new Set();
         const new_y = new Set();
@@ -1812,6 +1936,14 @@ export class FieldSolver2D {
         if (!this.is_differential) {
             return this.calculate_capacitance(V, vacuum);
         }
+        // Half-domain solve: only one trace is meshed (the other's mask is
+        // empty, so the 0.5*(Cp+Cn) average would silently halve C). The meshed
+        // trace's full contour carries the per-trace charge directly.
+        if (this.sym_half) {
+            const mask = this._sym_meshed_polarity > 0
+                ? this.signal_p_mask : this.signal_n_mask;
+            return this._trace_charge(V, mask, vacuum);
+        }
         const orig_signal_mask = this.signal_mask;
         this.signal_mask = this.signal_p_mask;
         const Cp = this.calculate_capacitance(V, vacuum);
@@ -1837,11 +1969,12 @@ export class FieldSolver2D {
         let C0;
         let V;
         let V0, Ex0, Ey0;
+        const planeBC = this._plane_bc(mode);
 
         if (vacuum_first) {
             // Calculate C0 (vacuum capacitance)
             V0 = this._create_voltage_array(mode);
-            V0 = await this.solve_laplace(V0, true);
+            V0 = await this.solve_laplace(V0, true, planeBC);
             C0 = this._signal_capacitance(V0, true);
             // Vacuum fields: the conductor-loss integrand for rect-based solvers
             // (the quasi-TEM H pattern, see _mode_conductor_loss). Frequency- and
@@ -1849,16 +1982,16 @@ export class FieldSolver2D {
             // V0 is kept as well: adaptive refinement feeds the vacuum solve
             // into its metrics so C0 (which the certificate certifies)
             // converges alongside C, see solve_adaptive.
-            if (this.conductor_id) ({ Ex: Ex0, Ey: Ey0 } = this.compute_fields(V0));
+            if (this.conductor_id) ({ Ex: Ex0, Ey: Ey0 } = this.compute_fields(V0, planeBC));
         }
 
         // Solve with dielectric
         V = this._create_voltage_array(mode);
-        V = await this.solve_laplace(V, false);
+        V = await this.solve_laplace(V, false, planeBC);
         const C = this._signal_capacitance(V, false);
 
         // Calculate fields
-        const { Ex, Ey } = this.compute_fields(V);
+        const { Ex, Ey } = this.compute_fields(V, planeBC);
 
         // Calculate impedance
         let eps_eff, Z0;
@@ -2036,10 +2169,24 @@ export class FieldSolver2D {
     // differential pair does 2 factorizations per grid level instead of 4.
     async _staticCapacitances() {
         const modeNames = this.is_differential ? ['odd', 'even'] : ['single'];
-        const signal = await this.solve_laplace_multi(
-            modeNames.map(m => this._create_voltage_array(m)), false);
-        const vacuum = await this.solve_laplace_multi(
-            modeNames.map(m => this._create_voltage_array(m)), true);
+        // The matrix depends on the symmetry-plane BC (odd: PEC, even/single:
+        // PMC), so batch the drives per BC. Full-domain solves have a single
+        // group (planeBC null) identical to the ungrouped batching.
+        const byBC = new Map();
+        modeNames.forEach((m, i) => {
+            const bc = this._plane_bc(m);
+            if (!byBC.has(bc)) byBC.set(bc, []);
+            byBC.get(bc).push(i);
+        });
+        const signal = new Array(modeNames.length);
+        const vacuum = new Array(modeNames.length);
+        for (const [bc, idxs] of byBC) {
+            const Vs = await this.solve_laplace_multi(
+                idxs.map(i => this._create_voltage_array(modeNames[i])), false, bc);
+            const V0s = await this.solve_laplace_multi(
+                idxs.map(i => this._create_voltage_array(modeNames[i])), true, bc);
+            idxs.forEach((i, k) => { signal[i] = Vs[k]; vacuum[i] = V0s[k]; });
+        }
         const out = [];
         for (let i = 0; i < modeNames.length; i++) {
             out.push(this._signal_capacitance(signal[i], false));
@@ -2190,6 +2337,10 @@ export class FieldSolver2D {
             this.ensure_mesh();
         }
 
+        if (this.sym_half) {
+            console.log('x=0 mirror symmetry detected: meshing right half only');
+        }
+
         const {
             max_iters = 10,
             refine_frac,
@@ -2211,8 +2362,13 @@ export class FieldSolver2D {
             let modeResults;
             if (this.is_differential) {
                 modeResults = [await this._solve_single_mode('odd', true), await this._solve_single_mode('even', true)];
-                const modal = await this._solve_modal_differential();   // null for symmetric/degenerate
+                // The modal path needs both traces meshed (4 per-trace solves).
+                // A half-domain pair is symmetric by construction, so the
+                // odd/even results are exact and the modal rebuild is skipped.
+                const modal = this.sym_half ? null
+                    : await this._solve_modal_differential();   // null for symmetric/degenerate
                 if (modal) modeResults = modal;
+                else if (this.sym_half) this._modalPhys = null;
             } else {
                 modeResults = [await this._solve_single_mode('single', true)];
             }
@@ -2220,6 +2376,7 @@ export class FieldSolver2D {
             this.V = modeResults.map(r => r.V);
             this.Ex = modeResults.map(r => r.Ex);
             this.Ey = modeResults.map(r => r.Ey);
+            this._plotModes = modeResults.map(r => r.mode);
             return this._build_results(modeResults);
         }
 
@@ -2427,16 +2584,21 @@ export class FieldSolver2D {
         // For an ASYMMETRIC differential pair, replace the odd/even drive results with the
         // genuine two-conductor modal decomposition on the converged mesh. _solve_modal_differential
         // returns null for a symmetric or degenerate pair, in which case the odd/even results
-        // (already in modeResults) are exact and are kept.
-        if (this.is_differential) {
+        // (already in modeResults) are exact and are kept. A half-domain pair is symmetric by
+        // construction and has only one trace meshed so the modal path is
+        // skipped outright.
+        if (this.is_differential && !this.sym_half) {
             const modal = await this._solve_modal_differential();
             if (modal) modeResults = modal;
+        } else if (this.is_differential) {
+            this._modalPhys = null;
         }
 
         // Store fields as arrays
         this.V = modeResults.map(r => r.V);
         this.Ex = modeResults.map(r => r.Ex);
         this.Ey = modeResults.map(r => r.Ey);
+        this._plotModes = modeResults.map(r => r.mode);
 
         // Build unified result structure
         return this._build_results(modeResults);
@@ -2500,6 +2662,43 @@ export class FieldSolver2D {
         }
 
         return result;
+    }
+
+    // Plotting payload: the grid and per-mode fields the app's field view reads.
+    // On a half-domain (sym_half) solve the solver-internal arrays cover only
+    // x >= 0. This mirrors fresh copies onto the full domain with the correct
+    // parity per mode so plots (and the mesh-line overlay, which draws the same
+    // x array) span the full cross-section. The internal half-domain arrays are
+    // never touched, the sweep paths keep recomputing losses from them.
+    //
+    //   V(-x) = sV * V(x) with sV = -1 for 'odd' (electric wall) else +1
+    //   Ex(-x) = -sV * Ex(x). Ey(-x) = sV * Ey(x).
+    getPlotFields() {
+        const base = { x: this.x, y: this.y, V: this.V, Ex: this.Ex, Ey: this.Ey,
+                       triMesh: this.triMesh || null };
+        // Mirror only a genuine half grid (x[0] === 0). Fields grafted by the
+        // triangular backend already span the full domain (x[0] < 0).
+        if (!this.sym_half || !this.V || !this.x || this.x.length < 2 || this.x[0] < 0)
+            return base;
+        const n = this.x.length;
+        const nf = 2 * n - 1;
+        const xs = new Float64Array(nf);
+        for (let j = 0; j < n - 1; j++) xs[j] = -this.x[n - 1 - j];
+        for (let j = 0; j < n; j++) xs[n - 1 + j] = this.x[j];
+        const mirror = (A, sign) => A.map(row => {
+            const out = new Float64Array(nf);
+            for (let j = 0; j < n - 1; j++) out[j] = sign * row[n - 1 - j];
+            for (let j = 0; j < n; j++) out[n - 1 + j] = row[j];
+            return out;
+        });
+        const V = [], Ex = [], Ey = [];
+        for (let m = 0; m < this.V.length; m++) {
+            const sV = (this._plotModes && this._plotModes[m] === 'odd') ? -1 : 1;
+            V.push(mirror(this.V[m], sV));
+            Ex.push(mirror(this.Ex[m], -sV));
+            Ey.push(mirror(this.Ey[m], sV));
+        }
+        return { x: xs, y: this.y, V, Ex, Ey, triMesh: this.triMesh || null };
     }
 
     /**

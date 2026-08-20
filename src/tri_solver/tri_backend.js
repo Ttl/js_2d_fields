@@ -43,7 +43,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
 import { Complex } from '../complex.js';
-import { classifyModalDecomposition } from '../geometry_symmetry.js';
+import { classifyModalDecomposition, isXSymmetric } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
 
@@ -350,43 +350,6 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
         return { Zs: z, mask };
     });
     return { uniform: groups.length <= 1, groups };
-}
-
-// Is the geometry mirror-symmetric about x=0? (lets us mesh only the right half.)
-function isXSymmetric(conductors, dielectrics, domainW) {
-    const tol = domainW * 1e-6;
-    // Shaped geometry can't be compared by rect spans, so a shape declares its own mirror
-    // symmetry instead (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
-    // phase 0, which puts vertices exactly on the y axis so the x >= 0 half is an exact 
-    // half). Every shape must qualify and the rectangular remainder still has to pass
-    // the span test below, so a shaped conductor can never wave through asymmetric rects
-    // sitting next to it.
-    const shaped = (o) => !!o.shape;
-    if (![...conductors, ...dielectrics].filter(shaped).every(o => o.shape.xSymmetric === true))
-        return false;
-    conductors = conductors.filter(o => !shaped(o));
-    dielectrics = dielectrics.filter(o => !shaped(o));
-    const mirrorOf = (list, extra) => {
-        // every rect must have a mirror partner (xmin↔-xmax) with same y + material
-        const key = (r) => `${extra(r)}|${r.y_min.toFixed(12)}|${r.y_max.toFixed(12)}`;
-        const buckets = new Map();
-        for (const o of list) {
-            const k = key(o);
-            if (!buckets.has(k)) buckets.set(k, []);
-            buckets.get(k).push([o.x_min, o.x_max]);
-        }
-        for (const spans of buckets.values()) {
-            for (const [xmin, xmax] of spans) {
-                const mlo = -xmax, mhi = -xmin;
-                const found = spans.some(([a, b]) => Math.abs(a - mlo) < tol && Math.abs(b - mhi) < tol);
-                if (!found) return false;
-            }
-        }
-        return true;
-    };
-    const condOk = mirrorOf(conductors, c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g'));
-    const dielOk = mirrorOf(dielectrics, d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}`);
-    return condOk && dielOk;
 }
 
 // Per-triangle electrostatic energy (legacy refinement metric): ε·∫|∇φ|² over

@@ -94,6 +94,53 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
         && mirrorInvariant(dielectrics, dielKey, axis, coord, tol);
 }
 
+// Is the geometry mirror-symmetric about x=0? (Mesh only the right half)
+export function isXSymmetric(conductors, dielectrics, domainW) {
+    const tol = domainW * 1e-6;
+    // Shaped geometry can't be compared by rect spans, so a shape declares its own mirror
+    // symmetry instead (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
+    // phase 0, which puts vertices exactly on the y axis so the x >= 0 half is an exact
+    // half).
+    const shaped = (o) => !!o.shape;
+    if (![...conductors, ...dielectrics].filter(shaped).every(o => o.shape.xSymmetric === true))
+        return false;
+    conductors = conductors.filter(o => !shaped(o));
+    dielectrics = dielectrics.filter(o => !shaped(o));
+    const mirrorOf = (list, extra) => {
+        // every rect must have a mirror partner (xmin <=> -xmax) with same y + material
+        const key = (r) => `${extra(r)}|${r.y_min.toFixed(12)}|${r.y_max.toFixed(12)}`;
+        const buckets = new Map();
+        for (const o of list) {
+            const k = key(o);
+            if (!buckets.has(k)) buckets.set(k, []);
+            buckets.get(k).push([o.x_min, o.x_max]);
+        }
+        for (const spans of buckets.values()) {
+            for (const [xmin, xmax] of spans) {
+                const mlo = -xmax, mhi = -xmin;
+                const found = spans.some(([a, b]) => Math.abs(a - mlo) < tol && Math.abs(b - mhi) < tol);
+                if (!found) return false;
+            }
+        }
+        return true;
+    };
+    const condOk = mirrorOf(conductors, c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g'));
+    const dielOk = mirrorOf(dielectrics, d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}`);
+    return condOk && dielOk;
+}
+
+// Half-domain symmetry: mirror-symmetric about x=0 and, for a differential
+// pair, no signal conductor cutting the plane. A broadside pair's traces are
+// stacked at x=0, so both modes are x-symmetric there and the plane cannot
+// separate even from odd those pairs must solve on the full domain.
+export function halfDomainSymmetry(conductors, dielectrics, domainW, isDifferential) {
+    const tol = domainW * 1e-6;
+    const diffStraddles = !!isDifferential && conductors.some(
+        c => c.is_signal && c.x_min < -tol && c.x_max > tol);
+    return { diffStraddles,
+             ok: !diffStraddles && isXSymmetric(conductors, dielectrics, domainW) };
+}
+
 // Modal-decomposition classifier for a differential pair, shared by BOTH backends
 // (FieldSolver2D._solve_modal_differential and TriBackend._prepareStaticModal) so the
 // symmetric/asymmetric decision, thresholds, and odd/even mode ordering can never drift
