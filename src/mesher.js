@@ -88,8 +88,13 @@ class Mesher {
      * @param {number} x_max - Maximum x-coordinate (default: domain_width)
      * @param {number} y_min - Minimum y-coordinate (default: 0)
      * @param {number} y_max - Maximum y-coordinate (default: domain_height)
+     * @param {boolean} half_x - Half-domain grid for a mirror-symmetric geometry: the x
+     *   mesh is generated for the full symmetric domain (same allocation, grading and
+     *   symmetry enforcement as without the flag) and generate_mesh returns only its
+     *   x >= centre half, starting exactly on the symmetry plane. The half grid is thus
+     *   the exactly right-half of the full grid. Requires symmetric = true.
      */
-    constructor(domain_width, domain_height, nx, ny, conductors, dielectrics, symmetric = false, x_min = 0, x_max = null, y_min = 0, y_max = null) {
+    constructor(domain_width, domain_height, nx, ny, conductors, dielectrics, symmetric = false, x_min = 0, x_max = null, y_min = 0, y_max = null, half_x = false) {
         this.domain_width = domain_width;
         this.domain_height = domain_height;
         this.nx = nx;
@@ -97,6 +102,7 @@ class Mesher {
         this.conductors = conductors;
         this.dielectrics = dielectrics;
         this.symmetric = symmetric;
+        this.half_x = half_x;
         this.x_min = x_min;
         this.x_max = x_max !== null ? x_max : domain_width;
         this.y_min = y_min;
@@ -332,12 +338,26 @@ class Mesher {
     }
 
     generate_mesh() {
-        const x = this._generate_axis_mesh('x');
+        let x = this._generate_axis_mesh('x');
         const y = this._generate_axis_mesh('y');
 
         // Validate symmetry if requested
         if (this.symmetric) {
             this._validate_mesh_symmetry(x);
+        }
+
+        // Half-domain grid: the x >= centre half of the symmetric full grid, starting
+        // exactly on the symmetry plane (_generate_axis_mesh guarantees the centre
+        // line of a symmetric x mesh).
+        if (this.half_x) {
+            if (!this.symmetric) throw new Error('Mesher: half_x requires symmetric meshing');
+            const center = (this.x_min + this.x_max) / 2;
+            const tol = this.domain_width * 1e-10;
+            const k = x.findIndex(v => v > center - tol);
+            if (k < 0 || Math.abs(x[k] - center) > tol)
+                throw new Error('Mesher: symmetric x mesh has no centre line');
+            x = x.slice(k);
+            x[0] = center;
         }
 
         return [x, y];
@@ -631,6 +651,14 @@ class Mesher {
             if (is_symmetric) {
                 const axis_min = axis === 'x' ? this.x_min : this.y_min;
                 const axis_max = axis === 'x' ? this.x_max : this.y_max;
+                // The centre line is the symmetry plane. A half-domain grid (half_x)
+                // starts on it and _enforce_symmetry keeps it unpaired. Add it when the
+                // generator left it out (e.g. an evenly-counted graded gap region
+                // between a differential pair's traces has points at +-d but no 0).
+                const center = (axis_min + axis_max) / 2;
+                if (!mesh.some(v => Math.abs(v - center) <= min_spacing)) {
+                    mesh = Float64Array.from([...mesh, center].sort((a, b) => a - b));
+                }
                 mesh = this._enforce_symmetry(mesh, axis_min, axis_max);
             } else {
                 console.warn('Geometry is not symmetric, but symmetric meshing was requested');
@@ -696,6 +724,9 @@ class Mesher {
 
             for (let j = 0; j < mesh.length; j++) {
                 if (used[j]) continue;
+                // The centre line is its own mirror. Make sure to not delete
+                // it.
+                if (Math.abs(mesh[j] - center) < tol) continue;
                 const dist = Math.abs(mesh[j] - mirror_pos);
                 if (dist < min_dist) {
                     min_dist = dist;

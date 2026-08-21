@@ -117,63 +117,36 @@ class MicrostripSolver extends FieldSolver2D {
         this.conductors = conductors;
 
         // x=0 mirror symmetry: when the cross-section is mirror-symmetric about
-        // x=0, mesh only the right half. Opt out with {symmetry: false}.
+        // x=0, the FDM grid covers only the right half (see Mesher half_x below).
+        // Disabled with {symmetry: false}, also disables the triangular
+        // backend's half domain (it reads tri_symmetry, see TriBackend.buildMesh).
         const symInfo = halfDomainSymmetry(this.conductors, this.dielectrics,
                                            this.domain_width, this.is_differential);
-        this.sym_half = options.symmetry !== false && symInfo.ok;
-        const symTol = this.domain_width * 1e-6;
-        // A signal straddling the plane is cut in half by the mesh, so its charge
+        if (options.symmetry === false) this.tri_symmetry = false;
+        this.sym_half = this.mesh_backend !== 'triangular' && options.symmetry !== false && symInfo.ok;
+        // A signal straddling the plane is cut in half by the grid, so its charge
         // contour captures Q/2 (capacitance needs x2). A signal entirely at x>0
         // (one trace of a differential pair) keeps its full contour (x1).
-        this._sym_signal_straddles = this.sym_half && this.conductors.some(
-            c => c.is_signal && c.x_min < -symTol && c.x_max > symTol);
-        // Polarity of the trace that remains in the meshed half (differential).
-        this._sym_meshed_polarity = 1;
-        if (this.sym_half && this.is_differential) {
-            const right = this.conductors.find(
-                c => c.is_signal && (c.x_min + c.x_max) / 2 > 0);
-            if (right) this._sym_meshed_polarity = right.polarity || 1;
-        }
+        this._sym_signal_straddles = this.sym_half && symInfo.straddles;
 
         // Create mesher but don't generate mesh yet
         // Geometry is centered at x=0, so domain spans from -domain_width/2 to +domain_width/2
         // Y-coordinate system: bottom ground extends from -t_gnd to 0 (top surface at y=0)
-        if (this.sym_half) {
-            // Half domain [0, W/2]. The mesher gets clipped copies of the rect
-            // lists (its interface collection has no domain-bounds check, so
-            // negative-x edges would corrupt the grid). this.conductors /
-            // this.dielectrics stay full, mask painting clips naturally by bbox
-            // and conductor_id / plating / R_dc stay aligned with the full list.
-            const clipC = this.conductors.flatMap(c => c.x_max <= symTol ? [] :
-                c.x_min < 0 ? [new Conductor(0, c.y, c.x_max, c.height,
-                                             c.is_signal, c.polarity, c.plating)]
-                            : [c]);
-            const clipD = this.dielectrics.flatMap(d => d.x_max <= symTol ? [] :
-                d.x_min < 0 ? [new Dielectric(0, d.y, d.x_max, d.height,
-                                              d.epsilon_r, d.tan_delta)]
-                            : [d]);
-            this.mesher = new Mesher(
-                this.domain_width / 2, this.domain_height,
-                Math.max(20, Math.ceil(this.nx / 2)), this.ny,
-                clipC, clipD,
-                false,                    // half grid is not mirror-symmetric
-                0,                        // x_min (the symmetry plane)
-                this.domain_width / 2,    // x_max
-                -this.t_gnd,              // y_min (bottom of bottom ground)
-                this.domain_height        // y_max (top of domain)
-            );
-        } else {
-            this.mesher = new Mesher(
-                this.domain_width, this.domain_height,
-                this.nx, this.ny,
-                this.conductors, this.dielectrics,
-                true,  // symmetric
-                -this.domain_width / 2,  // x_min
-                this.domain_width / 2,   // x_max
-                -this.t_gnd,             // y_min (bottom of bottom ground)
-                this.domain_height       // y_max (top of domain)
-            );
-        }
+        // Half-domain solve: the mesher still builds the symmetric full-domain grid
+        // from the full rect lists and returns its x >= 0 half, so the half grid is
+        // the exact right-half of the full one and this.conductors / this.dielectrics
+        // (mask painting clips by bbox, conductor_id / plating / R_dc indices) stay full.
+        this.mesher = new Mesher(
+            this.domain_width, this.domain_height,
+            this.nx, this.ny,
+            this.conductors, this.dielectrics,
+            true,  // symmetric
+            -this.domain_width / 2,  // x_min
+            this.domain_width / 2,   // x_max
+            -this.t_gnd,             // y_min (bottom of bottom ground)
+            this.domain_height,      // y_max (top of domain)
+            this.sym_half            // half_x: return the x >= 0 half of the grid
+        );
 
         // Mesh will be generated when needed
         this.x = null;

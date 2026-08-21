@@ -94,13 +94,18 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
         && mirrorInvariant(dielectrics, dielKey, axis, coord, tol);
 }
 
+// Coordinate tolerance for the x=0 mirror tests below (relative to the domain width).
+const symTol = (domainW) => domainW * 1e-6;
+
 // Is the geometry mirror-symmetric about x=0? (Mesh only the right half)
 export function isXSymmetric(conductors, dielectrics, domainW) {
-    const tol = domainW * 1e-6;
+    const tol = symTol(domainW);
     // Shaped geometry can't be compared by rect spans, so a shape declares its own mirror
     // symmetry instead (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
     // phase 0, which puts vertices exactly on the y axis so the x >= 0 half is an exact
-    // half).
+    // half). Every shape must qualify and the rectangular remainder still has to pass
+    // the span test below, so a shaped conductor can never wave through asymmetric rects
+    // sitting next to it.
     const shaped = (o) => !!o.shape;
     if (![...conductors, ...dielectrics].filter(shaped).every(o => o.shape.xSymmetric === true))
         return false;
@@ -129,16 +134,20 @@ export function isXSymmetric(conductors, dielectrics, domainW) {
     return condOk && dielOk;
 }
 
-// Half-domain symmetry: mirror-symmetric about x=0 and, for a differential
-// pair, no signal conductor cutting the plane. A broadside pair's traces are
-// stacked at x=0, so both modes are x-symmetric there and the plane cannot
-// separate even from odd those pairs must solve on the full domain.
+// Half-domain symmetry decision, shared by both backends (MicrostripSolver for the
+// FDM grid, TriBackend.buildMesh for the triangular mesh).
+//   ok        - mirror-symmetric about x=0 and, for a differential pair, no signal
+//               conductor cutting the plane. A broadside pair's traces are stacked at
+//               x=0, so both modes are x-symmetric there and the plane cannot separate
+//               even from odd. Those pairs must solve on the full domain.
+//   straddles - some signal conductor crosses x=0. With ok this is the single-ended
+//               case where the plane cuts the trace itself (the half-domain charge
+//               contour then captures Q/2).
 export function halfDomainSymmetry(conductors, dielectrics, domainW, isDifferential) {
-    const tol = domainW * 1e-6;
-    const diffStraddles = !!isDifferential && conductors.some(
-        c => c.is_signal && c.x_min < -tol && c.x_max > tol);
-    return { diffStraddles,
-             ok: !diffStraddles && isXSymmetric(conductors, dielectrics, domainW) };
+    const tol = symTol(domainW);
+    const straddles = conductors.some(c => c.is_signal && c.x_min < -tol && c.x_max > tol);
+    return { straddles,
+             ok: !(isDifferential && straddles) && isXSymmetric(conductors, dielectrics, domainW) };
 }
 
 // Modal-decomposition classifier for a differential pair, shared by BOTH backends

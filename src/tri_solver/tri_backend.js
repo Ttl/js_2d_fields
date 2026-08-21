@@ -43,7 +43,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
 import { Complex } from '../complex.js';
-import { classifyModalDecomposition, isXSymmetric } from '../geometry_symmetry.js';
+import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
 
@@ -833,23 +833,16 @@ export class TriBackend {
         const dom = { x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
                       y_min: -s.t_gnd, y_max: s.domain_height };
         this.domain = dom;
-        // Use a half-domain symmetry solve when the geometry is mirror-symmetric.
-        // BUT the x=0 plane can only separate the differential even/odd modes when
-        // it lies BETWEEN the signal conductors. For broadside pairs (traces stacked
-        // at x=0, straddling the plane) both modes are x-symmetric, so the plane
-        // cannot distinguish them — fall back to the full domain there.
-        const tolX = s.domain_width * 1e-6;
-        const diffStraddles = s.is_differential && s.conductors.some(
-            c => c.is_signal && c.x_min < -tolX && c.x_max > tolX);
+        // Use a half-domain symmetry solve when the geometry is mirror-symmetric (the
+        // shared halfDomainSymmetry disables symmetry for broadside).
         // A medium may also veto the half domain outright. A rectangular waveguide is
         // mirror-symmetric and its fundamental has a magnetic wall at x=0, so the half
         // solve would be valid, but resampleModeField has no parity/mirroring support the
         // way resampleStatic does, so the plotted mode field would be blank for x < 0.
         // (Routed through the solver, not tri_opts: app_solver overwrites tri_opts wholesale
-        // after construction.)
-        this.symmetry = (this.opts.symmetry ?? true) && !diffStraddles &&
-            s.tri_symmetry !== false &&
-            isXSymmetric(s.conductors, s.dielectrics, s.domain_width);
+        // after construction. MicrostripSolver also sets it for {symmetry: false}.)
+        this.symmetry = (this.opts.symmetry ?? true) && s.tri_symmetry !== false &&
+            halfDomainSymmetry(s.conductors, s.dielectrics, s.domain_width, s.is_differential).ok;
 
         const tAbs = Math.max(Math.abs(s.t ?? 35e-6), 1e-9);
         const wRef = Math.max(s.w ?? (dom.x_max - dom.x_min) / 10, 1e-9);

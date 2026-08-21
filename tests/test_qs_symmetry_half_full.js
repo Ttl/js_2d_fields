@@ -7,7 +7,7 @@
 // same five feature-stacked families:
 //   - single-ended: the plane cuts the TRACE itself (straddle x2 charge scaling,
 //     plane-column contour/loss segments, plating conductor_id alignment)
-//   - GCPW: pours + via slabs clipped at the mesher
+//   - GCPW: pours + via slabs cut by the plane column
 //   - diff stripline (PEC vs PMC plane walls), enclosure (side wall conductors
 //     clipped), ground cutout centered on the plane
 //
@@ -171,11 +171,65 @@ for (const fam of [FAMILIES[0], FAMILIES[2]]) {
     }
 }
 
+// ---- Initial grid: the half grid is the exact x >= 0 half of the full grid ----
+// The mesher builds the symmetric full-domain x mesh (same allocation, grading and
+// symmetry enforcement as the full-domain solve) and returns its right half, so
+// the half-domain solve starts from the exact restriction of the full-domain grid
+// (bit-identical lines, centre line at x = 0 first), not from a re-meshed [0, W/2].
+for (const fam of FAMILIES) {
+    for (const nx of [30, 300]) {
+        const h = new MicrostripSolver({ ...fam.geom, nx, ny: 30 });
+        const f = new MicrostripSolver({ ...fam.geom, nx, ny: 30, symmetry: false });
+        h.ensure_mesh(); f.ensure_mesh();
+        const right = Array.from(f.x).filter(v => v >= 0);
+        check(`${fam.name} nx=${nx}: half x grid == right half of the full x grid (bit-identical)`,
+            h.x[0] === 0 && right.length === h.x.length && right.every((v, j) => v === h.x[j]),
+            `${h.x.length} vs ${f.x.length} lines`);
+        check(`${fam.name} nx=${nx}: full grid carries the centre line and is mirror-symmetric`,
+            Array.from(f.x).includes(0) && f.x.length === 2 * h.x.length - 1 &&
+            Array.from(f.x).every((v, j) => v === -f.x[f.x.length - 1 - j]));
+        check(`${fam.name} nx=${nx}: y grid identical`,
+            f.y.length === h.y.length && Array.from(f.y).every((v, i) => v === h.y[i]));
+    }
+}
+
+// ---- Adaptive trajectory: the half-domain refinement IS the full-domain one ----
+// Every refinement ingredient is mirror-exact (flux-jump metric incl. the plane
+// term, two-corner intensity metric, energy change, pass pacing), so the half and
+// full solves select the same lines pass after pass: identical y grids, x grids
+// the right half, identical pass counts. A one-corner sampled metric broke this
+// (the x/y split drifted, costing the app default two extra passes).
+for (const fam of FAMILIES) {
+    const grids = { half: [], full: [] };
+    const run = async (tag, extra) => {
+        const s = new MicrostripSolver({ ...fam.geom, nx: 30, ny: 30, ...extra });
+        await quiet(() => s.solve_adaptive({ max_iters: 5, energy_tol: 1e-12, param_tol: 1e-12,
+            max_nodes: 400000, min_converged_passes: 2, certify: false,
+            onProgress: () => grids[tag].push({ x: Float64Array.from(s.x), y: Float64Array.from(s.y) }) }));
+    };
+    await run('half', {});
+    await run('full', { symmetry: false });
+    const same = grids.half.length === grids.full.length && grids.half.every((h, k) => {
+        const f = grids.full[k];
+        const right = Array.from(f.x).filter(v => v >= 0);
+        return right.length === h.x.length && right.every((v, j) => v === h.x[j]) &&
+               f.y.length === h.y.length && Array.from(f.y).every((v, i) => v === h.y[i]);
+    });
+    check(`${fam.name}: half and full adaptive runs refine identically for ${grids.full.length} passes`, same,
+        grids.half.map(g => `${g.x.length}x${g.y.length}`).join(' ') + ' vs ' +
+        grids.full.map(g => `${g.x.length}x${g.y.length}`).join(' '));
+}
+
 // ---- Detection / veto assertions ----
 {
     const geom = FAMILIES[0].geom;
     check('opt-out {symmetry: false} disables the half domain',
         new MicrostripSolver({ ...geom, nx: 30, ny: 30, symmetry: false }).sym_half === false);
+    check('opt-out {symmetry: false} also vetoes the triangular backend half domain (tri_symmetry)',
+        new MicrostripSolver({ ...geom, nx: 30, ny: 30, symmetry: false }).tri_symmetry === false &&
+        new MicrostripSolver({ ...geom, nx: 30, ny: 30 }).tri_symmetry === undefined);
+    check('sym_half is an FDM-grid property: false with the triangular backend',
+        new MicrostripSolver({ ...geom, nx: 30, ny: 30, mesh_backend: 'triangular' }).sym_half === false);
     const bs = new BroadsideStriplineSolver({
         trace_width: 0.2e-3, trace_thickness: 35e-6,
         h_bottom: 0.2e-3, h_middle: 0.2e-3, h_top: 0.2e-3,
