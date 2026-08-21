@@ -75,7 +75,12 @@ export function djordjevic_sarkar(freq, eps_ref, tand_ref, f_ref = 1e9) {
 
 /**
  * Apply Djordjevic-Sarkar model to all dielectric materials in the solver.
- * Modifies epsilon_r and tand arrays in place based on frequency.
+ * Modifies the nodal epsilon_r/tand arrays and, when present, the cell-centred
+ * epsilon_cell/tand_cell arrays in place based on frequency.
+ *
+ * Both sets must be updated together: the FDM operator and the capacitance
+ * contour read the cell permittivity while the dielectric-loss integral reads
+ * the nodal one.
  *
  * @param {FieldSolver2D} solver - The field solver instance
  * @param {number} f_ref - Reference frequency for material parameters (default 1 GHz)
@@ -86,41 +91,42 @@ export function applyDjordjevicSarkar(solver, f_ref = 1e9) {
     }
 
     const freq = solver.freq;
-    const ny = solver.y.length;
-    const nx = solver.x.length;
 
-    // Store original values as reference parameters
-    // Re-initialize if dimensions have changed (due to mesh refinement)
-    const needsInit = !solver._original_epsilon_r ||
-                      solver._original_epsilon_r.length !== ny ||
-                      (ny > 0 && (!solver._original_epsilon_r[0] || solver._original_epsilon_r[0].length !== nx));
+    // Reference (f_ref) values, re-captured whenever the array shape changes
+    // because the mesh was refined.
+    const stale = (orig, arr) =>
+        !orig || orig.length !== arr.length ||
+        (arr.length > 0 && (!orig[0] || orig[0].length !== arr[0].length));
 
-    if (needsInit) {
+    const apply = (eps, tand, origEps, origTand) => {
+        for (let i = 0; i < eps.length; i++) {
+            const epsRow = eps[i], tandRow = tand[i];
+            const epsRef = origEps[i], tandRef = origTand[i];
+            for (let j = 0; j < epsRow.length; j++) {
+                const eps_ref = epsRef[j], tand_ref = tandRef[j];
+                // Skip air/vacuum regions and lossless materials, the model is
+                // anchored on a finite loss tangent.
+                if (Math.abs(eps_ref - 1.0) < 1e-6) continue;
+                if (Math.abs(tand_ref) < 1e-10) continue;
+                const { eps_real, tand_actual } = djordjevic_sarkar(freq, eps_ref, tand_ref, f_ref);
+                epsRow[j] = eps_real;
+                tandRow[j] = tand_actual;
+            }
+        }
+    };
+
+    if (stale(solver._original_epsilon_r, solver.epsilon_r)) {
         solver._original_epsilon_r = solver.epsilon_r.map(row => new Float64Array(row));
         solver._original_tand = solver.tand.map(row => new Float64Array(row));
     }
+    apply(solver.epsilon_r, solver.tand, solver._original_epsilon_r, solver._original_tand);
 
-    // Apply model to each mesh point
-    for (let i = 0; i < ny; i++) {
-        for (let j = 0; j < nx; j++) {
-            const eps_ref = solver._original_epsilon_r[i][j];
-            const tand_ref = solver._original_tand[i][j];
-
-            // Skip air/vacuum regions (eps_r = 1)
-            if (Math.abs(eps_ref - 1.0) < 1e-6) {
-                continue;
-            }
-
-            // Skip if loss tangent is zero (lossless material)
-            if (Math.abs(tand_ref) < 1e-10) {
-                continue;
-            }
-
-            // Apply Djordjevic-Sarkar model
-            const { eps_real, tand_actual } = djordjevic_sarkar(freq, eps_ref, tand_ref, f_ref);
-
-            solver.epsilon_r[i][j] = eps_real;
-            solver.tand[i][j] = tand_actual;
+    if (solver.epsilon_cell) {
+        if (stale(solver._original_epsilon_cell, solver.epsilon_cell)) {
+            solver._original_epsilon_cell = solver.epsilon_cell.map(row => new Float64Array(row));
+            solver._original_tand_cell = solver.tand_cell.map(row => new Float64Array(row));
         }
+        apply(solver.epsilon_cell, solver.tand_cell,
+              solver._original_epsilon_cell, solver._original_tand_cell);
     }
 }

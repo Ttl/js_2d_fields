@@ -25,11 +25,12 @@ export const CONSTANTS = {
 // rescale to the 1-5 GHz median (1.054) broke the 20 GHz end and was reverted.
 export const VACUUM_LOSS_CAL = 1.093;
 
-// Node cap for the certificate's one-shot convergence-ratio measurement (see
-// _certifyStatic's l2OnceMaxNodes). Larger than the per-certificate l2MaxNodes
-// because it is paid at most once per adaptive solve and the r it yields is then
-// reused by every later certificate.
-const CERT_L2_ONCE_MAX_NODES = 400000;
+// Node cap for the certificate's convergence-ratio (level-2) measurement, on
+// the peak grid it solves (see _certifyStatic). It runs at most once per
+// adaptive solve (knownR caches the result for every later certificate) and
+// only when the conservative fallback ratio is what stands between the current
+// grid and a pass, so it can afford a grid well above the level-1 working size.
+const CERT_L2_MAX_NODES = 400000;
 
 // --- Math Utils ---
 
@@ -39,39 +40,6 @@ export function diff(arr) {
     return res;
 }
 
-function buildCSR(colLists, valLists, N) {
-    let nnz = 0;
-    for (let i = 0; i < N; i++) nnz += colLists[i].length;
-
-    const rowPtr = new Int32Array(N + 1);
-    const colIdx = new Int32Array(nnz);
-    const values = new Float64Array(nnz);
-
-    let p = 0;
-    for (let i = 0; i < N; i++) {
-        rowPtr[i] = p;
-        const cols = colLists[i];
-        const vals = valLists[i];
-
-        // Create array of (col, val) pairs and sort by column index
-        const pairs = [];
-        for (let k = 0; k < cols.length; k++) {
-            pairs.push({ col: cols[k], val: vals[k] });
-        }
-        pairs.sort((a, b) => a.col - b.col);
-
-        // Write sorted data
-        for (let k = 0; k < pairs.length; k++) {
-            colIdx[p] = pairs[k].col;
-            values[p] = pairs[k].val;
-            p++;
-        }
-    }
-    rowPtr[N] = p;
-
-    return { rowPtr, colIdx, values };
-}
-
 // Store the initialized WASM module (singleton pattern)
 let WASMModuleInstance = null;
 
@@ -79,7 +47,11 @@ let WASMModuleInstance = null;
 // factorization. The factorization dominates the solve cost, so k systems that
 // share an operator (e.g. the odd and even modes of a differential pair, which
 // differ only in their Dirichlet values) cost barely more than one.
-async function solveWithWASMMulti(csr, Bs, useLU = false) {
+//
+// forceLU forces the LU path. The default lets the WASM side pick, which means
+// Cholesky whenever the matrix tests symmetric (the FDM Laplace operator always
+// is, half-domain included. See solve_laplace_multi row scaling).
+async function solveWithWASMMulti(csr, Bs, forceLU = false) {
     if (!WASMModuleInstance) {
         // Initialize the module if it hasn't been already
         WASMModuleInstance = await createWASMModule();
@@ -127,7 +99,7 @@ async function solveWithWASMMulti(csr, Bs, useLU = false) {
             N, nnz,
             pRow, pCol, pVal,
             nRhs, pB, pX,
-            useLU ? 1 : 0
+            forceLU ? 1 : 0
         );
 
         if (status !== 0) {
@@ -161,8 +133,8 @@ async function solveWithWASMMulti(csr, Bs, useLU = false) {
     }
 }
 
-async function solveWithWASM(csr, B, useLU = false) {
-    return (await solveWithWASMMulti(csr, [B], useLU))[0];
+async function solveWithWASM(csr, B, forceLU = false) {
+    return (await solveWithWASMMulti(csr, [B], forceLU))[0];
 }
 
 function isArrayLike2D(arr, ny, nx) {
@@ -276,6 +248,46 @@ export class FieldSolver2D {
         // Computed fields - stored as array: [fields] for single-ended, [odd, even] for differential
         this.Ex = null;
         this.Ey = null;
+    }
+
+    /**
+     * Cell-centred material arrays: epsilon_cell[i][j] / tand_cell[i][j] describe
+     * the rectangle [x[j], x[j+1]] x [y[i], y[i+1]], sampled at its centre.
+     *
+     * The nodal epsilon_r samples material at grid points, which
+     * leaves a dielectric interface ambiguous. A node sitting exactly on the
+     * interface (which is where the mesher puts its lines) belongs to whichever
+     * region was painted last, and averaging two nodal values for a face
+     * permittivity then smears the interface by half a cell. A cell never
+     * straddles an interface that lies on a grid line, so the cell array is
+     * unambiguous, and the face coefficients built from it (see
+     * solve_laplace_multi) are exact.
+     *
+     * Called by each solver's _setup_geometry after the nodal arrays are painted.
+     */
+    _paint_cell_materials() {
+        const nx = this.x.length, ny = this.y.length;
+        const nxc = Math.max(nx - 1, 0), nyc = Math.max(ny - 1, 0);
+        const eps = Array(nyc).fill().map(() => new Float64Array(nxc).fill(1));
+        const tand = Array(nyc).fill().map(() => new Float64Array(nxc));
+        const xc = new Float64Array(nxc), yc = new Float64Array(nyc);
+        for (let j = 0; j < nxc; j++) xc[j] = 0.5 * (this.x[j] + this.x[j + 1]);
+        for (let i = 0; i < nyc; i++) yc[i] = 0.5 * (this.y[i] + this.y[i + 1]);
+        // Same "later dielectric wins" order as the nodal painting, so a stack
+        // (substrate, then solder mask over it) resolves identically.
+        for (const d of (this.dielectrics || [])) {
+            for (let i = 0; i < nyc; i++) {
+                if (yc[i] < d.y_min || yc[i] > d.y_max) continue;
+                const er = eps[i], td = tand[i];
+                for (let j = 0; j < nxc; j++) {
+                    if (xc[j] < d.x_min || xc[j] > d.x_max) continue;
+                    er[j] = d.epsilon_r;
+                    td[j] = d.tan_delta;
+                }
+            }
+        }
+        this.epsilon_cell = eps;
+        this.tand_cell = tand;
     }
 
     /**
@@ -645,8 +657,11 @@ export class FieldSolver2D {
         const N = nx * ny;
         const idx = (i, j) => i * nx + j;
 
-        const get_er = (i, j) => vacuum ? 1.0 : this.epsilon_r[i][j];
         const is_cond = (i, j) => this.conductor_mask[i][j];
+        // Cell-centred permittivity, the operator's material of record (see
+        // FieldSolver2D._paint_cell_materials). The vacuum solve reads 1 everywhere.
+        const ec = vacuum ? null : this.epsilon_cell;
+        const epsC = ec ? (ci, cj) => ec[ci][cj] : () => 1.0;
         // PEC symmetry plane: the j=0 column is set to V=0 like a conductor.
         const pec = planeBC === 'pec';
         const pinned = (i, j) => is_cond(i, j) || (pec && j === 0);
@@ -677,22 +692,19 @@ export class FieldSolver2D {
             }
         }
 
-        // Build sparse system
+        // Build sparse system. The 5-point stencil gives at most 5 entries per
+        // row, and the natural (row-major) node numbering already emits them in
+        // ascending column order (down, left, self, right, up), so the CSR is
+        // written straight into typed arrays.
         const Bs = Vs.map(() => new Float64Array(N_unknown));
-        const diag = new Float64Array(N_unknown);
-
-        const colLists = Array(N_unknown);
-        const valLists = Array(N_unknown);
-
-        for (let i = 0; i < N_unknown; i++) {
-            colLists[i] = [];
-            valLists[i] = [];
-        }
-
-        const addA = (r, c, v) => {
-            colLists[r].push(c);
-            valLists[r].push(v);
-            if (r === c) diag[r] += v;
+        const rowPtr = new Int32Array(N_unknown + 1);
+        const colIdx = new Int32Array(5 * N_unknown);
+        const values = new Float64Array(5 * N_unknown);
+        let nnz = 0;
+        const addA = (c, v) => {
+            colIdx[nnz] = c;
+            values[nnz] = v;
+            nnz++;
         };
 
         for (let i = 0; i < ny; i++) {
@@ -718,78 +730,86 @@ export class FieldSolver2D {
                     dyd = dy[i - 1];
                 }
 
-                let err, erl, eru, erd;
-                if (vacuum) {
-                    err = erl = eru = erd = 1.0;
-                } else {
-                    const erc = get_er(i, j);
-                    // The symmetry-plane column is an interior column of the
-                    // mirrored full domain, so it must use the conductor-aware
-                    // interior averaging. The generic boundary rule reads the
-                    // epsilon inside a conductor neighbor.
-                    const symPlane = this.sym_half && j === 0 && i > 0 && i < ny - 1;
-                    if (symPlane) {
-                        err = is_cond(i, j + 1) ? erc : 0.5 * (erc + get_er(i, j + 1));
-                        erl = erc;   // cl = 0 at the plane; unused
-                        eru = is_cond(i + 1, j) ? erc : 0.5 * (erc + get_er(i + 1, j));
-                        erd = is_cond(i - 1, j) ? erc : 0.5 * (erc + get_er(i - 1, j));
-                    } else if (boundary) {
-                        err = 0.5 * (erc + get_er(i, Math.min(j + 1, nx - 1)));
-                        erl = 0.5 * (erc + get_er(i, Math.max(j - 1, 0)));
-                        eru = 0.5 * (erc + get_er(Math.min(i + 1, ny - 1), j));
-                        erd = 0.5 * (erc + get_er(Math.max(i - 1, 0), j));
-                    } else {
-                        err = is_cond(i, j + 1) ? erc : 0.5 * (erc + get_er(i, j + 1));
-                        erl = is_cond(i, j - 1) ? erc : 0.5 * (erc + get_er(i, j - 1));
-                        eru = is_cond(i + 1, j) ? erc : 0.5 * (erc + get_er(i + 1, j));
-                        erd = is_cond(i - 1, j) ? erc : 0.5 * (erc + get_er(i - 1, j));
-                    }
-                }
+                // The control volume around node (i,j) spans half a cell in each
+                // direction. At a domain edge the missing half is the mirror of
+                // the present one (V[-1] = V[1]),
+                // which is what the dxl/dyd fallbacks above encode. Each of its
+                // four faces is therefore split across two cells, and the flux
+                // through it is the cell permittivities weighted by how much of
+                // the face each cell covers:
+                //
+                //     cr = -( eps[cid][j] * hd + eps[ciu][j] * hu ) / dxr
+                //
+                // and so on. With interfaces on grid lines (which is where the
+                // mesher puts them) no cell straddles a material boundary, so
+                // this is exact, unlike averaging the two nodal permittivities,
+                // which smears every interface by half a cell. It is also
+                // symmetric by construction: node (i,j+1)'s left face reads the
+                // same cells with the same weights, which is what lets the
+                // system be factored by Cholesky rather than LU.
+                //
+                // Conductors need no special case: a cell fully inside a
+                // conductor is only ever read by a node inside that conductor,
+                // and those nodes are pinned.
+                const cid = i > 0 ? i - 1 : 0;                 // cell row below the node
+                const ciu = i < ny - 1 ? i : ny - 2;           // cell row above
+                const cjl = j > 0 ? j - 1 : 0;                 // cell column left of the node
+                const cjr = j < nx - 1 ? j : nx - 2;           // cell column right
+                const hd = 0.5 * dyd, hu = 0.5 * dyu;          // face halves in y
+                const wl = 0.5 * dxl, wr = 0.5 * dxr;          // face halves in x
 
-                const area_i = 0.5 * (dyd + dyu);
-                const area_j = 0.5 * (dxl + dxr);
+                let cr = 0, cl = 0, cu = 0, cd = 0;
+                if (j < nx - 1) cr = -(epsC(cid, j) * hd + epsC(ciu, j) * hu) / dxr;
+                if (j > 0)      cl = -(epsC(cid, cjl) * hd + epsC(ciu, cjl) * hu) / dxl;
+                if (i < ny - 1) cu = -(epsC(i, cjl) * wl + epsC(i, cjr) * wr) / dyu;
+                if (i > 0)      cd = -(epsC(cid, cjl) * wl + epsC(cid, cjr) * wr) / dyd;
+                // Magnetic-wall symmetry plane. The mirrored ghost (V[-1] = V[1],
+                // dxl = dxr) folds the left flux into the right one, so the
+                // full-domain row restricted to x >= 0 is 2*cr*(V1-V0) plus
+                // vertical terms over the full width dx[0] (cjl == cjr == 0 there
+                // already gives that width).
+                if (this.sym_half && j === 0 && !pec) cr *= 2;
 
-                let cr, cl, cu, cd;
-                if (boundary) {
-                    cr = j < nx - 1 ? -err * area_i / dxr : 0;
-                    cl = j > 0 ? -erl * area_i / dxl : 0;
-                    cu = i < ny - 1 ? -eru * area_j / dyu : 0;
-                    cd = i > 0 ? -erd * area_j / dyd : 0;
-                    // Magnetic-wall symmetry plane. The mirrored
-                    // ghost (V[-1]=V[1], dxl=dxr) folds the left flux into the
-                    // right one, so the full-domain row restricted to x>=0 is
-                    // 2*cr*(V1-V0) + vertical terms over the full area dx[0].
-                    if (this.sym_half && j === 0 && !pec) cr *= 2;
-                } else {
-                    cr = -err * area_i / dxr;
-                    cl = -erl * area_i / dxl;
-                    cu = -eru * area_j / dyu;
-                    cd = -erd * area_j / dyd;
+                // Half-domain rows at j >= 1 each stand for a mirror pair of
+                // full-domain nodes while the plane row (j = 0) stands for one,
+                // so the restriction above (cr *= 2) leaves the operator
+                // unsymmetric: A[0,1] = 2*cr but A[1,0] = cr. Scaling every
+                // j >= 1 row by 2 makes it exactly P^T A P (P = the half -> full
+                // prolongation that duplicates x > 0 nodes), which is symmetric
+                // positive definite. Same solution, scaling a row and its
+                // right-hand side entry together is an identity, but Cholesky
+                // can factor it. Cholesky is ~1.4x faster than LU here.
+                // (In the PEC case every unknown row has j >= 1, so this is a
+                // uniform x2 and the matrix was symmetric either way.)
+                if (this.sym_half && j > 0) {
+                    cr *= 2; cl *= 2; cu *= 2; cd *= 2;
                 }
 
                 const cc = -(cr + cl + cu + cd);
-                addA(n, n, cc);
 
+                // Emit the row in ascending column order: (i-1,j), (i,j-1),
+                // (i,j), (i,j+1), (i+1,j). Row-major numbering makes that the
+                // sorted order, which is what the WASM entry point requires.
                 const handle = (ii, jj, c) => {
-                    const fn2 = idx(ii, jj);
                     if (!pinned(ii, jj)) {
-                        addA(n, full_to_red[fn2], c);
+                        addA(full_to_red[idx(ii, jj)], c);
                     } else {
                         for (let m = 0; m < Vs.length; m++)
                             Bs[m][n] -= c * Vs[m][ii][jj];
                     }
                 };
 
-                if (j < nx - 1) handle(i, j + 1, cr);
-                if (j > 0) handle(i, j - 1, cl);
-                if (i < ny - 1) handle(i + 1, j, cu);
                 if (i > 0) handle(i - 1, j, cd);
+                if (j > 0) handle(i, j - 1, cl);
+                addA(n, cc);
+                if (j < nx - 1) handle(i, j + 1, cr);
+                if (i < ny - 1) handle(i + 1, j, cu);
+                rowPtr[n + 1] = nnz;
             }
         }
 
-        const { rowPtr, colIdx, values } = buildCSR(colLists, valLists, N_unknown);
-        const csr = { rowPtr, colIdx, values };
-        const xs = await solveWithWASMMulti(csr, Bs, true);
+        const csr = { rowPtr, colIdx: colIdx.subarray(0, nnz), values: values.subarray(0, nnz) };
+        const xs = await solveWithWASMMulti(csr, Bs);
 
         // Reconstruct solutions for full mesh
         for (let m = 0; m < Vs.length; m++) {
@@ -892,6 +912,18 @@ export class FieldSolver2D {
             for (let j = j0; j < nx - 1; j++) {
                 if (!this.signal_mask[i][j]) continue;
 
+                // Half-widths of the node's control volume, and the cells its
+                // faces cut through. The same decomposition the operator uses
+                // (see solve_laplace_multi). Reading the face permittivity off
+                // the cells instead of the neighbour node makes this contour the
+                // discrete Gauss law of the system that was actually solved, so
+                // Q is exact for the computed potential rather than an
+                // independent quadrature that disagrees at every interface.
+                const hd = get_dy(i - 1) / 2, hu = get_dy(i) / 2;
+                const wl = j > 0 ? get_dx(j - 1) / 2 : get_dx(0) / 2;
+                const wr = get_dx(j) / 2;
+                const cjl = j > 0 ? j - 1 : 0;
+
                 // Check 4 neighbors
                 const check_neighbor = (ni, nj, is_vertical_flux) => {
                     // Only add flux if the neighbor is NOT part of the signal conductor
@@ -901,6 +933,7 @@ export class FieldSolver2D {
                     let En;
                     let dist;
                     let area;
+                    let er = 1;
 
                     if (is_vertical_flux) {
                          // Neighbor is Top/Bottom
@@ -908,15 +941,23 @@ export class FieldSolver2D {
                          En = (V[i][j] - V[ni][nj]) / dist;
                          // Average dx for area (half cell at the symmetry plane)
                          area = j > 0 ? (get_dx(j-1) + get_dx(j)) / 2 : get_dx(0) / 2;
+                         if (!vacuum) {
+                             const row = this.epsilon_cell[ni > i ? i : i - 1];
+                             er = (row[cjl] * wl + row[j] * wr) / (wl + wr);
+                         }
                     } else {
                         // Neighbor is Left/Right
                         dist = Math.abs(this.x[j] - this.x[nj]);
                         En = (V[i][j] - V[ni][nj]) / dist;
                         // Average dy for area
                         area = (get_dy(i-1) + get_dy(i)) / 2;
+                        if (!vacuum) {
+                            const col = nj > j ? j : j - 1;
+                            er = (this.epsilon_cell[i - 1][col] * hd +
+                                  this.epsilon_cell[i][col] * hu) / (hd + hu);
+                        }
                     }
 
-                    const er = vacuum ? 1 : this.epsilon_r[ni][nj];
                     Q += CONSTANTS.EPS0 * er * En * area;
                 };
 
@@ -1544,16 +1585,35 @@ export class FieldSolver2D {
         const x_metrics = new Float64Array(nx - 1);
         const y_metrics = new Float64Array(ny - 1);
         const dx = diff(this.x), dy = diff(this.y);
-        const er = (i, j) => vacuum ? 1.0 : this.epsilon_r[i][j];
         const cm = this.conductor_mask;
+        // Face permittivities exactly as the operator forms them (see
+        // solve_laplace_multi). The cell-weighted average over the half-faces
+        // above and below (x faces) or left and right (y faces) of the node. The
+        // nodal average this used to take differs from the operator's face value
+        // at any interface running along the jump direction, which shows up as a
+        // spurious jump where the discrete flux is in fact continuous, the
+        // indicator then spends refinement on interfaces that are already exact.
+        const ec = vacuum ? null : this.epsilon_cell;
+        const epsX = (i, cj) => {           // face at column cj, node row i
+            if (!ec) return 1.0;
+            const hd = i > 0 ? dy[i - 1] : dy[0], hu = i < ny - 1 ? dy[i] : dy[ny - 2];
+            const cid = i > 0 ? i - 1 : 0, ciu = i < ny - 1 ? i : ny - 2;
+            return (ec[cid][cj] * hd + ec[ciu][cj] * hu) / (hd + hu);
+        };
+        const epsY = (ci, j) => {           // face at row ci, node column j
+            if (!ec) return 1.0;
+            const wl = j > 0 ? dx[j - 1] : dx[0], wr = j < nx - 1 ? dx[j] : dx[nx - 2];
+            const cjl = j > 0 ? j - 1 : 0, cjr = j < nx - 1 ? j : nx - 2;
+            return (ec[ci][cjl] * wl + ec[ci][cjr] * wr) / (wl + wr);
+        };
 
         for (let i = 0; i < ny; i++) {
             // transverse control width so the accumulation approximates an area integral
             const wy = ((i + 1 < ny ? this.y[i + 1] : this.y[i]) - (i > 0 ? this.y[i - 1] : this.y[i])) / 2;
             for (let j = 1; j < nx - 1; j++) {
                 if (cm[i][j] || cm[i][j - 1] || cm[i][j + 1]) continue;
-                const eL = 0.5 * (er(i, j - 1) + er(i, j));
-                const eR = 0.5 * (er(i, j) + er(i, j + 1));
+                const eL = epsX(i, j - 1);
+                const eR = epsX(i, j);
                 const J = Math.abs(eR * (V[i][j + 1] - V[i][j]) / dx[j] -
                                    eL * (V[i][j] - V[i][j - 1]) / dx[j - 1]);
                 x_metrics[j - 1] += J * dx[j - 1] * wy;
@@ -1565,8 +1625,7 @@ export class FieldSolver2D {
             // borders here. The electric wall (odd mode) pins V[0] = 0 with an odd
             // mirror, so its jump is 0.
             if (planeBC === 'pmc' && nx > 1 && !cm[i][0] && !cm[i][1]) {
-                const eR = 0.5 * (er(i, 0) + er(i, 1));
-                const J = 2 * eR * Math.abs(V[i][1] - V[i][0]) / dx[0];
+                const J = 2 * epsX(i, 0) * Math.abs(V[i][1] - V[i][0]) / dx[0];
                 x_metrics[0] += J * dx[0] * wy;
             }
         }
@@ -1574,8 +1633,8 @@ export class FieldSolver2D {
             const wx = ((j + 1 < nx ? this.x[j + 1] : this.x[j]) - (j > 0 ? this.x[j - 1] : this.x[j])) / 2;
             for (let i = 1; i < ny - 1; i++) {
                 if (cm[i][j] || cm[i - 1][j] || cm[i + 1][j]) continue;
-                const eD = 0.5 * (er(i - 1, j) + er(i, j));
-                const eU = 0.5 * (er(i, j) + er(i + 1, j));
+                const eD = epsY(i - 1, j);
+                const eU = epsY(i, j);
                 const J = Math.abs(eU * (V[i + 1][j] - V[i][j]) / dy[i] -
                                    eD * (V[i][j] - V[i - 1][j]) / dy[i - 1]);
                 y_metrics[i - 1] += J * dy[i - 1] * wx;
@@ -1851,9 +1910,10 @@ export class FieldSolver2D {
         this.Ey = null;
     }
 
-    _compute_energy_error(Ex, Ey, prev_energy) {
+    _compute_energy_error(Ex, Ey, prev_energy, vacuum = false) {
         /**
          * Compute relative change in stored electromagnetic energy.
+         * vacuum: score the vacuum (C0) field, which carries no permittivity.
          */
         const ny = this.y.length;
         const nx = this.x.length;
@@ -1866,7 +1926,7 @@ export class FieldSolver2D {
         // same rule as calculate_dielectric_loss), so the convergence decisions
         // follow the full-domain trajectory.
         const term = (i, j) => this.conductor_mask[i][j] ? 0
-            : this.epsilon_r[i][j] * (Ex[i][j] ** 2 + Ey[i][j] ** 2);
+            : (vacuum ? 1 : this.epsilon_r[i][j]) * (Ex[i][j] ** 2 + Ey[i][j] ** 2);
         let energy = 0.0;
         for (let i = 0; i < ny - 1; i++) {
             for (let j = 0; j < nx - 1; j++) {
@@ -2209,28 +2269,44 @@ export class FieldSolver2D {
         return out;
     }
 
+    // Richardson certificate for the static quantities (C, C0 per mode).
+    //
+    // The comparison level halves one axis at a time rather than both at once.
+    // For a tensor-product discretisation the error separates as
+    // A_x*h_x^p + A_y*h_y^p, so the two single-axis differences add up to the
+    // both-axes difference. Verified in tests to within 0.7% on a microstrip, a
+    // stripline and a differential GCPW + solder mask, while the peak grid is
+    // 2N instead of 4N. That is ~0.7x the solve time at level 1 and a
+    // quarter of it at level 2 (two 4N solves instead of one 16N), and it halves
+    // the peak factorization, which is what the node caps below really guard.
+    //
     // Options beyond the caps/gates:
     //   * q0: base-grid (C, C0) per mode in _staticCapacitances order, when the
     //     caller already has them (the refinement pass that tripped the gate just
     //     computed exactly these). Skips re-solving the base level.
     //   * knownR: convergence ratio measured by an earlier certificate in the same
-    //     solve. Skips the 16x level-2 solve entirely: r decreases (or holds) under
+    //     solve. Skips the level-2 solves entirely: r decreases (or holds) under
     //     refinement, so an earlier genuine measurement used on a finer grid errs
     //     conservative, and the x1.5 safety still covers a moderately larger true r.
     //     Only genuinely measured, non-pre-asymptotic r values are reused.
-    //   * l2OnceMaxNodes: the level-2 cap for the one-shot r measurement in the
-    //     already-failing branch below. It runs at most once per adaptive solve
-    //     (knownR caches the result), so it affords a larger grid than the
-    //     per-certificate l2MaxNodes. The effective cap is the larger of the two, so
-    //     the one-shot measurement is never stingier than the routine one.
-    async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = 150000,
-                                l2OnceMaxNodes = CERT_L2_ONCE_MAX_NODES,
+    //   * l2MaxNodes: peak-grid cap for the level-2 (convergence-ratio) solves.
+    //
+    // All caps are on the peak grid a level actually solves, so they bound peak
+    // memory directly.
+    async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = CERT_L2_MAX_NODES,
                                 rMax = 0.7, safety = 1.5,
                                 q0 = null, knownR = null } = {}) {
-        const maxDiff = (a, b) => {
+        // Relative distance from a base level to the pair of once-refined levels,
+        // per quantity, worst quantity wins. The x and y components come out with
+        // the same sign in practice, so adding their magnitudes is tight, and
+        // conservative when they ever disagree.
+        const splitDiff = (qBase, qx, qy) => {
             let m = 0;
-            for (let i = 0; i < a.length; i++)
-                m = Math.max(m, Math.abs(a[i] - b[i]) / Math.max(Math.abs(b[i]), 1e-300));
+            for (let i = 0; i < qBase.length; i++) {
+                const dx = Math.abs(qBase[i] - qx[i]) / Math.max(Math.abs(qx[i]), 1e-300);
+                const dy = Math.abs(qBase[i] - qy[i]) / Math.max(Math.abs(qy[i]), 1e-300);
+                m = Math.max(m, dx + dy);
+            }
             return m;
         };
         const bisect = (arr) => {
@@ -2242,28 +2318,45 @@ export class FieldSolver2D {
             out[out.length - 1] = arr[arr.length - 1];
             return out;
         };
-        const bisectedNodes = (x, y) => (2 * x.length - 1) * (2 * y.length - 1);
-        if (bisectedNodes(this.x, this.y) > maxNodes) return null;
+        // Largest grid the split pair solves: one axis doubled, the other as is.
+        const peakNodes = (x, y) => Math.max((2 * x.length - 1) * y.length,
+                                             x.length * (2 * y.length - 1));
+        if (peakNodes(this.x, this.y) > maxNodes) return null;
         if (!q0) q0 = await this._staticCapacitances();
         const x1 = bisect(this.x), y1 = bisect(this.y);
-        const q1 = await this._withGrid(x1, y1, () => this._staticCapacitances());
-        const d1 = maxDiff(q0, q1);
+        const qx = await this._withGrid(x1, this.y, () => this._staticCapacitances());
+        const qy = await this._withGrid(this.x, y1, () => this._staticCapacitances());
+        const d1 = splitDiff(q0, qx, qy);
         const base = { nodes: this.x.length * this.y.length, d1, safety };
         if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, rSource: null, levels: 1 };
+
+        // Level 2 refines each axis once more, again one at a time: qxx is the
+        // x-halved grid with x halved again, qyy likewise in y, so each component
+        // is a clean three-level sequence in its own direction.
+        const l2Peak = Math.max((4 * this.x.length - 3) * this.y.length,
+                                this.x.length * (4 * this.y.length - 3));
+        const measureR = async () => {
+            const qxx = await this._withGrid(bisect(x1), this.y, () => this._staticCapacitances());
+            const qyy = await this._withGrid(this.x, bisect(y1), () => this._staticCapacitances());
+            let d2 = 0;
+            for (let i = 0; i < q0.length; i++) {
+                const dx = Math.abs(qx[i] - qxx[i]) / Math.max(Math.abs(qxx[i]), 1e-300);
+                const dy = Math.abs(qy[i] - qyy[i]) / Math.max(Math.abs(qyy[i]), 1e-300);
+                d2 = Math.max(d2, dx + dy);
+            }
+            return d2 / d1;
+        };
+
         if (d1 * safety >= tol) {
-            // Already failing on d1 alone. Still measure r when the level-2 grid
-            // is affordable: err = d1/(1-r) is more accurate than d1
-            // lower bound, and the measured r is reused (knownR) by every later
+            // Already failing on d1 alone. Still measure r when the level-2 grids
+            // are affordable: err = d1/(1-r) is more accurate than the d1 lower
+            // bound, and the measured r is reused (knownR) by every later
             // certificate in this solve, otherwise the final certificate on a
-            // large grid is stuck with the conservative r=0.5
-            // fallback even when the true ratio is ~0.3. This branch runs at
-            // most once per adaptive solve (knownR caches the result), so it
-            // affords the larger l2OnceMaxNodes cap: app-budget solves fail their
-            // first certificate at ~10-25k nodes, i.e. L2 at 160-400k.
-            if (knownR == null && bisectedNodes(x1, y1) <= Math.max(l2MaxNodes, l2OnceMaxNodes)) {
-                const x2 = bisect(x1), y2 = bisect(y1);
-                const q2 = await this._withGrid(x2, y2, () => this._staticCapacitances());
-                const r = maxDiff(q1, q2) / d1;
+            // large grid is stuck with the conservative r=0.5 fallback even when
+            // the true ratio is ~0.3. It runs at most once per adaptive solve
+            // (knownR caches the result).
+            if (knownR == null && l2Peak <= l2MaxNodes) {
+                const r = await measureR();
                 if (r >= rMax)
                     return { ...base, pass: false, err: d1, r, levels: 2, rSource: 'measured', preAsymptotic: true };
                 return { ...base, pass: false, err: d1 / (1 - r), r, levels: 2, rSource: 'measured' };
@@ -2275,20 +2368,22 @@ export class FieldSolver2D {
                 r: rEst, levels: 1, rSource: rEst != null ? 'reused' : null,
             };
         }
-        let r = 0.5, levels = 1, rSource = 'fallback';
-        if (knownR != null) {
-            r = knownR;
-            rSource = 'reused';
-        } else if (bisectedNodes(x1, y1) <= l2MaxNodes) {
-            const x2 = bisect(x1), y2 = bisect(y1);
-            const q2 = await this._withGrid(x2, y2, () => this._staticCapacitances());
-            r = maxDiff(q1, q2) / d1;
+        let r = knownR != null ? knownR : 0.5;
+        let rSource = knownR != null ? 'reused' : 'fallback';
+        let levels = 1;
+        let err = d1 / (1 - Math.min(r, rMax));
+        // Measuring r can only shrink the estimate, so when the conservative
+        // r = 0.5 fallback already clears the tolerance the level-2 solves would
+        // only improve the already passing estimate. Pay for it only when the
+        // alternative is continuing with extra refinement pass.
+        if (err * safety >= tol && knownR == null && l2Peak <= l2MaxNodes) {
+            r = await measureR();
             levels = 2;
             rSource = 'measured';
             if (r >= rMax)
                 return { ...base, pass: false, err: d1, r, levels, rSource, preAsymptotic: true };
+            err = d1 / (1 - Math.min(r, rMax));
         }
-        const err = d1 / (1 - Math.min(r, rMax));
         return { ...base, pass: err * safety < tol, err, r, levels, rSource };
     }
 
@@ -2364,8 +2459,7 @@ export class FieldSolver2D {
             min_converged_passes = 1,
             certify = true,
             certify_max_nodes = 600000,
-            certify_l2_max_nodes = 150000,
-            certify_l2_once_max_nodes = CERT_L2_ONCE_MAX_NODES,
+            certify_l2_max_nodes = CERT_L2_MAX_NODES,
             onProgress = null,
             shouldStop = null,
             skip_mesh = false
@@ -2395,8 +2489,7 @@ export class FieldSolver2D {
         // Verification certificate state (see _certifyStatic). Mirrors the triangular
         // backend: a tripped pass-to-pass gate is only a CANDIDATE stop until the
         // certified remaining error passes the tolerance.
-        const certOpts = { maxNodes: certify_max_nodes, l2MaxNodes: certify_l2_max_nodes,
-                           l2OnceMaxNodes: certify_l2_once_max_nodes };
+        const certOpts = { maxNodes: certify_max_nodes, l2MaxNodes: certify_l2_max_nodes };
         this.certification = null;
         this._certWarn = null;
 
@@ -2433,6 +2526,7 @@ export class FieldSolver2D {
 
         // Tracking variables for convergence
         const prevEnergy = {};
+        const prevEnergy0 = {};
         const prevZ0 = {};
         let converged_count = 0;
         let modeResults = null;
@@ -2454,12 +2548,22 @@ export class FieldSolver2D {
                 const r = modeResults[i];
 
                 const { energy, rel_error: energy_err } = this._compute_energy_error(r.Ex, r.Ey, prevEnergy[modeName]);
+                // The vacuum field is scored too. It is not a duplicate of the
+                // dielectric one, it carries C0 (hence Z0) and it is the entire
+                // conductor-loss integrand (see _mode_conductor_loss), which is a
+                // surface quantity that settles later than the dielectric energy.
+                let energy0_err = 0;
+                if (r.Ex0 && r.Ey0) {
+                    const e0 = this._compute_energy_error(r.Ex0, r.Ey0, prevEnergy0[modeName], true);
+                    energy0_err = e0.rel_error;
+                    prevEnergy0[modeName] = e0.energy;
+                }
 
                 const param_err = prevZ0[modeName] !== undefined
                     ? Math.abs(r.Z0 - prevZ0[modeName]) / Math.max(Math.abs(prevZ0[modeName]), 1e-12)
                     : 1.0;
 
-                max_energy_err = Math.max(max_energy_err, energy_err);
+                max_energy_err = Math.max(max_energy_err, energy_err, energy0_err);
                 max_param_err = Math.max(max_param_err, param_err);
 
                 prevEnergy[modeName] = energy;

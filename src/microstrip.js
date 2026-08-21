@@ -1040,6 +1040,10 @@ class MicrostripSolver extends FieldSolver2D {
             }
             return row;
         });
+
+        // Cell-centred permittivity for the flux coefficients (see
+        // FieldSolver2D._paint_cell_materials).
+        this._paint_cell_materials();
     }
 }
 
