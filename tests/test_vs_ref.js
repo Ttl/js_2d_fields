@@ -26,27 +26,42 @@ import { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation,
  * @param {string} test_name - Name of the test for printing
  * @returns {Object} Test results with pass/fail status
  */
-function test_microstrip_solution(solver_results, reference, test_name = "Microstrip") {
-    // Global error thresholds (relative error in %)
-    const MAX_Z0_ERROR = 5.0;
-    const MAX_DIEL_LOSS_ERROR = 10.0;
-    const MAX_COND_LOSS_ERROR = 50.0;
-    const MAX_C_ERROR = 10.0;
-    const MAX_R_ERROR = 15.0;
-    const MAX_L_ERROR = 10.0;
-    const MAX_G_ERROR = 15.0;
-    const MAX_EPS_EFF_ERROR = 5.0;
+function test_microstrip_solution(solver_results, reference, test_name = "Microstrip",
+                                  threshold_overrides = {}) {
+    // Global error thresholds (relative error in %). Set from the worst observed error
+    // across every case and both backends, with roughly 1.5x headroom.
+    // Re-derive them after an accuracy change: run this file with and without
+    // MESH_BACKEND=triangular and take the max per parameter.
+    const MAX_Z0_ERROR = 3.0;
+    const MAX_DIEL_LOSS_ERROR = 4.0;
+    const MAX_COND_LOSS_ERROR = 15.0;
+    const MAX_LOSS_ERROR = 10.0;
+    const MAX_C_ERROR = 2.0;
+    const MAX_R_ERROR = 10.0;
+    const MAX_L_ERROR = 2.0;
+    const MAX_G_ERROR = 6.0;
+    const MAX_EPS_EFF_ERROR = 3.0;
+    const MAX_ZC_ERROR = 10.0;
+    const MAX_Z_IMAG_ERROR = 6.0;
 
     // Error thresholds mapping
     const error_thresholds = {
         'Z0': MAX_Z0_ERROR,
+        'Z0_imag': MAX_Z_IMAG_ERROR,
+        'RZc': MAX_ZC_ERROR,
+        'IZc': MAX_ZC_ERROR,
         'diel_loss': MAX_DIEL_LOSS_ERROR,
         'cond_loss': MAX_COND_LOSS_ERROR,
+        'loss': MAX_LOSS_ERROR,
         'C': MAX_C_ERROR,
         'R': MAX_R_ERROR,
         'L': MAX_L_ERROR,
         'G': MAX_G_ERROR,
-        'eps_eff': MAX_EPS_EFF_ERROR
+        'eps_eff': MAX_EPS_EFF_ERROR,
+        // Per-case overrides. Mostly tightening, for a case that exists to test
+        // one quantity. A few loosen where the reference itself has poor
+        // accuracy.
+        ...threshold_overrides
     };
 
     console.log(`\n${'='.repeat(80)}`);
@@ -123,16 +138,18 @@ function test_microstrip_solution(solver_results, reference, test_name = "Micros
     return test_results;
 }
 
-function test_differential_solution(solver_results, reference, test_name = "Differential Microstrip") {
-    // Global error thresholds (relative error in %)
-    const MAX_Z_DIFF_ERROR = 7.0;
-    const MAX_Z_COMMON_ERROR = 7.0;
-    const MAX_Z_ODD_ERROR = 7.0;
-    const MAX_Z_EVEN_ERROR = 7.0;
-    const MAX_EPS_EFF_ERROR = 5.0;
-    const MAX_Z_IMAG_ERROR = 10.0;
-    const MAX_LOSS_ERROR = 50.0;
-    const MAX_C_ERROR = 10.0;
+function test_differential_solution(solver_results, reference, test_name = "Differential Microstrip",
+                                   threshold_overrides = {}) {
+    const MAX_Z_DIFF_ERROR = 4.0;
+    const MAX_Z_COMMON_ERROR = 4.0;
+    const MAX_Z_ODD_ERROR = 4.0;
+    const MAX_Z_EVEN_ERROR = 2.0;
+    const MAX_EPS_EFF_ERROR = 2.0;
+    const MAX_Z_IMAG_ERROR = 4.0;
+    const MAX_ALPHA_C_ERROR = 12.0;
+    const MAX_ALPHA_D_ERROR = 8.0;
+    const MAX_ALPHA_TOT_ERROR = 9.0;
+    const MAX_C_ERROR = 2.0;
 
     // Error thresholds mapping
     const error_thresholds = {
@@ -146,20 +163,22 @@ function test_differential_solution(solver_results, reference, test_name = "Diff
         'Zc_imag_even': MAX_Z_IMAG_ERROR,
         'C_odd': MAX_C_ERROR,
         'C_even': MAX_C_ERROR,
-        'alpha_c_odd': MAX_LOSS_ERROR,
-        'alpha_c_even': MAX_LOSS_ERROR,
-        'alpha_d_odd': MAX_LOSS_ERROR,
-        'alpha_d_even': MAX_LOSS_ERROR,
-        'alpha_total_odd': MAX_LOSS_ERROR,
-        'alpha_total_even': MAX_LOSS_ERROR,
+        'alpha_c_odd': MAX_ALPHA_C_ERROR,
+        'alpha_c_even': MAX_ALPHA_C_ERROR,
+        'alpha_d_odd': MAX_ALPHA_D_ERROR,
+        'alpha_d_even': MAX_ALPHA_D_ERROR,
+        'alpha_total_odd': MAX_ALPHA_TOT_ERROR,
+        'alpha_total_even': MAX_ALPHA_TOT_ERROR,
         // RLGC matrix thresholds
-        // Note: R has higher tolerance due to differences in conductor loss modeling
-        // (surface roughness, skin effect) between solvers
-        'R': 20.0,
-        'R_offdiag': 40.0,
-        'L': 10.0,
-        'G': 15.0,
-        'C': 10.0,
+        'R': 7.0,
+        // R12 = (R_even - R_odd)/2 amplifies any mode-dependent bias by
+        // R11/(2*R12) ~ 11x.
+        'R_offdiag': 32.0,
+        'L': 2.0,
+        'G': 12.0,
+        'C': 2.0,
+        // See test_microstrip_solution: mostly tightening, a few documented loosenings.
+        ...threshold_overrides
     };
 
     console.log(`\n${'='.repeat(80)}`);
@@ -385,8 +404,11 @@ async function solve_microstrip_1khz() {
         // "L": 523e-9
     };
 
-    // Test against reference
-    test_microstrip_solution(solver_results, reference, "Microstrip 1 kHz");
+    // Zc gets a looser bound than the suite default. At 1 kHz the line is deep
+    // in the DC-skin transition and the return current spreads through the
+    // ground plane, the same effect that makes L inaccurate.
+    test_microstrip_solution(solver_results, reference, "Microstrip 1 kHz",
+                             { 'RZc': 12.0, 'IZc': 12.0 });
 
     return solver_results;
 }
@@ -406,6 +428,7 @@ async function solve_microstrip_embed() {
         use_sm: false,
         top_diel_h: 0.2e-3,
         top_diel_er: 4.5,
+        top_diel_tand: 0.02,
         boundaries: ["open", "open", "open", "gnd"]
     });
 
@@ -413,7 +436,8 @@ async function solve_microstrip_embed() {
     const mode = results.modes[0];
 
     const solver_results = {
-        'Z0': mode.Z0,
+        'Z0': mode.Zc.re,
+        'Z0_imag': mode.Zc.im,
         'eps_eff': mode.eps_eff,
         'diel_loss': mode.alpha_d,
         'cond_loss': mode.alpha_c,
@@ -426,13 +450,16 @@ async function solve_microstrip_embed() {
 
     // Reference values from HFSS
     const reference = {
-        "Z0": 48.15,
-        "eps_eff": 3.621,
-        "loss": 3.48,
-        "C": 131.8e-12
+        "Z0": 48.154,
+        "Z0_imag": 0.402,
+        "eps_eff": 3.6217,
+        "loss": 3.4801,
+        "C": 131.81e-12,
+        "R": 3.2618,
+        "L": 305.7e-9,
+        "G": 15.233e-3
     };
 
-    // Test against reference
     test_microstrip_solution(solver_results, reference, "Embedded microstrip");
 
     return solver_results;
@@ -524,7 +551,10 @@ async function solve_microstrip_20ghz() {
     };
 
     // Test against reference
-    test_microstrip_solution(solver_results, reference, "Microstrip 50Ω 20 GHz");
+    // eps_eff is loosened here alone due to dispersion. Reference does not
+    // include it.
+    test_microstrip_solution(solver_results, reference, "Microstrip 50Ω 20 GHz",
+                             { 'eps_eff': 5.0 });
 
     return solver_results;
 }
@@ -600,7 +630,7 @@ async function solve_stripline() {
     const mode = results.modes[0];
 
     const solver_results = {
-        'Z0': mode.Z0,
+        'Z0': mode.Zc.re,
         'eps_eff': mode.eps_eff,
         'diel_loss': mode.alpha_d,
         'cond_loss': mode.alpha_c,
@@ -613,9 +643,10 @@ async function solve_stripline() {
 
     // Reference values from HFSS
     const reference = {
-        "Z0": 50.2,
-        "diel_loss": 3.685,
-        "cond_loss": 3.1
+        "Z0": 50.611,
+        "eps_eff": 4.1683,
+        "cond_loss": 3.061,
+        "loss": 6.7778
     };
 
     // Test against reference
@@ -947,6 +978,57 @@ async function solve_gcpw() {
     return solver_results;
 }
 
+async function solve_enclosed_air_microstrip() {
+    const solver = new MicrostripSolver({
+        substrate_height: 200e-6,
+        trace_width: 100e-6,
+        trace_thickness: 100e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 1.0, // air
+        tan_delta: 0,
+        sigma_cond: 5.8e7,
+        freq: 2e9,
+        nx: 10,
+        ny: 10,
+        enclosure_height: 335e-6,
+        enclosure_width: 400e-6,
+        boundaries: ["gnd", "gnd", "gnd", "gnd"]
+    });
+    solver.use_causal_materials = false;
+
+    const results = await solver.solve_adaptive({ energy_tol: 0.001 });
+    const mode = results.modes[0];
+
+    const solver_results = {
+        'Z0': mode.Zc.re,
+        'Z0_imag': mode.Zc.im,
+        'eps_eff': mode.eps_eff,
+        'loss': mode.alpha_total,
+        'C': mode.RLGC.C,
+        'R': mode.RLGC.R,
+        'L': mode.RLGC.L,
+        'G': mode.RLGC.G
+    };
+
+    const reference = {
+        'Z0': 84.534,
+        'Z0_imag': -0.535,
+        'eps_eff': 1.013,
+        'loss': 2.3193,
+        'C': 39.714e-12,
+        'R': 45.144,
+        'L': 283.78e-9,
+        'G': 0
+    };
+
+    // R tests the accuracy of side wall loss modeling. Set it stricter in this
+    // test only.
+    test_microstrip_solution(solver_results, reference, "Enclosed Air Microstrip 2 GHz",
+                             { 'R': 5.0 });
+
+    return solver_results;
+}
+
 async function solve_differential_gcpw() {
     const FREQ = 2e9;
     const solver = new MicrostripSolver({
@@ -1022,7 +1104,7 @@ async function runTests() {
     const cases = [
         solve_microstrip, solve_microstrip_1khz, solve_microstrip_embed,
         solve_microstrip_cut, solve_microstrip_20ghz, solve_gcpw,
-        solve_differential_gcpw, solve_stripline,
+        solve_enclosed_air_microstrip, solve_differential_gcpw, solve_stripline,
         solve_rough_stripline, solve_differential_stripline,
         solve_differential_stripline_rlgc, solve_differential_microstrip,
         solve_broadside_stripline, solve_broadside_stripline_offset,
