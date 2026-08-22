@@ -1788,12 +1788,15 @@ export class TriBackend {
         let useMQS = ((lossMethod === 'mqs' && mqsOk)
             || (lossMethod === 'auto' && (this.symmetry || mqsMulti) && mqsOk))
             && mqsModeSelectable;
+        // Both modes need to use MQS if one uses it. Otherwise R12 could be
+        // non-physical.
+        if (this._noMqsThisSolve) useMQS = false;
         if (useMQS && mesh.condInteriorMeshed === false) {
             useMQS = false;
             if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'mqs-no-interior')) {
                 this._modeWarnings.push({ type: 'mqs-no-interior', mode, freq: f,
                     message: 'MQS conductor loss needs the conductor interiors meshed, but this ' +
-                             'mesh was built without them; using the perturbation method instead.' });
+                             'mesh was built without it. Using the perturbation method instead.' });
             }
         }
         let eps_d = eps_eff_static, fw = null;
@@ -1939,6 +1942,9 @@ export class TriBackend {
         // (mqsOk / anyPlating / useMQS are computed above the eigensolve —
         // the dispersion-cache fast path there needs the MQS applicability.)
         let R_total = 0, L_internal = 0;
+        // 'mqs' only when R_total came from the eddy solve (directly or from its
+        // interpolated anchors), solveAt compares this across modes.
+        let lossVia = 'perturbation';
         // Smallest conductor cross-section dimension (gates the skin-band remesh and
         // the static/SIBC blend below).
         let minDim = Infinity;
@@ -2011,11 +2017,16 @@ export class TriBackend {
             // Depth grading across the band (see refineSkinBand). The target size
             // relaxes with distance from the metal surface.
             const depthSlope = this.opts.mqsBandDepthSlope ?? 3;
+            // Bisection-pass budget for the band refinement. refineSkinBand
+            // stops on its own as soon as nothing is left above the size target
+            // (or the triangle cap trips), so an unused pass costs nothing. The
+            // triangle cap is the real bound on runaway growth.
+            const bandPasses = this.opts.mqsBandPasses ?? 20;
             const buildSkin = (base, dlt) => {
-                let m = refineSkinBand(base, { rects: sigRects }, dlt, 12, mqsBand, bandDelta * dlt,
+                let m = refineSkinBand(base, { rects: sigRects }, dlt, bandPasses, mqsBand, bandDelta * dlt,
                     mqsMaxTris, null, depthSlope);
                 if (gndRects.length) {
-                    m = refineSkinBand(m, { rects: gndRects }, dlt, 12, mqsBand,
+                    m = refineSkinBand(m, { rects: gndRects }, dlt, bandPasses, mqsBand,
                         bandDelta * dlt, m.nTris + gndBudget, gndGrading, depthSlope);
                 }
                 return m;
@@ -2078,6 +2089,7 @@ export class TriBackend {
             if (rInterp !== null && rInterp > 0 && xInterp !== null && xInterp > 0) {
                 R_total = rInterp;
                 L_internal = (omega > 0) ? Math.max(0, Math.min(xInterp / omega, 0.5 * L_external)) : 0;
+                lossVia = 'mqs';                      // interpolated MQS anchors
             } else {
             // Per-face plating ⇒ weight each face's smooth current by its own surface
             // impedance (surfaceZs); otherwise the uniform roughness factor (Rq).
@@ -2114,6 +2126,7 @@ export class TriBackend {
             if (mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop) && mqs.L_loop > 0
                 && isFinite(mqs.X_total) && mqs.X_total > 0) {
                 R_total = s.is_differential ? mqs.R_total / 2 : mqs.R_total;
+                lossVia = 'mqs';
                 // Internal (skin) inductance from the surface REACTANCE X_total, NOT from
                 // the difference (mqs.L_loop − L_external): that subtracts two large
                 // near-equal numbers (~L_external each, computed on different bases — MQS
@@ -2281,7 +2294,7 @@ export class TriBackend {
             RLGC: { R: R_total, L: L_total, G, C },
             Zc,
             alpha_c, alpha_d, alpha_total: alpha_c + alpha_d,
-            L_internal, L_external,
+            L_internal, L_external, lossVia,
             V: st.fields.V, Ex: st.fields.Ex, Ey: st.fields.Ey,
         };
     }
@@ -2352,8 +2365,34 @@ export class TriBackend {
         if (this._certWarn) this._modeWarnings.push(this._certWarn);
         // A waveguide never reaches _modeAtFreq, so its quasi-static fallback (which would
         // be physically meaningless below cutoff) is unreachable for this medium.
-        const modes = this._isWG ? [this._waveguideModeAtFreq(f)]
+        let modes = this._isWG ? [this._waveguideModeAtFreq(f)]
             : this.modeNames.map(m => this._modeAtFreq(m, f));
+        // Use the same loss (MQS or pertrubation) for both modes. Keeps R12
+        // physical. If MQS fails for one mode, then use pertrubation for both.
+        if (!this._isWG && modes.length > 1 && !this._noMqsThisSolve) {
+            const via = modes.map(m => m.lossVia);
+            if (via.some(v => v === 'mqs') && via.some(v => v !== 'mqs')) {
+                // Drop the MQS R/X anchors the succeeding mode already cached
+                // so that they aren't used in frequency sweep other points.
+                for (const m of this.modeNames) {
+                    const st = this._static && this._static[m];
+                    if (st) { st.mqsR = null; st.mqsX = null; }
+                }
+                this._noMqsThisSolve = true;
+                try {
+                    modes = this.modeNames.map(m => this._modeAtFreq(m, f));
+                } finally {
+                    this._noMqsThisSolve = false;
+                }
+                if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'mqs-mixed-modes')) {
+                    this._modeWarnings.push({ type: 'mqs-mixed-modes', freq: f, message:
+                        `The MQS conductor-loss solve succeeded for some modes of this pair and ` +
+                        `failed for others (${this.modeNames.map((m, i) => `${m}:${via[i]}`).join(', ')}). ` +
+                        `Mixing the two estimators corrupts the mutual resistance R12, so all modes ` +
+                        `were recomputed with the perturbation estimate instead.` });
+                }
+            }
+        }
         const result = { modes };
         if (this._modeWarnings.length) result.warnings = this._modeWarnings;
         this.solver.modeWarnings = this._modeWarnings;

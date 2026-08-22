@@ -156,11 +156,6 @@ function test_differential_solution(solver_results, reference, test_name = "Diff
         // Note: R has higher tolerance due to differences in conductor loss modeling
         // (surface roughness, skin effect) between solvers
         'R': 20.0,
-        // Off-diagonal (mutual) R is given a much wider tolerance: it is the small
-        // difference (R_even - R_odd)/2 of two large numbers and is dominated by the
-        // inter-trace proximity effect. The MQS volume eddy-current method (used by the
-        // triangular backend) systematically under-predicts it (~7-11 Ohm) vs the 13.56
-        // reference, whose provenance is unknown; the diagonal self-R stays tight at 20%.
         'R_offdiag': 40.0,
         'L': 10.0,
         'G': 15.0,
