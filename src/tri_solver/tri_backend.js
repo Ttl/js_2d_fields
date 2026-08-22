@@ -2025,10 +2025,17 @@ export class TriBackend {
             const buildSkin = (base, dlt) => {
                 let m = refineSkinBand(base, { rects: sigRects }, dlt, bandPasses, mqsBand, bandDelta * dlt,
                     mqsMaxTris, null, depthSlope);
+                // Each refineSkinBand stamps its own bandTrunc on the mesh it returns,
+                // so collect the signal band's before the ground pass overwrites it,
+                // and leave the merged list (or null) on the mesh that gets cached.
+                const trunc = [];
+                if (m.bandTrunc) trunc.push({ band: 'signal', ...m.bandTrunc });
                 if (gndRects.length) {
                     m = refineSkinBand(m, { rects: gndRects }, dlt, bandPasses, mqsBand,
                         bandDelta * dlt, m.nTris + gndBudget, gndGrading, depthSlope);
+                    if (m.bandTrunc) trunc.push({ band: 'ground', ...m.bandTrunc });
                 }
+                m.bandTrunc = trunc.length ? trunc : null;
                 return m;
             };
             // DEFAULT: f_max-reuse. Build the skin mesh at the HIGHEST frequency seen
@@ -2050,11 +2057,12 @@ export class TriBackend {
             // rebuild whenever a higher frequency appears).
             const fBand = Math.max(f, this.solver._sweepFmax || 0);
             const deltaBand = fBand > f ? Math.sqrt(2 / (2 * Math.PI * fBand * MU0 * mqsSigma)) : mqsDelta;
-            let mqsMesh;
+            let mqsMesh, bandTrunc = null;
             if (deltaBand >= minDim) {
-                mqsMesh = mesh;
+                mqsMesh = mesh;   // no band at all — nothing to under-resolve
             } else if (this.opts.mqsCacheMesh === false) {
                 mqsMesh = buildSkin(mesh, mqsDelta);
+                bandTrunc = mqsMesh.bandTrunc;
             } else {
                 // The skin mesh depends only on the geometry and the band skin depth —
                 // NOT on the mode (the odd/even BC enters the MQS solve, not the mesh) —
@@ -2067,6 +2075,25 @@ export class TriBackend {
                     sc.mesh = buildSkin(mesh, deltaBand);
                 }
                 mqsMesh = sc.mesh;
+                bandTrunc = mqsMesh.bandTrunc;
+            }
+            // A band that stopped short of bandDelta*δ leaves the loss integral
+            // on an under-resolved skin layer, and it is invisible from the
+            // outside. The answer looks converged. Read the flag off the mesh,
+            // the skin mesh is cached across modes and sweep points, and
+            // a point that reuses it must warn just the same.
+            if (bandTrunc && this._modeWarnings
+                && !this._modeWarnings.some(w => w.type === 'mqs-band-capped')) {
+                // The message goes straight to the UI log, so it says what is
+                // degraded and what to use instead. Neither mqsMaxTris nor
+                // mqsBandPasses is reachable from the UI, so naming them would
+                // only be noise.
+                this._modeWarnings.push({ type: 'mqs-band-capped', mode, freq: f,
+                    detail: bandTrunc, message:
+                    `Conductor-loss accuracy is reduced. Fully resolving the ` +
+                    `${(deltaBand * 1e6).toFixed(2)} µm skin layer on this geometry needs a ` +
+                    `finer mesh than the full-wave solver's budget allows. ` +
+                    `Conductor loss can be several percent high.` });
             }
             // R(f) and X(f) anchor caches: the sweep consumes only these two scalars
             // from the solve, and both are smooth on the ln-f axis — so past the first

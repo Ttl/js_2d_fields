@@ -112,7 +112,14 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     // would otherwise refine without limit (band-tris ∝ perimeter/δ) and exhaust
     // memory. Hitting the cap degrades gracefully to a partially-resolved band —
     // the same accuracy compromise the old early-stop made.
-    for (let p = 0; p < passes; p++) {
+    //
+    // "Gracefully" still costs accuracy. So record a band that stopped before
+    // everything reached targetH, by the triangle cap or by running out of
+    // passes, on the returned mesh as `bandTrunc`, for the caller to surface as
+    // a warning. null = the band converged (a final marking scan found nothing
+    // left to refine).
+    let trunc = null;
+    for (let p = 0; ; p++) {
         const marked = new Uint8Array(mesh.nTris);
         let any = false, nMarked = 0;
         for (let t = 0; t < mesh.nTris; t++) {
@@ -144,12 +151,21 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
             }
             marked[t] = 1; any = true; nMarked++;
         }
-        if (!any) break;
+        if (!any) break;                     // target reached everywhere
+        // The pass counter is checked here rather than in the loop header so the
+        // scan above runs once more after the last refinement: that is what tells
+        // converged-on-the-final-pass apart from out-of-passes. The number of
+        // refinements is unchanged.
+        if (p >= passes) { trunc = { reason: 'passes', passes, nTris: mesh.nTris, nMarked }; break; }
         // Refining splits each marked triangle ~1→4 (plus conformity closure);
         // stop before the projected size blows the budget.
-        if (mesh.nTris + 3 * nMarked > maxTris) break;
+        if (mesh.nTris + 3 * nMarked > maxTris) {
+            trunc = { reason: 'maxTris', maxTris, nTris: mesh.nTris, nMarked };
+            break;
+        }
         mesh = refineTriMesh(mesh, marked);
     }
+    mesh.bandTrunc = trunc;
     return mesh;
 }
 

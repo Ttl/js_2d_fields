@@ -30,10 +30,11 @@
 // broadside reference and the skin-transition/plating/GCPW loss fixes): gate R_THRESH
 // (default 25%), RELAXED to R_RELAX (default 60%) when a solve carries a loss-accuracy
 // note — QS reason 'skin-transition' (δ deep into the conductor thickness) or
-// 'broadside-proximity' (strongly coupled pair, QS reads up to ~50% high), or a tri
-// mqs-* fallback warning (reference degraded to perturbation). Certificate warnings do
-// NOT relax the gate (they describe C, not R). Geometries that BOTH backends reject
-// (invalid random combos) are skipped, not flagged.
+// 'broadside-proximity' (strongly coupled pair, QS reads up to ~50% high), or any tri
+// mqs-* warning: either a fallback (reference degraded to perturbation) or
+// 'mqs-band-capped' (MQS ran, but on a skin band that stopped short of its size
+// target). Certificate warnings do NOT relax the gate (they describe C, not R).
+// Geometries that BOTH backends reject (invalid random combos) are skipped, not flagged.
 //
 // Usage:   node tests/fuzz_qs_vs_fullwave.js [N] [seed] [threshold%] [R-threshold%]
 //   e.g.   node tests/fuzz_qs_vs_fullwave.js 40 1 15 25
@@ -400,9 +401,9 @@ async function main() {
 
         // Conductor-loss gate (R per mode). Relaxed when either backend flagged
         // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
-        // 'broadside-proximity', or the tri backend downgrading MQS to
-        // perturbation (mqs-* fallback warnings). Certificate warnings describe
-        // C, not R, and do NOT relax the gate.
+        // 'broadside-proximity', or any tri mqs-* warning — the backend downgrading
+        // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
+        // band). Certificate warnings describe C, not R, and do NOT relax the gate.
         const lossRelaxed =
             qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity')
             || fw.warns.some(w => /^mqs-/.test(w.type));
