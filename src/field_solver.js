@@ -12,19 +12,6 @@ export const CONSTANTS = {
     PI: Math.PI
 };
 
-// Global calibration of the vacuum-field conductor-loss integrand, applied to
-// the AC sums (both Re and Im parts, the internal-inductance/roughness
-// reactance uses the same |H_t|^2 integral). Absorbs the uniform,
-// frequency-flat underestimate of the discrete surface integral. Minimax-fit vs
-// the tri-backend MQS across frequency as well as geometry, do not re-center it
-// on a single-frequency measurement. Measured bias structure vs tri MQS (2026-08-16,
-// blend-metric meshes, app budgets): at 1-5 GHz the sweep reads −0.6 to +8.6%
-// (median +3.7%, wide traces high, narrow ~0), at 20 GHz the same integrand
-// reads -7% low (skin-scale surface detail under-resolved, MQS's f-dependent
-// crowding missed). The current value is a compromise. A 2026-08-16 attempt to
-// rescale to the 1-5 GHz median (1.054) broke the 20 GHz end and was reverted.
-export const VACUUM_LOSS_CAL = 1.093;
-
 // Node cap for the certificate's convergence-ratio (level-2) measurement, on
 // the peak grid it solves (see _certifyStatic). It runs at most once per
 // adaptive solve (knownR caches the result for every later certificate) and
@@ -1029,9 +1016,7 @@ export class FieldSolver2D {
      * vacuum (C0) solve fields and Z0 is Z0_vac = 1/(c*C0). In the quasi-TEM
      * skin-effect limit the H pattern is the harmonic conjugate of the vacuum
      * potential (the same identity as L_ext = 1/(c^2*C0)), so H_t = E_n(vac)/η0,
-     * the surface current distribution, which is permittivity independent. The
-     * AC sums are scaled by VACUUM_LOSS_CAL. Algebraically identical to the
-     * legacy variant for homogeneous fill apart from the calibration.
+     * the surface current distribution, which is permittivity independent.
      *
      * vacuum_fields = false (legacy): Ex/Ey are the dielectric solve fields,
      * H_t = E_n*√εr(local)/η0, Z0 is the line impedance. For mixed dielectric
@@ -1370,9 +1355,8 @@ export class FieldSolver2D {
 
         // Vacuum variant: |H|^2 per unit current is |H_vac per 1V|^2*Z0_vac^2, since the
         // vacuum drive at 1V carries I_vac = 1/Z0_vac (legacy: same algebra with the
-        // line Z0). The calibration applies to both sums (same integral and same bias).
-        const cal = vacuum_fields ? VACUUM_LOSS_CAL : 1.0;
-        const Z0_sq = Z0 * Z0 * cal;
+        // line Z0).
+        const Z0_sq = Z0 * Z0;
 
         // AC Resistance per unit length from skin effect (Ohm/m)
         const R_ac = power_factor * sum_H2_dl_R * Z0_sq;
@@ -1383,7 +1367,7 @@ export class FieldSolver2D {
         // In practice very minimal error since DC can be solved correctly.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
-		// DC-skin transition correction (vacuum-calibrated path only): against
+		// DC-skin transition correction (vacuum-field path only): against
 		// tri-MQS the sqrt(R_dc^2+R_ac^2) is consistently high, a log-normal
 		// notch in δ/t, = −7% at δ/t = 0.4, gone below δ/t = 0.12 and decaying
 		// by δ/t = 1.3 (where R_dc takes over). Calibrated on ms/sl (w/h

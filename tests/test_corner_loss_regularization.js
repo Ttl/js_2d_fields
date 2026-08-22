@@ -2,12 +2,13 @@
 //
 // Production (rect-based solvers) uses the VACUUM-field integrand: H_t from the
 // vacuum (C0) solve — the quasi-TEM surface-current pattern, ε-independent —
-// scaled by Z0_vac² and the global VACUUM_LOSS_CAL. This replaced the
-// dielectric-field integrand whose substrate-interface corner singularity made
-// the sum practically mesh-divergent and +21–26% high vs the tri-backend MQS
-// volume loss. This test checks the three properties that formulation bought:
+// scaled by Z0_vac² and nothing else. This replaced the dielectric-field
+// integrand, whose substrate-interface corner singularity made the sum
+// practically mesh-divergent and +21–26% high vs the tri-backend MQS volume
+// loss. This test checks the three properties that formulation bought:
 //   1. mesh stability — R moves < 2.5% between a coarse and a dense FDM mesh;
-//   2. accuracy — R within 8% of the tri-backend MQS reference (measured ~+4%);
+//   2. accuracy — R within 8% of the tri-backend MQS reference (measured ~-3%
+//      at this test's mesh budget, the surface integral still resolving);
 //   3. ε-invariance — R at εr 2.2 and 9.8 agrees within 1% (the loss integrand
 //      must not see the dielectric; a leak of the dielectric fields or the √εr
 //      factor into the loss path breaks this immediately).

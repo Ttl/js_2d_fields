@@ -66,7 +66,7 @@ const BAD_Q  = 2000;
 // (deep-skin-transition plated stripline — QS ~2× high — and strongly-coupled
 // broadside). New unwarned rows above 25% are worth investigating, not just
 // gate-bumping: they'd extend the known bias envelope (issue-9 pour faces,
-// VACUUM_LOSS_CAL tilt, broadside proximity below the warning threshold).
+// broadside proximity below the warning threshold).
 const R_THRESH = (parseFloat(process.argv[5]) || 25) / 100;
 const R_RELAX  = 0.60;
 
