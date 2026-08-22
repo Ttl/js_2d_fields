@@ -2215,13 +2215,30 @@ export class FieldSolver2D {
         const saved_x = this.x, saved_y = this.y;
         this.x = x;
         this.y = y;
-        this._setup_geometry();
+        this._repaint_geometry();
         try {
             return await fn();
         } finally {
             this.x = saved_x;
             this.y = saved_y;
-            this._setup_geometry();
+            this._repaint_geometry();
+        }
+    }
+
+    // _setup_geometry repaints epsilon_r/tand from the nominal material values, so
+    // every rebuild (initial mesh, each refinement pass, the certificate's grid
+    // swaps) drops the causal dispersion and has to re-apply it. Always go through
+    // this instead of calling _setup_geometry directly, or the solve silently runs
+    // at the f_ref permittivity while a sweep point at the same frequency does not.
+    // applyDjordjevicSarkar recomputes from cached nominals, so it is idempotent.
+    _repaint_geometry() {
+        this._setup_geometry();
+        this._apply_causal_materials();
+    }
+
+    _apply_causal_materials() {
+        if (this.use_causal_materials && this.epsilon_r && this.tand) {
+            applyDjordjevicSarkar(this);
         }
     }
 
@@ -2429,6 +2446,7 @@ export class FieldSolver2D {
         if (this.ensure_mesh) {
             this.ensure_mesh();
         }
+        this._apply_causal_materials();
 
         if (this.sym_half) {
             console.log('x=0 mirror symmetry detected: meshing right half only');
@@ -2634,7 +2652,7 @@ export class FieldSolver2D {
                     return sets;
                 });
                 this.refine_mesh_multi(refineSets, refineFrac);
-                this._setup_geometry();
+                this._repaint_geometry();
             }
         }
 

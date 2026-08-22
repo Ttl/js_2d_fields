@@ -130,6 +130,7 @@ function test_differential_solution(solver_results, reference, test_name = "Diff
     const MAX_Z_ODD_ERROR = 7.0;
     const MAX_Z_EVEN_ERROR = 7.0;
     const MAX_EPS_EFF_ERROR = 5.0;
+    const MAX_Z_IMAG_ERROR = 10.0;
     const MAX_LOSS_ERROR = 50.0;
     const MAX_C_ERROR = 10.0;
 
@@ -141,6 +142,8 @@ function test_differential_solution(solver_results, reference, test_name = "Diff
         'Z_even': MAX_Z_EVEN_ERROR,
         'eps_eff_odd': MAX_EPS_EFF_ERROR,
         'eps_eff_even': MAX_EPS_EFF_ERROR,
+        'Zc_imag_odd': MAX_Z_IMAG_ERROR,
+        'Zc_imag_even': MAX_Z_IMAG_ERROR,
         'C_odd': MAX_C_ERROR,
         'C_even': MAX_C_ERROR,
         'alpha_c_odd': MAX_LOSS_ERROR,
@@ -782,17 +785,17 @@ async function solve_differential_stripline_rlgc() {
     }
 
     const reference = {
-        'Z_odd': 37.6,
-        'Z_even': 61.36,
-        'eps_eff_even': 4.162,
-        'eps_eff_odd': 4.195,
-        'alpha_total_odd': 278.5,
-        'alpha_total_even': 266.2,
+        'Z_odd': 37.235,
+        'Z_even': 60.94,
+        'eps_eff_odd': 4.112,
+        'eps_eff_even': 4.1081,
+        'alpha_total_odd': 280.42,
+        'alpha_total_even': 269.35,
         // 2x2 RLGC matrix (left and right traces)
-        'R': [297.62, 13.56, 13.56, 297.62],
-        'L': [3.32e-7, 8e-8, 8e-8, 3.2e-7],
-        'C': [1.46e-10, -3.53e-11, -3.53e-11, 1.46e-10],
-        'G': [1.23, -0.297, -0.297, 1.23]
+        'R': [297.62, 13.565, 13.565, 297.62],
+        'L': [3.32e-7, 8e-8, 8e-8, 3.32e-7],
+        'C': [1.4626e-10, -3.5347e-11, -3.5347e-11, 1.4626e-10],
+        'G': [1.232, -0.2976, -0.2976, 1.232]
     };
 
     // Test against reference
@@ -949,12 +952,82 @@ async function solve_gcpw() {
     return solver_results;
 }
 
+async function solve_differential_gcpw() {
+    const FREQ = 2e9;
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2104e-3,
+        trace_width: 0.35e-3,
+        trace_thickness: 50e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.4,
+        tan_delta: 0.02,
+        sigma_cond: 5.8e7,
+        freq: FREQ,
+        nx: 10,
+        ny: 10,
+        trace_spacing: 0.2e-3,       // enables differential mode
+        use_coplanar_gnd: true,
+        gap: 0.2e-3,                 // trace-to-coplanar-ground spacing
+        via_gap: 0.1e-3,             // stitching via, measured from the gap edge
+        use_vias: true,
+        enclosure_width: 3e-3,
+        // enclosure_height is measured from the top of the substrate.
+        enclosure_height: 1e-3 + 50e-6,
+        boundaries: ["gnd", "gnd", "gnd", "gnd"]
+    });
+    // Causal (Djordjevic-Sarkar) dispersion left at its default (on).
+
+    const results = await solver.solve_adaptive({ energy_tol: 0.001 });
+    const odd = results.modes.find(m => m.mode === 'odd');
+    const even = results.modes.find(m => m.mode === 'even');
+
+    const solver_results = {
+        'Z_odd': odd.Zc.re,
+        'Z_even': even.Zc.re,
+        'Zc_imag_odd': odd.Zc.im,
+        'Zc_imag_even': even.Zc.im,
+        'eps_eff_odd': odd.eps_eff,
+        'eps_eff_even': even.eps_eff,
+        'alpha_total_odd': odd.alpha_total,
+        'alpha_total_even': even.alpha_total
+    };
+
+    if (results.RLGC_matrix) {
+        const m = results.RLGC_matrix;
+        solver_results.R = [m.R[0][0], m.R[0][1], m.R[1][0], m.R[1][1]];
+        solver_results.L = [m.L[0][0], m.L[0][1], m.L[1][0], m.L[1][1]];
+        solver_results.G = [m.G[0][0], m.G[0][1], m.G[1][0], m.G[1][1]];
+        solver_results.C = [m.C[0][0], m.C[0][1], m.C[1][0], m.C[1][1]];
+    }
+
+    const reference = {
+        'Z_odd': 41.09,
+        'Z_even': 54.38,
+        'Zc_imag_odd': 0.135,
+        'Zc_imag_even': 0.26,
+        'eps_eff_odd': 2.649,
+        'eps_eff_even': 3.121,
+        'alpha_total_odd': 7.565,
+        'alpha_total_even': 8.199,
+        // 2x2 RLGC matrix (left and right traces)
+        'R': [29.319, 2.77, 2.77, 29.319],
+        'L': [271.8e-9, 48.69e-9, 48.69e-9, 271.8e-9],
+        'C': [120.24e-12, -11.88e-12, -11.88e-12, 120.24e-12],
+        'G': [25.26e-3, -1.40e-3, -1.40e-3, 25.26e-3]
+    };
+
+    test_differential_solution(solver_results, reference, "Differential GCPW 2 GHz");
+
+    return results;
+}
+
 // Run tests. Each case is isolated so the whole suite reports even when some
 // cases fail (useful when comparing the two backends).
 async function runTests() {
     const cases = [
         solve_microstrip, solve_microstrip_1khz, solve_microstrip_embed,
-        solve_microstrip_cut, solve_microstrip_20ghz, solve_gcpw, solve_stripline,
+        solve_microstrip_cut, solve_microstrip_20ghz, solve_gcpw,
+        solve_differential_gcpw, solve_stripline,
         solve_rough_stripline, solve_differential_stripline,
         solve_differential_stripline_rlgc, solve_differential_microstrip,
         solve_broadside_stripline, solve_broadside_stripline_offset,

@@ -80,6 +80,26 @@ console.log(`   Δeps_eff = ${(mode_67ghz_nc.eps_eff - mode_67ghz_c.eps_eff).toF
 console.log(`   ΔC = ${((mode_67ghz_nc.C - mode_67ghz_c.C) * 1e12).toFixed(6)} pF/m`);
 console.log(`   Causal effect: ${((1 - mode_67ghz_c.eps_eff / mode_67ghz_nc.eps_eff) * 100).toFixed(2)}% reduction in eps_eff`);
 
+// A single-frequency solve must see the same dispersed materials as a sweep point
+// at that frequency. solve_adaptive rebuilds epsilon_r from the NOMINAL values on
+// every mesh pass, so it has to re-apply the causal model itself; when it did not,
+// a direct solve silently ran at the f_ref permittivity (eps_eff ~4.1 instead of
+// ~3.89) while computeAtFrequency at the very same frequency returned the dispersed
+// answer. This MUST use a fresh solver: computeAtFrequency above dispersed the
+// arrays in place, so reusing `solver` would inherit the correct materials by
+// accident and pass either way.
+console.log('\n5. Solving DIRECTLY at 67 GHz on a FRESH solver (no computeAtFrequency)...');
+const solver_direct = new MicrostripSolver({ ...options, freq: 67e9 });
+const result_67ghz_direct = await solver_direct.solve_adaptive({
+    max_iters: 3,
+    energy_tol: 0.05,
+    param_tol: 0.05,
+    max_nodes: 100000
+});
+const mode_67ghz_d = result_67ghz_direct.modes[0];
+console.log(`   eps_eff = ${mode_67ghz_d.eps_eff.toFixed(6)} (must be ~3.89, not ~4.1)`);
+console.log(`   C = ${(mode_67ghz_d.C * 1e12).toFixed(6)} pF/m`);
+
 // --- Self-checks --------------------------------------------------------
 // Causal materials must LOWER eps_eff (and hence C) at 67 GHz relative to the
 // non-causal case, matching the ~4.1 → ~3.89 shift the Djordjevic-Sarkar model
@@ -97,6 +117,15 @@ check('causal eps_eff < non-causal eps_eff', mode_67ghz_c.eps_eff < mode_67ghz_n
 check('causal C < non-causal C', mode_67ghz_c.C < mode_67ghz_nc.C);
 const reduction = 1 - mode_67ghz_c.eps_eff / mode_67ghz_nc.eps_eff;
 check('eps_eff reduction in 3%–8% band', reduction > 0.03 && reduction < 0.08);
+// The regression guard: a direct single-frequency solve must land on the causal
+// answer, not the nominal one. The mesh trajectory differs from step 3 (which reused
+// the 1 GHz mesh), so this is a band, not an identity — but 3.89 and 4.1 are 5% apart
+// and a 3% band around the causal value excludes the nominal one outright.
+check(`direct 67 GHz solve ≈ 3.89 (got ${mode_67ghz_d.eps_eff.toFixed(4)})`,
+      Math.abs(mode_67ghz_d.eps_eff - 3.89) < 3.89 * 0.03);
+check('direct 67 GHz solve is NOT the nominal-eps answer',
+      Math.abs(mode_67ghz_d.eps_eff - mode_67ghz_nc.eps_eff) >
+      Math.abs(mode_67ghz_d.eps_eff - mode_67ghz_c.eps_eff));
 
 console.log(failed ? `\n✗ ${failed} check(s) failed` : '\n✓ All checks passed');
 process.exit(failed ? 1 : 0);
