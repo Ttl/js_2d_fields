@@ -2,63 +2,40 @@
 // WASM eigensolver/direct-solver helpers, COO→CSR, Jacobi-preconditioned CG,
 // complex sqrt, shared Gauss quadrature constants, triangle quality metric.
 
-// ==================== COO to CSR ====================
+// COO to CSR
 
-// Counting sort into per-row buckets + dense-scratch dedup + per-row insertion
-// sort on the (small) unique column sets. O(nnz) overall vs the previous global
-// comparator sort over an index array, which dominated whole-sweep CPU profiles
-// (~44%) at FEM assembly sizes (millions of raw triplets).
+// COO to CSR by double counting sort (first column, then row). Filling the
+// row buckets in column-major order leaves every row already sorted by column, so
+// duplicates land adjacent and collapse in one linear pass. O(nnz) with no
+// comparisons.
 export function tripletsToCSR(rows, cols, valsRe, N, valsIm) {
     const hasIm = valsIm != null;
     const nRaw = rows.length;
-    // Pass 1: raw entries per row → bucket offsets.
-    const rowStart = new Int32Array(N + 1);
-    for (let i = 0; i < nRaw; i++) rowStart[rows[i] + 1]++;
-    for (let r = 0; r < N; r++) rowStart[r + 1] += rowStart[r];
-    // Pass 2: scatter triplets into their row buckets.
+    const perm = _columnOrder(rows, cols, N, nRaw);
+    const rowStart = _rowOffsets(rows, N, nRaw);
     const bCol = new Int32Array(nRaw);
     const bRe = new Float64Array(nRaw);
     const bIm = hasIm ? new Float64Array(nRaw) : null;
     const fill = rowStart.slice(0, N);
-    for (let i = 0; i < nRaw; i++) {
-        const p = fill[rows[i]]++;
+    for (let k = 0; k < nRaw; k++) {
+        const i = perm[k], p = fill[rows[i]]++;
         bCol[p] = cols[i]; bRe[p] = valsRe[i];
         if (hasIm) bIm[p] = valsIm[i];
     }
-    // Pass 3: per row, sum duplicates via a dense col→slot scratch map (reset
-    // per row by walking only the row's own entries), then insertion-sort the
-    // unique columns (rows have tens of entries — insertion sort beats any
-    // general sort here and keeps colIdx ascending for the WASM consumers).
     const outCol = new Int32Array(nRaw);
     const outRe = new Float64Array(nRaw);
     const outIm = new Float64Array(nRaw);   // stays zero when !hasIm
     const rowPtr = new Int32Array(N + 1);
-    const colPos = new Int32Array(N).fill(-1);
     let nnz = 0;
     for (let r = 0; r < N; r++) {
-        const rowOut = nnz;
-        for (let p = rowStart[r]; p < rowStart[r + 1]; p++) {
+        let p = rowStart[r];
+        const e = rowStart[r + 1];
+        while (p < e) {
             const c = bCol[p];
-            let q = colPos[c];
-            if (q >= 0) {
-                outRe[q] += bRe[p];
-                if (hasIm) outIm[q] += bIm[p];
-            } else {
-                q = nnz++;
-                colPos[c] = q;
-                outCol[q] = c; outRe[q] = bRe[p];
-                if (hasIm) outIm[q] = bIm[p];
-            }
-        }
-        for (let q = rowOut; q < nnz; q++) colPos[outCol[q]] = -1;
-        for (let q = rowOut + 1; q < nnz; q++) {
-            const c = outCol[q], vr = outRe[q], vi = outIm[q];
-            let j = q - 1;
-            while (j >= rowOut && outCol[j] > c) {
-                outCol[j + 1] = outCol[j]; outRe[j + 1] = outRe[j]; outIm[j + 1] = outIm[j];
-                j--;
-            }
-            outCol[j + 1] = c; outRe[j + 1] = vr; outIm[j + 1] = vi;
+            let re = bRe[p], im = hasIm ? bIm[p] : 0;
+            p++;
+            while (p < e && bCol[p] === c) { re += bRe[p]; if (hasIm) im += bIm[p]; p++; }
+            outCol[nnz] = c; outRe[nnz] = re; outIm[nnz] = im; nnz++;
         }
         rowPtr[r + 1] = nnz;
     }
@@ -68,6 +45,76 @@ export function tripletsToCSR(rows, cols, valsRe, N, valsIm) {
         valRe: outRe.slice(0, nnz),
         valIm: outIm.slice(0, nnz),
     };
+}
+
+// Entry indices ordered by column (counting sort), the first half of the double
+// transpose above.
+function _columnOrder(rows, cols, N, nRaw) {
+    const start = new Int32Array(N + 1);
+    for (let i = 0; i < nRaw; i++) start[cols[i] + 1]++;
+    for (let c = 0; c < N; c++) start[c + 1] += start[c];
+    const perm = new Int32Array(nRaw);
+    for (let i = 0; i < nRaw; i++) perm[start[cols[i]]++] = i;
+    return perm;
+}
+
+function _rowOffsets(rows, N, nRaw) {
+    const start = new Int32Array(N + 1);
+    for (let i = 0; i < nRaw; i++) start[rows[i] + 1]++;
+    for (let r = 0; r < N; r++) start[r + 1] += start[r];
+    return start;
+}
+
+// The FEM decompositions all produce a fixed index sequence carrying two to four
+// aligned value templates (A0 / A1re / A1im / ABC for the eigen pencil, S / M for
+// the MQS block system), and only the templates differ. Counting sort, the
+// dedup and the per-row ordering are done once for the whole set instead of
+// once per template. Returns { rowPtr, colIdx, vals } with vals[k] aligned to
+// colIdx entry-for-entry.
+export function tripletsToCSRMulti(rows, cols, N, valueArrays) {
+    const nv = valueArrays.length;
+    const nRaw = rows.length;
+    const perm = _columnOrder(rows, cols, N, nRaw);
+    const rowStart = _rowOffsets(rows, N, nRaw);
+    // Values interleaved (entry-major, stride nv).
+    const bCol = new Int32Array(nRaw);
+    const bVal = new Float64Array(nRaw * nv);
+    const fill = rowStart.slice(0, N);
+    for (let k = 0; k < nRaw; k++) {
+        const i = perm[k], p = fill[rows[i]]++;
+        bCol[p] = cols[i];
+        const sb = p * nv;
+        for (let v = 0; v < nv; v++) bVal[sb + v] = valueArrays[v][i];
+    }
+    const outCol = new Int32Array(nRaw);
+    const outVal = new Float64Array(nRaw * nv);
+    const rowPtr = new Int32Array(N + 1);
+    let nnz = 0;
+    for (let r = 0; r < N; r++) {
+        let p = rowStart[r];
+        const e = rowStart[r + 1];
+        while (p < e) {
+            const c = bCol[p];
+            const so = nnz * nv;
+            let sb = p * nv;
+            for (let v = 0; v < nv; v++) outVal[so + v] = bVal[sb + v];
+            p++;
+            while (p < e && bCol[p] === c) {
+                sb = p * nv;
+                for (let v = 0; v < nv; v++) outVal[so + v] += bVal[sb + v];
+                p++;
+            }
+            outCol[nnz] = c; nnz++;
+        }
+        rowPtr[r + 1] = nnz;
+    }
+    const vals = [];
+    for (let v = 0; v < nv; v++) {
+        const a = new Float64Array(nnz);
+        for (let q = 0; q < nnz; q++) a[q] = outVal[q * nv + v];
+        vals.push(a);
+    }
+    return { rowPtr, colIdx: outCol.slice(0, nnz), vals };
 }
 
 // ==================== Linear Algebra ====================
@@ -151,6 +198,14 @@ function _dumpCall(fn, meta, arrays) {
 }
 function _dumpDone(path) { if (path) try { _fs.unlinkSync(path); } catch { /* keep */ } }
 
+// Perf hook (node only). TRI_STATS=1 records every WASM solver call's size and wall
+// time in globalThis.__TRI_STATS__ = { eig: [...], lin: [...] }. The two direct solves
+// (eigensolve and the MQS block system) dominate a full-wave sweep, and their
+// count is as interesting as their cost, the dispersion / R(f) caches only pay off if
+// they actually skip solves. No effect when the env is unset.
+const _stats = (typeof process !== 'undefined' && process.env && process.env.TRI_STATS)
+    ? (globalThis.__TRI_STATS__ ??= { eig: [], lin: [] }) : null;
+
 export function createWasmHelpers(M) {
     function allocInt32(arr) {
         const p = M._malloc(4 * arr.length);
@@ -191,6 +246,7 @@ export function createWasmHelpers(M) {
             const pEvIm = M._malloc(8 * nev); ptrs.push(pEvIm);
             const pVRe = M._malloc(8 * nev * N); ptrs.push(pVRe);
             const pVIm = M._malloc(8 * nev * N); ptrs.push(pVIm);
+            const _t0 = _stats ? performance.now() : 0;
             let nc;
             if (initVec) {
                 const pInitRe = af(initVec);
@@ -208,6 +264,7 @@ export function createWasmHelpers(M) {
                     sigma[0], sigma[1], nev, ncv, ncvMax, pEvRe, pEvIm, pVRe, pVIm
                 );
             }
+            if (_stats) _stats.eig.push({ N, nnz: csrA.colIdx.length, nev, ncv, ms: performance.now() - _t0 });
             // Negative nc = solver-reported failure (factorization failed,
             // exception caught in C++, …). Throw so callers can't mistake it for
             // a truthy "converged" count.
@@ -243,7 +300,9 @@ export function createWasmHelpers(M) {
             for (let r = 0; r < nRhs; r++) rhsPacked.set(rhsArrays[r], r * N);
             const pRhs = af(rhsPacked);
             const pX = M._malloc(8 * nRhs * N); ptrs.push(pX);
+            const _t0 = _stats ? performance.now() : 0;
             const rc = M._solve_sparse_multi(N, csr.colIdx.length, pR, pC, pV, nRhs, pRhs, pX);
+            if (_stats) _stats.lin.push({ N, nnz: csr.colIdx.length, nRhs, ms: performance.now() - _t0 });
             if (rc !== 0) throw new Error(`solve_sparse_multi failed: ${rc}`);
             _dumpDone(dumpPath);
             const results = [];

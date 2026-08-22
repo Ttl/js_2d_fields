@@ -1,18 +1,28 @@
 // Triangular P2 Nedelec FEM — generic mesh, basis, assembly, and solver functions
 
-import { tripletsToCSR, solveCG, triQuality as triQualityXY } from './fem_core.js';
+import { tripletsToCSR, tripletsToCSRMulti, solveCG, triQuality as triQualityXY } from './fem_core.js';
 import { shapeContains, REL_SHAPE_TOL } from '../shapes.js';
 
-// --- 6-point Gauss quadrature on triangle (barycentric) ---
+// 6-point Gauss quadrature on triangle (barycentric)
 
-export const QW = [0.22338159, 0.22338159, 0.22338159, 0.10995174, 0.10995174, 0.10995174];
-export const QL1 = [0.10810302, 0.44594849, 0.44594849, 0.81684757, 0.09157621, 0.09157621];
-export const QL2 = [0.44594849, 0.44594849, 0.10810302, 0.09157621, 0.09157621, 0.81684757];
-export const QL3 = [0.44594849, 0.10810302, 0.44594849, 0.09157621, 0.81684757, 0.09157621];
+// Degree-4 exact. Full double precision on purpose. At the 8-digit truncation
+// the barycentric triples summed to 0.99999999, so the quadrature point was
+// slightly off the triangle resulting in ~1e-5 relative on the element matrices
+// of a small element far from the origin (exactly the mesh a PCB cross-section
+// produces).
+export const QW = [0.223381589678011, 0.223381589678011, 0.223381589678011,
+                   0.109951743655322, 0.109951743655322, 0.109951743655322];
+export const QL1 = [0.108103018168070, 0.445948490915965, 0.445948490915965,
+                    0.816847572980459, 0.091576213509771, 0.091576213509771];
+export const QL2 = [0.445948490915965, 0.445948490915965, 0.108103018168070,
+                    0.091576213509771, 0.091576213509771, 0.816847572980459];
+export const QL3 = [0.445948490915965, 0.108103018168070, 0.445948490915965,
+                    0.091576213509771, 0.816847572980459, 0.091576213509771];
 export const NQ = 6;
 
 
-// --- Barycentric coefficients ---
+// Barycentric coefficients
+
 // Returns normalized coeff: coeff[i] = [a_i/(2A), b_i/(2A), c_i/(2A)]
 // so that λ_i(x,y) = coeff[i][0] + coeff[i][1]*x + coeff[i][2]*y
 
@@ -52,7 +62,8 @@ export function triCoefficients(nodes, v0, v1, v2) {
     return { coeff, Area, twoA };
 }
 
-// --- P2 Nedelec basis functions (using normalized coeff) ---
+// P2 Nedelec basis functions (using normalized coeff)
+
 // All functions evaluate at a single point (x, y) and return [Wx, Wy] or scalar.
 // The coeff is indexed as coeff[vertex_index][0=a, 1=b, 2=c] (normalized).
 
@@ -178,231 +189,208 @@ export function nf2Curl(coeff, x, y) {
            6*b2*b3*c1*x + 3*b2*c1*c3*y + 3*b3*c1*c2*y;
 }
 
-// --- P2 element matrices via Gauss quadrature ---
-// Returns 14x14 A and B matrices for the generalized eigenvalue problem
-// DOF ordering: [ne1_0, ne1_1, ne1_2, nf1, ne2_0, ne2_1, ne2_2, nf2, lv_0, lv_1, lv_2, le_0, le_1, le_2]
+// P2 element matrices for the full-wave pencil
 
-export function computeTriP2Matrices(nodes, v0, v1, v2, epsRe, epsIm, k0) {
-    const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
+// Sub-blocks in the 8 transverse (Nedelec) + 6 longitudinal (nodal) local layout:
+//   Att  [8x8]  ∫curlW_i·curlW_j          (ε-free)
+//   Btt  [8x8]  ε·∫W_i·W_j                 = ε · Wtt
+//   Dtt  [8x8]  ∫W_i·W_j with the face-face entries zeroed
+//   Dzt  [6x8]  ∫∇Lz_i·W_j                 (ε-free)
+//   Dzz1 [6x6]  ∫∇Lz_i·∇Lz_j               = the P2 stiffness
+//   Dzz2 [6x6]  ε·∫Lz_i·Lz_j               = ε · Area · P2_MASS
+// Only one integral (Wtt) carries ε, and it does so as a scalar factor, so Btt/Dtt
+// share it and Dzz1/Dzz2 come from the closed forms above without quadrature.
+//
+// The quadrature runs on barycentric coordinates directly. On a straight-sided
+// triangle λ_i at quadrature point q is the rule's barycentric weight, so no
+// physical point or affine λ evaluation (which amplifies the a_i/(2A) term for a
+// small element far from the origin), and no basis-function call. Every basis and
+// curl below is written out in terms of (λ, b, c).
+//
+// The returned object and every array in it are resued across calls (this runs
+// once per triangle per assembly): consume the values before the next call.
 
-    // Local edge map: edge k → [local vertex p, local vertex q]
-    // Edge 0: (v0,v1) → [0,1], Edge 1: (v1,v2) → [1,2], Edge 2: (v2,v0) → [2,0]
-    const edgeVerts = [[0, 1], [1, 2], [2, 0]];
+const _Wx = new Float64Array(8), _Wy = new Float64Array(8), _cW = new Float64Array(8);
+const _Gx = new Float64Array(6), _Gy = new Float64Array(6);
+const _Att = new Float64Array(64), _Wtt = new Float64Array(64), _Dtt = new Float64Array(64);
+const _BttRe = new Float64Array(64), _BttIm = new Float64Array(64);
+const _Dzt = new Float64Array(48);
+const _Dzz1 = new Float64Array(36), _Dzz2Re = new Float64Array(36), _Dzz2Im = new Float64Array(36);
+const _p2out = { Area: 0, Att: _Att, Dtt: _Dtt, Dzt: _Dzt, Dzz1: _Dzz1,
+                 Dzz2Re: _Dzz2Re, Dzz2Im: _Dzz2Im, BttRe: _BttRe, BttIm: _BttIm };
 
-    const k02 = k0 * k0;
+export function computeTriP2Matrices(nodes, v0, v1, v2, epsRe, epsIm) {
+    const x0 = nodes[2*v0], y0 = nodes[2*v0+1];
+    const x1 = nodes[2*v1], y1 = nodes[2*v1+1];
+    const x2 = nodes[2*v2], y2 = nodes[2*v2+1];
+    const sA = 0.5 * ((x0 - x2) * (y1 - y0) - (x0 - x1) * (y2 - y0));
+    const Area = Math.abs(sA);
+    const inv = (sA >= 0 ? 1 : -1) / (2 * Area);
+    const b0 = (y1 - y2) * inv, b1 = (y2 - y0) * inv, b2 = (y0 - y1) * inv;
+    const c0 = (x2 - x1) * inv, c1 = (x0 - x2) * inv, c2 = (x1 - x0) * inv;
 
-    // Sub-matrices (real and imaginary parts)
-    const Att = new Float64Array(64);   // 8x8
-    const BttRe = new Float64Array(64); // 8x8
-    const BttIm = new Float64Array(64);
-    const Dtt = new Float64Array(64);   // 8x8
-    const Dzt = new Float64Array(48);   // 6x8
-    const Dzz1 = new Float64Array(36);  // 6x6
-    const Dzz2Re = new Float64Array(36); // 6x6
-    const Dzz2Im = new Float64Array(36);
+    // Whitney curls are constant over the element.
+    const cw0 = 2 * (b0*c1 - b1*c0), cw1 = 2 * (b1*c2 - b2*c1), cw2 = 2 * (b2*c0 - b0*c2);
 
-    // Physical coordinates of triangle vertices
-    const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-    const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
+    _Att.fill(0); _Wtt.fill(0); _Dzt.fill(0);
 
-    // Gauss quadrature loop
     for (let q = 0; q < NQ; q++) {
-        const w = QW[q];
-        const xq = txs[0]*QL1[q] + txs[1]*QL2[q] + txs[2]*QL3[q];
-        const yq = tys[0]*QL1[q] + tys[1]*QL2[q] + tys[2]*QL3[q];
+        const w = QW[q], l0 = QL1[q], l1 = QL2[q], l2 = QL3[q];
 
-        // Evaluate all 8 transverse basis functions and their curls at (xq, yq)
-        // Indices 0-2: ne1 for edges 0,1,2
-        // Index 3: nf1
-        // Indices 4-6: ne2 for edges 0,1,2
-        // Index 7: nf2
-        const Wx = new Float64Array(8);
-        const Wy = new Float64Array(8);
-        const curlW = new Float64Array(8);
+        // Whitney (lowest-order Nedelec) on edges (0,1), (1,2), (2,0):
+        // W_pq = λ_p∇λ_q − λ_q∇λ_p.
+        const W0x = l0*b1 - l1*b0, W0y = l0*c1 - l1*c0;
+        const W1x = l1*b2 - l2*b1, W1y = l1*c2 - l2*c1;
+        const W2x = l2*b0 - l0*b2, W2y = l2*c0 - l0*c2;
+        _Wx[0] = W0x; _Wy[0] = W0y; _cW[0] = cw0;
+        _Wx[1] = W1x; _Wy[1] = W1y; _cW[1] = cw1;
+        _Wx[2] = W2x; _Wy[2] = W2y; _cW[2] = cw2;
 
-        for (let k = 0; k < 3; k++) {
-            const [p, qq] = edgeVerts[k];
-            const [wx1, wy1] = ne1(coeff, p, qq, xq, yq);
-            Wx[k] = wx1; Wy[k] = wy1;
-            curlW[k] = ne1Curl(coeff, p, qq);
+        // Quadratic edge bases ne2 = W_pq·(λ_p − λ_q); curl via curl(fV) = f·curlV + ∇f×V.
+        const d0 = l0 - l1, d1 = l1 - l2, d2 = l2 - l0;
+        _Wx[4] = W0x*d0; _Wy[4] = W0y*d0;
+        _Wx[5] = W1x*d1; _Wy[5] = W1y*d1;
+        _Wx[6] = W2x*d2; _Wy[6] = W2y*d2;
+        _cW[4] = cw0*d0 + (b0 - b1)*W0y - (c0 - c1)*W0x;
+        _cW[5] = cw1*d1 + (b1 - b2)*W1y - (c1 - c2)*W1x;
+        _cW[6] = cw2*d2 + (b2 - b0)*W2y - (c2 - c0)*W2x;
 
-            const [wx2, wy2] = ne2(coeff, p, qq, xq, yq);
-            Wx[k+4] = wx2; Wy[k+4] = wy2;
-            curlW[k+4] = ne2Curl(coeff, p, qq, xq, yq);
-        }
-        {
-            const [fx1, fy1] = nf1(coeff, xq, yq);
-            Wx[3] = fx1; Wy[3] = fy1;
-            curlW[3] = nf1Curl(coeff, xq, yq);
+        // Face bubbles: nf1 = λ_0·W_12 − λ_1·W_20,  nf2 = λ_1·W_20 − λ_2·W_01.
+        _Wx[3] = l0*W1x - l1*W2x; _Wy[3] = l0*W1y - l1*W2y;
+        _cW[3] = l0*cw1 + (b0*W1y - c0*W1x) - l1*cw2 - (b1*W2y - c1*W2x);
+        _Wx[7] = l1*W2x - l2*W0x; _Wy[7] = l1*W2y - l2*W0y;
+        _cW[7] = l1*cw2 + (b1*W2y - c1*W2x) - l2*cw0 - (b2*W0y - c2*W0x);
 
-            const [fx2, fy2] = nf2(coeff, xq, yq);
-            Wx[7] = fx2; Wy[7] = fy2;
-            curlW[7] = nf2Curl(coeff, xq, yq);
-        }
+        // Nodal P2 gradients: ∇(2λ²−λ) = (4λ−1)∇λ,  ∇(4λ_pλ_q) = 4(λ_q∇λ_p + λ_p∇λ_q).
+        const f0 = 4*l0 - 1, f1 = 4*l1 - 1, f2 = 4*l2 - 1;
+        _Gx[0] = b0*f0; _Gy[0] = c0*f0;
+        _Gx[1] = b1*f1; _Gy[1] = c1*f1;
+        _Gx[2] = b2*f2; _Gy[2] = c2*f2;
+        _Gx[3] = 4*(b0*l1 + b1*l0); _Gy[3] = 4*(c0*l1 + c1*l0);
+        _Gx[4] = 4*(b1*l2 + b2*l1); _Gy[4] = 4*(c1*l2 + c2*l1);
+        _Gx[5] = 4*(b2*l0 + b0*l2); _Gy[5] = 4*(c2*l0 + c0*l2);
 
-        // Evaluate all 6 longitudinal basis functions and their gradients
-        // Indices 0-2: lv for vertices 0,1,2
-        // Indices 3-5: le for edges 0,1,2
-        const Lz = new Float64Array(6);
-        const Gx = new Float64Array(6);
-        const Gy = new Float64Array(6);
-
-        for (let k = 0; k < 3; k++) {
-            Lz[k] = lv(coeff, k, xq, yq);
-            const [gx, gy] = lvGrad(coeff, k, xq, yq);
-            Gx[k] = gx; Gy[k] = gy;
-        }
-        for (let k = 0; k < 3; k++) {
-            const [p, qq] = edgeVerts[k];
-            Lz[k+3] = le(coeff, p, qq, xq, yq);
-            const [gx, gy] = leGrad(coeff, p, qq, xq, yq);
-            Gx[k+3] = gx; Gy[k+3] = gy;
-        }
-
-        // Accumulate sub-matrices with quadrature weight
-        // For isotropic materials: Ms = I (ur_inv = 1), Mm = eps * I
-        // Msz = 1, Mmz = eps
-
-        // Att[i,j] = ∫ curlW_i * Msz * curlW_j dA = ∫ curlW_i * curlW_j dA
-        // Btt[i,j] = ∫ W_i · (Mm * W_j) dA = eps * ∫ W_i · W_j dA
-        // Dtt[i,j] = ∫ W_i · (Ms * W_j) dA = ∫ W_i · W_j dA
         for (let i = 0; i < 8; i++) {
+            const ci = w * _cW[i], wxi = w * _Wx[i], wyi = w * _Wy[i], row = i * 8;
             for (let j = 0; j < 8; j++) {
-                const idx = i * 8 + j;
-                Att[idx] += w * curlW[i] * curlW[j];
-                const dot = Wx[i]*Wx[j] + Wy[i]*Wy[j];
-                BttRe[idx] += w * epsRe * dot;
-                BttIm[idx] += w * epsIm * dot;
-                Dtt[idx] += w * dot;
+                _Att[row + j] += ci * _cW[j];
+                _Wtt[row + j] += wxi * _Wx[j] + wyi * _Wy[j];
             }
         }
-
-        // Dzt[i,j] = ∫ ∇Lz_i · (Ms * W_j) dA = ∫ ∇Lz_i · W_j dA
         for (let i = 0; i < 6; i++) {
-            for (let j = 0; j < 8; j++) {
-                Dzt[i * 8 + j] += w * (Gx[i]*Wx[j] + Gy[i]*Wy[j]);
-            }
-        }
-
-        // Dzz1[i,j] = ∫ ∇Lz_i · (Ms * ∇Lz_j) dA = ∫ ∇Lz_i · ∇Lz_j dA
-        // Dzz2[i,j] = ∫ Lz_i * Mmz * Lz_j dA = eps * ∫ Lz_i * Lz_j dA
-        for (let i = 0; i < 6; i++) {
-            for (let j = 0; j < 6; j++) {
-                const idx = i * 6 + j;
-                Dzz1[idx] += w * (Gx[i]*Gx[j] + Gy[i]*Gy[j]);
-                const prod = Lz[i]*Lz[j];
-                Dzz2Re[idx] += w * epsRe * prod;
-                Dzz2Im[idx] += w * epsIm * prod;
-            }
+            const gxi = w * _Gx[i], gyi = w * _Gy[i], row = i * 8;
+            for (let j = 0; j < 8; j++) _Dzt[row + j] += gxi * _Wx[j] + gyi * _Wy[j];
         }
     }
 
-    // Zero out face-face entries in Dtt (EMerge convention: Dtt[3,3], Dtt[3,7], Dtt[7,3], Dtt[7,7] = 0)
-    // This suppresses face DOF self-coupling in the B matrix
-    for (const fi of [3, 7]) for (const fj of [3, 7]) Dtt[fi*8+fj] = 0;
+    for (let i = 0; i < 64; i++) {
+        const wtt = _Wtt[i] * Area;
+        _Att[i] *= Area;
+        _Wtt[i] = wtt; _Dtt[i] = wtt;
+        _BttRe[i] = epsRe * wtt; _BttIm[i] = epsIm * wtt;
+    }
+    // No face-DOF self-coupling in the B matrix.
+    _Dtt[3*8+3] = _Dtt[3*8+7] = _Dtt[7*8+3] = _Dtt[7*8+7] = 0;
+    for (let i = 0; i < 48; i++) _Dzt[i] *= Area;
 
-    // Multiply by |Area| (Jacobian of the triangle mapping)
-    for (let i = 0; i < 64; i++) { Att[i] *= Area; BttRe[i] *= Area; BttIm[i] *= Area; Dtt[i] *= Area; }
-    for (let i = 0; i < 48; i++) { Dzt[i] *= Area; }
-    for (let i = 0; i < 36; i++) { Dzz1[i] *= Area; Dzz2Re[i] *= Area; Dzz2Im[i] *= Area; }
-
-
-    // Assemble 14x14 A and B:
-    // A[0:8,0:8] = Att - k0² * Btt
-    // B[0:8,0:8] = Dtt
-    // B[8:14,0:8] = Dzt
-    // B[0:8,8:14] = Dzt^T
-    // B[8:14,8:14] = Dzz1 - k0² * Dzz2
-    // (Note: EMerge uses B[8:,8:] = Dzz1 - k0²*Dzz2 with minus sign)
-
-    const ARe = new Float64Array(196); // 14x14
-    const AIm = new Float64Array(196);
-    const BRe = new Float64Array(196);
-    const BIm = new Float64Array(196);
-
-    // A[0:8,0:8] = Att - k0² * Btt
-    for (let i = 0; i < 8; i++) {
-        for (let j = 0; j < 8; j++) {
-            ARe[i*14+j] = Att[i*8+j] - k02 * BttRe[i*8+j];
-            AIm[i*14+j] = -k02 * BttIm[i*8+j];
-        }
+    triP2Stiffness(nodes, v0, v1, v2, _Dzz1);
+    for (let i = 0; i < 36; i++) {
+        const m = Area * P2_MASS[i];
+        _Dzz2Re[i] = epsRe * m; _Dzz2Im[i] = epsIm * m;
     }
 
-    // B[0:8,0:8] = Dtt
-    for (let i = 0; i < 8; i++)
-        for (let j = 0; j < 8; j++)
-            BRe[i*14+j] = Dtt[i*8+j];
-
-    // B[8:14,0:8] = Dzt
-    for (let i = 0; i < 6; i++)
-        for (let j = 0; j < 8; j++)
-            BRe[(i+8)*14+j] = Dzt[i*8+j];
-
-    // B[0:8,8:14] = Dzt^T
-    for (let i = 0; i < 8; i++)
-        for (let j = 0; j < 6; j++)
-            BRe[i*14+(j+8)] = Dzt[j*8+i];
-
-    // B[8:14,8:14] = Dzz1 - k0² * Dzz2 (matching EMerge sign convention)
-    for (let i = 0; i < 6; i++) {
-        for (let j = 0; j < 6; j++) {
-            BRe[(i+8)*14+(j+8)] = Dzz1[i*6+j] - k02 * Dzz2Re[i*6+j];
-            BIm[(i+8)*14+(j+8)] = -k02 * Dzz2Im[i*6+j];
-        }
-    }
-
-    // Note: EMerge applies Ls (edge length) scaling to rows and columns.
-    // For now, skip Ls scaling and use raw DOF values. The eigenvalues are
-    // independent of DOF scaling; only conditioning is affected.
-
-    return { ARe, AIm, BRe, BIm, Area, coeff, Dzz1, Dzz2Re, Dzz2Im, Att, Dtt, Dzt, BttRe, BttIm };
+    _p2out.Area = Area;
+    return _p2out;
 }
 
-// --- P2 static element matrices (6x6 nodal only) ---
+// P2 static element matrices (6x6 nodal only)
+//
+// Closed form instead of a per-triangle quadrature loop. On a straight-sided
+// (affine) triangle the barycentric coordinate at quadrature point q is the
+// quadrature's barycentric weight, so every P2 shape function and gradient
+// there is a constant combination of the element's ∇λ:
+//
+//   ∇N_i = Σ_m D_im(q)·∇λ_m,  D constant per (i, m, q)   [each i touches ≤ 2 m]
+//   ⇒ Sz_ij = Area·Σ_{m,n} (Σ_q w_q D_im D_jn)·(b_m b_n + c_m c_n)
+//
+// The bracketed tensor is a property of the reference element, built once below
+// as a flat (dst, gIdx, coeff) term list, so the element stiffness is 81 fused
+// multiply-adds on the six geometric products g_mn, with no quadrature loop, no
+// basis-function calls and no per-triangle allocation. Same integral as the
+// 6-point rule it replaces (which is exact for the degree-2 integrand), to
+// rounding.
+//
+// The companion mass matrix M_ij = ∫N_i N_j and load vector F_i = ∫N_i are
+// likewise Area x a constant reference matrix (P2_MASS / P2_LOAD below), since
+// the 6-point rule is exact through degree 4. mqs_loss.js consumes both.
 
-export function computeTriP2StaticMatrices(nodes, v0, v1, v2) {
-    const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-    const edgeVerts = [[0, 1], [1, 2], [2, 0]];
-
-    const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-    const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
-
-    const Sz = new Float64Array(36); // 6x6 stiffness
-    const Mz = new Float64Array(36); // 6x6 mass
-
-    for (let q = 0; q < NQ; q++) {
-        const w = QW[q];
-        const xq = txs[0]*QL1[q] + txs[1]*QL2[q] + txs[2]*QL3[q];
-        const yq = tys[0]*QL1[q] + tys[1]*QL2[q] + tys[2]*QL3[q];
-
-        const Lz = new Float64Array(6);
-        const Gx = new Float64Array(6);
-        const Gy = new Float64Array(6);
-
-        for (let k = 0; k < 3; k++) {
-            Lz[k] = lv(coeff, k, xq, yq);
-            const [gx, gy] = lvGrad(coeff, k, xq, yq);
-            Gx[k] = gx; Gy[k] = gy;
-        }
-        for (let k = 0; k < 3; k++) {
-            const [p, qq] = edgeVerts[k];
-            Lz[k+3] = le(coeff, p, qq, xq, yq);
-            const [gx, gy] = leGrad(coeff, p, qq, xq, yq);
-            Gx[k+3] = gx; Gy[k+3] = gy;
-        }
-
-        for (let i = 0; i < 6; i++) {
-            for (let j = 0; j < 6; j++) {
-                const idx = i * 6 + j;
-                Sz[idx] += w * (Gx[i]*Gx[j] + Gy[i]*Gy[j]);
-                Mz[idx] += w * Lz[i]*Lz[j];
-            }
-        }
+// Atom a = (basis i, gradient index m, λ-profile over the quadrature points).
+// Vertex k: ∇N = (4λ_k − 1)∇λ_k. Edge k=(p,q): ∇N = 4λ_q∇λ_p + 4λ_p∇λ_q.
+const P2_ATOM_BASIS = [0, 1, 2, 3, 3, 4, 4, 5, 5];
+const P2_ATOM_GRAD  = [0, 1, 2, 0, 1, 1, 2, 2, 0];
+const { P2_TERM_DST, P2_TERM_G, P2_TERM_C, P2_MASS, P2_LOAD } = (() => {
+    const QL = [QL1, QL2, QL3];
+    // λ-profile of each atom at every quadrature point.
+    const prof = [
+        q => 4 * QL1[q] - 1, q => 4 * QL2[q] - 1, q => 4 * QL3[q] - 1,
+        q => 4 * QL2[q], q => 4 * QL1[q],        // edge 0 = (v0,v1)
+        q => 4 * QL3[q], q => 4 * QL2[q],        // edge 1 = (v1,v2)
+        q => 4 * QL1[q], q => 4 * QL3[q],        // edge 2 = (v2,v0)
+    ];
+    // Merge the 81 atom pairs by (destination entry, g index): duplicates differ
+    // only in their coefficient, and summing them up front shrinks the per-triangle
+    // loop.
+    const merged = new Map();
+    for (let a = 0; a < 9; a++) for (let b = 0; b < 9; b++) {
+        let c = 0;
+        for (let q = 0; q < NQ; q++) c += QW[q] * prof[a](q) * prof[b](q);
+        if (c === 0) continue;
+        const dst = P2_ATOM_BASIS[a] * 6 + P2_ATOM_BASIS[b];
+        const g = P2_ATOM_GRAD[a] * 3 + P2_ATOM_GRAD[b];
+        const key = dst * 9 + g;
+        merged.set(key, (merged.get(key) || 0) + c);
     }
+    const keys = [...merged.keys()].sort((x, y) => x - y);
+    const dst = new Int32Array(keys.length), gi = new Int32Array(keys.length);
+    const co = new Float64Array(keys.length);
+    keys.forEach((k, i) => { dst[i] = (k / 9) | 0; gi[i] = k % 9; co[i] = merged.get(k); });
+    // Reference mass matrix and load vector (per unit area).
+    const N = (i, q) => (i < 3 ? (l => 2 * l * l - l)(QL[i][q])
+                               : 4 * QL[[0, 1, 2][i - 3]][q] * QL[[1, 2, 0][i - 3]][q]);
+    const M = new Float64Array(36), L = new Float64Array(6);
+    for (let q = 0; q < NQ; q++) for (let i = 0; i < 6; i++) {
+        L[i] += QW[q] * N(i, q);
+        for (let j = 0; j < 6; j++) M[i * 6 + j] += QW[q] * N(i, q) * N(j, q);
+    }
+    return { P2_TERM_DST: dst, P2_TERM_G: gi, P2_TERM_C: co, P2_MASS: M, P2_LOAD: L };
+})();
+export { P2_MASS, P2_LOAD };
 
-    for (let i = 0; i < 36; i++) { Sz[i] *= Area; Mz[i] *= Area; }
+const _g9 = new Float64Array(9);
 
-    return { Sz, Mz, Area };
+// Element P2 stiffness ∫∇N_i·∇N_j into `Sz` (36 entries, caller-owned so the
+// per-triangle loops stay allocation-free). Returns the triangle area.
+export function triP2Stiffness(nodes, v0, v1, v2, Sz) {
+    const x0 = nodes[2*v0], y0 = nodes[2*v0+1];
+    const x1 = nodes[2*v1], y1 = nodes[2*v1+1];
+    const x2 = nodes[2*v2], y2 = nodes[2*v2+1];
+    const sA = 0.5 * ((x0 - x2) * (y1 - y0) - (x0 - x1) * (y2 - y0));
+    const Area = Math.abs(sA);
+    // ∇λ_m = sign·(b_m, c_m)/(2A); the sign cancels in every g_mn product, so it
+    // is dropped here (triCoefficients keeps it because λ itself needs it).
+    const inv = 1 / (2 * Area);
+    const b0 = (y1 - y2) * inv, b1 = (y2 - y0) * inv, b2 = (y0 - y1) * inv;
+    const c0 = (x2 - x1) * inv, c1 = (x0 - x2) * inv, c2 = (x1 - x0) * inv;
+    const g = _g9;
+    g[0] = b0*b0 + c0*c0; g[4] = b1*b1 + c1*c1; g[8] = b2*b2 + c2*c2;
+    g[1] = g[3] = b0*b1 + c0*c1;
+    g[2] = g[6] = b0*b2 + c0*c2;
+    g[5] = g[7] = b1*b2 + c1*c2;
+    Sz.fill(0);
+    for (let k = 0; k < P2_TERM_DST.length; k++)
+        Sz[P2_TERM_DST[k]] += P2_TERM_C[k] * g[P2_TERM_G[k]];
+    for (let i = 0; i < 36; i++) Sz[i] *= Area;
+    return Area;
 }
 
 // --- Longitudinal DOF offsets ---
@@ -591,7 +579,7 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const eps = epsMap[t];
-        const m = computeTriP2Matrices(nodes, v0, v1, v2, eps.re, eps.im, 0);
+        const m = computeTriP2Matrices(nodes, v0, v1, v2, eps.re, eps.im);
 
         A0el.fill(0); A1elRe.fill(0); A1elIm.fill(0);
         B0el.fill(0); B1elRe.fill(0); B1elIm.fill(0);
@@ -696,18 +684,18 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
         rowsA[nAe + i] = rR[i]; colsA[nAe + i] = rC[i];
         vrA[nAe + i] = rV[i];
     }
-    const csrA0 = tripletsToCSR(rowsA, colsA, v0A, N);
-    const csrA1 = tripletsToCSR(rowsA, colsA, v1ReA, N, v1ImA);
-    const csrAr = tripletsToCSR(rowsA, colsA, new Float64Array(nA), N, vrA);
-    const csrB0 = tripletsToCSR(eBr.subarray(0, bNnz), eBc.subarray(0, bNnz), eB0.subarray(0, bNnz), N);
-    const csrB1 = tripletsToCSR(eBr.subarray(0, bNnz), eBc.subarray(0, bNnz), eB1Re.subarray(0, bNnz), N, eB1Im.subarray(0, bNnz));
+    // One conversion per pattern (A and B), each carrying all of its aligned value
+    // templates, not one conversion per template.
+    const csrA = tripletsToCSRMulti(rowsA, colsA, N, [v0A, v1ReA, v1ImA, vrA]);
+    const csrB = tripletsToCSRMulti(eBr.subarray(0, bNnz), eBc.subarray(0, bNnz), N,
+        [eB0.subarray(0, bNnz), eB1Re.subarray(0, bNnz), eB1Im.subarray(0, bNnz)]);
 
     return {
         N,
-        A: { rowPtr: csrA0.rowPtr, colIdx: csrA0.colIdx,
-             v0Re: csrA0.valRe, v1Re: csrA1.valRe, v1Im: csrA1.valIm, vrIm: csrAr.valIm },
-        B: { rowPtr: csrB0.rowPtr, colIdx: csrB0.colIdx,
-             v0Re: csrB0.valRe, v1Re: csrB1.valRe, v1Im: csrB1.valIm },
+        A: { rowPtr: csrA.rowPtr, colIdx: csrA.colIdx,
+             v0Re: csrA.vals[0], v1Re: csrA.vals[1], v1Im: csrA.vals[2], vrIm: csrA.vals[3] },
+        B: { rowPtr: csrB.rowPtr, colIdx: csrB.colIdx,
+             v0Re: csrB.vals[0], v1Re: csrB.vals[1], v1Im: csrB.vals[2] },
     };
 }
 
@@ -757,20 +745,26 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSo
     // Note: these are offsets within the longitudinal block (no lzOff prefix)
     // because the static solver only has longitudinal DOFs.
 
-    const Rows = [], Cols = [], Vals = [];
+    // COO in preallocated typed arrays (≤ 36 entries per triangle), and one set of
+    // per-element scratch buffers for the whole loop: at mesh sizes here the JS-array
+    // pushes and the per-triangle allocations cost more than the arithmetic.
+    const Rows = new Int32Array(36 * nTris), Cols = new Int32Array(36 * nTris);
+    const Vals = new Float64Array(36 * nTris);
+    let nCoo = 0;
     const rhs = new Float64Array(nFreeDof);
+    const nLocal = 6;
+    const Sz = new Float64Array(36);
+    const globalDof = new Int32Array(nLocal);
+    const isDirichlet = new Uint8Array(nLocal);
+    const dirichletVal = new Float64Array(nLocal);
+    const verts = new Int32Array(3);
 
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const nLocal = 6;
-        const Sz = computeTriP2StaticMatrices(nodes, v0, v1, v2).Sz;
+        triP2Stiffness(nodes, v0, v1, v2, Sz);
         const eps = epsMap ? epsMap[t].re : 1.0;
-        const verts = [v0, v1, v2];
-
-        const globalDof = new Int32Array(nLocal);
-        const isDirichlet = new Uint8Array(nLocal);
-        const dirichletVal = new Float64Array(nLocal);
-        const signs = new Float64Array(nLocal).fill(1);
+        verts[0] = v0; verts[1] = v1; verts[2] = v2;
+        isDirichlet.fill(0);
 
         // Vertex DOFs (lv): indices 0-2
         for (let k = 0; k < 3; k++) {
@@ -806,14 +800,14 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSo
 
         // Stiffness assembly
         for (let li = 0; li < nLocal; li++) {
-            const gi = globalDof[li]; if (gi < 0 && !isDirichlet[li]) continue;
+            const gi = globalDof[li]; if (gi < 0) continue;
             for (let lj = 0; lj < nLocal; lj++) {
-                const v = eps * signs[li] * signs[lj] * Sz[li * nLocal + lj];
+                const v = eps * Sz[li * nLocal + lj];
                 if (v === 0) continue;
                 const gj = globalDof[lj];
-                if (gi >= 0 && gj >= 0) {
-                    Rows.push(gi); Cols.push(gj); Vals.push(v);
-                } else if (gi >= 0 && isDirichlet[lj]) {
+                if (gj >= 0) {
+                    Rows[nCoo] = gi; Cols[nCoo] = gj; Vals[nCoo] = v; nCoo++;
+                } else if (isDirichlet[lj]) {
                     rhs[gi] -= v * dirichletVal[lj];
                 }
             }
@@ -821,7 +815,8 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSo
     }
 
 
-    const csrS = tripletsToCSR(Rows, Cols, Vals, nFreeDof);
+    const csrS = tripletsToCSR(Rows.subarray(0, nCoo), Cols.subarray(0, nCoo),
+                               Vals.subarray(0, nCoo), nFreeDof);
     // Direct WASM solve (SPD → LDLT, pattern-cached across the eps/air pair on the
     // same freedom map) when a solver is supplied; JS CG otherwise / on failure.
     let phiFree = null;
@@ -863,24 +858,28 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSo
 
 // Compute energy W = ½∫ε|∇φ|² dA.
 export function computeTriEnergy(phi, mesh, epsMap) {
-    const { nodes, tris, nTris } = mesh;
+    const { nodes, tris, triEdges, nTris } = mesh;
     const { phiVertex, phiEdge } = phi;
     let W = 0;
+    const Sz = new Float64Array(36);
+    const localPhi = new Float64Array(6);
 
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const nLocal = 6;
-        const Sz = computeTriP2StaticMatrices(nodes, v0, v1, v2).Sz;
+        triP2Stiffness(nodes, v0, v1, v2, Sz);
         const eps = epsMap ? epsMap[t].re : 1.0;
 
-        const localPhi = new Float64Array(nLocal);
-        const verts = [v0, v1, v2];
-        for (let k = 0; k < 3; k++) localPhi[k] = phiVertex[verts[k]];
-        for (let k = 0; k < 3; k++) localPhi[k+3] = phiEdge[mesh.triEdges[3*t+k]];
+        localPhi[0] = phiVertex[v0]; localPhi[1] = phiVertex[v1]; localPhi[2] = phiVertex[v2];
+        localPhi[3] = phiEdge[triEdges[3*t]];
+        localPhi[4] = phiEdge[triEdges[3*t+1]];
+        localPhi[5] = phiEdge[triEdges[3*t+2]];
 
-        for (let li = 0; li < nLocal; li++)
-            for (let lj = 0; lj < nLocal; lj++)
-                W += eps * Sz[li * nLocal + lj] * localPhi[li] * localPhi[lj];
+        let e = 0;
+        for (let li = 0; li < 6; li++) {
+            const pi = localPhi[li], row = li * 6;
+            for (let lj = 0; lj < 6; lj++) e += Sz[row + lj] * pi * localPhi[lj];
+        }
+        W += eps * e;
     }
 
     return 0.5 * W;
@@ -1248,10 +1247,23 @@ export function refineTriMesh(mesh, marked) {
     }
 
     function smoothVertexSet(eligible, maxPasses, clampLo, clampHi) {
+        // Only triangles with an eligible, movable vertex contribute to any average
+        // that gets used. The rest of the mesh is skipped on every pass. (The
+        // neighbour sums are read only at eligible vertices.)
+        const touch = new Uint8Array(nNewTris);
+        let anyTouch = false;
+        for (let t = 0; t < nNewTris; t++) {
+            const va = newTriArr[3*t], vb = newTriArr[3*t+1], vc = newTriArr[3*t+2];
+            if ((eligible[va] && canMove[va]) || (eligible[vb] && canMove[vb]) ||
+                (eligible[vc] && canMove[vc])) { touch[t] = 1; anyTouch = true; }
+        }
+        if (!anyTouch) return;
+        const sumX = new Float64Array(newNodeCount), sumY = new Float64Array(newNodeCount);
+        const cnt = new Int32Array(newNodeCount);
         for (let smoothPass = 0; smoothPass < maxPasses; smoothPass++) {
-            const sumX = new Float64Array(newNodeCount), sumY = new Float64Array(newNodeCount);
-            const cnt = new Int32Array(newNodeCount);
+            sumX.fill(0); sumY.fill(0); cnt.fill(0);
             for (let t = 0; t < nNewTris; t++) {
+                if (!touch[t]) continue;
                 const va = newTriArr[3*t], vb = newTriArr[3*t+1], vc = newTriArr[3*t+2];
                 for (const [p, q] of [[va,vb],[va,vc],[vb,vc]]) {
                     sumX[p] += newNodes[2*q]; sumY[p] += newNodes[2*q+1]; cnt[p]++;
@@ -1326,7 +1338,18 @@ export function refineTriMesh(mesh, marked) {
         return false;
     }
 
+    // Triangles worth swapping around: only an edge with a sliver (q >= Q_SWAP)
+    // on at least one side can be improved by a flip. Computed first so a mesh
+    // with no slivers (common case after a band refinement) never pays for the
+    // edge map below (3 map ops per triangle, up to 20 passes per refinement).
+    const Q_SWAP = 10;
+    function anySliverTri() {
+        for (let t = 0; t < nNewTris; t++) if (triQuality(t) >= Q_SWAP) return true;
+        return false;
+    }
+
     function edgeSwapPass() {
+        if (!anySliverTri()) return 0;
         const tmpEdgeMap = new Map();
         for (let t = 0; t < nNewTris; t++) {
             const localE = [[0,1],[1,2],[2,0]];
@@ -1358,7 +1381,7 @@ export function refineTriMesh(mesh, marked) {
             }
             if (opp0 < 0 || opp1 < 0 || opp0 === opp1) continue;
             const qBefore = Math.max(triQuality(t0), triQuality(t1));
-            if (qBefore < 10) continue; // only target actual slivers
+            if (qBefore < Q_SWAP) continue; // only target actual slivers
             // Convexity check: n0 and n1 must be on opposite sides of opp0-opp1
             const cross0 = (newNodes[2*opp1]-newNodes[2*opp0])*(newNodes[2*n0+1]-newNodes[2*opp0+1])
                          - (newNodes[2*n0]-newNodes[2*opp0])*(newNodes[2*opp1+1]-newNodes[2*opp0+1]);
@@ -1396,23 +1419,27 @@ export function refineTriMesh(mesh, marked) {
     for (let outerPass = 0; outerPass < 3; outerPass++) {
         // Edge swaps
         for (let sp = 0; sp < 5; sp++) { if (edgeSwapPass() === 0) break; }
+        // Quality-targeted smoothing of vertices near slivers. Determined
+        // before the vtAdj rebuild so a mesh with no slivers left leaves the
+        // loop without paying for it (vtAdj is not read after this loop).
+        const Q_THRESH = 10;
+        const sliverAdj = new Uint8Array(newNodeCount);
+        let anySliver = false;
+        for (let t = 0; t < nNewTris; t++) {
+            if (triQuality(t) > Q_THRESH) {
+                for (let k = 0; k < 3; k++) {
+                    const v = newTriArr[3*t+k];
+                    if (canMove[v] >= 1) { sliverAdj[v] = 1; anySliver = true; }
+                }
+            }
+        }
+        if (!anySliver) break;
         // Rebuild vtAdj after swaps
         for (let n = 0; n < newNodeCount; n++) vtAdj[n] = [];
         for (let t = 0; t < nNewTris; t++) {
             vtAdj[newTriArr[3*t]].push(t);
             vtAdj[newTriArr[3*t+1]].push(t);
             vtAdj[newTriArr[3*t+2]].push(t);
-        }
-        // Quality-targeted smoothing of vertices near slivers
-        const Q_THRESH = 10;
-        const sliverAdj = new Uint8Array(newNodeCount);
-        for (let t = 0; t < nNewTris; t++) {
-            if (triQuality(t) > Q_THRESH) {
-                for (let k = 0; k < 3; k++) {
-                    const v = newTriArr[3*t+k];
-                    if (canMove[v] >= 1) sliverAdj[v] = 1;
-                }
-            }
         }
         // Build constraint-line neighbor bounds for constrained vertices
         // canMove=2: on X boundary, moves along Y; canMove=3: on Y boundary, moves along X

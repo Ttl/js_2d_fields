@@ -38,9 +38,9 @@
 // solving D*C = I_target realizes the requested mode currents (+1/-1 odd, +1/+1
 // even, or the modal current vector for an asymmetric pair).
 
-import { tripletsToCSR, GL3p, GL3w } from './fem_core.js';
+import { tripletsToCSRMulti, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
-         refineTriMesh } from './tri_fem.js';
+         triP2Stiffness, P2_MASS, P2_LOAD, refineTriMesh } from './tri_fem.js';
 import { calculate_Zrough } from '../surface_roughness.js';
 
 const MU0 = 4 * Math.PI * 1e-7;
@@ -68,7 +68,7 @@ function inAnyRect(rects, x, y, tol) {
 // from the slot, so full δ-resolution is only needed within ~Dfine of the signal
 // and the band cost stays independent of how far the ground pour extends.
 // Refinement stops naturally once the graded target exceeds the base mesh size.
-export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity, grading = null) {
+export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity, grading = null, depthSlope = 0) {
     const rects = condRect.rects || [condRect];
     const bw = band * delta;
     function distToRectBoundary(r, x, y) {
@@ -93,6 +93,15 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
         }
         return Math.max(targetH, grading.slope * (d - grading.Dfine));
     }
+    // Depth grading (across the band, not along the surface). The eddy current
+    // decays as exp(-d/δ), so the outer part of the
+    // band carries a small, smooth fraction of the total and does not need the
+    // surface's element size. Isotropic bisection means an element's tangential 
+    // extent shrinks with its target too, so a layer at 2*targetH costs 4x fewer
+    // triangles.
+    //     target(d) = targetH*(1 + depthSlope*|d|/δ)
+    // depthSlope = 0 for uniform meshing.
+    const depthTarget = (dSurf) => targetH * (1 + depthSlope * dSurf / delta);
     // Size-aware marking: refine a band triangle only while it is still larger
     // than targetH, and stop when nothing needs refining. (The previous early-stop
     // keyed on the MINIMUM conductor-surface edge, which the main mesh's
@@ -114,7 +123,19 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
             const xc = (x0+x1+x2)/3, yc = (y0+y1+y2)/3;
             if (!(nearSurface(xc, yc) || nearSurface(x0, y0) ||
                   nearSurface(x1, y1) || nearSurface(x2, y2))) continue;
-            const tgt = grading ? targetAt(xc, yc) : targetH;
+            let tgt = grading ? targetAt(xc, yc) : targetH;
+            if (depthSlope > 0 && targetH > 0) {
+                // Distance of the element's closest point (of centroid + vertices) to
+                // metal. A triangle straddling the surface must get the surface target.
+                let dS = Infinity;
+                for (const r of rects) {
+                    dS = Math.min(dS, Math.abs(distToRectBoundary(r, xc, yc)),
+                                      Math.abs(distToRectBoundary(r, x0, y0)),
+                                      Math.abs(distToRectBoundary(r, x1, y1)),
+                                      Math.abs(distToRectBoundary(r, x2, y2)));
+                }
+                tgt = Math.max(tgt, depthTarget(dS));
+            }
             if (tgt > 0) {
                 const hMax = Math.max(Math.hypot(x1-x0, y1-y0),
                                       Math.hypot(x2-x1, y2-y1),
@@ -249,7 +270,16 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     // Assemble S (everywhere), M (all metal: signal + passive grounds) and Fc
     // (signal only, grounds have C = 0, so no source term). condArea is the
     // signal cross-section: it is only used to normalize the signal current.
-    const sR = [], sC = [], sV = [], mR = [], mC = [], mV = [];
+    // The three element integrals are closed-form on a straight-sided triangle.
+    // The P2 stiffness comes from triP2Stiffness and the mass / load are Area
+    // x the reference P2_MASS / P2_LOAD. That replaces a 6-point quadrature
+    // loop with six basis evaluations per point, the assembly used to dominate
+    // the MQS path's JS time on the (skin-refined, hence large) conductor mesh.
+    const Nb = 2 * nF;
+    const maxCoo = 4 * 36 * nTris;   // ≤ 2 block entries per S and per M local entry
+    const R = new Int32Array(maxCoo), Cc = new Int32Array(maxCoo);
+    const VS = new Float64Array(maxCoo), VM = new Float64Array(maxCoo);
+    let nCoo = 0;
     const Fc = new Float64Array(nF);
     // Per-group source vectors / areas for the per-conductor-drive path. The
     // combined Fc/condArea keep their own accumulation (not a sum of these) so
@@ -258,63 +288,47 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     const areaG = new Float64Array(groups.length);
     let condArea = 0;
     const lg = new Int32Array(6);
+    const Sl = new Float64Array(36);
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
+        const Area = triP2Stiffness(nodes, v0, v1, v2, Sl);
         lg[0] = dofOf[v0]; lg[1] = dofOf[v1]; lg[2] = dofOf[v2];
         for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*t+k]];
-        const xs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-        const ys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
         const cond = isCondTri[t];
         const driven = cond === 1;
         if (driven) { condArea += Area; areaG[triGroup[t]] += Area; }
-        const Sl = new Float64Array(36), Ml = new Float64Array(36), Fl = new Float64Array(6);
-        for (let q = 0; q < NQ; q++) {
-            const w = QW[q] * Area;
-            const xq = xs[0]*QL1[q] + xs[1]*QL2[q] + xs[2]*QL3[q];
-            const yq = ys[0]*QL1[q] + ys[1]*QL2[q] + ys[2]*QL3[q];
-            const N = new Float64Array(6), Gx = new Float64Array(6), Gy = new Float64Array(6);
-            for (let k = 0; k < 3; k++) {
-                N[k] = lv(coeff, k, xq, yq);
-                const g = lvGrad(coeff, k, xq, yq); Gx[k] = g[0]; Gy[k] = g[1];
-                const [p, qq] = edgeVerts[k];
-                N[3+k] = le(coeff, p, qq, xq, yq);
-                const ge = leGrad(coeff, p, qq, xq, yq); Gx[3+k] = ge[0]; Gy[3+k] = ge[1];
-            }
-            for (let i = 0; i < 6; i++) {
-                if (driven) Fl[i] += w * N[i];
-                for (let j = 0; j < 6; j++) {
-                    Sl[6*i+j] += w * (Gx[i]*Gx[j] + Gy[i]*Gy[j]);
-                    if (cond) Ml[6*i+j] += w * N[i]*N[j];
-                }
-            }
-        }
+        const FcGt = driven ? FcG[triGroup[t]] : null;
         for (let i = 0; i < 6; i++) {
             const gi = lg[i]; if (gi < 0) continue;
-            if (driven) { Fc[gi] += Fl[i]; FcG[triGroup[t]][gi] += Fl[i]; }
+            if (driven) { const f = Area * P2_LOAD[i]; Fc[gi] += f; FcGt[gi] += f; }
             for (let j = 0; j < 6; j++) {
                 const gj = lg[j]; if (gj < 0) continue;
-                if (Sl[6*i+j] !== 0) { sR.push(gi); sC.push(gj); sV.push(Sl[6*i+j]); }
-                if (cond && Ml[6*i+j] !== 0) { mR.push(gi); mC.push(gj); mV.push(Ml[6*i+j]); }
+                // Block system [[S, -beta * M], [-beta * M, -S]] with beta
+                // = w * mu0 * sigma, the only frequency-dependent factor. 
+                // Put each local entry into both of its blocks with separate
+                // S / M values on one shared index stream.
+                const sv = Sl[6*i+j];
+                if (sv !== 0) {
+                    R[nCoo] = gi; Cc[nCoo] = gj; VS[nCoo] = sv; VM[nCoo] = 0; nCoo++;
+                    R[nCoo] = nF + gi; Cc[nCoo] = nF + gj; VS[nCoo] = -sv; VM[nCoo] = 0; nCoo++;
+                }
+                const mv = cond ? Area * P2_MASS[6*i+j] : 0;
+                if (mv !== 0) {
+                    R[nCoo] = gi; Cc[nCoo] = nF + gj; VS[nCoo] = 0; VM[nCoo] = -mv; nCoo++;
+                    R[nCoo] = nF + gi; Cc[nCoo] = gj; VS[nCoo] = 0; VM[nCoo] = -mv; nCoo++;
+                }
             }
         }
     }
 
-    // Symbolic block system with separate S / M value templates. The SAME
-    // (row, col) sequence is converted twice, so the dedup produces an identical
-    // pattern for both — valS and valM line up entry-for-entry.
-    const Nb = 2 * nF;
-    const R = [], Cc = [], VS = [], VM = [];
-    for (let k = 0; k < sR.length; k++) {
-        R.push(sR[k]); Cc.push(sC[k]); VS.push(sV[k]); VM.push(0);
-        R.push(nF + sR[k]); Cc.push(nF + sC[k]); VS.push(-sV[k]); VM.push(0);
-    }
-    for (let k = 0; k < mR.length; k++) {
-        R.push(mR[k]); Cc.push(nF + mC[k]); VS.push(0); VM.push(-mV[k]);
-        R.push(nF + mR[k]); Cc.push(mC[k]); VS.push(0); VM.push(-mV[k]);
-    }
-    const csrS = tripletsToCSR(R, Cc, VS, Nb);
-    const csrM = tripletsToCSR(R, Cc, VM, Nb);
+    // Symbolic block system with separate S / M value templates on one pattern:
+    // valS and valM line up entry-for-entry, so a frequency only needs
+    // valS + beta * valM.
+    const csr2 = tripletsToCSRMulti(R.subarray(0, nCoo), Cc.subarray(0, nCoo), Nb,
+                                    [VS.subarray(0, nCoo), VM.subarray(0, nCoo)]);
+    const csrS = { rowPtr: csr2.rowPtr, colIdx: csr2.colIdx, valRe: csr2.vals[0],
+                   valIm: new Float64Array(csr2.colIdx.length) };
+    const csrM = { valRe: csr2.vals[1] };
 
     // edge → one adjacent triangle (for the ground-loss surface integral)
     const edgeToTri = new Int32Array(nEdges).fill(-1);

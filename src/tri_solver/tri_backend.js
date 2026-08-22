@@ -26,7 +26,7 @@ import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh, _clipDomain } from './occ_to_mesh.js';
 import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
-         markTrianglesForRefinement, computeTriP2StaticMatrices,
+         markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
          femFromDecomposition } from './tri_fem.js';
@@ -359,9 +359,10 @@ function perElementEnergy(phi, mesh, epsMap) {
     const { nodes, tris, nTris, triEdges } = mesh;
     const m = new Float64Array(nTris);
     const lp = new Float64Array(6);
+    const Sz = new Float64Array(36);
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
-        const Sz = computeTriP2StaticMatrices(nodes, v0, v1, v2).Sz;
+        triP2Stiffness(nodes, v0, v1, v2, Sz);
         lp[0] = phi.phiVertex[v0]; lp[1] = phi.phiVertex[v1]; lp[2] = phi.phiVertex[v2];
         lp[3] = phi.phiEdge[triEdges[3 * t]]; lp[4] = phi.phiEdge[triEdges[3 * t + 1]]; lp[5] = phi.phiEdge[triEdges[3 * t + 2]];
         let e = 0;
@@ -1051,6 +1052,8 @@ export class TriBackend {
             let metric = null;
             const conv = [];   // convergence quantities (eps + loss surface integral per mode)
             const energy = []; // total field energy per mode (for the reported energy error)
+            const certQ0 = []; // this pass's (W_eps, W_air) per mode, for the certificate
+            this._passEnergies = null;
             // Source-free waveguide: there is no static solve, so the whole per-mode body
             // in the else branch is replaced, see _wgRefinePass.
             if (this._isWG) {
@@ -1066,6 +1069,9 @@ export class TriBackend {
                 const W_air = computeTriEnergy(phiAir, mesh, null);
                 const eps_static = W_eps / W_air;
                 energy.push(W_eps);
+                // Same (mesh, mode, drive) pair _staticEnergies would recompute as the
+                // certificate's level-0 solve, hand it over instead (see _certifyStatic).
+                certQ0.push(W_eps, W_air);
                 // Full-wave eigenmode at fRef: source of the reported dispersive ε_eff
                 // (fw.eps) and the H-field for the ZZ refinement metric. Computed every pass.
                 let fw = null;
@@ -1106,6 +1112,7 @@ export class TriBackend {
                 for (let i = 0; i < energy.length; i++) energyRel = Math.max(energyRel, Math.abs(energy[i] - prevEnergy[i]) / Math.max(Math.abs(prevEnergy[i]), 1e-300));
             }
             prev = conv; prevEnergy = energy;
+            if (certQ0.length) this._passEnergies = { mesh, q: certQ0 };
             // Report this pass (real triangle count + convergence) so the UI shows
             // the adaptive progress just like the rectilinear backend. When a progress
             // sink is present, yield to the event loop so the browser can paint each
@@ -1276,7 +1283,10 @@ export class TriBackend {
         if (mesh.nTris * GROW > cap) return null;
         const rMax = this.opts.certifyRMax ?? 0.7;
         const safety = this.opts.certifySafety ?? 1.5;
-        const q0 = this._staticEnergies(mesh);
+        // Level 0 is exactly what the refinement pass on this mesh already solved
+        // (same freedom map, same drives), reuse it rather than re-solving.
+        const pe = this._passEnergies;
+        const q0 = (pe && pe.mesh === mesh) ? pe.q : this._staticEnergies(mesh);
         const m1 = this._uniformBisect(mesh);
         const q1 = this._staticEnergies(m1);
         const d1 = maxDiff(q0, q1);
@@ -1591,7 +1601,8 @@ export class TriBackend {
         // odd/even and picking one eigenmode per drive can return the SAME eigenmode twice
         // (e.g. broadside stripline with an unequal er stack). Use the genuine line modes
         // instead — the eigenvectors of [C0]⁻¹[C] from per-trace drives.
-        if (s.is_differential && !this.symmetry && this._prepareStaticModal(grid)) return;
+        if (s.is_differential && !this.symmetry &&
+            this._prepareStaticModal(grid, s.use_causal_materials ? 'defer' : 'build')) return;
         for (const mode of this.modeNames) {
             const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry, this.condRect.wallPEC);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
@@ -1604,7 +1615,10 @@ export class TriBackend {
             const C0 = kC * eps0 * W_air;                 // vacuum cap (geometric)
             const eps_eff_static = W_eps / W_air;
             const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
-            const fields = resampleStatic(mesh, phiEps, this.domain,
+            // With causal materials the first solveAt immediately re-solves the statics
+            // under eps(f) and resamples again, so resampling here would be thrown away.
+            // _applyCausal fills st.fields in whenever it is still missing.
+            const fields = s.use_causal_materials ? null : resampleStatic(mesh, phiEps, this.domain,
                 { resolution: this.opts.resolution, parity, grid, rects: this._plotRects });
             this._static[mode] = {
                 fm, abc, kC, phiEps, C0, W_loss, eps_eff_static,
@@ -1622,7 +1636,10 @@ export class TriBackend {
     // modes are labelled odd/even by differential character (opposite-sign components → odd)
     // so the downstream result assembly is unchanged. For a symmetric pair the eigenvectors
     // come out as [1,∓1], reproducing the existing odd/even basis exactly.
-    _prepareStaticModal(grid) {
+    // fieldsMode: 'build' resamples the plot fields, 'defer' leaves them null (the
+    // causal re-solve in _applyCausal supersedes them immediately), 'reuse' keeps the
+    // ones already there (mid-sweep: nothing displays them, see _applyCausal).
+    _prepareStaticModal(grid, fieldsMode = 'build') {
         const { mesh } = this;
         const s = this.solver;
         const roles = this.condRect.rectRoles;
@@ -1667,8 +1684,11 @@ export class TriBackend {
             const W_air = Wa(phiAir);
             const C0 = kC * eps0 * W_air;
             const eps_eff_static = We(phiEps) / W_air;
-            const fields = resampleStatic(mesh, phiEps, this.domain,
-                { resolution: this.opts.resolution, parity: null, grid, rects: this._plotRects });
+            const prevFields = this._static[label] && this._static[label].fields;
+            const fields = fieldsMode === 'defer' ? null
+                : (fieldsMode === 'reuse' && prevFields) ? prevFields
+                : resampleStatic(mesh, phiEps, this.domain,
+                    { resolution: this.opts.resolution, parity: null, grid, rects: this._plotRects });
             this._static[label] = {
                 fm, abc, kC, phiEps, C0, W_loss: computeTriEnergy(phiEps, mesh, mesh.lossMap),
                 eps_eff_static,
@@ -1936,15 +1956,20 @@ export class TriBackend {
             // no-op). The skin band is sized by the matching bulk skin depth.
             const mqsSigma = anyPlating ? (s.sigma_cond ?? 5.8e7) : sigma;
             const mqsDelta = anyPlating ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
-            // Skin-band target element size (× δ): the band must be resolved to a
-            // fraction of δ for accurate R (matches ms2d's mqs_band_delta).
-            // Skin-band target element size (×δ) and band width (×δ): resolve the skin
-            // layer to bandDelta·δ within mqsBand·δ of each conductor surface. Tuned down
-            // from (2, 0.5): a 1.5δ band with 0.6δ elements roughly halves the refined
-            // mesh on tight/high-frequency geometries with ≤1% change in R (validated
-            // against the reference suite), keeping the reused mesh small and the solve
-            // fast.
-            const bandDelta = this.opts.mqsBandDelta ?? 0.6;
+            // Skin-band element size at the conductor surface (xδ) and band width (xδ).
+            // Resolve the skin layer to bandDelta*δ within mqsBand*δ of each surface,
+            // with the target relaxing away from the surface (mqsBandDepthSlope, see
+            // buildSkin / refineSkinBand).
+            //
+            // The surface target is deliberately ~δ rather than a fraction of it: with
+            // the depth grading in place, R converges on the grading , not on the surface
+            // element size, a P2 element about a skin depth across already carries
+            // exp(-d/δ) well. The previous uniform-target band needed 0.6δ elements
+            // everywhere inside 1.5δ and still ran into its triangle cap (leaving R
+            // +0.6% at 10 GHz and +1.3% at 40 GHz on the reference differential GCPW).
+            // The graded band converges inside the same budget at ~0.1%, with a smaller
+            // mesh and a faster block solve.
+            const bandDelta = this.opts.mqsBandDelta ?? 1.25;
             // Skin-mesh triangle budget: bounds the size-aware band refinement on
             // large-perimeter/small-δ geometries (memory guard; hitting it leaves the
             // band partially resolved rather than aborting).
@@ -1983,11 +2008,15 @@ export class TriBackend {
                     slope: this.opts.mqsGndSlope ?? 0.5 };
             }
             const gndBudget = this.opts.mqsGndMaxTris ?? Math.floor(mqsMaxTris / 2);
+            // Depth grading across the band (see refineSkinBand). The target size
+            // relaxes with distance from the metal surface.
+            const depthSlope = this.opts.mqsBandDepthSlope ?? 3;
             const buildSkin = (base, dlt) => {
-                let m = refineSkinBand(base, { rects: sigRects }, dlt, 12, mqsBand, bandDelta * dlt, mqsMaxTris);
+                let m = refineSkinBand(base, { rects: sigRects }, dlt, 12, mqsBand, bandDelta * dlt,
+                    mqsMaxTris, null, depthSlope);
                 if (gndRects.length) {
                     m = refineSkinBand(m, { rects: gndRects }, dlt, 12, mqsBand,
-                        bandDelta * dlt, m.nTris + gndBudget, gndGrading);
+                        bandDelta * dlt, m.nTris + gndBudget, gndGrading, depthSlope);
                 }
                 return m;
             };
@@ -2290,7 +2319,8 @@ export class TriBackend {
         // this._modalPhys from the now-causal mesh.epsMap. It returns false for an electrically
         // symmetric or velocity-degenerate pair, in which case the odd/even drive below is the
         // correct basis (and any _modalPhys it set is already causal-consistent).
-        if (s.is_differential && !this.symmetry && this._prepareStaticModal(this._staticGrid)) return;
+        if (s.is_differential && !this.symmetry &&
+            this._prepareStaticModal(this._staticGrid, skipFields ? 'reuse' : 'build')) return;
         for (const mode of this.modeNames) {
             const st = this._static[mode];
             const pot = drivePotentials(this.condRect, mode, this.symmetry);
@@ -2303,7 +2333,9 @@ export class TriBackend {
             // Skipped on mid-sweep calls (skipFields): each sweep point's resample
             // is immediately overwritten by the next, and the plot the user sees
             // comes from the main solve — the physics above never depends on it.
-            if (!skipFields) {
+            // (Unless nothing has resampled yet: _prepareStatic leaves fields null on
+            // the causal path precisely because this call supersedes it.)
+            if (!skipFields || !st.fields) {
                 const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
                 st.fields = resampleStatic(this.mesh, phiEps, this.domain,
                     { resolution: this.opts.resolution, parity, grid: this._staticGrid, rects: this._plotRects });
