@@ -2125,7 +2125,8 @@ export class TriBackend {
             // modeCurrents instead, and shares one cache across both modes. The
             // assembly and the per-frequency unit solves are mode-independent
             // there, so the second mode at each frequency skips the block LU.
-            const mqsOpts = { topGround: !!(cr.wallPEC && cr.wallPEC.top),
+            const mqsOpts = { wallPEC: cr.wallPEC || null,
+                              topGround: !!(cr.wallPEC && cr.wallPEC.top),   // legacy fallback
                               oddSymmetry: this.symmetry && mode === 'odd',
                               diffPair: !!s.is_differential,
                               // Frequency-invariant assembly cache (validated

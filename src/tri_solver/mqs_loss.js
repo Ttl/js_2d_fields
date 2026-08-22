@@ -175,7 +175,12 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   freq, sigma — frequency (Hz), conductivity (S/m)
 //   solveSparseMulti — WASM helper from createWasmHelpers
 //   Z0          — (optional) line impedance for α_c conversion
-//   opts.topGround — include the y=ymax_domain wall in the ground loss (stripline)
+//   opts.wallPEC — {left,right,top,bottom} flags saying which domain walls are metal
+//   (from the mesher. `left` is already cleared on a half domain so the symmetry
+//   plane is never counted). Only these walls contribute to the wall loss, every
+//   wall is Dirichlet in the solve regardless. Omit it and the legacy behaviour
+//   applies: bottom always, top per opts.topGround, sides never.
+//   opts.topGround — legacy fallback for opts.wallPEC.top (stripline)
 //   opts.oddSymmetry — odd-mode symmetry: A = 0 (Dirichlet) on the symmetry plane
 //   x = xmin_domain instead of the natural (even-mode) BC. For a centered
 //   differential pair meshed as a half domain with one full trace, this solves
@@ -403,6 +408,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     const Rs = 1 / (sigma * delta);
     const TOL = 1e-12;
     const xmin_d = condRect.xmin_domain;
+    const xmax_d = condRect.xmax_domain;
     const ymax_d = condRect.ymax_domain;
     const ymin_d = condRect.ymin_domain ?? 0;
 
@@ -541,43 +547,66 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
         if (cls === 1) Psig += Ptri; else PgndRect += Ptri;
     }
 
-    // Ground loss: flat-surface skin formula on |Hx(y=0)| = |∂A/∂y|/μ₀
-    // (edgeToTri comes precomputed from mqsPrecompute)
+    // Domain-wall loss
+    //
+    // Flat-surface skin formula on the tangential H at each wall
+    // that is actually metal. |Hx| = |∂A/∂y|/μ₀ on a horizontal wall, |Hy| =
+    // |∂A/∂x|/μ₀ on a vertical one. (edgeToTri comes precomputed from mqsPrecompute.)
+    //
+    // Every domain wall is Dirichlet in the MQS solve (A = 0 confines the flux), but
+    // only the metal ones dissipate. An 'open' far-field truncation and the symmetry
+    // plane are boundary conditions, not surfaces. opts.wallPEC carries that
+    // distinction from the mesher (which clears `left` on a half domain, so the
+    // symmetry plane can never be mistaken for metal).
     let Pgnd = 0;
     // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
     // conductor surfaces, used below to scale the smooth loss per face.
     let gndS = 0, gndZreS = 0, gndZimS = 0;
-    function isGroundY(y) {
-        if (Math.abs(y - ymin_d) < 1e-9) return true;
-        if (opts.topGround && Math.abs(y - ymax_d) < 1e-9) return true;
-        return false;
+    // Dallback for a caller with no wall map: bottom is ground on every
+    // geometry the mesher builds, top came from opts.topGround, sides skipped.
+    const wp = opts.wallPEC || { bottom: true, top: !!opts.topGround };
+    const onLine = (a, b, v) => Math.abs(a - v) < 1e-9 && Math.abs(b - v) < 1e-9;
+    // Orientation of the metal wall this edge lies on ('h' | 'v'), else null.
+    function wallOrient(x0, y0, x1, y1) {
+        if (wp.bottom && onLine(y0, y1, ymin_d)) return 'h';
+        if (wp.top && onLine(y0, y1, ymax_d)) return 'h';
+        if (wp.left && onLine(x0, x1, xmin_d)) return 'v';
+        if (wp.right && onLine(x0, x1, xmax_d)) return 'v';
+        return null;
     }
     for (let e = 0; e < nEdges; e++) {
         const n0 = edges[2*e], n1 = edges[2*e+1];
-        if (!isGroundY(nodes[2*n0+1]) || !isGroundY(nodes[2*n1+1])) continue;
+        const x0 = nodes[2*n0], y0 = nodes[2*n0+1];
+        const x1 = nodes[2*n1], y1 = nodes[2*n1+1];
+        const orient = wallOrient(x0, y0, x1, y1);
+        if (!orient) continue;
         const adj = edgeToTri[e];
-        if (adj < 0) continue;
+        // A meshed conductor sitting on the wall (a GCPW pour or via slab reaching
+        // it) bonds to it. There is no exposed wall surface there, and the adjacent
+        // triangle is metal, so ∂A/∂n is an interior gradient, not the exterior H.
+        // That segment's dissipation belongs to the volume eddy term, not here.
+        if (adj < 0 || isCondTri[adj]) continue;
         const v0 = tris[3*adj], v1 = tris[3*adj+1], v2 = tris[3*adj+2];
         const { coeff } = triCoefficients(nodes, v0, v1, v2);
         lg[0] = dofOf[v0]; lg[1] = dofOf[v1]; lg[2] = dofOf[v2];
         for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*adj+k]];
-        const x0 = nodes[2*n0], x1 = nodes[2*n1];
-        const yWall = nodes[2*n0+1];
-        const L = Math.abs(x1 - x0);
-        // Ground is bare metal (never plated); evaluate Zs once at the edge midpoint.
-        const Zg = opts.surfaceZs ? opts.surfaceZs((x0 + x1) / 2, yWall, 'h') : null;
+        const L = Math.hypot(x1 - x0, y1 - y0);
+        // Tangential H comes from the gradient component along the wall normal.
+        const comp = orient === 'h' ? 1 : 0;
+        // Walls are bare metal (never plated). Evaluate Zs once at the edge midpoint.
+        const Zg = opts.surfaceZs ? opts.surfaceZs((x0 + x1) / 2, (y0 + y1) / 2, orient) : null;
         for (let q = 0; q < 3; q++) {
-            const xq = x0 + GL3p[q] * (x1 - x0);
-            let gyR = 0, gyI = 0;
+            const xq = x0 + GL3p[q] * (x1 - x0), yq = y0 + GL3p[q] * (y1 - y0);
+            let gR = 0, gI = 0;
             for (let k = 0; k < 6; k++) {
                 const g = lg[k]; if (g < 0) continue;
-                const gr = k < 3 ? lvGrad(coeff, k, xq, yWall) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yWall);
-                gyR += gr[1] * sol[g]; gyI += gr[1] * sol[nF + g];
+                const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
+                gR += gr[comp] * sol[g]; gI += gr[comp] * sol[nF + g];
             }
-            const K2 = Cmag2 * (gyR*gyR + gyI*gyI) / (MU0*MU0);
+            const K2 = Cmag2 * (gR*gR + gI*gI) / (MU0*MU0);
             Pgnd += 0.5 * Rs * K2 * GL3w[q] * L;
             if (Zg) {
-                const Sseg = (gyR*gyR + gyI*gyI) * GL3w[q] * L;   // ∝ |K|² (global factors cancel in the ratio)
+                const Sseg = (gR*gR + gI*gI) * GL3w[q] * L;   // ∝ |K|² (global factors cancel in the ratio)
                 gndS += Sseg; gndZreS += Zg.re * Sseg; gndZimS += Zg.im * Sseg;
             }
         }
