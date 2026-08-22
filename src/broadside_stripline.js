@@ -70,7 +70,6 @@ class BroadsideStriplineSolver extends FieldSolver2D {
 
         // Domain width
         const total_substrate_h = this.h_bottom + this.h_middle + this.h_top;
-        const trace_extent = this.w + Math.abs(this.x_offset);
         if (options.enclosure_width != null && options.enclosure_width !== "auto") {
             this.enclosure_width = options.enclosure_width;
             if (this.has_side_gnd) {
@@ -80,7 +79,12 @@ class BroadsideStriplineSolver extends FieldSolver2D {
             }
         } else {
             this.enclosure_width = null;
-            this.domain_width = 2 * Math.max(trace_extent * 8, total_substrate_h * 4);
+            // Same trace-to-wall clearance rule as the other line types: a margin set by
+            // the trace width and the substrate stack.
+            // x_offset only translated the upper trace, so it widens the domain
+            // by the translation instead of scaling the margin with it.
+            const margin = Math.max(this.w * 8, total_substrate_h * 4);
+            this.domain_width = 2 * (margin + Math.abs(this.x_offset));
         }
 
         this._calculate_coordinates();

@@ -165,6 +165,21 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
     const ers = s.dielectrics.map(d => d.epsilon_r);
     check('broadside: three dielectric layers with the specified εr stack',
         ers.includes(4.4) && ers.includes(3.5));
+
+    // Auto domain width: x_offset only TRANSLATES the upper trace, so the trace-to-wall
+    // margin must not grow with it (it used to scale 8·(w + |x_offset|), which turned a
+    // 1 mm offset on a 0.2 mm trace into a 19 mm domain). Clearance from the outermost
+    // trace edge to the nearer wall stays exactly what the un-offset pair gets.
+    const clearance = (sol) => {
+        const c = signals(sol), half = sol.domain_width / 2;
+        return Math.min(Math.min(...c.map(k => k.x_min)) + half, half - Math.max(...c.map(k => k.x_max)));
+    };
+    const base = clearance(new BroadsideStriplineSolver({ ...opt, x_offset: 0 }));
+    for (const off of [0.05e-3, 1e-3, -1e-3]) {
+        check(`broadside: auto width keeps the un-offset trace-to-wall margin at x_offset=${off * 1e3} mm`,
+            near(clearance(new BroadsideStriplineSolver({ ...opt, x_offset: off })), base, 1e-15),
+            `${(base * 1e3).toFixed(3)} mm`);
+    }
 }
 
 // ---------- _clipDomain unit cases (synthetic rects) ----------
