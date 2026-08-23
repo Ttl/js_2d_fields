@@ -641,18 +641,30 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
         }
     }
 
-    // Robin ABC entries: A += j·k₀·(1/L or 1/(3L)) on boundary edge DOFs — a pure
+    // Robin ABC entries: A += j·k₀√ε·(1/L or 1/(3L)) on boundary edge DOFs — a pure
     // per-unit-k₀ imaginary template. On edge (p,q) parameterized by s∈[0,1] the
     // transverse tangential basis is ne1_tang(s) = 1/L (constant), ne2_tang(s) =
     // (1/L)(1−2s), giving self-integrals ∫ne1²dl = 1/L, ∫ne2²dl = 1/(3L),
     // ∫ne1·ne2 dl = 0. (Strict === true: 'pmc' walls skip the Robin terms. The P2
     // NODAL Robin on Ez is deliberately absent — forcing ∂Ez/∂n + jk₀Ez = 0 distorts
     // quasi-TEM eigenvectors; the transverse ABC alone suppresses cavity modes.)
+    //
+    // The matched coefficient is the local plane-wave wavenumber k*sqrt(er), not vacuum k.
+    // A wall edge in dielectric uses one triangle adjacent to the boundary to
+    // sample the permittivity.
     const rR = [], rC = [], rV = [];
     if (abc.top === true || abc.left === true || abc.right === true || abc.bottom === true) {
         const ymax = condRect.ymax_domain, ymin = condRect.ymin_domain;
         const xmin = condRect.xmin_domain, xmax = condRect.xmax_domain;
         const TOL = 1e-12;
+        // Sample er from adjacent triangle. Built only when the ABC is live.
+        const edgeTri = new Int32Array(nEdges).fill(-1);
+        for (let t = 0; t < nTris; t++) {
+            for (let le = 0; le < 3; le++) {
+                const eIdx = triEdges[3*t + le];
+                if (edgeTri[eIdx] < 0) edgeTri[eIdx] = t;
+            }
+        }
         for (let e = 0; e < nEdges; e++) {
             const n0 = edges[2*e], n1 = edges[2*e+1];
             const x0 = nodes[2*n0], y0 = nodes[2*n0+1];
@@ -664,10 +676,13 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
             if (abc.right === true && Math.abs(x0 - xmax) < TOL && Math.abs(x1 - xmax) < TOL) isBoundary = true;
             if (!isBoundary) continue;
             const L = Math.sqrt((x1-x0)**2 + (y1-y0)**2);
+            const tAdj = edgeTri[e];
+            const erAdj = (tAdj >= 0 && epsMap && epsMap[tAdj]) ? epsMap[tAdj].re : 1;
+            const nWall = erAdj > 0 ? Math.sqrt(erAdj) : 1;   // local k = k₀·n_wall
             const ef1 = edgeF[2*e];
-            if (ef1 >= 0) { rR.push(ef1); rC.push(ef1); rV.push(1 / L); }
+            if (ef1 >= 0) { rR.push(ef1); rC.push(ef1); rV.push(nWall / L); }
             const ef2 = edgeF[2*e+1];
-            if (ef2 >= 0) { rR.push(ef2); rC.push(ef2); rV.push(1 / (3 * L)); }
+            if (ef2 >= 0) { rR.push(ef2); rC.push(ef2); rV.push(nWall / (3 * L)); }
         }
     }
 
