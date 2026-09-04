@@ -73,7 +73,7 @@ async function tri(opts, triOpts = {}) {
 
     // Ground rects carry return current: direct MQS call on the cached skin mesh.
     const mqs = mqsConductorLoss(b._skinCache.mesh, b.condRect, 10e9, SIGMA,
-        ctx.helpers.solveSparseMulti, 0, { cache: {} });
+        ctx.helpers.solveComplexSymmetric, 0, { cache: {} });
     const share = mqs.R_gnd / mqs.R_total;
     check('GCPW ground loss share in (5%, 60%)', share > 0.05 && share < 0.6,
         `R_trace ${mqs.R_trace.toFixed(2)}, R_gnd ${mqs.R_gnd.toFixed(2)} Ω/m → ${(100 * share).toFixed(1)}%`);

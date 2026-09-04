@@ -17,6 +17,73 @@ using RVector = Eigen::VectorXd;
 using CMatrix = Eigen::MatrixXcd;
 using RMatrix = Eigen::MatrixXd;
 
+// Complex-symmetric scalar for Eigen's simplicial LDL^T
+//
+// The MQS eddy-current system K = S + j*β*M (S the real P2 stiffness, M the
+// conductor mass, β = ωμ_0σ) is complex symmetric, K^T = K, not Hermitian.
+// Eigen's SimplicialLDLT computes LDL^H, the wrong factorization for such a
+// matrix. Its only complex-aware operations, though, are numext::conj() and
+// numext::real(), and for a scalar type whose NumTraits says IsComplex = 0 both
+// are the identity: the same code then computes LDL^T with a complex diagonal
+// D, which is exactly the complex-symmetric factorization. `csym` is
+// std::complex<double> wearing that disguise.
+//
+// No pivoting is needed: S is SPD (every MQS domain wall is Dirichlet) and βM is
+// positive semidefinite, so K has a positive-definite Hermitian part, and so does
+// every Schur complement, i.e. every pivot has Re(d) > 0 (the Higham 1998 class;
+// measured min Re(d) ≈ 1 with a |d| spread of ~1e-3 on the reference systems).
+// solve_complex_symmetric still verifies the residual and falls back to the
+// pivoted complex SparseLU if anything is off.
+struct csym {
+    Complex v;
+    csym() : v(0.0) {}
+    csym(double r) : v(r) {}
+    csym(int r) : v((double)r) {}
+    csym(double r, double i) : v(r, i) {}
+    csym(const Complex& c) : v(c) {}
+    csym operator+(const csym& o) const { return csym(v + o.v); }
+    csym operator-(const csym& o) const { return csym(v - o.v); }
+    csym operator*(const csym& o) const { return csym(v * o.v); }
+    csym operator/(const csym& o) const { return csym(v / o.v); }
+    csym operator-() const { return csym(-v); }
+    csym& operator+=(const csym& o) { v += o.v; return *this; }
+    csym& operator-=(const csym& o) { v -= o.v; return *this; }
+    csym& operator*=(const csym& o) { v *= o.v; return *this; }
+    csym& operator/=(const csym& o) { v /= o.v; return *this; }
+    bool operator==(const csym& o) const { return v == o.v; }
+    bool operator!=(const csym& o) const { return v != o.v; }
+    // Orderings exist only because Eigen's "real" scalar concept requires them;
+    // LDLᵀ never orders values. Compare magnitudes so they are at least sane.
+    bool operator<(const csym& o) const { return std::abs(v) < std::abs(o.v); }
+    bool operator>(const csym& o) const { return std::abs(v) > std::abs(o.v); }
+    bool operator<=(const csym& o) const { return std::abs(v) <= std::abs(o.v); }
+    bool operator>=(const csym& o) const { return std::abs(v) >= std::abs(o.v); }
+};
+static inline csym operator*(double a, const csym& b) { return csym(a * b.v); }
+static inline csym abs(const csym& a) { return csym(std::abs(a.v)); }
+static inline csym sqrt(const csym& a) { return csym(std::sqrt(a.v)); }
+namespace Eigen {
+template<> struct NumTraits<csym> {
+    typedef csym Real; typedef csym NonInteger; typedef csym Nested; typedef csym Literal;
+    enum { IsComplex = 0, IsInteger = 0, IsSigned = 1, RequireInitialization = 0,
+           ReadCost = 2, AddCost = 2, MulCost = 6 };
+    static inline csym epsilon() { return csym(std::numeric_limits<double>::epsilon()); }
+    static inline csym dummy_precision() { return csym(1e-12); }
+    static inline csym highest() { return csym(std::numeric_limits<double>::max()); }
+    static inline csym lowest() { return csym(-std::numeric_limits<double>::max()); }
+    static inline int digits10() { return std::numeric_limits<double>::digits10; }
+    static inline int digits() { return std::numeric_limits<double>::digits; }
+    static inline int max_digits10() { return std::numeric_limits<double>::max_digits10; }
+    static inline int min_exponent() { return std::numeric_limits<double>::min_exponent; }
+    static inline int max_exponent() { return std::numeric_limits<double>::max_exponent; }
+    static inline csym infinity() { return csym(std::numeric_limits<double>::infinity()); }
+    static inline csym quiet_NaN() { return csym(std::numeric_limits<double>::quiet_NaN()); }
+};
+}
+using SSpMat = Eigen::SparseMatrix<csym>;
+using SVector = Eigen::Matrix<csym, Eigen::Dynamic, 1>;
+using CSymLDLT = Eigen::SimplicialLDLT<SSpMat>;
+
 // ---- Sparse pattern cache ----------------------------------------------------
 // A frequency sweep re-solves systems with the SAME sparsity pattern and
 // different VALUES at every point (the MQS block system: only β = ωμσ changes;
@@ -34,6 +101,7 @@ struct SparsePatternCache {
     std::vector<int> transposeIdx;        // index of entry (j,i) for each entry k=(i,j)
     bool patternSymmetric = false;
     Eigen::SimplicialLDLT<RSpMat>* ldlt = nullptr;   // analyzePattern() already done
+    CSymLDLT* cldlt = nullptr;                        // complex-symmetric twin (solve_complex_symmetric)
     // Largest |σ| at which the unpivoted LDLT failed the accuracy probe for this
     // pattern (the FEM pencil's curl null-space clusters eigenvalues near 0, so
     // LDLT reliably fails at SMALL |σ| and works at large |σ|). Future calls with
@@ -41,7 +109,7 @@ struct SparsePatternCache {
     // factorize+probe first.
     double ldltFailSigmaMax = 0.0;
     unsigned long lastUse = 0;
-    ~SparsePatternCache() { delete ldlt; }
+    ~SparsePatternCache() { delete ldlt; delete cldlt; }
 };
 
 static SparsePatternCache* findPatternCache(std::vector<SparsePatternCache*>& cache,
@@ -896,6 +964,106 @@ int solve_sparse_multi(
         x = lu.solve(b);
     }
     return 0;
+  } catch (...) {
+    return -9;
+  }
+}
+
+
+// Complex-symmetric direct solver: factor K = valRe + j·valIm (K^T = K) once and
+// solve nRhs right-hand sides. Every RHS and every solution is 2N doubles: N
+// real parts followed by N imaginary parts, the [Ar; Ai] layout the MQS
+// post-processing indexes (mqs_loss.js). Unpivoted LDL^T on the csym scalar (see
+// above), with the AMD ordering + symbolic analysis cached per pattern: a sweep
+// re-solves the same skin mesh at every frequency with only β changed. The
+// solution's residual is checked and a failure falls back to the pivoted complex
+// SparseLU, so the caller always gets a correct answer or an error code.
+// Returns 0 (LDL^T), 1 (solved by the SparseLU fallback), negative on failure.
+EMSCRIPTEN_KEEPALIVE
+int solve_complex_symmetric(
+    int N, int nnz,
+    int* rowPtr, int* colIdx, double* valRe, double* valIm,
+    int nRhs, double* rhs_arr, double* x_arr
+) {
+  try {
+    for (int i = 0; i < N; i++)
+        for (int p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
+            if (colIdx[p] < 0 || colIdx[p] >= N) return -10;               // invalid column
+            if (p > rowPtr[i] && colIdx[p] < colIdx[p - 1]) return -11;   // unsorted row
+        }
+    static std::vector<SparsePatternCache*> store;
+    SparsePatternCache* pc = findPatternCache(store, N, nnz, rowPtr, colIdx);
+
+    // LDL^T reads only the lower triangle: require value symmetry of BOTH parts
+    // (cheap with the cached transpose map), else go straight to LU.
+    bool symmetric = pc->patternSymmetric;
+    if (symmetric) {
+        double scale = 0;
+        for (int k = 0; k < nnz; k++) scale = std::max(scale, std::abs(valRe[k]) + std::abs(valIm[k]));
+        const double tol = 1e-12 * scale;
+        for (int k = 0; k < nnz; k++) {
+            const int t = pc->transposeIdx[k];
+            if (std::abs(valRe[k] - valRe[t]) > tol || std::abs(valIm[k] - valIm[t]) > tol) { symmetric = false; break; }
+        }
+    }
+    const size_t stride = (size_t)2 * N;
+    if (symmetric) {
+        SSpMat A(N, N);
+        {
+            std::vector<Eigen::Triplet<csym>> triplets;
+            triplets.reserve(nnz);
+            for (int i = 0; i < N; i++)
+                for (int p = rowPtr[i]; p < rowPtr[i + 1]; p++)
+                    triplets.emplace_back(i, colIdx[p], csym(valRe[p], valIm[p]));
+            A.setFromTriplets(triplets.begin(), triplets.end());
+        }
+        A.makeCompressed();
+        if (!pc->cldlt) {
+            pc->cldlt = new CSymLDLT();
+            pc->cldlt->analyzePattern(A);
+        }
+        CSymLDLT* ldlt = pc->cldlt;
+        ldlt->factorize(A);
+        bool ok = ldlt->info() == Eigen::Success;
+        if (ok) {
+            SVector b(N), x(N), res(N);
+            for (int r = 0; r < nRhs && ok; r++) {
+                const double* br = rhs_arr + r * stride;
+                for (int i = 0; i < N; i++) b[i] = csym(br[i], br[N + i]);
+                x = ldlt->solve(b);
+                // Residual guard: the unpivoted factorization has no other way to
+                // report a bad pivot (NaN or a lost digit), and it costs one
+                // sparse product. 1e-8 relative is far above what a healthy
+                // factorization produces (~1e-15) and far below any physical use.
+                res = A * x - b;
+                double rn = 0, bn = 0;
+                for (int i = 0; i < N; i++) { rn += std::norm(res[i].v); bn += std::norm(b[i].v); }
+                if (bn > 0 && !(rn <= 1e-16 * bn)) { ok = false; break; }
+                double* xr = x_arr + r * stride;
+                for (int i = 0; i < N; i++) { xr[i] = x[i].v.real(); xr[N + i] = x[i].v.imag(); }
+            }
+            if (ok) return 0;
+        }
+        // Drop the factor (it holds memory the LU below needs) and fall through.
+        delete pc->cldlt;
+        pc->cldlt = nullptr;
+    }
+
+    // Fallback: pivoted complex LU, robust, several times slower.
+    SpMat A = buildSparseMatrix(N, nnz, rowPtr, colIdx, valRe, valIm);
+    Eigen::SparseLU<SpMat> lu;
+    lu.compute(A);
+    if (lu.info() != Eigen::Success) return -1;
+    CVector b(N), x(N);
+    for (int r = 0; r < nRhs; r++) {
+        const double* br = rhs_arr + r * stride;
+        for (int i = 0; i < N; i++) b[i] = Complex(br[i], br[N + i]);
+        x = lu.solve(b);
+        if (lu.info() != Eigen::Success) return -2;
+        double* xr = x_arr + r * stride;
+        for (int i = 0; i < N; i++) { xr[i] = x[i].real(); xr[N + i] = x[i].imag(); }
+    }
+    return 1;
   } catch (...) {
     return -9;
   }

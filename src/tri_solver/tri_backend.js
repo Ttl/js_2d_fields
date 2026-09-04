@@ -1974,7 +1974,7 @@ export class TriBackend {
             // everywhere inside 1.5δ and still ran into its triangle cap (leaving R
             // +0.6% at 10 GHz and +1.3% at 40 GHz on the reference differential GCPW).
             // The graded band converges inside the same budget at ~0.1%, with a smaller
-            // mesh and a faster block solve.
+            // mesh and a faster MQS solve.
             const bandDelta = this.opts.mqsBandDelta ?? 1.25;
             // Skin-mesh triangle budget: bounds the size-aware band refinement on
             // large-perimeter/small-δ geometries (memory guard; hitting it leaves the
@@ -2098,8 +2098,8 @@ export class TriBackend {
             // R(f) and X(f) anchor caches: the sweep consumes only these two scalars
             // from the solve, and both are smooth on the ln-f axis — so past the first
             // few anchor frequencies, interpolate them the same way the eigensolve's
-            // ε_eff dispersion cache does (PCHIP + leave-one-out gate) and skip the ~1s
-            // block-LU entirely. Keyed to the skin mesh so a finer rebuild (higher f
+            // ε_eff dispersion cache does (PCHIP + leave-one-out gate) and skip the
+            // MQS factorization entirely. Keyed to the skin mesh so a finer rebuild (higher f
             // seen) discards anchors from the coarser mesh.
             //
             // The two caches are written in lockstep so they always hold the same
@@ -2124,7 +2124,7 @@ export class TriBackend {
             // solve, the full-domain differential path selects the mode via
             // modeCurrents instead, and shares one cache across both modes. The
             // assembly and the per-frequency unit solves are mode-independent
-            // there, so the second mode at each frequency skips the block LU.
+            // there, so the second mode at each frequency skips the factorization.
             const mqsOpts = { wallPEC: cr.wallPEC || null,
                               topGround: !!(cr.wallPEC && cr.wallPEC.top),   // legacy fallback
                               oddSymmetry: this.symmetry && mode === 'odd',
@@ -2139,10 +2139,10 @@ export class TriBackend {
             else mqsOpts.Rq = rq;
             let mqs = null;
             try {
-                mqs = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveSparseMulti, 0, mqsOpts);
+                mqs = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, mqsOpts);
             } catch (e) {
                 // Surface the downgrade instead of silently falling back: an MQS solve
-                // failure here is almost always the block LU exhausting the WASM heap
+                // failure here is almost always the factorization exhausting the WASM heap
                 // on a very large skin mesh, and the perturbation estimate it falls
                 // back to is markedly less accurate (corner-sensitive).
                 mqs = null;

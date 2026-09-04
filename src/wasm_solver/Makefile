@@ -47,7 +47,7 @@ eigen_solver.js: eigen_solver.cpp | eigen spectra
 	$(MAKE) eigen-patch
 	$(EMCC) eigen_solver.cpp -I eigen -I spectra/include -O3 -fwasm-exceptions \
 	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,node \
-	  -s EXPORTED_FUNCTIONS='["_solve_generalized_eigen","_solve_generalized_eigen_with_init","_solve_sparse_multi","_solve_rqi","_solve_qep_rqi","_malloc","_free"]' \
+	  -s EXPORTED_FUNCTIONS='["_solve_generalized_eigen","_solve_generalized_eigen_with_init","_solve_sparse_multi","_solve_rqi","_solve_qep_rqi","_solve_complex_symmetric","_malloc","_free"]' \
 	  -s EXPORTED_RUNTIME_METHODS='["HEAP32","HEAPF64"]' \
 	  -s ALLOW_MEMORY_GROWTH=1 -msimd128 -s STACK_SIZE=33554432 \
 	  -o eigen_solver.js

@@ -200,7 +200,7 @@ function _dumpDone(path) { if (path) try { _fs.unlinkSync(path); } catch { /* ke
 
 // Perf hook (node only). TRI_STATS=1 records every WASM solver call's size and wall
 // time in globalThis.__TRI_STATS__ = { eig: [...], lin: [...] }. The two direct solves
-// (eigensolve and the MQS block system) dominate a full-wave sweep, and their
+// (eigensolve and the MQS complex-symmetric system) dominate a full-wave sweep, and their
 // count is as interesting as their cost, the dispersion / R(f) caches only pay off if
 // they actually skip solves. No effect when the env is unset.
 const _stats = (typeof process !== 'undefined' && process.env && process.env.TRI_STATS)
@@ -313,7 +313,44 @@ export function createWasmHelpers(M) {
             freeAll(ptrs);
         }
     }
-    return { allocInt32, allocFloat64, readFloat64, solveGeneralized, solveSparseMulti };
+    // Complex-symmetric direct solver (K^T = K, not Hermitian, the MQS eddy-current
+    // system S + jβM). csr: {rowPtr, colIdx, valRe, valIm} every RHS is a
+    // Float64Array(2N) holding N real parts then N imaginary parts, and each
+    // solution comes back in the same layout. One unpivoted LDL^T factorization
+    // serves all RHS (solve_complex_symmetric in eigen_solver.cpp, which verifies
+    // the residual and falls back to the pivoted complex LU on its own).
+    function solveComplexSymmetric(N, csr, rhsArrays) {
+        const ptrs = [];
+        function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
+        function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
+        const nRhs = rhsArrays.length;
+        for (const r of rhsArrays)
+            if (r.length !== 2 * N) throw new Error(`solveComplexSymmetric: RHS length ${r.length} != 2N (${2 * N})`);
+        const dumpPath = _dumpCall('solveComplexSymmetric',
+            { N, nRhs },
+            [['rowPtr', csr.rowPtr], ['colIdx', csr.colIdx], ['valRe', csr.valRe], ['valIm', csr.valIm],
+             ...rhsArrays.map((r, i) => [`rhs${i}`, r])]);
+        try {
+            const pR = ai(csr.rowPtr), pC = ai(csr.colIdx), pVr = af(csr.valRe), pVi = af(csr.valIm);
+            const rhsPacked = new Float64Array(nRhs * 2 * N);
+            for (let r = 0; r < nRhs; r++) rhsPacked.set(rhsArrays[r], r * 2 * N);
+            const pRhs = af(rhsPacked);
+            const pX = M._malloc(8 * nRhs * 2 * N); ptrs.push(pX);
+            const _t0 = _stats ? performance.now() : 0;
+            const rc = M._solve_complex_symmetric(N, csr.colIdx.length, pR, pC, pVr, pVi, nRhs, pRhs, pX);
+            if (_stats) _stats.lin.push({ N, nnz: csr.colIdx.length, nRhs, ms: performance.now() - _t0,
+                                          complex: true, luFallback: rc === 1 });
+            if (rc < 0) throw new Error(`solve_complex_symmetric failed: ${rc}`);
+            _dumpDone(dumpPath);
+            const results = [];
+            for (let r = 0; r < nRhs; r++)
+                results.push(readFloat64(pX + r * 2 * N * 8, 2 * N));
+            return results;
+        } finally {
+            freeAll(ptrs);
+        }
+    }
+    return { allocInt32, allocFloat64, readFloat64, solveGeneralized, solveSparseMulti, solveComplexSymmetric };
 }
 
 // ==================== Shared geometric / quadrature constants ====================

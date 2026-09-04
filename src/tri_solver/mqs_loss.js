@@ -22,18 +22,19 @@
 // from condRect.rectRoles (is_signal), without rectRoles every rect is driven.
 //
 // The problem is linear in the single drive C: solve K*A1 = μ₀σ*Fc once with
-// C = 1 (K = S + jωμ₀σ*M, complex symmetric, Fc spans the signal rects only),
-// then scale C so the total signal current equals I. The complex system is
-// solved as the real symmetric indefinite block
-// [[S, −βM],[−βM, −S]]·[Ar; Ai] = [μ₀σFc; 0], symmetry is required because
-// the WASM solver's LDLT fast path assumes a symmetric matrix.
+// C = 1 (K = S + jωμ₀σ*M, complex symmetric, K^T = K not Hermitian, Fc spans
+// the signal rects only), then scale C so the total signal current equals I.
+// K is factorized as is by the WASM complex-symmetric LDL^T (solveComplexSymmetric,
+// see solve_complex_symmetric in eigen_solver.cpp): S is SPD and βM positive
+// semidefinite, so no pivoting is needed. Solutions travel as [Ar; Ai], the N
+// real parts followed by the N imaginary parts.
 //
 // Per-conductor drives (opts.modeCurrents): a differential pair with no
 // symmetry walls, or asymmetric pair, cannot use the single shared drive: both
 // traces would act as a parallel conductor. Instead the signal rects are
 // grouped by polarity (one group per net), each group gets its own drive C_k,
 // and linearity gives A = Σ C_k*A_k from one unit solve per group (same
-// factorization, solveSparseMulti takes all RHS at once). The small NxN current
+// factorization, solveComplexSymmetric takes all RHS at once). The small NxN current
 // matrix D_jk = σ(δ_jk*area_j - jω*Fc_j*A_k) maps drives to net currents,
 // solving D*C = I_target realizes the requested mode currents (+1/-1 odd, +1/+1
 // even, or the modal current vector for an asymmetric pair).
@@ -173,7 +174,8 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   mesh        — mesh WITH conductor interior triangles
 //   condRect    — conductor geometry object ({rects: [...]} for multi-rect signal)
 //   freq, sigma — frequency (Hz), conductivity (S/m)
-//   solveSparseMulti — WASM helper from createWasmHelpers
+//   solveComplexSymmetric — WASM helper from createWasmHelpers (complex-symmetric
+//   direct solve, [re; im] vector layout)
 //   Z0          — (optional) line impedance for α_c conversion
 //   opts.wallPEC — {left,right,top,bottom} flags saying which domain walls are metal
 //   (from the mesher. `left` is already cleared on a half domain so the symmetry
@@ -218,9 +220,9 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 // them (Im(Zs)/Re(Zs) reaches ~5 at 1 µm rms). Same differential convention as R_total.
 // Frequency-INVARIANT part of the MQS solve on a given mesh: conductor
 // classification, DOF map, the S (everywhere) / M, Fc (conductor) assembly, and
-// the symbolic block-CSR with separate S / M value templates. The block system
-// is [[S, −βM], [−βM, −S]] with β = ωμ₀σ the ONLY frequency-dependent piece, so
-// per frequency the values are just valS + β·valM on a fixed pattern. Cached by
+// the symbolic CSR with separate S / M value templates. The system is
+// K = S + jβM with β = ωμ₀σ the ONLY frequency-dependent piece, so per frequency
+// the values are just valRe = valS, valIm = β·valM on a fixed pattern. Cached by
 // the caller (opts.cache) per (mesh, oddSymmetry) — the skin mesh is reused
 // across sweep points (f_max-reuse), and re-assembling it every point used to
 // dominate the MQS path's JS time.
@@ -296,8 +298,8 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     // x the reference P2_MASS / P2_LOAD. That replaces a 6-point quadrature
     // loop with six basis evaluations per point, the assembly used to dominate
     // the MQS path's JS time on the (skin-refined, hence large) conductor mesh.
-    const Nb = 2 * nF;
-    const maxCoo = 4 * 36 * nTris;   // ≤ 2 block entries per S and per M local entry
+    const Nb = 2 * nF;               // length of a [re; im] state vector
+    const maxCoo = 36 * nTris;       // one entry per local (i, j) pair
     const R = new Int32Array(maxCoo), Cc = new Int32Array(maxCoo);
     const VS = new Float64Array(maxCoo), VM = new Float64Array(maxCoo);
     let nCoo = 0;
@@ -324,32 +326,22 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
             if (driven) { const f = Area * P2_LOAD[i]; Fc[gi] += f; FcGt[gi] += f; }
             for (let j = 0; j < 6; j++) {
                 const gj = lg[j]; if (gj < 0) continue;
-                // Block system [[S, -beta * M], [-beta * M, -S]] with beta
-                // = w * mu0 * sigma, the only frequency-dependent factor. 
-                // Put each local entry into both of its blocks with separate
-                // S / M values on one shared index stream.
+                // K = S + jβM with β = ωμ₀σ the only frequency-dependent factor:
+                // the stiffness and the (metal-only) mass go into separate value
+                // templates on one shared index stream.
                 const sv = Sl[6*i+j];
-                if (sv !== 0) {
-                    R[nCoo] = gi; Cc[nCoo] = gj; VS[nCoo] = sv; VM[nCoo] = 0; nCoo++;
-                    R[nCoo] = nF + gi; Cc[nCoo] = nF + gj; VS[nCoo] = -sv; VM[nCoo] = 0; nCoo++;
-                }
                 const mv = cond ? Area * P2_MASS[6*i+j] : 0;
-                if (mv !== 0) {
-                    R[nCoo] = gi; Cc[nCoo] = nF + gj; VS[nCoo] = 0; VM[nCoo] = -mv; nCoo++;
-                    R[nCoo] = nF + gi; Cc[nCoo] = gj; VS[nCoo] = 0; VM[nCoo] = -mv; nCoo++;
-                }
+                if (sv === 0 && mv === 0) continue;
+                R[nCoo] = gi; Cc[nCoo] = gj; VS[nCoo] = sv; VM[nCoo] = mv; nCoo++;
             }
         }
     }
 
-    // Symbolic block system with separate S / M value templates on one pattern:
+    // Symbolic system with separate S / M value templates on one pattern:
     // valS and valM line up entry-for-entry, so a frequency only needs
-    // valS + beta * valM.
-    const csr2 = tripletsToCSRMulti(R.subarray(0, nCoo), Cc.subarray(0, nCoo), Nb,
+    // valIm = β·valM next to valRe = valS.
+    const csr2 = tripletsToCSRMulti(R.subarray(0, nCoo), Cc.subarray(0, nCoo), nF,
                                     [VS.subarray(0, nCoo), VM.subarray(0, nCoo)]);
-    const csrS = { rowPtr: csr2.rowPtr, colIdx: csr2.colIdx, valRe: csr2.vals[0],
-                   valIm: new Float64Array(csr2.colIdx.length) };
-    const csrM = { valRe: csr2.vals[1] };
 
     // edge → one adjacent triangle (for the ground-loss surface integral)
     const edgeToTri = new Int32Array(nEdges).fill(-1);
@@ -360,8 +352,8 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     return {
         isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri,
         groups, triGroup, FcG, areaG,
-        rowPtr: csrS.rowPtr, colIdx: csrS.colIdx,
-        valS: csrS.valRe, valM: csrM.valRe, valIm: csrS.valIm,   // valIm stays zero
+        rowPtr: csr2.rowPtr, colIdx: csr2.colIdx,
+        valS: csr2.vals[0], valM: csr2.vals[1],
     };
 }
 
@@ -399,7 +391,7 @@ function solveComplexLinear(A, b) {
     });
 }
 
-export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, Z0 = 0, opts = {}) {
+export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmetric, Z0 = 0, opts = {}) {
     const { nodes, edges, tris, triEdges, nNodes, nEdges, nTris } = mesh;
     const rects = condRect.rects || [condRect];
     const sym = condRect.symmetry > 1 ? 2 : 1;
@@ -423,11 +415,12 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     const { isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri, triGroup } = pre;
     const lg = new Int32Array(6);
 
-    // Per-frequency system: values = valS + β·valM on the cached pattern.
+    // Per-frequency system K = S + jβM on the cached pattern: only the imaginary
+    // template depends on frequency. Vectors are [re(nF); im(nF)] = [Ar; Ai].
     const beta = omega * MU0 * sigma;
-    const val = new Float64Array(pre.valS.length);
-    for (let k = 0; k < val.length; k++) val[k] = pre.valS[k] + beta * pre.valM[k];
-    const csr = { rowPtr: pre.rowPtr, colIdx: pre.colIdx, valRe: val, valIm: pre.valIm };
+    const valIm = new Float64Array(pre.valM.length);
+    for (let k = 0; k < valIm.length; k++) valIm[k] = beta * pre.valM[k];
+    const csr = { rowPtr: pre.rowPtr, colIdx: pre.colIdx, valRe: pre.valS, valIm };
 
     // Per-conductor-drive path (opts.modeCurrents, full domain only): one unit
     // solve per polarity group, then the NxN current-matrix solve for the drive
@@ -439,7 +432,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     if (multiI) {
         const nG = pre.groups.length;
         // Unit solutions A_k are mode-independent, cache them per (mesh, beta) so
-        // the second mode of the pair at the same frequency skips the block LU.
+        // the second mode of the pair at the same frequency skips the factorization.
         let sols = (cc && cc.sols && cc.solsMesh === mesh && cc.solsBeta === beta) ? cc.sols : null;
         if (!sols) {
             const rhsList = pre.FcG.map(F => {
@@ -447,7 +440,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
                 for (let i = 0; i < nF; i++) r[i] = MU0 * sigma * F[i];
                 return r;
             });
-            sols = solveSparseMulti(Nb, csr, rhsList);
+            sols = solveComplexSymmetric(nF, csr, rhsList);
             if (cc) { cc.sols = sols; cc.solsMesh = mesh; cc.solsBeta = beta; }
         }
         // Net current in group j for unit drive on group k:
@@ -491,7 +484,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     } else {
         const rhs = new Float64Array(Nb);
         for (let i = 0; i < nF; i++) rhs[i] = MU0 * sigma * Fc[i];
-        [sol] = solveSparseMulti(Nb, csr, [rhs]);
+        [sol] = solveComplexSymmetric(nF, csr, [rhs]);
 
         // Rescale C for trace current 1 A. When the signal conductor straddles the
         // symmetry plane (single-ended half mesh), the meshed part carries half the
@@ -757,6 +750,6 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveSparseMulti, 
     return {
         R_trace, R_gnd, R_total, X_total, L_loop, PsiR,
         alpha_c, alpha_c_dBm: alpha_c * 8.686,
-        Rs, delta, nDofs: Nb, modeZ: Zmode,
+        Rs, delta, nDofs: nF, modeZ: Zmode,
     };
 }
