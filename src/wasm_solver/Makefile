@@ -69,10 +69,16 @@ gmsh-patch:
 	cd gmsh && (git apply --check ../gmsh.patch 2>/dev/null && git apply ../gmsh.patch \
 	  && echo "applied gmsh.patch" || echo "gmsh.patch already applied / not applicable; skipping")
 
+# Compiled and linked with native wasm exceptions (-fwasm-exceptions) at -O2. The
+# JS exception handling that emscripten uses by default routes every call from a
+# function with a landing pad through a JS trampoline, which was about a third of
+# a mesh build's time in the OCC kernel. OCCT must be built with the same flags.
 gmsh-configure: gmsh-patch
 	mkdir -p $(GMSH_BUILD)
 	cd $(GMSH_BUILD) && emcmake cmake .. \
 	  -DCMAKE_BUILD_TYPE=Release \
+	  -DCMAKE_CXX_FLAGS="-fwasm-exceptions" -DCMAKE_C_FLAGS="-fwasm-exceptions" \
+	  -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
 	  -DENABLE_BUILD_LIB=ON -DENABLE_BUILD_SHARED=OFF -DENABLE_BUILD_DYNAMIC=OFF \
 	  -DENABLE_OCC=ON -DOCC_STATIC=ON \
 	  -DCMAKE_FIND_ROOT_PATH=$(OCCT_WASM) \
