@@ -1155,7 +1155,11 @@ async function solve_differential_microstrip_500mm_s4p() {
     const length = 0.5;
     const Z_ref = 50;
 
-    const tolerance = MESH_BACKEND === 'triangular' ? 0.8 : 0.07;
+    // Worst observed (energy_tol 0.001) with ~1.5x headroom: rectilinear 0.044 at 10 GHz.
+    // Triangular 0.39 at 10 GHz, which is dispersion the reference does not model (its
+    // even mode rises to 3.222 at 10 GHz while the reference stays at 3.185); below ~3 GHz
+    // it matches the reference as closely as the rectilinear backend.
+    const tolerance = MESH_BACKEND === 'triangular' ? 0.6 : 0.07;
 
     let all_passed = true;
     let worst = { err: 0, freq: 0, param: '' };

@@ -252,9 +252,17 @@ const F_STATIC = [1e6, 5e7], F_WAVE = [1e9, 40e9];
     // it is discretization, not a formula error — the convergence sweep below shows it
     // going away as O(h). The gate exists to catch it GROWING (a coarser default mesh, a
     // worse element, a broken size field), which nothing else in the suite would see.
+    // The reported eps_eff_mode is anchored to the static solve (the bias is divided
+    // out, TriBackend._eigenBias) so the RAW eigenvalue is eps_eff_mode * eigen_bias.
     for (const f of F_WAVE) {
-        near(`full-wave @ ${(f / 1e9).toFixed(0)} GHz: eps_eff_mode == 1 on the default mesh`,
-            at.get(f).eps_eff_mode, 1, 1.0);
+        const m = at.get(f);
+        near(`full-wave @ ${(f / 1e9).toFixed(0)} GHz: raw eigenvalue == 1 on the default mesh`,
+            m.eps_eff_mode * m.eigen_bias, 1, 1.0);
+        // A homogeneous fill has eps_static == 1 exactly (same solve with and without the
+        // material map), so the anchored value is 1 up to the eigensolve's own
+        // frequency drift between the anchor and f.
+        near(`full-wave @ ${(f / 1e9).toFixed(0)} GHz: anchored eps_eff_mode == 1`,
+            m.eps_eff_mode, 1, 1e-3);
     }
 
     // Algebraic ties between the reported quantities, at machine precision. These are
@@ -278,15 +286,20 @@ const F_STATIC = [1e6, 5e7], F_WAVE = [1e9, 40e9];
 // the error. Measured 0.337% at 986 triangles and 0.172% at 2932 — first order, ratio
 // 1.95. A method that stopped converging (or converged to the wrong constant) would keep
 // the ratio near 1 while every reference-based test in the suite still passed.
+// Measured on the RAW eigenvalue (eps_eff_mode * eigen_bias): the reported value has the
+// bias divided out and reads 1.0000000 on both meshes, which is the point of the
+// anchoring, not a statement about the eigensolve.
 console.log('\n--- A. eigensolve convergence against the exact homogeneous answer ---');
 {
     const errs = [];
     for (const [hFine, hCoarse] of [[52e-6, 260e-6], [26e-6, 130e-6]]) {
         const { at, nTris } = await sweep(MS_VAC, [1e9], { hints: { hFine, hCoarse } });
-        const err = Math.abs(at.get(1e9).eps_eff_mode - 1);
+        const m = at.get(1e9);
+        const raw = m.eps_eff_mode * m.eigen_bias;
+        const err = Math.abs(raw - 1);
         errs.push(err);
         console.log(`  hFine=${(hFine * 1e6).toFixed(0)}um  ${nTris} triangles  `
-            + `eps_eff_mode ${at.get(1e9).eps_eff_mode.toFixed(7)}  error ${(err * 100).toFixed(4)}%`);
+            + `raw eigenvalue ${raw.toFixed(7)}  error ${(err * 100).toFixed(4)}%  (reported eps_eff_mode ${m.eps_eff_mode.toFixed(7)})`);
     }
     check('refining halves the error (first-order convergence to the exact answer)',
         errs[0] / errs[1] > 1.6 && errs[0] / errs[1] < 2.6,

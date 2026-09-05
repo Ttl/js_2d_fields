@@ -988,6 +988,79 @@ export function markTrianglesForRefinement(metric, refineFrac) {
     return marked;
 }
 
+// Nested uniform ("red") refinement: every triangle is split into four congruent
+// children through its edge midpoints, existing nodes stay where they are, and no
+// smoothing or edge swap follows. The refined P2 space therefore contains the coarse
+// one: for a fixed material map the Galerkin energy decreases monotonically from level
+// to level and the level-to-level ratio of the changes is the discretization rate (h
+// halves exactly per level). That is what the verification certificate extrapolates
+// (TriBackend._certifyStatic). The adaptive passes keep refineTriMesh below, whose
+// smoothing and swaps buy mesh quality for the eigensolve at the cost of nestedness
+// (its energies are not monotone: measured level ratios 0.17-2.2 on one mesh).
+// Children of parent t are 4t..4t+3, so a per-triangle map is inherited as
+// map[4t+k] = map[t]. Midpoints stay on straight constraint lines automatically. On a
+// shaped (curved) boundary they stay on the chord, so the certificate measures the
+// discretization error of the polygon the mesh already is, not the polygonization.
+export function refineTriMeshNested(mesh) {
+    const { nodes, tris, edges, nNodes, nTris, nEdges } = mesh;
+    const nNew = nNodes + nEdges;
+    const newNodes = new Float64Array(2 * nNew);
+    newNodes.set(nodes);
+    for (let e = 0; e < nEdges; e++) {
+        const a = edges[2*e], b = edges[2*e+1];
+        newNodes[2*(nNodes+e)]   = (nodes[2*a]   + nodes[2*b])   / 2;
+        newNodes[2*(nNodes+e)+1] = (nodes[2*a+1] + nodes[2*b+1]) / 2;
+    }
+    // Midpoint node of the edge (a,b), looked up by vertex pair so the parent's
+    // local-edge convention does not matter.
+    const emap = new Map();
+    for (let e = 0; e < nEdges; e++) {
+        const a = edges[2*e], b = edges[2*e+1];
+        emap.set(Math.min(a, b) * nNodes + Math.max(a, b), nNodes + e);
+    }
+    const mid = (a, b) => emap.get(Math.min(a, b) * nNodes + Math.max(a, b));
+    const nNewTris = 4 * nTris;
+    const newTris = new Int32Array(3 * nNewTris);
+    for (let t = 0; t < nTris; t++) {
+        const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
+        const m0 = mid(v0, v1), m1 = mid(v1, v2), m2 = mid(v2, v0);
+        newTris.set([v0, m0, m2,  m0, v1, m1,  m2, m1, v2,  m0, m1, m2], 12 * t);
+    }
+    // Children of a CCW parent are CCW, keep the guard anyway (mirrors refineTriMesh).
+    for (let t = 0; t < nNewTris; t++) {
+        const va = newTris[3*t], vb = newTris[3*t+1], vc = newTris[3*t+2];
+        const xa = newNodes[2*va], ya = newNodes[2*va+1];
+        const xb = newNodes[2*vb], yb = newNodes[2*vb+1];
+        const xc = newNodes[2*vc], yc = newNodes[2*vc+1];
+        if ((xb-xa)*(yc-ya)-(xc-xa)*(yb-ya) < 0) { newTris[3*t+1] = vc; newTris[3*t+2] = vb; }
+    }
+    // Edge table, same layout/convention as refineTriMesh (local edges (0,1),(1,2),(2,0)).
+    const edgeMap = new Map(), edgeList = [];
+    const newTriEdges = new Int32Array(3 * nNewTris), newTriSigns = new Int8Array(3 * nNewTris);
+    for (let t = 0; t < nNewTris; t++) {
+        for (let le = 0; le < 3; le++) {
+            const na = newTris[3*t + le], nb = newTris[3*t + (le + 1) % 3];
+            const n0 = Math.min(na, nb), n1 = Math.max(na, nb);
+            const key = n0 * nNew + n1;
+            let eIdx = edgeMap.get(key);
+            if (eIdx === undefined) { eIdx = edgeList.length / 2; edgeList.push(n0, n1); edgeMap.set(key, eIdx); }
+            newTriEdges[3*t+le] = eIdx;
+            newTriSigns[3*t+le] = (na === n0) ? 1 : -1;
+        }
+    }
+    return {
+        nodes: newNodes, tris: newTris, edges: new Int32Array(edgeList),
+        triEdges: newTriEdges, triSigns: newTriSigns,
+        nNodes: nNew, nTris: nNewTris, nEdges: edgeList.length / 2,
+        Nx: 0, Ny: 0,
+        constraintYRanges: mesh.constraintYRanges || {},
+        constraintXRanges: mesh.constraintXRanges || null,
+        constraintXs: mesh.constraintXs || [],
+        constraintSegments: mesh.constraintSegments || [],
+        condInteriorMeshed: mesh.condInteriorMeshed
+    };
+}
+
 // Longest-edge bisection with green closure (Rivara-style).
 // Marked triangles get their longest edge bisected. Propagation ensures
 // conformity: if a triangle has a marked non-longest edge, its longest

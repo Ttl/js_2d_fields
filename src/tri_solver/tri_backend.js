@@ -25,7 +25,7 @@ import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh, _clipDomain } from './occ_to_mesh.js';
 import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
-import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh,
+import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
@@ -38,7 +38,8 @@ import { checkMeshQuality } from './tri_mesh.js';
 
 // Below this frequency the full-wave eigensolve degenerates near DC; use the
 // static (variational) solve instead. Above it, use the full-wave eigenmode for
-// the dispersive effective permittivity.
+// the dispersive effective permittivity, anchored to the static solve at this
+// frequency (see TriBackend._eigenBias) so the two agree at the switch.
 const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
@@ -1223,35 +1224,45 @@ export class TriBackend {
     }
 
     // Verification certificate
-    // Bisect every triangle (uniform refinement) and re-solve the statics:
-    //   d1 = max rel change of (W_eps, W_air) per mode, mesh -> bisect
-    //   d2 = same, bisect -> bisect^2,   r = d2/d1
-    //   certified error = d1/(1−r)
-    // Every reported static quantity (C, C0, eps_static, Z0) is a combination of W_eps
-    // and W_air, and the eigensolve eps_eff error tracked the static error at <=1× on every
-    // mesh measured, so the static energies certify the reported numbers. Gates:
-    //   * r > certifyRMax  -> pre-asymptotic,  cannot certify.
-    //   * d1 ≥ tol         -> already failed. Level 2 skipped (cost control).
-    //   * d1 < noise floor -> pass outright: below the linear-solver reproducibility.
-    //   * level-2 mesh over certifyMaxTris -> fall back to r = 0.5 (certified 2*d1). The
-    //     assumption is only reached on budget-sized meshes, past the pre-asymptotic
-    //     regime the r-gate exists for. A base mesh over the cap returns null (caller
-    //     keeps the legacy gate).
-    // The pass decision applies certifySafety (x1.5) on top of the estimate: the static
-    // certificate does not see the eigensolve eps_eff part of the reported error.
-    // `err` stays the un-inflated best estimate (it is what warnings report).
+    // Refine the mesh uniformly and nested (refineTriMeshNested: red split,
+    // nodes fixed) and re-solve the statics:
+    //   d1 = max rel change of (W_eps, W_air) per mode, mesh -> level 1
+    //   certified error = d1/(1-r),  r = level-to-level error ratio
+    // On a nested P2 hierarchy r is set by the strongest field singularity: h halves per
+    // level and the energy error goes as h^(2λ), so a conductor corner (λ = 2/3 for its
+    // 270° exterior angle) gives r = ~0.40 and a knife edge (λ = 1/2) is the worst case at
+    // r = 0.5. R_BOUND = 0.5 is therefore the one-level estimate.
+    // A second level, which measures r, costs 16x the base mesh
+    // and only changes the verdict when it is borderline (d1 alone passes, 2*d1 does
+    // not), so it runs only then.
+    // Every reported static quantity (C0, eps_static, Z0) is a combination of W_eps and
+    // W_air, and the eigensolve part of the reported eps_eff is anchored to the static
+    // solve (_eigenBias), so the static error is the reported error. Gates:
+    //   * d1 < noise floor  -> pass outright: below the linear-solver reproducibility.
+    //   * d1*safety ≥ tol   -> already failed, no second level (cost control).
+    //   * 2*d1*safety < tol -> pass on level 1 (rSource 'bound').
+    //   * otherwise level 2 when it fits certifyMaxTris: r ≥ certifyRMax -> pre-asymptotic,
+    //     cannot certify, else err = d1/(1−r). Over the cap -> fail on the level-1 bound.
+    //     A base mesh whose level 1 is over the cap returns null.
+    // The pass decision applies certifySafety (x1.5) on top of the estimate. `err` stays
+    // the un-inflated best estimate (it is what warnings report).
     //
     // Result shape is the same as FieldSolver2D._certifyStatic so the UI and tests can
     // read either backend's `solver.certification` the same way:
     //   { pass, err, d1, r, rSource, levels, safety, preAsymptotic?, <size> }
-    // rSource is 'measured' (level-2 ratio), 'fallback' (the r = 0.5
-    // assumption) or null (no r, the d1-alone failure branch). The size field is
-    // deliberately named in each backend's own unit (tris or nodes).
-    _uniformBisect(mesh) {
-        const refined = refineTriMesh(mesh, new Uint8Array(mesh.nTris).fill(1));
+    // rSource is 'bound' (r = R_BOUND), 'measured' (level-2 ratio) or null (no r, the
+    // d1-alone failure branch). The size field is deliberately named in each backend's
+    // own unit (tris or nodes).
+    _nestedRefine(mesh) {
+        const refined = refineTriMeshNested(mesh);
         refined.condRect = this.condRect;
-        const mats = tagMaterials(refined, this.solver.dielectrics);
-        refined.epsMap = mats.epsMap; refined.lossMap = mats.lossMap;
+        // Inherit the parent's material map (children 4t..4t+3 of parent t): the
+        // certificate must solve the same problem on nested spaces.
+        const epsMap = new Array(refined.nTris), lossMap = new Array(refined.nTris);
+        for (let t = 0; t < mesh.nTris; t++) {
+            for (let k = 0; k < 4; k++) { epsMap[4 * t + k] = mesh.epsMap[t]; lossMap[4 * t + k] = mesh.lossMap[t]; }
+        }
+        refined.epsMap = epsMap; refined.lossMap = lossMap;
         return refined;
     }
 
@@ -1276,36 +1287,36 @@ export class TriBackend {
                 m = Math.max(m, Math.abs(a[i] - b[i]) / Math.max(Math.abs(b[i]), 1e-300));
             return m;
         };
-        // Uniform bisection grows the mesh ~2.4x per level (all longest edges split,
-        // plus conformity closure).
-        const GROW = 2.6;
+        const GROW = 4;                                   // red split: 4 children per triangle
         const cap = this.opts.certifyMaxTris ?? 150000;
         if (mesh.nTris * GROW > cap) return null;
         const rMax = this.opts.certifyRMax ?? 0.7;
         const safety = this.opts.certifySafety ?? 1.5;
+        const R_BOUND = 0.5;                              // knife-edge rate, worst singularity
         // Level 0 is exactly what the refinement pass on this mesh already solved
         // (same freedom map, same drives), reuse it rather than re-solving.
         const pe = this._passEnergies;
         const q0 = (pe && pe.mesh === mesh) ? pe.q : this._staticEnergies(mesh);
-        const m1 = this._uniformBisect(mesh);
+        const m1 = this._nestedRefine(mesh);
         const q1 = this._staticEnergies(m1);
         const d1 = maxDiff(q0, q1);
         const base = { tris: mesh.nTris, d1, safety };
         if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, rSource: null, levels: 1 };
         if (d1 * safety >= tol)
             return { ...base, pass: false, err: d1, r: null, rSource: null, levels: 1 };
-        let r = 0.5, levels = 1, rSource = 'fallback';
-        if (m1.nTris * GROW <= cap) {
-            const m2 = this._uniformBisect(m1);
-            const q2 = this._staticEnergies(m2);
-            r = maxDiff(q1, q2) / d1;
-            levels = 2;
-            rSource = 'measured';
-            if (r >= rMax)
-                return { ...base, pass: false, err: d1, r, rSource, levels, preAsymptotic: true };
-        }
+        const errBound = d1 / (1 - R_BOUND);
+        if (errBound * safety < tol)
+            return { ...base, pass: true, err: errBound, r: R_BOUND, rSource: 'bound', levels: 1 };
+        // Borderline: only a measured ratio below the bound can still certify this mesh.
+        if (m1.nTris * GROW > cap)
+            return { ...base, pass: false, err: errBound, r: R_BOUND, rSource: 'bound', levels: 1 };
+        const m2 = this._nestedRefine(m1);
+        const q2 = this._staticEnergies(m2);
+        const r = maxDiff(q1, q2) / d1;
+        if (r >= rMax)
+            return { ...base, pass: false, err: d1, r, rSource: 'measured', levels: 2, preAsymptotic: true };
         const err = d1 / (1 - Math.min(r, rMax));
-        return { ...base, pass: err * safety < tol, err, r, rSource, levels };
+        return { ...base, pass: err * safety < tol, err, r, rSource: 'measured', levels: 2 };
     }
 
     // Rectangular waveguide path
@@ -1717,9 +1728,96 @@ export class TriBackend {
         return mode === 'odd' ? [1, -1] : [1, 1];
     }
 
+    // One exact quasi-TEM eigensolve at f for a prepared mode: the closed-wall pick
+    // first, escalating to the radiating-ABC pick when that fails or is ambiguous (the
+    // two-stage pick is explained in _modeAtFreq). Returns { fw, fwErr }.
+    _eigenPick(st, f, phiEps, eps_eff_static) {
+        const { mesh } = this, cr = this.condRect, fm = st.fm;
+        let fw = null, fwErr = null;
+        try {
+            fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
+                st.femCache || (st.femCache = {}));
+        } catch (e) { fw = null; fwErr = e; }
+        if (!fw || fw.ambiguous) {
+            const pickAbc = {};
+            let radiates = false;
+            for (const k of ['left', 'right', 'top', 'bottom']) {
+                const v = st.abc[k];
+                if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
+                const rad = !(this.symmetry && k === 'left');
+                pickAbc[k] = rad ? true : 'pmc';
+                if (rad) radiates = true;
+            }
+            if (radiates) {
+                try {
+                    const fw2 = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f,
+                        phiEps, eps_eff_static, st.femCacheAbc || (st.femCacheAbc = {}));
+                    if (fw2) { fw = fw2; fwErr = null; }
+                } catch (e) { if (!fw) fwErr = e; }
+            }
+        }
+        return { fw, fwErr };
+    }
+
+    // Static anchoring of the eigensolve. On a given mesh the quasi-TEM
+    // eigenvalue sits above the variational static solve of the same mesh by
+    // a discretization bias that is flat in frequency below a few GHz, while
+    // the dispersion ratio eps_fw(f)/eps_fw(F_STATIC_MAX) is mesh-independent
+    // to 1e-4. So the reported eps_d is
+    //     eps_static * eps_fw(f) / eps_fw(F_STATIC_MAX)
+    // the static energies (which the verification certificate covers) set the level and
+    // the eigensolve contributes only the dispersion. It also makes eps_eff continuous at
+    // the static/full-wave switch. One extra eigensolve per (mesh, mode), cached on the
+    // backend keyed by mesh identity (survives the per-frequency causal re-solves of
+    // this._static[*], whose material changes move the bias only in the noise). When no
+    // anchor frequency yields a usable solve, or the candidate is implausible (|bias - 1|
+    // > 5%: a different mode was picked), the raw eigenvalue stays in place and a warning
+    // is surfaced once. `fwAtAnchor` lets the caller hand over a solve it already did at
+    // exactly F_STATIC_MAX.
+    _eigenBias(mode, st, phiEps, eps_eff_static, fwAtAnchor = null) {
+        if (!this._eigenBiasCache || this._eigenBiasCache.mesh !== this.mesh)
+            this._eigenBiasCache = { mesh: this.mesh, byMode: {} };
+        const cache = this._eigenBiasCache.byMode;
+        if (cache[mode] !== undefined) return cache[mode];
+        // The eigensolve can return no quasi-TEM candidate right at F_STATIC_MAX on a
+        // fine mesh (the near-DC degeneracy the static switch exists for creeps up in
+        // frequency as the mesh refines; seen for the odd mode at 12k triangles), so walk
+        // up to 1 GHz. The dispersion left in the ratio at 1 GHz is ~3e-5, far below the
+        // bias being removed.
+        const ANCHORS = [F_STATIC_MAX, 2e8, 5e8, 1e9];
+        let bias = 1, ok = false;
+        const reasons = [];
+        const accept = (fw, fwErr, fa) => {
+            const label = `${(fa / 1e6).toFixed(0)} MHz`;
+            if (!fw) { reasons.push(`${label}: ${fwErr ? `eigensolver error: ${fwErr.message || fwErr}` : 'no converged quasi-TEM candidate'}`); return false; }
+            if (!(fw.eps > 0 && eps_eff_static > 0)) { reasons.push(`${label}: non-physical eigenvalue`); return false; }
+            const b = fw.eps / eps_eff_static;
+            if (Math.abs(b - 1) > 0.05) {
+                reasons.push(`${label}: ε_eff=${fw.eps.toFixed(3)} is ${((b - 1) * 100).toFixed(1)}% off the static ε_eff=${eps_eff_static.toFixed(3)}, not a discretization bias`);
+                return false;
+            }
+            bias = b; return true;
+        };
+        if (fwAtAnchor) ok = accept(fwAtAnchor, null, F_STATIC_MAX);
+        for (const fa of (fwAtAnchor ? ANCHORS.slice(1) : ANCHORS)) {
+            if (ok) break;
+            const { fw, fwErr } = this._eigenPick(st, fa, phiEps, eps_eff_static);
+            ok = accept(fw, fwErr, fa);
+        }
+        if (!ok && this._modeWarnings && !this._modeWarnings.some(w => w.mode === mode && w.type === 'eigen-anchor')) {
+            const msg = `${mode} mode: no usable full-wave anchor eigensolve (${reasons.join('; ')}) — reported `
+                + `ε_eff keeps the raw eigenvalue, which can sit up to ~1% above the static ε_eff on a coarse mesh.`;
+            this._modeWarnings.push({ type: 'eigen-anchor', mode, freq: F_STATIC_MAX, message: msg });
+            globalThis.__TRI_DEBUG__ && console.warn('[tri full-wave] ' + msg);
+        }
+        cache[mode] = bias;
+        return bias;
+    }
+
     // Per-mode result at frequency f, reusing the cached static solve.
-    // eps_eff comes from the full-wave eigenmode (f ≥ 100 MHz) or the static
-    // solve (below); conductor loss is from the robust static-field method.
+    // eps_eff comes from the full-wave eigenmode (f ≥ 100 MHz), anchored to the
+    // static solve (_eigenBias), or the static solve alone (below), conductor loss is
+    // from the robust static-field method.
     _modeAtFreq(mode, f) {
         const { mesh } = this;
         const s = this.solver;
@@ -1799,7 +1897,7 @@ export class TriBackend {
                              'mesh was built without it. Using the perturbation method instead.' });
             }
         }
-        let eps_d = eps_eff_static, fw = null;
+        let eps_d = eps_eff_static, fw = null, eigen_bias = 1;
         if (f >= F_STATIC_MAX) {
             // Seed the eigensolve with the STATIC field (frequency-deterministic), NOT a
             // cross-frequency eigenvector warm-start. The static seed is the quasi-TEM
@@ -1843,34 +1941,15 @@ export class TriBackend {
             const dispTol = this.opts.dispTol ?? 1e-3;
             const dc = useMQS ? (st.disp || (st.disp = { xs: [], eps: [] })) : null;
             const epsI = dc ? dispersionInterp(dc, f, dispTol) : null;
+            // Raw eigenvalue (exact or interpolated); anchored to the static solve below.
+            let haveEigen = false;
             if (epsI !== null) {
-                eps_d = epsI;
+                eps_d = epsI; haveEigen = true;
             } else {
             let fwErr = null;
-            try {
-                fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                    st.femCache || (st.femCache = {}));
-            } catch (e) { fw = null; fwErr = e; }
-            if (!fw || fw.ambiguous) {
-                const pickAbc = {};
-                let radiates = false;
-                for (const k of ['left', 'right', 'top', 'bottom']) {
-                    const v = st.abc[k];
-                    if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
-                    const rad = !(this.symmetry && k === 'left');
-                    pickAbc[k] = rad ? true : 'pmc';
-                    if (rad) radiates = true;
-                }
-                if (radiates) {
-                    try {
-                        const fw2 = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f,
-                            phiEps, eps_eff_static, st.femCacheAbc || (st.femCacheAbc = {}));
-                        if (fw2) { fw = fw2; fwErr = null; }
-                    } catch (e) { if (!fw) fwErr = e; }
-                }
-            }
+            ({ fw, fwErr } = this._eigenPick(st, f, phiEps, eps_eff_static));
             if (fw && fw.eps > 0) {
-                eps_d = fw.eps;
+                eps_d = fw.eps; haveEigen = true;
                 if (dc) dispersionInsert(dc, f, fw.eps);
             }
             // The eigensolve failed (or converged to no physical quasi-TEM) at this
@@ -1903,6 +1982,11 @@ export class TriBackend {
                 }
             }
             }   // end exact-eigensolve branch (dispersion-cache miss)
+            if (haveEigen) {
+                eigen_bias = this._eigenBias(mode, st, phiEps, eps_eff_static,
+                    (f === F_STATIC_MAX && fw && fw.eps > 0) ? fw : null);
+                eps_d /= eigen_bias;
+            }
         }
         // Dielectric dispersion is a capacitance effect: C = eps_d·C0 (geometric
         // L_external = 1/(c²C0)). Reduces to the static result when eps_d = eps_static.
@@ -2322,6 +2406,10 @@ export class TriBackend {
 
         return {
             mode, Z0, eps_eff, eps_eff_mode: eps_d, C, C0,
+            // The static-anchoring factor divided out of the eigensolve's eps (1 below
+            // F_STATIC_MAX or when the anchor was unusable): eps_eff_mode * eigen_bias is
+            // the raw eigenvalue, kept visible for diagnostics of the eigensolve itself.
+            eigen_bias,
             RLGC: { R: R_total, L: L_total, G, C },
             Zc,
             alpha_c, alpha_d, alpha_total: alpha_c + alpha_d,
