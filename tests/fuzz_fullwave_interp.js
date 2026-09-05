@@ -6,7 +6,7 @@
 // The optimizations under test (all default-on in the triangular backend):
 //   • ε_eff dispersion anchor cache      (dispTol,       off via 0)
 //   • MQS R(f) anchor cache              (mqsInterpTol,  off via 0)
-//   • 2·t thickness term in hFine        (reference forces the old 1.5·t sizing)
+//   • 2·t thickness term + floor in hFine (reference forces the old 1.5·t sizing)
 //   • skin-band economy sizing 0.6δ/1.5δ (reference uses the pre-tuning 0.5δ/2δ)
 //   • InterpolatingSweep spline itself   (reference calls computeAtFrequency exactly)
 // Both sides share the same adaptive-refinement settings (that loop is identical

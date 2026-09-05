@@ -5,13 +5,19 @@ import { triQuality } from './fem_core.js';
 // --- Mesh quality check ---
 // Validates mesh quality before FEM solve. Returns { ok, warnings, errors, metrics }.
 // constraintYs/constraintXs: arrays of y/x values where material interfaces exist.
-export function checkMeshQuality(mesh, constraintYs, constraintXs) {
+// opts.skip: per-triangle mask (truthy = leave the triangle out of the shape
+// statistics: Q, badFraction, area ratio). The structural checks (crossings,
+// missing constraint edges, NaN nodes) always cover the whole mesh.
+export function checkMeshQuality(mesh, constraintYs, constraintXs, opts = {}) {
     const { nodes, tris, edges, nTris, nEdges, nNodes } = mesh;
     const warnings = [], errors = [];
+    const skip = opts.skip || null;
 
     // --- Triangle quality (Q = circumradius / (2 * inradius), ideal = 1) ---
-    let maxQ = 0, sumQ = 0, badCount = 0, degenerateCount = 0, worstTri = -1;
+    let maxQ = 0, sumQ = 0, badCount = 0, degenerateCount = 0, worstTri = -1, nRated = 0;
     for (let t = 0; t < nTris; t++) {
+        if (skip && skip[t]) continue;
+        nRated++;
         const ax = nodes[2*tris[3*t]], ay = nodes[2*tris[3*t]+1];
         const bx = nodes[2*tris[3*t+1]], by = nodes[2*tris[3*t+1]+1];
         const cx = nodes[2*tris[3*t+2]], cy = nodes[2*tris[3*t+2]+1];
@@ -80,6 +86,7 @@ export function checkMeshQuality(mesh, constraintYs, constraintXs) {
     // --- Extreme area ratio (indicates ill-conditioned FEM matrices) ---
     let minArea = Infinity, maxArea = 0;
     for (let t = 0; t < nTris; t++) {
+        if (skip && skip[t]) continue;
         const ax = nodes[2*tris[3*t]], ay = nodes[2*tris[3*t]+1];
         const bx = nodes[2*tris[3*t+1]], by = nodes[2*tris[3*t+1]+1];
         const cx = nodes[2*tris[3*t+2]], cy = nodes[2*tris[3*t+2]+1];
@@ -96,8 +103,8 @@ export function checkMeshQuality(mesh, constraintYs, constraintXs) {
     }
 
     // --- Build result ---
-    const badFraction = nTris > 0 ? badCount / nTris : 0;
-    const metrics = { maxQ, avgQ: nTris > 0 ? sumQ / nTris : 0, badCount, badFraction,
+    const badFraction = nRated > 0 ? badCount / nRated : 0;
+    const metrics = { maxQ, avgQ: nRated > 0 ? sumQ / nRated : 0, badCount, badFraction,
                       degenerateCount, crossings, missingEdges, areaRatio, minArea, nanNodes };
 
     if (nanNodes > 0) errors.push(`${nanNodes} nodes with NaN/Inf coordinates`);
@@ -106,7 +113,7 @@ export function checkMeshQuality(mesh, constraintYs, constraintXs) {
     if (missingEdges > 0) errors.push(`${missingEdges} missing constraint edges`);
     if (areaRatio > 1e6) errors.push(`area ratio ${areaRatio.toExponential(1)} (extreme element size variation, will cause ill-conditioning)`);
     if (maxQ > 10) warnings.push(`max Q=${maxQ.toFixed(1)} (poor quality triangle)`);
-    if (badFraction > 0.05) warnings.push(`${badCount}/${nTris} (${(badFraction*100).toFixed(1)}%) triangles with Q>5`);
+    if (badFraction > 0.05) warnings.push(`${badCount}/${nRated} (${(badFraction*100).toFixed(1)}%) triangles with Q>5`);
     if (areaRatio > 1e4 && areaRatio <= 1e6) warnings.push(`area ratio ${areaRatio.toExponential(1)} (large element size variation)`);
 
     return { ok: errors.length === 0, warnings, errors, metrics };

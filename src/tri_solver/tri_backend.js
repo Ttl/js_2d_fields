@@ -884,6 +884,21 @@ export class TriBackend {
         // mesh-sensitive, so replicate the useMQS gate (see _modeAtFreq)
         // pre-mesh: wall-absorption via _clipDomain instead of cr.rectRoles,
         // and keep the proven 1.5t sizing when MQS won't apply.
+        //
+        // On the MQS path the thickness term is also floored at a quarter of
+        // the smaller of the trace width and twice the clearance to the nearest
+        // other conductor or PEC wall (gapRef). A thin conductor otherwise gets
+        // its whole perimeter meshed at the thickness scale for nothing: the
+        // static and eigen solves need the edge singularity, which the adaptive
+        // passes refine, and the loss solve re-resolves the conductor through
+        // the skin band, which copes with the flat sliver elements gmsh puts
+        // inside a rect thinner than its surface size (a 1 um trace on the
+        // 35 um sizing: R within 0.1% of the thickness-sized mesh from 100 MHz
+        // to 100 GHz on a tenth of the base triangles). The floor tracks the
+        // thick-copper sizing, where 2t is near w/4 anyway, so the base mesh of
+        // a thin conductor costs about what the same trace in thick copper does.
+        // The perturbation path keeps the thickness sizing: its surface |H|^2
+        // integral is only as good as the base mesh's edge resolution.
         const lmPre = this.opts.lossMethod ?? 'auto';
         const clip = _clipDomain(dom, s.conductors, s.boundaries, s.domain_width * 1e-9);
         const survives = c => Math.min(c.x_max, clip.X1) - Math.max(c.x_min, clip.X0) > 0
@@ -908,7 +923,27 @@ export class TriBackend {
         // A medium may supply its own base sizing (coax: derived from the conductor
         // radii, since w/t have no meaning for a round conductor).
         const hints = s.tri_mesh_hints || {};
-        let hFine = this.opts.hFine ?? hints.hFine ?? Math.min((mqsPre ? 2 : 1) * tAbs, wRef / 4) * 1.5;
+        // Clearance from the signal rects to the nearest other conductor rect or
+        // PEC wall. Absorbed wall slabs do not survive the clip, the wall they
+        // became does. Touching conductors give 0, which disables the floor.
+        let gapRef = Infinity;
+        const rectsPre = s.conductors.filter(c => !c.shape && survives(c));
+        for (const a of rectsPre) {
+            if (!a.is_signal) continue;
+            for (const b of rectsPre) {
+                if (b === a) continue;
+                const dx = Math.max(0, Math.max(a.x_min, b.x_min) - Math.min(a.x_max, b.x_max));
+                const dy = Math.max(0, Math.max(a.y_min, b.y_min) - Math.min(a.y_max, b.y_max));
+                gapRef = Math.min(gapRef, Math.hypot(dx, dy));
+            }
+            if (clip.wallPEC.left) gapRef = Math.min(gapRef, a.x_min - clip.X0);
+            if (clip.wallPEC.right) gapRef = Math.min(gapRef, clip.X1 - a.x_max);
+            if (clip.wallPEC.bottom) gapRef = Math.min(gapRef, a.y_min - clip.Y0);
+            if (clip.wallPEC.top) gapRef = Math.min(gapRef, clip.Y1 - a.y_max);
+        }
+        const hFineFloor = (mqsPre && gapRef > 0) ? Math.min(wRef, 2 * gapRef) / 4 : 0;
+        let hFine = this.opts.hFine ?? hints.hFine
+            ?? Math.min(Math.max((mqsPre ? 2 : 1) * tAbs, hFineFloor), wRef / 4) * 1.5;
         let hCoarse = this._wavelengthCap(this.opts.hCoarse ?? hints.hCoarse ?? (dom.y_max - dom.y_min) / 5);
         // Triangle budget derived from the Max Nodes setting (memory parity with the FDM
         // backend — see maxTrisForBudget). Cap the INITIAL mesh here: element count ∝ 1/h²,
@@ -1289,8 +1324,26 @@ export class TriBackend {
         // Mesh quality of the final (post-refinement) mesh. Q = circumradius/(2·inradius),
         // ideal 1; a very high Qmax means a sliver that ill-conditions the FEM solve.
         // Surfaced to the UI as a warning (empty constraint args → quality metrics only).
+        // Conductor-interior triangles are left out: they carry no field DOFs (every
+        // node and edge inside metal is PEC in the static and eigen solves) and the
+        // skin band re-refines them before the MQS solve, so their shape says nothing
+        // about this mesh's accuracy. A rect thinner than its surface element size
+        // (a 1 um trace on the thick-copper sizing) holds flat slivers of Q in the
+        // hundreds that would otherwise trip the UI warning. Shaped conductors are
+        // never interior-meshed and their bbox can span the domain (coax shield), so
+        // only rects are tested.
         try {
-            const mq = checkMeshQuality(mesh, [], []);
+            const skip = new Uint8Array(mesh.nTris);
+            const rects = (this.condRect.rects || []).filter(r => !r.shape);
+            if (rects.length) for (let t = 0; t < mesh.nTris; t++) {
+                const v0 = mesh.tris[3 * t], v1 = mesh.tris[3 * t + 1], v2 = mesh.tris[3 * t + 2];
+                const xc = (mesh.nodes[2 * v0] + mesh.nodes[2 * v1] + mesh.nodes[2 * v2]) / 3;
+                const yc = (mesh.nodes[2 * v0 + 1] + mesh.nodes[2 * v1 + 1] + mesh.nodes[2 * v2 + 1]) / 3;
+                for (const r of rects) {
+                    if (xc > r.xmin && xc < r.xmax && yc > r.ymin && yc < r.ymax) { skip[t] = 1; break; }
+                }
+            }
+            const mq = checkMeshQuality(mesh, [], [], { skip });
             this.meshQuality = mq.metrics;
             if (this.solver) this.solver.meshQuality = mq.metrics;
         } catch { this.meshQuality = null; }
@@ -2241,10 +2294,17 @@ export class TriBackend {
             // rebuild whenever a higher frequency appears).
             const fBand = Math.max(f, this.solver._sweepFmax || 0);
             const deltaBand = fBand > f ? Math.sqrt(2 / (2 * Math.PI * fBand * MU0 * mqsSigma)) : mqsDelta;
+            // The band is built at every skin depth. refineSkinBand is size-aware
+            // and leaves the base mesh untouched where it already resolves
+            // bandDelta*delta, so at delta well above the conductor dimensions it
+            // costs one marking scan. Skipping it for delta >= thickness would be
+            // wrong for a thin conductor on a coarse base mesh: the current is
+            // uniform across the thickness but still crowds toward the edges over
+            // a lateral scale of order delta^2/t, which the sliver elements inside
+            // the conductor cannot follow (1 um trace at 3 GHz: R +12% without
+            // the band).
             let mqsMesh, bandTrunc = null;
-            if (deltaBand >= minDim) {
-                mqsMesh = mesh;   // no band at all — nothing to under-resolve
-            } else if (this.opts.mqsCacheMesh === false) {
+            if (this.opts.mqsCacheMesh === false) {
                 mqsMesh = buildSkin(mesh, mqsDelta);
                 bandTrunc = mqsMesh.bandTrunc;
             } else {
