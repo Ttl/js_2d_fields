@@ -540,6 +540,190 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
     };
 }
 
+// Tree-cotree gauge (low-frequency stability of the eigen pencil)
+//
+// The Lee–Sun-Cendes pencil pairs the curl-curl block (entries ~1/h^2, up to 1e15 on a
+// PCB mesh graded to 1e-8 m at a corner) with k^2-scaled mass terms (O(k^2) = ~4 at
+// 100 MHz). The quasi-TEM eigenvector is almost a pure gradient, S.∇ψ = 0, so on the
+// tiny elements everything the mode carries lives ~1e-15 below the curl-curl entries:
+// the LDL^T fails. No shift helps, the two scales are (k0h)^2 apart whatever σ
+// is. The cure is to make the gradient part an explicit variable:
+//
+//     e_t = P_c*e_c + G*ψ
+//
+// with ψ a P2 nodal potential (free vertices and edge midpoints, plus one
+// constant per PEC component, less one reference) and e_c the "cotree"
+// transverse DOFs: the ne1 DOF of every edge not on a BFS spanning tree of the
+// vertex graph, plus every face bubble (the ne2 DOF of an edge is replaced by
+// its midpoint's ψ). G is the discrete gradient of the P2 nodal basis in the
+// N1_2 edge basis, an integer template (P2_GRAD_T), and [P_c G] is square and
+// invertible. The pencil is congruence-transformed element by element, X'
+// = T_loc^T * X * T_loc, with the curl-curl block written directly onto the
+// cotree x cotree slots. Every ψ-block entry is then O(k^2) by construction and
+// the 1/h^2 entries are confined to the cotree block, whose Schur complement
+// onto ψ is a ~k^4h^2 correction: the factorization's roundoff in the large block
+// never reaches the small one.
+
+// Discrete gradient of the 6 local P2 nodal functions [v0 v1 v2 e01 e12 e20] in
+// the local N1_2 basis [ne1_01 ne1_12 ne1_20 nf1 ne2_01 ne2_12 ne2_20 nf2].
+// Shape-independent (barycentric algebra): ∇λ_1 - ∇λ_0 is the Whitney DOF of
+// edge 01, the ne2 DOF of an edge bubble is -2(ψ_p+ψ_q)+4ψ_pq (the dual of
+// staticToEdgeDofs' formula), and the face bubbles carry the second-order part
+// of the gradient. Verified as Wtt^(-1)*Dzt^T on random triangles to 1e-10.
+export const P2_GRAD_T = [
+    [-1, 1, 0, 0, 0, 0], [0, -1, 1, 0, 0, 0], [1, 0, -1, 0, 0, 0],
+    [0, 2, -2, -4, 0, 4],
+    [-2, -2, 0, 4, 0, 0], [0, -2, -2, 0, 4, 0], [-2, 0, -2, 0, 0, 4],
+    [-2, 2, 0, 0, -4, 4],
+];
+
+// Build the gauge for a freedom map. Returns the transformation T as CSR rows over the
+// original transverse DOFs (columns: [0,nC) cotree, [nC,nC+nPsi) ψ; the longitudinal
+// DOFs keep their indices, so the gauged system has the same size N and lzOff).
+export function buildTriGauge(mesh, fm) {
+    const { edges, tris, triEdges, nNodes, nEdges, nTris } = mesh;
+    const { edgeF, faceF, nodeF, edgeNodeF, nFreeTransverse } = fm;
+    const N = fm.nFreeTransverse + fm.nFreeLongitudinal;
+    for (let e = 0; e < nEdges; e++)
+        if ((edgeF[2*e+1] >= 0) !== (edgeNodeF[e] >= 0))
+            throw new Error(`buildTriGauge: edge ${e} ne2 / midpoint freedom mismatch`);
+    // PEC components: union-find over the PEC edges (both endpoints are PEC nodes).
+    const parent = new Int32Array(nNodes);
+    for (let i = 0; i < nNodes; i++) parent[i] = i;
+    const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    for (let e = 0; e < nEdges; e++) {
+        if (edgeF[2*e] >= 0) continue;
+        const a = find(edges[2*e]), b = find(edges[2*e+1]);
+        if (a !== b) parent[a] = b;
+    }
+    // Quotient vertex of a node: itself when free, its PEC component root otherwise.
+    const qv = n => nodeF[n] >= 0 ? n : find(n);
+    // Reference (ψ = 0): the largest PEC component (the enclosure / ground plane).
+    const compSize = new Int32Array(nNodes);
+    for (let n = 0; n < nNodes; n++) if (nodeF[n] < 0) compSize[find(n)]++;
+    let ref = -1;
+    for (let n = 0; n < nNodes; n++)
+        if (nodeF[n] < 0 && find(n) === n && (ref < 0 || compSize[n] > compSize[ref])) ref = n;
+    // Adjacency of the quotient graph over the free edges (ne1 DOF present).
+    const deg = new Int32Array(nNodes);
+    for (let e = 0; e < nEdges; e++) if (edgeF[2*e] >= 0) { deg[qv(edges[2*e])]++; deg[qv(edges[2*e+1])]++; }
+    const adjPtr = new Int32Array(nNodes + 1);
+    for (let n = 0; n < nNodes; n++) adjPtr[n+1] = adjPtr[n] + deg[n];
+    const adjE = new Int32Array(adjPtr[nNodes]);
+    const fill = adjPtr.slice(0, nNodes);
+    for (let e = 0; e < nEdges; e++) if (edgeF[2*e] >= 0) { adjE[fill[qv(edges[2*e])]++] = e; adjE[fill[qv(edges[2*e+1])]++] = e; }
+    // BFS spanning forest. psiV[quotient vertex] = ψ index, -1 for a root (reference).
+    const psiV = new Int32Array(nNodes).fill(-2);
+    const isTree = new Uint8Array(nEdges);
+    const queue = new Int32Array(nNodes);
+    let nPsiV = 0, nRoots = 0;
+    const bfs = root => {
+        let qh = 0, qt = 0;
+        queue[qt++] = root; psiV[root] = -1; nRoots++;
+        while (qh < qt) {
+            const u = queue[qh++];
+            for (let p = adjPtr[u]; p < adjPtr[u+1]; p++) {
+                const e = adjE[p];
+                const a = qv(edges[2*e]), b = qv(edges[2*e+1]);
+                const v = a === u ? b : a;
+                if (v === u || psiV[v] !== -2) continue;   // chord on one component / visited
+                psiV[v] = nPsiV++; isTree[e] = 1; queue[qt++] = v;
+            }
+        }
+    };
+    if (ref >= 0) bfs(ref);
+    for (let n = 0; n < nNodes; n++) if (qv(n) === n && psiV[n] === -2) bfs(n);
+    // Edge-midpoint ψ after the vertex ψ.
+    const psiE = new Int32Array(nEdges).fill(-3);
+    let nPsi = nPsiV;
+    for (let e = 0; e < nEdges; e++) if (edgeF[2*e+1] >= 0) psiE[e] = nPsi++;
+    // ψ column (already offset by nC below) of a node / an edge midpoint; -1 = reference.
+    // Cotree numbering: ne1 of the non-tree free edges, then the free faces.
+    const cIdx = new Int32Array(nFreeTransverse).fill(-1);
+    let nC = 0;
+    for (let e = 0; e < nEdges; e++) if (edgeF[2*e] >= 0 && !isTree[e]) cIdx[edgeF[2*e]] = nC++;
+    for (let t = 0; t < nTris; t++) for (let k = 0; k < 2; k++) if (faceF[2*t+k] >= 0) cIdx[faceF[2*t+k]] = nC++;
+    if (nC + nPsi !== nFreeTransverse)
+        throw new Error(`buildTriGauge: ${nC} cotree + ${nPsi} ψ DOFs != ${nFreeTransverse} transverse DOFs`);
+    const psiCol = p => (p < 0 ? -1 : nC + p);
+    const psiOfNode = n => psiCol(psiV[qv(n)]);
+    const psiOfMid = e => psiCol(edgeF[2*e+1] >= 0 ? psiE[e] : psiV[qv(edges[2*e])]);
+    // T rows. Entries with a shared column (two local vertices on one PEC component) are
+    // merged and reference columns dropped, so a row is a clean sparse combination.
+    const rowPtr = new Int32Array(nFreeTransverse + 1);
+    const rowCols = new Array(nFreeTransverse), rowW = new Array(nFreeTransverse);
+    const setRow = (g, list) => {
+        const c = [], w = [];
+        for (let i = 0; i < list.length; i += 2) {
+            const col = list[i], wt = list[i+1];
+            if (col < 0) continue;
+            const j = c.indexOf(col);
+            if (j >= 0) w[j] += wt; else { c.push(col); w.push(wt); }
+        }
+        const cc = [], ww = [];
+        for (let j = 0; j < c.length; j++) if (w[j] !== 0) { cc.push(c[j]); ww.push(w[j]); }
+        rowCols[g] = cc; rowW[g] = ww;
+    };
+    for (let e = 0; e < nEdges; e++) {
+        const g1 = edgeF[2*e]; if (g1 < 0) continue;
+        const p0 = psiOfNode(edges[2*e]), p1 = psiOfNode(edges[2*e+1]);
+        // ne1: ψ_q − ψ_p along the global edge orientation, plus its own cotree DOF.
+        setRow(g1, isTree[e] ? [p0, -1, p1, 1] : [p0, -1, p1, 1, cIdx[g1], 1]);
+        setRow(edgeF[2*e+1], [p0, -2, p1, -2, psiOfMid(e), 4]);
+    }
+    const loc = new Int32Array(6);
+    for (let t = 0; t < nTris; t++) {
+        if (faceF[2*t] < 0 && faceF[2*t+1] < 0) continue;
+        for (let k = 0; k < 3; k++) { loc[k] = psiOfNode(tris[3*t+k]); loc[3+k] = psiOfMid(triEdges[3*t+k]); }
+        for (const [k, li] of [[0, 3], [1, 7]]) {
+            const g = faceF[2*t+k]; if (g < 0) continue;
+            const list = [cIdx[g], 1];
+            for (let j = 0; j < 6; j++) if (P2_GRAD_T[li][j] !== 0) list.push(loc[j], P2_GRAD_T[li][j]);
+            setRow(g, list);
+        }
+    }
+    let nnz = 0;
+    for (let g = 0; g < nFreeTransverse; g++) { rowPtr[g+1] = rowPtr[g] + rowCols[g].length; nnz += rowCols[g].length; }
+    const cols = new Int32Array(nnz), coefs = new Float64Array(nnz);
+    for (let g = 0, p = 0; g < nFreeTransverse; g++)
+        for (let j = 0; j < rowCols[g].length; j++, p++) { cols[p] = rowCols[g][j]; coefs[p] = rowW[g][j]; }
+    return { nC, nPsi, nPsiV, nRoots, ref, psiV, psiE, isTree, cIdx, qv, N, nFreeTransverse,
+             T: { rowPtr, cols, coefs } };
+}
+
+// x (original DOF layout) from a gauged vector x'.
+export function gaugeExpand(gauge, xp) {
+    const { T, nFreeTransverse, N } = gauge;
+    const x = new Float64Array(N);
+    for (let g = 0; g < nFreeTransverse; g++) {
+        let s = 0;
+        for (let p = T.rowPtr[g]; p < T.rowPtr[g+1]; p++) s += T.coefs[p] * xp[T.cols[p]];
+        x[g] = s;
+    }
+    for (let g = nFreeTransverse; g < N; g++) x[g] = xp[g];
+    return x;
+}
+
+// Static seed in the gauged layout, the counterpart of staticToEdgeDofs: e_c = 0 and
+// ψ = −(φ − φ_ref) make e_t = −∇φ an EXACT discrete gradient (face bubbles included),
+// e_z = φ as before.
+export function gaugeSeed(gauge, phi, mesh, fm) {
+    const { nC, psiV, psiE, ref, qv, N } = gauge;
+    const { phiVertex, phiEdge } = phi;
+    const xp = new Float64Array(N);
+    const phiRef = ref >= 0 ? phiVertex[ref] : 0;
+    for (let n = 0; n < mesh.nNodes; n++) {
+        if (qv(n) !== n) continue;
+        const p = psiV[n];
+        if (p >= 0) xp[nC + p] = -(phiVertex[n] - phiRef);
+    }
+    for (let e = 0; e < mesh.nEdges; e++) { const p = psiE[e]; if (p >= 0) xp[nC + p] = -(phiEdge[e] - phiRef); }
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
+    for (let n = 0; n < mesh.nNodes; n++) { const nf = fm.nodeF[n]; if (nf >= 0) xp[lzOff + nf] = phiVertex[n]; }
+    for (let e = 0; e < mesh.nEdges; e++) { const enf = fm.edgeNodeF[e]; if (enf >= 0) xp[lzEdgeMidOff + enf] = phiEdge[e]; }
+    return xp;
+}
+
 // --- Assembly ---
 
 // Decomposed assembly. The Lee–Jin system is AFFINE in k² with a Robin (ABC)
@@ -550,16 +734,29 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
 // for A including the ABC entries, one for B); femFromDecomposition() then
 // produces the matrices for any frequency in O(nnz). Per-frequency quadrature
 // reassembly used to be a dominant sweep cost.
-export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
+//
+// With a gauge (buildTriGauge) the templates are assembled in the gauged DOF layout
+// [cotree | ψ | e_z] (same N): every element matrix is congruence-transformed through
+// the element's rows of T, except the curl-curl template A0, which is copied onto the
+// cotree×cotree slots only (S·G ≡ 0). The transformed local matrices are symmetrized
+// explicitly so the pattern is exactly symmetric (the eigensolver's LDL^T path checks
+// that), two summation orders would otherwise leave roundoff-asymmetric zeros.
+// Without a gauge the assembly is unchanged (bit-identical output).
+export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge = null) {
     const { tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF } = fm;
     const N = fm.nFreeTransverse + fm.nFreeLongitudinal;
     const nodes = mesh.nodes;
     const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
     const nLocal = 14;
+    // Gauged: a local slot set of ≤ 3 cotree edges + 2 faces + 6 ψ + 6 e_z = 17 columns,
+    // T rows of ≤ 7 entries. Slot lists are per element, no global scratch.
+    const MAXS = gauge ? 20 : 14, MAXR = 8;
+    const nFT = fm.nFreeTransverse, T = gauge ? gauge.T : null;
 
-    // Pre-allocate COO arrays: max 196 nonzeros per P2 element (14×14)
-    const maxNnz = nTris * 196;
+    // Pre-allocate COO arrays: max 196 nonzeros per P2 element (14×14); the gauged
+    // element has ≤ MAXS² slots.
+    const maxNnz = nTris * MAXS * MAXS;
     const eAr = new Int32Array(maxNnz), eAc = new Int32Array(maxNnz);
     const eA0 = new Float64Array(maxNnz);
     const eA1Re = new Float64Array(maxNnz), eA1Im = new Float64Array(maxNnz);
@@ -575,6 +772,13 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
     const B1elRe = new Float64Array(196), B1elIm = new Float64Array(196);
     const globalDof = new Int32Array(nLocal);
     const signs = new Float64Array(nLocal);
+    // Gauged scratch: per-element slot table and local T rows, accumulators per template.
+    const slotCol = new Int32Array(MAXS);
+    const rowSlot = new Int32Array(nLocal * MAXR), rowW = new Float64Array(nLocal * MAXR), rowLen = new Int32Array(nLocal);
+    const cSlot = new Int32Array(nLocal);
+    const acc0 = new Float64Array(MAXS * MAXS), acc1Re = new Float64Array(MAXS * MAXS), acc1Im = new Float64Array(MAXS * MAXS);
+    const accB0 = new Float64Array(MAXS * MAXS), accB1Re = new Float64Array(MAXS * MAXS), accB1Im = new Float64Array(MAXS * MAXS);
+    const accs = [acc0, acc1Re, acc1Im, accB0, accB1Re, accB1Im];
 
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
@@ -621,18 +825,84 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
             globalDof[8 + k] = nf >= 0 ? lzOff + nf : -1;
         }
 
+        if (!gauge) {
+            for (let li = 0; li < nLocal; li++) {
+                const gi = globalDof[li]; if (gi < 0) continue;
+                for (let lj = 0; lj < nLocal; lj++) {
+                    const gj = globalDof[lj]; if (gj < 0) continue;
+                    const s = signs[li] * signs[lj];
+                    const idx = li * nLocal + lj;
+                    const a0 = s * A0el[idx], a1re = s * A1elRe[idx], a1im = s * A1elIm[idx];
+                    if (a0 !== 0 || a1re !== 0 || a1im !== 0) {
+                        eAr[aNnz] = gi; eAc[aNnz] = gj;
+                        eA0[aNnz] = a0; eA1Re[aNnz] = a1re; eA1Im[aNnz] = a1im; aNnz++;
+                    }
+                    const b0 = s * B0el[idx], b1re = s * B1elRe[idx], b1im = s * B1elIm[idx];
+                    if (b0 !== 0 || b1re !== 0 || b1im !== 0) {
+                        eBr[bNnz] = gi; eBc[bNnz] = gj;
+                        eB0[bNnz] = b0; eB1Re[bNnz] = b1re; eB1Im[bNnz] = b1im; bNnz++;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Gauged scatter. Local T rows (sign folded in) over the element's slot set.
+        let nSlot = 0;
+        const slotOf = c => {
+            for (let s = 0; s < nSlot; s++) if (slotCol[s] === c) return s;
+            if (nSlot >= MAXS) throw new Error('assembleTriFEMDecomposed: gauged slot overflow');
+            slotCol[nSlot] = c; return nSlot++;
+        };
         for (let li = 0; li < nLocal; li++) {
-            const gi = globalDof[li]; if (gi < 0) continue;
+            rowLen[li] = 0; cSlot[li] = -1;
+            const g = globalDof[li]; if (g < 0) continue;
+            if (g >= nFT) { rowSlot[li*MAXR] = slotOf(g); rowW[li*MAXR] = 1; rowLen[li] = 1; continue; }
+            let k = 0;
+            for (let p = T.rowPtr[g]; p < T.rowPtr[g+1]; p++, k++) {
+                rowSlot[li*MAXR + k] = slotOf(T.cols[p]); rowW[li*MAXR + k] = signs[li] * T.coefs[p];
+            }
+            rowLen[li] = k;
+            const c = gauge.cIdx[g];
+            if (c >= 0) cSlot[li] = slotOf(c);
+        }
+        for (const a of accs) a.fill(0, 0, nSlot * MAXS);
+        for (let li = 0; li < nLocal; li++) {
+            if (rowLen[li] === 0) continue;
             for (let lj = 0; lj < nLocal; lj++) {
-                const gj = globalDof[lj]; if (gj < 0) continue;
-                const s = signs[li] * signs[lj];
+                if (rowLen[lj] === 0) continue;
                 const idx = li * nLocal + lj;
-                const a0 = s * A0el[idx], a1re = s * A1elRe[idx], a1im = s * A1elIm[idx];
+                const a1re = A1elRe[idx], a1im = A1elIm[idx], b0 = B0el[idx], b1re = B1elRe[idx], b1im = B1elIm[idx];
+                if (cSlot[li] >= 0 && cSlot[lj] >= 0)
+                    acc0[cSlot[li] * MAXS + cSlot[lj]] += signs[li] * signs[lj] * A0el[idx];
+                if (a1re === 0 && a1im === 0 && b0 === 0 && b1re === 0 && b1im === 0) continue;
+                for (let ki = 0; ki < rowLen[li]; ki++) {
+                    const si = rowSlot[li*MAXR + ki], wi = rowW[li*MAXR + ki];
+                    for (let kj = 0; kj < rowLen[lj]; kj++) {
+                        const k = si * MAXS + rowSlot[lj*MAXR + kj];
+                        const w = wi * rowW[lj*MAXR + kj];
+                        acc1Re[k] += w * a1re; acc1Im[k] += w * a1im;
+                        accB0[k] += w * b0; accB1Re[k] += w * b1re; accB1Im[k] += w * b1im;
+                    }
+                }
+            }
+        }
+        // Symmetrize, then emit.
+        for (const a of accs)
+            for (let r = 0; r < nSlot; r++) for (let s = r + 1; s < nSlot; s++) {
+                const v = 0.5 * (a[r*MAXS + s] + a[s*MAXS + r]);
+                a[r*MAXS + s] = v; a[s*MAXS + r] = v;
+            }
+        for (let r = 0; r < nSlot; r++) {
+            const gi = slotCol[r];
+            for (let s = 0; s < nSlot; s++) {
+                const k = r*MAXS + s, gj = slotCol[s];
+                const a0 = acc0[k], a1re = acc1Re[k], a1im = acc1Im[k];
                 if (a0 !== 0 || a1re !== 0 || a1im !== 0) {
                     eAr[aNnz] = gi; eAc[aNnz] = gj;
                     eA0[aNnz] = a0; eA1Re[aNnz] = a1re; eA1Im[aNnz] = a1im; aNnz++;
                 }
-                const b0 = s * B0el[idx], b1re = s * B1elRe[idx], b1im = s * B1elIm[idx];
+                const b0 = accB0[k], b1re = accB1Re[k], b1im = accB1Im[k];
                 if (b0 !== 0 || b1re !== 0 || b1im !== 0) {
                     eBr[bNnz] = gi; eBc[bNnz] = gj;
                     eB0[bNnz] = b0; eB1Re[bNnz] = b1re; eB1Im[bNnz] = b1im; bNnz++;
@@ -652,6 +922,7 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
     // The matched coefficient is the local plane-wave wavenumber k*sqrt(er), not vacuum k.
     // A wall edge in dielectric uses one triangle adjacent to the boundary to
     // sample the permittivity.
+    // Gauged: a diagonal entry r on DOF g becomes r*T_g^T*T_g (symmetric by construction).
     const rR = [], rC = [], rV = [];
     if (abc.top === true || abc.left === true || abc.right === true || abc.bottom === true) {
         const ymax = condRect.ymax_domain, ymin = condRect.ymin_domain;
@@ -665,6 +936,14 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
                 if (edgeTri[eIdx] < 0) edgeTri[eIdx] = t;
             }
         }
+        const pushRobin = (g, val) => {
+            if (g < 0) return;
+            if (!gauge) { rR.push(g); rC.push(g); rV.push(val); return; }
+            for (let p = T.rowPtr[g]; p < T.rowPtr[g+1]; p++)
+                for (let q = T.rowPtr[g]; q < T.rowPtr[g+1]; q++) {
+                    rR.push(T.cols[p]); rC.push(T.cols[q]); rV.push(val * T.coefs[p] * T.coefs[q]);
+                }
+        };
         for (let e = 0; e < nEdges; e++) {
             const n0 = edges[2*e], n1 = edges[2*e+1];
             const x0 = nodes[2*n0], y0 = nodes[2*n0+1];
@@ -679,10 +958,8 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect) {
             const tAdj = edgeTri[e];
             const erAdj = (tAdj >= 0 && epsMap && epsMap[tAdj]) ? epsMap[tAdj].re : 1;
             const nWall = erAdj > 0 ? Math.sqrt(erAdj) : 1;   // local k = k₀·n_wall
-            const ef1 = edgeF[2*e];
-            if (ef1 >= 0) { rR.push(ef1); rC.push(ef1); rV.push(nWall / L); }
-            const ef2 = edgeF[2*e+1];
-            if (ef2 >= 0) { rR.push(ef2); rC.push(ef2); rV.push(nWall / (3 * L)); }
+            pushRobin(edgeF[2*e], nWall / L);
+            pushRobin(edgeF[2*e+1], nWall / (3 * L));
         }
     }
 

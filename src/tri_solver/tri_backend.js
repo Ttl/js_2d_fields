@@ -29,17 +29,16 @@ import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, re
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
-         femFromDecomposition } from './tri_fem.js';
+         femFromDecomposition, buildTriGauge, gaugeSeed, gaugeExpand } from './tri_fem.js';
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
          projectH, computePoyntingFromProjectedH } from './conductor_loss.js';
 import { csqrt } from './fem_core.js';
 import { mqsConductorLoss, refineSkinBand } from './mqs_loss.js';
 import { checkMeshQuality } from './tri_mesh.js';
 
-// Below this frequency the full-wave eigensolve degenerates near DC; use the
-// static (variational) solve instead. Above it, use the full-wave eigenmode for
-// the dispersive effective permittivity, anchored to the static solve at this
-// frequency (see TriBackend._eigenBias) so the two agree at the switch.
+// Below this frequency use the static solve. Above it, the full-wave eigenmode
+// for the dispersive effective permittivity, anchored to the static solve at
+// this frequency (see TriBackend._eigenBias) so the two agree at the switch.
 const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
@@ -79,10 +78,14 @@ const MAX_SOLVE_BYTES = 1e9;
 // The eigensolver factorizes C = A - σB, whose sparsity pattern is the union of
 // the A and B patterns, and B (with the g2 coupling blocks) is typically ~2.6x
 // denser than A. Size the estimate on the denser of the two patterns.
-function eigenSolveBytes(N, fem) {
-    const nnz = Math.max(fem.csrA.colIdx.length, fem.csrB.colIdx.length);
+// nnzScale: the tree-cotree gauged pencil (fullwaveMode) carries ~20% more B entries
+// than the plain one for the same factor size (measured L+U fill 21.9M vs 22.1M on a
+// 12k-triangle mesh), so its estimate is scaled back to keep the guard at parity.
+function eigenSolveBytes(N, fem, nnzScale = 1) {
+    const nnz = nnzScale * Math.max(fem.csrA.colIdx.length, fem.csrB.colIdx.length);
     return 2 * 10 * (12 * nnz + 20 * N);
 }
+const GAUGED_NNZ_SCALE = 1 / 1.2;
 
 // ---- WASM context (lazy singleton) ----
 let _ctxPromise = null;
@@ -467,25 +470,33 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // decomposition A0 + k²·A1 + j·k0·Ar and combined per frequency in O(nnz).
     // The cache self-validates on object identity (a refinement pass or a causal
     // epsMap rebuild changes the objects → clean recompute).
-    let dec;
+    // The pencil is assembled in the tree-cotree gauge (buildTriGauge): the gradient
+    // part of e_t is an explicit nodal variable, so the O(k^2) terms the quasi-TEM lives
+    // on never sit inside the roundoff of the 1/h^2 curl-curl entries. Without it the
+    // solve on a finely graded mesh returned nothing below ~200 MHz (the true mode's
+    // Ritz residual at the gate) and fell back from LDL^T to LU at every frequency.
+    let dec, gauge;
     const abcKey = JSON.stringify(abc);
     if (cache && cache.mesh === mesh && cache.fm === fm && cache.epsMap === epsMap &&
         cache.abcKey === abcKey) {
-        dec = cache.dec;
+        dec = cache.dec; gauge = cache.gauge;
     } else {
-        dec = assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect);
+        gauge = (cache && cache.mesh === mesh && cache.fm === fm && cache.gauge)
+            ? cache.gauge : buildTriGauge(mesh, fm);
+        dec = assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge);
         if (cache) {
             cache.mesh = mesh; cache.fm = fm; cache.epsMap = epsMap;
-            cache.abcKey = abcKey; cache.dec = dec;
+            cache.abcKey = abcKey; cache.dec = dec; cache.gauge = gauge;
         }
     }
     const fem = femFromDecomposition(dec, k2);
     if (!fem) return null;
     const N = fem.N;
-    // Seed the Arnoldi from the static-field projection (the quasi-TEM shape). The
-    // mode-pick below also overlaps every candidate against this static drive.
+    // Seed the Arnoldi from the static-field projection (the quasi-TEM shape), in the
+    // gauged layout. The mode-pick below overlaps every candidate against the same
+    // static drive in the original layout (staticSeed).
     const staticSeed = staticToEdgeDofs(phiEps, mesh, fm);
-    const seed = staticSeed;
+    const seed = gaugeSeed(gauge, phiEps, mesh, fm);
     // Request enough eigenpairs that the quasi-TEM is in the returned set even when it has
     // DISPERSED away from the shift. Shift-invert is centered on -k2·eps_static, so the
     // solver returns the `nev` modes nearest that shift. At high frequency on an inhomogeneous
@@ -506,8 +517,8 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // Absolute ceiling (mirrors the FDM "Problem too large" guard): refuse a solve that
     // would overrun the eigensolver heap with a clear error rather than an opaque abort().
     // The triangle budget keeps normal solves well under this; this backstops misuse.
-    if (eigenSolveBytes(N, fem) > MAX_SOLVE_BYTES)
-        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
+    if (eigenSolveBytes(N, fem, GAUGED_NNZ_SCALE) > MAX_SOLVE_BYTES)
+        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem, GAUGED_NNZ_SCALE) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
     // solveGeneralized throws on solver failure (negative return code) — let it
     // propagate so the caller can warn. nconv === 0 (nothing converged) → null.
     const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed);
@@ -531,12 +542,12 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         const epsMode = -res.evalsRe[i] / k2;
         if (epsMode < 0.5 * eps_static) continue;          // drop near-cutoff / lateral-continuum modes
         if (epsMode > epsRMax * 1.01) continue;            // drop spurious super-dense modes (ε_eff > max εr)
-        const vR = res.evecsRe.subarray(i * N, (i + 1) * N);
+        const vR = gaugeExpand(gauge, res.evecsRe.subarray(i * N, (i + 1) * N));
         let dot = 0, nS = 0, nV = 0;
         for (let k = 0; k < fm.nFreeTransverse; k++) { dot += staticSeed[k] * vR[k]; nS += staticSeed[k] ** 2; nV += vR[k] ** 2; }
         const ovl = nS > 0 && nV > 0 ? Math.abs(dot) / Math.sqrt(nS * nV) : 0;
         globalThis.__TRI_DEBUG__ && console.log(`    cand ${i}: eps=${epsMode.toFixed(4)} ovl=${ovl.toFixed(3)} (target ${eps_static.toFixed(4)})`);
-        if (ovl > 0.3) cands.push({ i, eps: epsMode, ovl });   // require overlap > 0.3
+        if (ovl > 0.3) cands.push({ i, eps: epsMode, ovl, vR });   // require overlap > 0.3
     }
     if (!cands.length) return null;
     // Among the overlap-COMPETITIVE candidates (within 0.05 of the best overlap), pick the one
@@ -564,8 +575,8 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         && Math.abs(altEps - bestEps) / Math.max(bestEps, 1e-9) >= 0.10;
     return {
         eps: -res.evalsRe[bestIdx] / k2,
-        vRe: res.evecsRe.slice(bestIdx * N, (bestIdx + 1) * N),
-        vIm: res.evecsIm.slice(bestIdx * N, (bestIdx + 1) * N),
+        vRe: pick.vR,
+        vIm: gaugeExpand(gauge, res.evecsIm.subarray(bestIdx * N, (bestIdx + 1) * N)),
         g2Re: res.evalsRe[bestIdx], g2Im: res.evalsIm[bestIdx],
         ambiguous, bestOvl, altOvl, bestEps, altEps,
     };
@@ -1779,11 +1790,8 @@ export class TriBackend {
             this._eigenBiasCache = { mesh: this.mesh, byMode: {} };
         const cache = this._eigenBiasCache.byMode;
         if (cache[mode] !== undefined) return cache[mode];
-        // The eigensolve can return no quasi-TEM candidate right at F_STATIC_MAX on a
-        // fine mesh (the near-DC degeneracy the static switch exists for creeps up in
-        // frequency as the mesh refines; seen for the odd mode at 12k triangles), so walk
-        // up to 1 GHz. The dispersion left in the ratio at 1 GHz is ~3e-5, far below the
-        // bias being removed.
+        // Safety net: walk up to 1 GHz if the anchor solve returns no quasi-TEM candidate.
+        // This shouldn't be needed with tree-cotree cauge.
         const ANCHORS = [F_STATIC_MAX, 2e8, 5e8, 1e9];
         let bias = 1, ok = false;
         const reasons = [];

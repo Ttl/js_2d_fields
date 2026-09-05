@@ -32,6 +32,7 @@ const TIERS = {
         { file: 'tests/test_geometry.js', cost: 1 },
         { file: 'src/tri_solver/tests/eigen_pencil_test.mjs', cost: 1 },
         { file: 'src/tri_solver/tests/complex_symmetric_test.mjs', cost: 1 },
+        { file: 'src/tri_solver/tests/gauge_test.mjs', cost: 19 },
         { file: 'src/tri_solver/tests/box_modes_test.mjs', cost: 16 },
         { file: 'tests/test_parallel_plate.js', cost: 28 },
         { file: 'tests/test_coax.js', cost: 11 },
