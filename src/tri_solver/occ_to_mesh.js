@@ -29,6 +29,12 @@ import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSig
 // refinement smoother (see REL_SHAPE_TOL) so all three agree on where a boundary is.
 const REL_TOL = REL_SHAPE_TOL;
 
+// OCC model units. OpenCASCADE works to a fixed Precision::Confusion of 1e-7
+// model units, so a cross-section built in metres falls apart for sub-micron
+// features. Every coordinate and size handed to gmsh is multiplied by OCC_SCALE
+// and every coordinate read back divided by it.
+const OCC_SCALE = 1e6;
+
 // Per-triangle ε / loss maps by centroid (last-match-wins over the dielectric list,
 // matching _setup_geometry). Reusable: call again after refineTriMesh.
 export function tagMaterials(mesh, dielectrics, tol) {
@@ -261,7 +267,8 @@ export function buildOccMeshFromGeometry(G, opts) {
     G._gmshModelAdd(_cstr(G, 'occmesh'), ierr); check('ModelAdd');
 
     const addRect = (r) => {
-        const t = G._gmshModelOccAddRectangle(r.xmin, r.ymin, 0, r.xmax - r.xmin, r.ymax - r.ymin, -1, 0, ierr);
+        const t = G._gmshModelOccAddRectangle(r.xmin * OCC_SCALE, r.ymin * OCC_SCALE, 0,
+            (r.xmax - r.xmin) * OCC_SCALE, (r.ymax - r.ymin) * OCC_SCALE, -1, 0, ierr);
         check('AddRectangle'); return t;
     };
     // Convex polygon as an OCC plane surface. The trimmed gmsh build exports no
@@ -274,7 +281,7 @@ export function buildOccMeshFromGeometry(G, opts) {
         const n = poly.length >> 1;
         const pts = new Array(n), lines = new Array(n);
         for (let i = 0; i < n; i++) {
-            pts[i] = G._gmshModelOccAddPoint(poly[2 * i], poly[2 * i + 1], 0, 0, -1, ierr);
+            pts[i] = G._gmshModelOccAddPoint(poly[2 * i] * OCC_SCALE, poly[2 * i + 1] * OCC_SCALE, 0, 0, -1, ierr);
             check('AddPoint');
         }
         for (let i = 0; i < n; i++) {
@@ -355,6 +362,12 @@ export function buildOccMeshFromGeometry(G, opts) {
         G._gmshModelGetEntities(fe, feN, 2, ierr); check('GetEntities(2)');
         const faces = _readIntArray(G, fe, feN);   // (dim,tag) pairs
         const bb = [G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8), G.stackAlloc(8)];
+        // Bounding box of a model entity, in metres.
+        const readBB = (dim, tag, label) => {
+            G._gmshModelGetBoundingBox(dim, tag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr); check(label);
+            return { x0: G.getValue(bb[0], 'double') / OCC_SCALE, y0: G.getValue(bb[1], 'double') / OCC_SCALE,
+                     x1: G.getValue(bb[3], 'double') / OCC_SCALE, y1: G.getValue(bb[4], 'double') / OCC_SCALE };
+        };
         // Only shapeless (non-rect) conductors take the face-bbox route below. A shaped
         // conductor's bounding box is far larger than its body (a complement shield's
         // spans the whole domain), so it would match the air face and collect the
@@ -371,26 +384,21 @@ export function buildOccMeshFromGeometry(G, opts) {
         // face surrounding a centered conductor (e.g. symmetric stripline) has
         // its bbox center inside the conductor rect, so the whole domain outline
         // would be collected as "conductor" curves and refined at sizeMin.
-        // OCC enlarges bounding boxes by Precision::Confusion (1e-7 in model
-        // units, verified empirically) — the containment pad must absorb that,
-        // capped per rect so a very thin conductor can't false-positive.
-        const OCC_BBOX_PAD = 2e-7;
-        const bboxPad = (c) => Math.max(tol, Math.min(OCC_BBOX_PAD,
-            0.4 * Math.min(c.xmax - c.xmin, c.ymax - c.ymin)));
+        // OCC enlarges bounding boxes by Precision::Confusion, the containment
+        // pad must absorb that, with a 2x margin.
+        const OCC_BBOX_PAD = 2e-7 / OCC_SCALE;
+        const pad = Math.max(tol, OCC_BBOX_PAD);
         // Is the bbox (x0,y0)-(x1,y1) contained in this rect, within the OCC pad? Shared
         // with the conductor-interior removal below so both use one padding rule.
         const bboxInRect = (c, x0, y0, x1, y1) => {
-            const pad = bboxPad(c);
             return x0 > c.xmin - pad && x1 < c.xmax + pad &&
                    y0 > c.ymin - pad && y1 < c.ymax + pad;
         };
         const inCond = (x0, y0, x1, y1) => bboxRects.find(e => bboxInRect(e.c, x0, y0, x1, y1)) || null;
         for (let i = 0; i < faces.length; i += 2) {
             const ftag = faces[i + 1];
-            G._gmshModelGetBoundingBox(2, ftag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr); check('GetBoundingBox');
-            const bx0 = G.getValue(bb[0], 'double'), by0 = G.getValue(bb[1], 'double');
-            const bx1 = G.getValue(bb[3], 'double'), by1 = G.getValue(bb[4], 'double');
-            const hit = inCond(bx0, by0, bx1, by1);
+            const b = readBB(2, ftag, 'GetBoundingBox');
+            const hit = inCond(b.x0, b.y0, b.x1, b.y1);
             if (!hit) continue;
             const fbuf = G.stackAlloc(8); G.setValue(fbuf, 2, 'i32'); G.setValue(fbuf + 4, ftag, 'i32');
             const cb = G.stackAlloc(4), cbN = G.stackAlloc(4);
@@ -415,10 +423,8 @@ export function buildOccMeshFromGeometry(G, opts) {
             const curves = _readIntArray(G, ce, ceN);   // (dim,tag) pairs
             for (let i = 0; i < curves.length; i += 2) {
                 const ctag = curves[i + 1];
-                G._gmshModelGetBoundingBox(1, ctag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
-                check('GetBoundingBox(1)');
-                const cx = (G.getValue(bb[0], 'double') + G.getValue(bb[3], 'double')) / 2;
-                const cy = (G.getValue(bb[1], 'double') + G.getValue(bb[4], 'double')) / 2;
+                const b = readBB(1, ctag, 'GetBoundingBox(1)');
+                const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
                 // Shaped conductors always take the fine (signal) field: a coax
                 // shield is the return conductor and its surface bounds the whole
                 // field region, so it never qualifies for the ground relaxation.
@@ -435,10 +441,7 @@ export function buildOccMeshFromGeometry(G, opts) {
         // toward the interior term only (`*LenExt` excludes it).
         const bTol = OCC_BBOX_PAD + tol;
         const curveLen = (ctag) => {
-            G._gmshModelGetBoundingBox(1, ctag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
-            check('GetBoundingBox(1) len');
-            const x0 = G.getValue(bb[0], 'double'), y0 = G.getValue(bb[1], 'double');
-            const x1 = G.getValue(bb[3], 'double'), y1 = G.getValue(bb[4], 'double');
+            const { x0, y0, x1, y1 } = readBB(1, ctag, 'GetBoundingBox(1) len');
             const onOutline = !domainShape && (
                 (x1 - x0 < bTol && (Math.abs(x0 - X0) < bTol || Math.abs(x1 - X1) < bTol)) ||
                 (y1 - y0 < bTol && (Math.abs(y0 - Y0) < bTol || Math.abs(y1 - Y1) < bTol)));
@@ -479,12 +482,9 @@ export function buildOccMeshFromGeometry(G, opts) {
             const holes = [];
             for (let i = 0; i < faces.length; i += 2) {
                 const ftag = faces[i + 1];
-                G._gmshModelGetBoundingBox(2, ftag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
-                check('GetBoundingBox');
-                const bx0 = G.getValue(bb[0], 'double'), by0 = G.getValue(bb[1], 'double');
-                const bx1 = G.getValue(bb[3], 'double'), by1 = G.getValue(bb[4], 'double');
+                const b = readBB(2, ftag, 'GetBoundingBox');
                 const hit = condRects.some(c =>
-                    !(c.shape && isComplement(c.shape)) && bboxInRect(c, bx0, by0, bx1, by1));
+                    !(c.shape && isComplement(c.shape)) && bboxInRect(c, b.x0, b.y0, b.x1, b.y1));
                 if (hit) holes.push(ftag);
             }
             let dangling = 0;
@@ -508,10 +508,8 @@ export function buildOccMeshFromGeometry(G, opts) {
                 const kill = [];
                 for (let i = 0; i < cs.length; i += 2) {
                     const ctag = cs[i + 1];
-                    G._gmshModelGetBoundingBox(1, ctag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
-                    check('GetBoundingBox(1) post-remove');
-                    const cx = (G.getValue(bb[0], 'double') + G.getValue(bb[3], 'double')) / 2;
-                    const cy = (G.getValue(bb[1], 'double') + G.getValue(bb[4], 'double')) / 2;
+                    const b = readBB(1, ctag, 'GetBoundingBox(1) post-remove');
+                    const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
                     for (const c of condRects) {
                         if (c.shape && isComplement(c.shape)) continue;
                         // STRICTLY inside (−tol): a curve ON the conductor boundary is a
@@ -559,10 +557,10 @@ export function buildOccMeshFromGeometry(G, opts) {
             G._gmshModelMeshFieldSetNumber(fd, _cstr(G, 'Sampling'), 200, ierr);
             const ft = G._gmshModelMeshFieldAdd(_cstr(G, 'Threshold'), -1, ierr); check('FieldAdd Threshold');
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'InField'), fd, ierr);
-            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMin'), sMin, ierr);
-            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMax'), hCoarse, ierr);
-            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMin'), sMin, ierr);
-            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), hFine + (hCoarse - hFine) / gradeRate, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMin'), sMin * OCC_SCALE, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMax'), hCoarse * OCC_SCALE, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMin'), sMin * OCC_SCALE, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), (hFine + (hCoarse - hFine) / gradeRate) * OCC_SCALE, ierr);
             return ft;
         };
         const fields = [];
@@ -586,8 +584,8 @@ export function buildOccMeshFromGeometry(G, opts) {
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeExtendFromBoundary'), 0, ierr);
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeFromPoints'), 0, ierr);
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeFromCurvature'), 0, ierr);
-    G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeMin'), Math.min(hFine * 0.5, sizeMin * 0.5), ierr);
-    G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeMax'), hCoarse, ierr);
+    G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeMin'), Math.min(hFine * 0.5, sizeMin * 0.5) * OCC_SCALE, ierr);
+    G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeMax'), hCoarse * OCC_SCALE, ierr);
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.Algorithm'), 5, ierr);
     // One Laplacian smoothing pass (gmsh's default). Ten passes cost ~0.2 ms per
     // triangle in this WASM build (1.1 s of a 1.6 s build at 5k triangles) and
@@ -618,17 +616,17 @@ export function buildOccMeshFromGeometry(G, opts) {
     const tagToIdx = new Map();
     for (let i = 0; i < nNodes; i++) tagToIdx.set(gmshTags[i], i);
     const nodes = new Float64Array(2 * nNodes);
-    for (let i = 0; i < nNodes; i++) { nodes[2 * i] = coords[3 * i]; nodes[2 * i + 1] = coords[3 * i + 1]; }
+    for (let i = 0; i < nNodes; i++) { nodes[2 * i] = coords[3 * i] / OCC_SCALE; nodes[2 * i + 1] = coords[3 * i + 1] / OCC_SCALE; }
 
     // Snap near-wall nodes exactly onto the domain walls
     //
-    // OCC's boolean fragmentation works to Precision::Confusion() (1e-7 in
-    // model units = metres), so a nearly-degenerate fragment (for example
-    // solder mask) can emit nodes tens of nanometres off the wall. Adaptive
+    // OCC's boolean fragmentation works to Precision::Confusion() (1e-7 model
+    // units, 1e-7 / OCC_SCALE in metres), so a nearly-degenerate fragment (for
+    // example solder mask) can emit nodes slightly off the wall. Adaptive
     // passes can then drag the node causing it to cause a void to appear near
-    // the symmetry plane.  Shaped domains (coax) are excluded.
+    // the symmetry plane. Shaped domains (coax) are excluded.
     if (!domainShape) {
-        const snapTol = Math.max(tol, 2e-7);
+        const snapTol = Math.max(tol, 2e-7 / OCC_SCALE);
         for (let i = 0; i < nNodes; i++) {
             const x = nodes[2 * i], y = nodes[2 * i + 1];
             if (Math.abs(x - X0) < snapTol) nodes[2 * i] = X0;
