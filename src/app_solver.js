@@ -238,6 +238,14 @@ const DEFAULT_SETTINGS = {
     wg_sigma: 5.8e7,
 };
 
+// Certified error (fraction) as a percentage with three significant digits,
+// scientific notation below 0.001%.
+function fmtErrPct(err) {
+    const pct = 100 * err;
+    if (pct === 0) return '0';
+    return pct < 1e-3 ? pct.toExponential(2) : pct.toPrecision(3);
+}
+
 /**
  * Get current UI settings as a serializable object (in display units)
  */
@@ -1619,7 +1627,7 @@ async function runSimulation() {
             // the same point in the log as before the sweep output starts.
             meshDone: (m) => {
                 if (m.meta.certification && m.meta.certification.pass) {
-                    log(`Estimated remaining error ${(100 * m.meta.certification.err).toExponential(2)}% ` +
+                    log(`Estimated remaining error ${fmtErrPct(m.meta.certification.err)}% ` +
                         `(tolerance ${(100 * p.tolerance).toFixed(2)}%)`);
                 }
                 if (m.meta.meshQuality && m.meta.meshQuality.maxQ > 100) {
@@ -1994,7 +2002,7 @@ async function runParameterSweep() {
             // legacy per-pass gate with the same refinement settings.
             firstPointCert: (m) => {
                 if (m.certification && m.certification.pass) {
-                    log(`Estimated remaining error (first-point) ${(100 * m.certification.err).toExponential(2)}%. ` +
+                    log(`Estimated remaining error (first-point) ${fmtErrPct(m.certification.err)}%. ` +
                         `Later sweep points are not re-verified.`);
                 }
                 // Every accuracy note, not just the first: one solve can carry a failed
