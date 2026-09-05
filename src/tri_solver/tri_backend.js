@@ -1976,15 +1976,18 @@ export class TriBackend {
             // The graded band converges inside the same budget at ~0.1%, with a smaller
             // mesh and a faster MQS solve.
             const bandDelta = this.opts.mqsBandDelta ?? 1.25;
-            // Skin-mesh triangle budget: bounds the size-aware band refinement on
-            // large-perimeter/small-δ geometries (memory guard; hitting it leaves the
-            // band partially resolved rather than aborting).
-            const mqsMaxTris = this.opts.mqsMaxTris ?? 40000;
+            // Skin-band triangle budget: how many triangles the size-aware band
+            // refinement may add on top of the base mesh, a memory guard for
+            // large-perimeter/small-δ geometries (hitting it leaves the band
+            // partially resolved rather than aborting, see mqs-band-capped below).
+            // Not an absolute cap, otherwise base mesh near the limit would not
+            // get band at all.
+            const mqsMaxTris = this.opts.mqsMaxTris ?? 80000;
             const mqsBand = this.opts.mqsBand ?? 1.5;
             // Skin-band refinement runs in two passes, trace first: the signal
-            // band takes the full mqsMaxTris budget, then the passive ground
-            // rects (GCPW coplanar grounds, via slabs) refine on top with their
-            // own additional budget and a distance-graded target, full
+            // band may add mqsMaxTris triangles to the base mesh, then the passive
+            // ground rects (GCPW coplanar grounds, via slabs) refine on top with
+            // their own additional budget and a distance-graded target, full
             // bandDelta*δ resolution only within ~Dfine of the signal, where
             // the return current concentrates at the slot edge, growing
             // linearly beyond (the ground surface current decays away from the
@@ -2024,7 +2027,7 @@ export class TriBackend {
             const bandPasses = this.opts.mqsBandPasses ?? 20;
             const buildSkin = (base, dlt) => {
                 let m = refineSkinBand(base, { rects: sigRects }, dlt, bandPasses, mqsBand, bandDelta * dlt,
-                    mqsMaxTris, null, depthSlope);
+                    base.nTris + mqsMaxTris, null, depthSlope);
                 // Each refineSkinBand stamps its own bandTrunc on the mesh it returns,
                 // so collect the signal band's before the ground pass overwrites it,
                 // and leave the merged list (or null) on the mesh that gets cached.

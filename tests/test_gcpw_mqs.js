@@ -78,9 +78,10 @@ async function tri(opts, triOpts = {}) {
     check('GCPW ground loss share in (5%, 60%)', share > 0.05 && share < 0.6,
         `R_trace ${mqs.R_trace.toFixed(2)}, R_gnd ${mqs.R_gnd.toFixed(2)} Ω/m → ${(100 * share).toFixed(1)}%`);
 
-    // Two-pass band budget: trace cap + ground budget (default mqsMaxTris/2),
-    // with slack for the conformity closure of the final refinement pass.
-    const budget = 40000 + 20000;
+    // Two-pass band budget on top of the base mesh: trace headroom (mqsMaxTris)
+    // + ground budget (default mqsMaxTris/2), with slack for the conformity
+    // closure of the final refinement pass.
+    const budget = b.mesh.nTris + 80000 + 40000;
     check('GCPW skin mesh respects trace+ground budget', b._skinCache.mesh.nTris <= 1.3 * budget,
         `${b._skinCache.mesh.nTris} tris vs budget ${budget}`);
 }
