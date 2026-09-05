@@ -448,6 +448,13 @@ static int solve_real(
     RSpMat C = A - sigma_re * B;
     C.makeCompressed();
     bool ldltOK = false;
+    // Per-solve iterative refinement is only worth its residual matvec + second
+    // solve on every Arnoldi step when the raw factor is marginal. The probe
+    // below measures the raw solve first: at ~1e-8 (typical for this pencil at
+    // the quasi-TEM shift, measured 1e-9 to 2e-8) the operator is already four
+    // orders inside the 1e-4 Ritz gate that verifies every returned pair against
+    // the true pencil, so refinement is switched off for the whole call.
+    bool ldltRefine = true;
     SparsePatternCache* pc = nullptr;
     {
         static std::vector<SparsePatternCache*> store;
@@ -481,17 +488,24 @@ static int solve_real(
                     }
                     RVector xp = pc->ldlt->solve(bp);
                     if (xp.allFinite()) {
-                        double bn = bp.norm(), rn = 0;
-                        for (int it = 0; it < 3; it++) {
-                            RVector r = bp - C * xp;
-                            rn = r.norm() / bn;
-                            if (!std::isfinite(rn) || rn < 1e-11) break;
-                            xp += pc->ldlt->solve(r);
+                        double bn = bp.norm();
+                        RVector r = bp - C * xp;
+                        double rn = r.norm() / bn;
+                        if (std::isfinite(rn) && rn < 1e-7) {
+                            ldltOK = true;
+                            ldltRefine = false;   // raw factor is good: no per-solve refinement
+                        } else {
+                            for (int it = 0; it < 3; it++) {
+                                if (!std::isfinite(rn) || rn < 1e-11) break;
+                                xp += pc->ldlt->solve(r);
+                                r = bp - C * xp;
+                                rn = r.norm() / bn;
+                            }
+                            // Same 1e-8 operator accuracy the plain-LU probe
+                            // required, refinement just gets marginal factors
+                            // there.
+                            if (std::isfinite(rn) && rn < 1e-8) ldltOK = true;
                         }
-                        rn = (C * xp - bp).norm() / bn;
-                        // Same 1e-8 operator accuracy the plain-LU probe historically
-                        // required — refinement just gets marginal factors there.
-                        if (std::isfinite(rn) && rn < 1e-8) ldltOK = true;
                     }
                 }
                 if (!ldltOK)
@@ -510,6 +524,7 @@ static int solve_real(
     auto solveC = [&](const RVector& v) -> RVector {
         if (!ldltOK) return RVector(solver.solve(v));
         RVector x = pc->ldlt->solve(v);
+        if (!ldltRefine) return x;
         const double vn = v.norm();
         double prev = std::numeric_limits<double>::infinity();
         for (int it = 0; it < 2; it++) {
@@ -563,13 +578,20 @@ static int solve_real(
             if (std::abs(th) < 1e-15) continue;
             Complex lambda = sigma_re + 1.0 / th;
 
-            // Ritz vector: complex combination of the REAL basis
+            // Ritz vector: complex combination of the real basis. A real Ritz
+            // value (the common case on this real symmetric pencil, the
+            // conjugate-pair case is the exception) comes with an exactly real
+            // eigenvector from the real Schur form, so its imaginary half is
+            // identically zero and its two sparse products are skipped. Half the
+            // extraction cost for bit-identical result.
+            const bool realPair = th.imag() == 0.0 && Y.col(idx).imag().isZero(0.0);
             RVector xr = V.leftCols(actual_m) * Y.col(idx).real();
-            RVector xi = V.leftCols(actual_m) * Y.col(idx).imag();
+            RVector xi = realPair ? RVector(RVector::Zero(n)) : RVector(V.leftCols(actual_m) * Y.col(idx).imag());
 
             // Residual ‖Ax − λBx‖ with real A, B and complex λ, x (componentwise)
-            RVector Axr = A * xr, Axi = A * xi;
-            RVector Bxr = B * xr, Bxi = B * xi;
+            RVector Axr = A * xr, Bxr = B * xr;
+            RVector Axi = realPair ? RVector(RVector::Zero(n)) : RVector(A * xi);
+            RVector Bxi = realPair ? RVector(RVector::Zero(n)) : RVector(B * xi);
             double lr = lambda.real(), li = lambda.imag();
             double res2 = 0, xn2 = 0, Axn2 = 0, Bxn2 = 0;
             for (int i2 = 0; i2 < n; i2++) {
