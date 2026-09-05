@@ -23,13 +23,13 @@
 import createModule from '../wasm_solver/eigen_solver.js';
 import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
-import { buildOccMeshFromGeometry, tagMaterials, validateTriMesh, _clipDomain } from './occ_to_mesh.js';
+import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain } from './occ_to_mesh.js';
 import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
-         femFromDecomposition, buildTriGauge, gaugeSeed, gaugeExpand } from './tri_fem.js';
+         femFromDecomposition, decompositionClassEps, buildTriGauge, gaugeSeed, gaugeExpand } from './tri_fem.js';
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
          projectH, computePoyntingFromProjectedH } from './conductor_loss.js';
 import { csqrt } from './fem_core.js';
@@ -475,21 +475,26 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // on never sit inside the roundoff of the 1/h^2 curl-curl entries. Without it the
     // solve on a finely graded mesh returned nothing below ~200 MHz (the true mode's
     // Ritz residual at the gate) and fell back from LDL^T to LU at every frequency.
-    let dec, gauge;
+    // A rebuilt material map (the causal model re-tags the same layout with new
+    // values at every frequency) keeps the decomposition and only changes the
+    // per-class permittivities it is combined with (decompositionClassEps).
+    let dec = null, gauge, classEps = null;
     const abcKey = JSON.stringify(abc);
-    if (cache && cache.mesh === mesh && cache.fm === fm && cache.epsMap === epsMap &&
-        cache.abcKey === abcKey) {
-        dec = cache.dec; gauge = cache.gauge;
-    } else {
+    if (cache && cache.dec && cache.mesh === mesh && cache.fm === fm && cache.abcKey === abcKey) {
+        classEps = cache.epsMap === epsMap ? cache.classEps : decompositionClassEps(cache.dec, epsMap);
+        if (classEps) { dec = cache.dec; gauge = cache.gauge; cache.epsMap = epsMap; cache.classEps = classEps; }
+    }
+    if (!dec) {
         gauge = (cache && cache.mesh === mesh && cache.fm === fm && cache.gauge)
             ? cache.gauge : buildTriGauge(mesh, fm);
         dec = assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge);
+        classEps = dec.classes;
         if (cache) {
-            cache.mesh = mesh; cache.fm = fm; cache.epsMap = epsMap;
+            cache.mesh = mesh; cache.fm = fm; cache.epsMap = epsMap; cache.classEps = classEps;
             cache.abcKey = abcKey; cache.dec = dec; cache.gauge = gauge;
         }
     }
-    const fem = femFromDecomposition(dec, k2);
+    const fem = femFromDecomposition(dec, k2, classEps);
     if (!fem) return null;
     const N = fem.N;
     // Seed the Arnoldi from the static-field projection (the quasi-TEM shape), in the
@@ -932,37 +937,94 @@ export class TriBackend {
         const COARSEN_MAX_PASSES = 4, GND_MAX_PASSES = 3;
         let gndScale = 1, gndStalled = false, gndPrevN = null;
         let coarsenPasses = 0, gndPasses = 0;
+        // Accept a near-budget mesh rather than pay a rebuild to shave it (see the loop).
+        const OVERSHOOT_OK = 1.3;
+        const surfScaleB = this.opts.occSurfScale ?? 0.35;
+        const occBase = {
+            conductors: s.conductors, dielectrics: s.dielectrics,
+            domain: dom, boundaries: s.boundaries, symmetry: this.symmetry,
+            // Non-rectangular meshed domain (coax: the dielectric disk itself).
+            domainShape: s.domain_shape || null,
+            // Conductor interiors are meshed only for the MQS volume eddy-current
+            // solve. mqsPre is the same applicability test _modeAtFreq uses. On
+            // the perturbation path those elements carry no DOFs, every
+            // node/edge inside metal is PEC, so meshing them is pure cost. Coax
+            // always lands here: its shaped (non-rectangular) conductors rule
+            // MQS out.
+            meshConductorInterior: mqsPre,
+            occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
+            gmshOptions: this.opts.gmshOptions,
+        };
+        // Pre-mesh budget sizing
+        //
+        // Predict the triangle count of the feature-sized start from the size-field
+        // statistics (estimateOccTriCount: the OCC model is built and classified, but
+        // not meshed, ~0.1 s) and apply the loop's own relaxation policy analytically,
+        // passive grounds first, then global, before the first gmsh run. The estimate
+        // is good to ~±30%, so it only takes over when the start is far enough over
+        // budget (PRESIZE_MIN_OVERSHOOT) that the loop would need two or more extra
+        // builds. A moderately over-budget start keeps the loop's trial coarsening
+        // and its exact meshes (mesh-sensitive quantities such as the perturbation
+        // loss were tuned on them), and a start that fits is untouched. The loop
+        // stays as the safety net for a misestimate either way.
+        // opts.preMeshSizing = false disables it (diagnostics).
+        const PRESIZE_MIN_OVERSHOOT = 2.5;
+        if (this.opts.preMeshSizing !== false) try {
+            const pre = buildOccMeshFromGeometry(this.ctx.G, { ...occBase, hFine, hCoarse, statsOnly: true });
+            const est = (hF, hC, gS) => estimateOccTriCount(pre.sizeStats, {
+                sizeMin: hF * surfScaleB, sizeMinGnd: Math.min(hF * surfScaleB * Math.max(1, gS), hC),
+                hCoarse: hC, gradeRate: this.opts.gradeRate ?? 0.35 });
+            // Aim at the budget itself: the loop accepts up to OVERSHOOT_OK×, and an
+            // over-estimate (the common error direction) then lands under it.
+            const target = maxTris;
+            const bisect = (f) => {   // largest x in [0, 1] with f(x) > target, log-scale
+                let lo = 0, hi = 1;
+                for (let k = 0; k < 40; k++) { const mid = (lo + hi) / 2; if (f(mid) > target) lo = mid; else hi = mid; }
+                return hi;
+            };
+            const est0 = est(hFine, hCoarse, 1);
+            if (est0 > PRESIZE_MIN_OVERSHOOT * maxTris) {
+                // Ground relaxation up to the loop's cap (the ground field is inert at
+                // hCoarse): the smallest scale that fits, or the cap.
+                const gndCap = hCoarse / (hFine * surfScaleB);
+                if (pre.nGndCurves > 0 && gndCap > 1) {
+                    if (est(hFine, hCoarse, gndCap) > target) gndScale = gndCap;
+                    else gndScale = Math.exp(bisect(x => est(hFine, hCoarse, Math.exp(x * Math.log(gndCap)))) * Math.log(gndCap));
+                }
+                // Global coarsening (hFine and hCoarse together, as the loop does),
+                // bounded at 64x: beyond that the geometry is so far over budget that
+                // the loop's measured exponent is the better guide.
+                if (est(hFine, hCoarse, gndScale) > target) {
+                    const lnMax = Math.log(64);
+                    const x = est(hFine * 64, hCoarse * 64, gndScale) > target ? 1
+                        : bisect(x => est(hFine * Math.exp(x * lnMax), hCoarse * Math.exp(x * lnMax), gndScale));
+                    const f = Math.exp(x * lnMax);
+                    hFine *= f; hCoarse *= f;
+                }
+                if (globalThis.__OCC_DEBUG__)
+                    console.error('[tri] pre-mesh sizing', { est0, est: est(hFine, hCoarse, gndScale), maxTris, hFine, hCoarse, gndScale });
+            }
+        } catch (e) {
+            // Estimate unavailable: the loop below sizes by trial as before.
+            globalThis.__OCC_DEBUG__ && console.error('[tri] pre-mesh sizing failed', e);
+        }
         for (;;) {
-            mesh = buildOccMeshFromGeometry(this.ctx.G, {
-                conductors: s.conductors, dielectrics: s.dielectrics,
-                domain: dom, boundaries: s.boundaries, hFine, hCoarse, symmetry: this.symmetry,
-                // Non-rectangular meshed domain (coax: the dielectric disk itself).
-                domainShape: s.domain_shape || null,
-                // Conductor interiors are meshed ONLY for the MQS volume eddy-current
-                // solve. mqsPre is the same applicability test _modeAtFreq uses, hoisted
-                // here (it already gates hFine above). On the perturbation path those
-                // elements carry no DOFs — every node/edge inside metal is PEC — so
-                // meshing them is pure cost. Coax always lands here: its shaped
-                // (non-rectangular) conductors rule MQS out.
-                meshConductorInterior: mqsPre,
-                occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
-                gndSizeScale: gndScale,
-                gmshOptions: this.opts.gmshOptions,
-            });
+            mesh = buildOccMeshFromGeometry(this.ctx.G, { ...occBase, hFine, hCoarse, gndSizeScale: gndScale });
+            if (globalThis.__OCC_DEBUG__)
+                console.error('[tri] initial mesh attempt', { nTris: mesh.nTris, maxTris, hFine, hCoarse, gndScale, coarsenPasses, gndPasses,
+                    est: estimateOccTriCount(mesh.sizeStats, mesh.sizeStats) });
             if (mesh.nTris <= maxTris || coarsenPasses >= COARSEN_MAX_PASSES) break;
             // Accept a near-budget mesh before any relaxation/coarsening. This is the
             // same OVERSHOOT_OK acceptance as below, hoisted so a mesh that today gets
             // accepted at, say, 1.2x budget is still accepted identically rather than
             // paying a rebuild with relaxed grounds (keeps the meshes of every family
             // that never over-runs badly bit-for-bit unchanged).
-            const OVERSHOOT_OK = 1.3;
             if (mesh.nTris < maxTris * OVERSHOOT_OK) break;
             // Ground relaxation first (only when there are relaxable ground curves and
             // headroom below the hCoarse cap). Element count along a painted curve is
             // ~1/size, so scale by the overshoot, +5% to land under. If a relaxation
             // pass cut the mesh by less than 10%, the grounds were not the cost, stop
             // relaxing and let the global path take over.
-            const surfScaleB = this.opts.occSurfScale ?? 0.35;
             const gndCap = hCoarse / (hFine * surfScaleB);
             if (!gndStalled && gndPasses < GND_MAX_PASSES && mesh.nGndCurves > 0 && gndScale < gndCap) {
                 if (gndPrevN !== null && mesh.nTris > gndPrevN * 0.9) {
@@ -1066,6 +1128,11 @@ export class TriBackend {
             const energy = []; // total field energy per mode (for the reported energy error)
             const certQ0 = []; // this pass's (W_eps, W_air) per mode, for the certificate
             this._passEnergies = null;
+            // Per-mode work of this pass (freedom map, statics, pencil decomposition,
+            // eigenmode at fRef). When this turns out to be the final mesh,
+            // _prepareStatic and the first solveAt would redo all of it on the same
+            // objects, so it is handed over instead (see this._passWork).
+            const passWork = { mesh, byMode: {} };
             // Source-free waveguide: there is no static solve, so the whole per-mode body
             // in the else branch is replaced, see _wgRefinePass.
             if (this._isWG) {
@@ -1087,7 +1154,9 @@ export class TriBackend {
                 // Full-wave eigenmode at fRef: source of the reported dispersive ε_eff
                 // (fw.eps) and the H-field for the ZZ refinement metric. Computed every pass.
                 let fw = null;
-                try { fw = fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static); } catch { fw = null; }
+                const femCache = {};
+                try { fw = fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static, femCache); } catch { fw = null; }
+                passWork.byMode[rm] = { fm, phiEps, phiAir, W_eps, W_air, femCache, fw, fRef, epsMap: mesh.epsMap };
                 // Converge on the REPORTED quantities, not a static proxy:
                 //   • static characteristic impedance Z0 = sqrt(L/C) ∝ 1/sqrt(W_eps·W_air)
                 //   • full-wave effective permittivity ε_eff = fw.eps (what _modeAtFreq reports)
@@ -1125,6 +1194,7 @@ export class TriBackend {
             }
             prev = conv; prevEnergy = energy;
             if (certQ0.length) this._passEnergies = { mesh, q: certQ0 };
+            this._passWork = this._isWG ? null : passWork;
             // Report this pass (real triangle count + convergence) so the UI shows
             // the adaptive progress just like the rectilinear backend. When a progress
             // sink is present, yield to the event loop so the browser can paint each
@@ -1623,16 +1693,23 @@ export class TriBackend {
         // odd/even and picking one eigenmode per drive can return the SAME eigenmode twice
         // (e.g. broadside stripline with an unequal er stack). Use the genuine line modes
         // instead — the eigenvectors of [C0]⁻¹[C] from per-trace drives.
+        // The last refinement pass solved exactly these statics (same mesh, freedom
+        // map, drives and material map) and assembled the pencil for its eigensolve
+        // at fRef; reuse them rather than recompute (this._passWork, buildMesh). The
+        // modal path below derives its own basis and does not use them.
+        const pw = (this._passWork && this._passWork.mesh === mesh) ? this._passWork.byMode : null;
+        this._passWork = null;
         if (s.is_differential && !this.symmetry &&
             this._prepareStaticModal(grid, s.use_causal_materials ? 'defer' : 'build')) return;
         for (const mode of this.modeNames) {
             const { abc, kC } = modeConfig(mode, s.is_differential, this.symmetry, this.condRect.wallPEC);
-            const fm = buildTriFreedomMap(mesh, this.condRect, abc);
+            const w = (pw && pw[mode] && pw[mode].epsMap === mesh.epsMap) ? pw[mode] : null;
+            const fm = w ? w.fm : buildTriFreedomMap(mesh, this.condRect, abc);
             const pot = drivePotentials(this.condRect, mode, this.symmetry);
-            const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
-            const phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
-            const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
-            const W_air = computeTriEnergy(phiAir, mesh, null);
+            const phiEps = w ? w.phiEps : solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
+            const phiAir = w ? w.phiAir : solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
+            const W_eps = w ? w.W_eps : computeTriEnergy(phiEps, mesh, mesh.epsMap);
+            const W_air = w ? w.W_air : computeTriEnergy(phiAir, mesh, null);
             const W_loss = computeTriEnergy(phiEps, mesh, mesh.lossMap);
             const C0 = kC * eps0 * W_air;                 // vacuum cap (geometric)
             const eps_eff_static = W_eps / W_air;
@@ -1646,6 +1723,11 @@ export class TriBackend {
                 fm, abc, kC, phiEps, C0, W_loss, eps_eff_static,
                 Z_static: 1 / (c0 * Math.sqrt(C0 * eps_eff_static * C0)),
                 fields,
+                // Closed-pick pencil decomposition from the pass (fullwaveMode's own
+                // identity-validated cache) and its eigenmode at fRef, which the first
+                // solveAt asks for again (_eigenPick).
+                femCache: w ? w.femCache : undefined,
+                fwSeed: (w && w.fw) ? { f: w.fRef, fw: w.fw, epsMap: w.epsMap, phiEps: w.phiEps } : undefined,
             };
         }
     }
@@ -1745,10 +1827,17 @@ export class TriBackend {
     _eigenPick(st, f, phiEps, eps_eff_static) {
         const { mesh } = this, cr = this.condRect, fm = st.fm;
         let fw = null, fwErr = null;
-        try {
-            fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                st.femCache || (st.femCache = {}));
-        } catch (e) { fw = null; fwErr = e; }
+        // The closed pick at this exact frequency, material map and static field may
+        // already exist from the final refinement pass (st.fwSeed, see _prepareStatic).
+        const seed = st.fwSeed;
+        if (seed && seed.f === f && seed.epsMap === mesh.epsMap && seed.phiEps === phiEps) {
+            fw = seed.fw;
+        } else {
+            try {
+                fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
+                    st.femCache || (st.femCache = {}));
+            } catch (e) { fw = null; fwErr = e; }
+        }
         if (!fw || fw.ambiguous) {
             const pickAbc = {};
             let radiates = false;

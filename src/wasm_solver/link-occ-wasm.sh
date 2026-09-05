@@ -36,4 +36,19 @@ emcc libgmsh.a $OCCLIBS -o gmsh.js \
   -s EXPORTED_FUNCTIONS="$EXPORTS" \
   -s EXPORTED_RUNTIME_METHODS="['ccall','cwrap','getValue','setValue','UTF8ToString','stringToUTF8','lengthBytesUTF8','stackAlloc','stackSave','stackRestore']"
 echo "=== link exit: $? ==="
+# Emscripten's getWasmTableEntry calls WebAssembly.Table.get on every indirect
+# call routed through an invoke_* trampoline (this build uses JS exceptions,
+# -fexceptions, so that is most calls inside OCC). Table.get is slow in V8
+# (~1 µs): it was 10 s of a 28 s mesh build. Mirror the table in a JS array, as
+# older Emscripten versions did (wasmTableMirror). Static build, no addFunction,
+# so the entries never change.
+python3 - gmsh.js <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = 'var getWasmTableEntry=funcPtr=>wasmTable.get(funcPtr);'
+new = ('var wasmTableMirror=[];var getWasmTableEntry=funcPtr=>{var f=wasmTableMirror[funcPtr];'
+       'if(!f){f=wasmTableMirror[funcPtr]=wasmTable.get(funcPtr)}return f};')
+assert s.count(old) == 1, 'getWasmTableEntry pattern not found: update the mirror patch'
+open(p, 'w').write(s.replace(old, new)); print('patched getWasmTableEntry (table mirror)')
+PY
 ls -la gmsh.wasm | awk '{printf ">>> gmsh+OCC WASM: %.2f MB\n",$5/1048576}'

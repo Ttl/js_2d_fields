@@ -57,3 +57,12 @@ WASM**, which gmsh links statically for the OCC-fragment mesher.
 
 `gmsh.patch` is a small source patch against the pinned gmsh commit; it only
 removes unused code (size optimization) and is not required for correctness.
+
+`link-occ-wasm.sh` also post-processes the generated `gmsh.js`: it replaces
+Emscripten's `getWasmTableEntry` with a JS-array mirror of the function table.
+The build uses JS exception handling (`-fexceptions`), so most calls inside OCC
+go through `invoke_*` trampolines that look their target up with
+`WebAssembly.Table.get`, which was ~35% of a mesh build's wall time. The patched
+`gmsh.js` is what is checked in; rebuilding without the script loses it (a
+rebuild with `-fwasm-exceptions` and `-O2` instead of `-Oz` would remove the
+trampolines altogether, at the cost of a larger binary, and is untested).

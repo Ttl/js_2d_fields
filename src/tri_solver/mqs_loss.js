@@ -79,10 +79,6 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
         if (outside > 0) return outside;
         return -Math.min(x - r.xmin, r.xmax - x, y - r.ymin, r.ymax - y);
     }
-    function nearSurface(x, y) {
-        for (const r of rects) if (Math.abs(distToRectBoundary(r, x, y)) < bw) return true;
-        return false;
-    }
     // Graded target size at a point: outside distance to the nearest signal rect.
     function targetAt(x, y) {
         if (!grading) return targetH;
@@ -120,6 +116,12 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     // a warning. null = the band converged (a final marking scan found nothing
     // left to refine).
     let trunc = null;
+    // Per-rect boxes grown by the band width: a triangle whose bounding box misses
+    // every one of them has no point within bw of any surface (a point within bw of a
+    // rect's boundary lies inside the grown box), so the far field, most of the mesh
+    // on every pass, is rejected on four comparisons per rect instead of the
+    // distance evaluations below.
+    const grown = rects.map(r => ({ x0: r.xmin - bw, x1: r.xmax + bw, y0: r.ymin - bw, y1: r.ymax + bw }));
     for (let p = 0; ; p++) {
         const marked = new Uint8Array(mesh.nTris);
         let any = false, nMarked = 0;
@@ -128,22 +130,29 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
             const x0 = mesh.nodes[2*v0], y0 = mesh.nodes[2*v0+1];
             const x1 = mesh.nodes[2*v1], y1 = mesh.nodes[2*v1+1];
             const x2 = mesh.nodes[2*v2], y2 = mesh.nodes[2*v2+1];
-            const xc = (x0+x1+x2)/3, yc = (y0+y1+y2)/3;
-            if (!(nearSurface(xc, yc) || nearSurface(x0, y0) ||
-                  nearSurface(x1, y1) || nearSurface(x2, y2))) continue;
-            let tgt = grading ? targetAt(xc, yc) : targetH;
-            if (depthSlope > 0 && targetH > 0) {
-                // Distance of the element's closest point (of centroid + vertices) to
-                // metal. A triangle straddling the surface must get the surface target.
-                let dS = Infinity;
-                for (const r of rects) {
-                    dS = Math.min(dS, Math.abs(distToRectBoundary(r, xc, yc)),
-                                      Math.abs(distToRectBoundary(r, x0, y0)),
-                                      Math.abs(distToRectBoundary(r, x1, y1)),
-                                      Math.abs(distToRectBoundary(r, x2, y2)));
-                }
-                tgt = Math.max(tgt, depthTarget(dS));
+            const bx0 = Math.min(x0, x1, x2), bx1 = Math.max(x0, x1, x2);
+            const by0 = Math.min(y0, y1, y2), by1 = Math.max(y0, y1, y2);
+            let candidate = false;
+            for (const g of grown) {
+                if (bx1 < g.x0 || bx0 > g.x1 || by1 < g.y0 || by0 > g.y1) continue;
+                candidate = true; break;
             }
+            if (!candidate) continue;
+            const xc = (x0+x1+x2)/3, yc = (y0+y1+y2)/3;
+            // Distance of the element's closest point (of centroid + vertices) to
+            // metal. Within the band iff dS < bw (the former per-point nearSurface
+            // test, evaluated once), a triangle straddling the surface must get the
+            // surface target.
+            let dS = Infinity;
+            for (const r of rects) {
+                dS = Math.min(dS, Math.abs(distToRectBoundary(r, xc, yc)),
+                                  Math.abs(distToRectBoundary(r, x0, y0)),
+                                  Math.abs(distToRectBoundary(r, x1, y1)),
+                                  Math.abs(distToRectBoundary(r, x2, y2)));
+            }
+            if (!(dS < bw)) continue;
+            let tgt = grading ? targetAt(xc, yc) : targetH;
+            if (depthSlope > 0 && targetH > 0) tgt = Math.max(tgt, depthTarget(dS));
             if (tgt > 0) {
                 const hMax = Math.max(Math.hypot(x1-x0, y1-y0),
                                       Math.hypot(x2-x1, y2-y1),

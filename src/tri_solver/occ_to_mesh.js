@@ -152,6 +152,47 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
     return { X0, X1, Y0, Y1, wallPEC };
 }
 
+// Pre-mesh triangle-count estimate for the Distance->Threshold size field that
+// buildOccMeshFromGeometry paints (see the field setup there). Triangles concentrate
+// in the graded band around each painted curve: with surface size s and the size
+// growing at the rate g (gradeRate) with the distance d beyond d = s, one side of the
+// band holds L * integral(dd / (K * h(d)^2)) triangles, K being the mean triangle
+// area in units of h^2. The exterior side integrates to L * (1 + 1/g) / (K * s). A
+// meshed conductor interior is truncated at half the rect's thinner dimension and
+// bounded by the rect area. The bulk adds area / (K * hCoarse^2).
+//
+// K = 0.33 was fitted on gmsh's Delaunay output for these fields (six meshes of a
+// solder-masked differential GCPW, 4.7k..35k triangles: within -5..+20% wherever the
+// Distance field's 200-point curve sampling resolves s, over-predicting only when s
+// is far below the sample spacing of a long curve, which is the safe direction for
+// a budget check). Curves on the domain outline get no exterior band (sigLenExt /
+// gndLenExt). Bands of neighbouring curves overlap and are counted twice, so the
+// estimate is biased high for closely stacked conductors (a cutout's ground slabs
+// under a pair: +30%). `st` is the sizeStats object from a buildOccMeshFromGeometry
+// call (statsOnly or not), `sz` the sizing {sizeMin, sizeMinGnd, hCoarse, gradeRate}.
+export function estimateOccTriCount(st, sz) {
+    const K = 0.33;
+    const g = sz.gradeRate ?? 0.35;
+    // Triangles per unit curve length on one side of the band, depth D available.
+    const side = (s, D) => {
+        if (!(s > 0)) return 0;
+        if (D <= s) return D / (s * s * K);
+        return (1 / s + (1 / s - 1 / (s + g * (D - s))) / g) / K;
+    };
+    const cls = (len, lenExt, area, thin, s) => {
+        if (!(len > 0) || !(s > 0)) return 0;
+        let n = lenExt * side(s, Infinity);
+        if (st.interior && area > 0) {
+            const D = Number.isFinite(thin) ? thin / 2 : Infinity;
+            n += Math.min(len * side(s, D), area / (K * s * s));
+        }
+        return n;
+    };
+    const bulk = sz.hCoarse > 0 ? st.area / (K * sz.hCoarse * sz.hCoarse) : 0;
+    return cls(st.sigLen, st.sigLenExt ?? st.sigLen, st.sigArea, st.sigThin, sz.sizeMin)
+         + cls(st.gndLen, st.gndLenExt ?? st.gndLen, st.gndArea, st.gndThin, sz.sizeMinGnd) + bulk;
+}
+
 export function buildOccMeshFromGeometry(G, opts) {
     const conductors = opts.conductors || [];
     const dielectrics = opts.dielectrics || [];
@@ -302,6 +343,13 @@ export function buildOccMeshFromGeometry(G, opts) {
     // the only lever was global coarsening, which left the signal trace with
     // elements larger than the trace itself.
     const sigCurves = new Set(), gndCurves = new Set();
+    // Size-field statistics for the pre-mesh triangle-count estimate
+    // (estimateOccTriCount): painted curve length, meshed conductor area and the
+    // thinnest rect dimension per class, plus the meshed domain area.
+    const sizeStats = { sigLen: 0, gndLen: 0, sigLenExt: 0, gndLenExt: 0,
+                        sigArea: 0, gndArea: 0, sigThin: Infinity, gndThin: Infinity,
+                        area: domainShape ? shapeArea({ shape: domainShape }, meshOpts) : (X1 - X0) * (Y1 - Y0),
+                        interior: opts.meshConductorInterior !== false };
     {
         const fe = G.stackAlloc(4), feN = G.stackAlloc(4);
         G._gmshModelGetEntities(fe, feN, 2, ierr); check('GetEntities(2)');
@@ -378,6 +426,40 @@ export function buildOccMeshFromGeometry(G, opts) {
                     if (Math.abs(shapeSignedDist(c.shape, cx, cy)) < tol) { sigCurves.add(ctag); break; }
                 }
             }
+        }
+
+        // Curve lengths per class (straight segments: the bbox diagonal), for the
+        // pre-mesh triangle-count estimate (estimateOccTriCount). A curve lying on
+        // the meshed-domain outline (a ground slab's bottom face on y = Y0, a via
+        // slab's outer face on x = X1) has no exterior side to mesh, so it counts
+        // toward the interior term only (`*LenExt` excludes it).
+        const bTol = OCC_BBOX_PAD + tol;
+        const curveLen = (ctag) => {
+            G._gmshModelGetBoundingBox(1, ctag, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], ierr);
+            check('GetBoundingBox(1) len');
+            const x0 = G.getValue(bb[0], 'double'), y0 = G.getValue(bb[1], 'double');
+            const x1 = G.getValue(bb[3], 'double'), y1 = G.getValue(bb[4], 'double');
+            const onOutline = !domainShape && (
+                (x1 - x0 < bTol && (Math.abs(x0 - X0) < bTol || Math.abs(x1 - X1) < bTol)) ||
+                (y1 - y0 < bTol && (Math.abs(y0 - Y0) < bTol || Math.abs(y1 - Y1) < bTol)));
+            return { len: Math.hypot(x1 - x0, y1 - y0), onOutline };
+        };
+        for (const c of sigCurves) { const { len, onOutline } = curveLen(c); sizeStats.sigLen += len; if (!onOutline) sizeStats.sigLenExt += len; }
+        for (const c of gndCurves) { const { len, onOutline } = curveLen(c); sizeStats.gndLen += len; if (!onOutline) sizeStats.gndLenExt += len; }
+        condRects.forEach((c, i) => {
+            if (c.shape && isComplement(c.shape)) return;
+            const thin = c.shape ? Infinity : Math.min(c.xmax - c.xmin, c.ymax - c.ymin);
+            if (condRoles[i] && condRoles[i].is_signal) {
+                sizeStats.sigArea += c.meshArea; sizeStats.sigThin = Math.min(sizeStats.sigThin, thin);
+            } else {
+                sizeStats.gndArea += c.meshArea; sizeStats.gndThin = Math.min(sizeStats.gndThin, thin);
+            }
+        });
+        // Statistics-only call (tri_backend's pre-mesh budget sizing): the OCC model
+        // is built and classified exactly as for a real mesh, but nothing is meshed.
+        if (opts.statsOnly) {
+            G.stackRestore(stack);
+            return { sizeStats, nGndCurves: gndCurves.size };
         }
 
         // ---- Optionally drop the conductor INTERIORS from the meshed model ----
@@ -461,7 +543,8 @@ export function buildOccMeshFromGeometry(G, opts) {
     // set the ground resolution, and the adaptive passes sharpen what matters.
     const gndScale = Math.max(1, opts.gndSizeScale ?? 1);
     const sizeMinGnd = Math.min(sizeMin * gndScale, hCoarse);
-    if (globalThis.__OCC_DEBUG__) console.error('[occ] condRects', condRects.length, 'sigCurves', sigCurves.size, 'gndCurves', gndCurves.size, 'hFine', hFine, 'sizeMin', sizeMin, 'sizeMinGnd', sizeMinGnd, 'hCoarse', hCoarse);
+    Object.assign(sizeStats, { sizeMin, sizeMinGnd, hFine, hCoarse, gradeRate });
+    if (globalThis.__OCC_DEBUG__) console.error('[occ] condRects', condRects.length, 'sigCurves', sigCurves.size, 'gndCurves', gndCurves.size, 'hFine', hFine, 'sizeMin', sizeMin, 'sizeMinGnd', sizeMinGnd, 'hCoarse', hCoarse, 'stats', JSON.stringify(sizeStats));
     {
         // sizeMin (conductor-surface element size) is finer than the global hFine so the
         // current distribution (skin/proximity loss) and a narrow inter-trace gap (only
@@ -506,7 +589,11 @@ export function buildOccMeshFromGeometry(G, opts) {
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeMin'), Math.min(hFine * 0.5, sizeMin * 0.5), ierr);
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.MeshSizeMax'), hCoarse, ierr);
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.Algorithm'), 5, ierr);
-    G._gmshOptionSetNumber(_cstr(G, 'Mesh.Smoothing'), 10, ierr);
+    // One Laplacian smoothing pass (gmsh's default). Ten passes cost ~0.2 ms per
+    // triangle in this WASM build (1.1 s of a 1.6 s build at 5k triangles) and
+    // measured no quality gain over one: same maxQ/avgQ on a 1 µm-trace GCPW,
+    // slightly better on a 35 µm one, results within 0.01%.
+    G._gmshOptionSetNumber(_cstr(G, 'Mesh.Smoothing'), 1, ierr);
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.RandomSeed'), 1, ierr);
     // Caller overrides (experimental tuning of the gmsh mesher, e.g. Mesh.Optimize).
     if (opts.gmshOptions) {
@@ -665,6 +752,9 @@ export function buildOccMeshFromGeometry(G, opts) {
         // How many passive-ground boundary curves fed the (relaxable) ground size
         // field — tri_backend's budget loop only tries gndSizeScale when nonzero.
         nGndCurves: gndCurves.size,
+        // Size-field statistics + the sizing this mesh was built with, for
+        // estimateOccTriCount (tri_backend's budget pre-sizing / diagnostics).
+        sizeStats,
         meshedDomain: { X0, X1, Y0, Y1, wallPEC },
     };
 }

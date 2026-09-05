@@ -1,6 +1,6 @@
 // Triangular P2 Nedelec FEM — generic mesh, basis, assembly, and solver functions
 
-import { tripletsToCSR, tripletsToCSRMulti, solveCG, triQuality as triQualityXY } from './fem_core.js';
+import { tripletsToCSR, solveCG, triQuality as triQualityXY } from './fem_core.js';
 import { shapeContains, REL_SHAPE_TOL } from '../shapes.js';
 
 // 6-point Gauss quadrature on triangle (barycentric)
@@ -730,10 +730,15 @@ export function gaugeSeed(gauge, phi, mesh, fm) {
 // boundary term LINEAR in k₀ = √k²:
 //   A(k) = A0 + k²·A1 + j·k0·Ar        (A0 = Att block, A1 = −Btt, Ar = ABC template)
 //   B(k) = B0 + k²·B1                  (B0 = Dtt/Dzt/Dzz1 blocks, B1 = −Dzz2)
-// This builds the five value templates ONCE on fixed CSR patterns (one pattern
+// This builds the value templates ONCE on fixed CSR patterns (one pattern
 // for A including the ABC entries, one for B); femFromDecomposition() then
 // produces the matrices for any frequency in O(nnz). Per-frequency quadrature
 // reassembly used to be a dominant sweep cost.
+// The eps-dependent templates (A1, B1: mass terms, linear in eps) are stored per
+// material class (distinct permittivity value) and combined with a per-class eps
+// list, so a permittivity change that keeps the material layout (the causal
+// Djordjevic–Sarkar model per frequency) recombines in O(nnz) too
+// (decompositionClassEps). The ABC template carries its edge's class the same way.
 //
 // With a gauge (buildTriGauge) the templates are assembled in the gauged DOF layout
 // [cotree | ψ | e_z] (same N): every element matrix is congruence-transformed through
@@ -742,7 +747,19 @@ export function gaugeSeed(gauge, phi, mesh, fm) {
 // explicitly so the pattern is exactly symmetric (the eigensolver's LDL^T path checks
 // that), two summation orders would otherwise leave roundoff-asymmetric zeros.
 // Without a gauge the assembly is unchanged (bit-identical output).
+// Perf hook (node only, see fem_core's _stats): TRI_STATS=1 records every pencil
+// assembly's size and wall time in globalThis.__TRI_STATS__.asm.
+const _asmStats = (typeof process !== 'undefined' && process.env && process.env.TRI_STATS)
+    ? ((globalThis.__TRI_STATS__ ??= { eig: [], lin: [] }).asm ??= []) : null;
+
 export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge = null) {
+    const _t0 = _asmStats ? performance.now() : 0;
+    const dec = _assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge);
+    if (_asmStats) _asmStats.push({ N: dec.N, nnz: dec.A.colIdx.length, nTris: mesh.nTris, ms: performance.now() - _t0 });
+    return dec;
+}
+
+function _assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge = null) {
     const { tris, edges, triEdges, triSigns, nTris, nEdges } = mesh;
     const { edgeF, faceF, nodeF, edgeNodeF } = fm;
     const N = fm.nFreeTransverse + fm.nFreeLongitudinal;
@@ -754,44 +771,64 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
     const MAXS = gauge ? 20 : 14, MAXR = 8;
     const nFT = fm.nFreeTransverse, T = gauge ? gauge.T : null;
 
-    // Pre-allocate COO arrays: max 196 nonzeros per P2 element (14×14); the gauged
-    // element has ≤ MAXS² slots.
+    // Material classes: the triangles sharing one complex permittivity. Every
+    // eps-dependent element block is eps times an eps-free template (see
+    // computeTriP2Matrices), so the mass templates are kept per class and the
+    // pencil is recombined for any per-class eps by femFromDecomposition, a
+    // causal-materials sweep changes each dielectric's eps at every frequency
+    // and used to re-assemble the whole pencil per point (~0.4 s at 5k
+    // triangles, more than the eigensolve itself).
+    const clsOf = new Int32Array(nTris);
+    const classes = [];
+    {
+        const keyMap = new Map();
+        for (let t = 0; t < nTris; t++) {
+            const e = epsMap[t];
+            const key = e.re + ',' + e.im;
+            let c = keyMap.get(key);
+            if (c === undefined) { c = classes.length; classes.push({ re: e.re, im: e.im }); keyMap.set(key, c); }
+            clsOf[t] = c;
+        }
+    }
+
+    // Pre-allocate COO arrays: max 196 nonzeros per P2 element (14x14); the gauged
+    // element has ≤ MAXS^2 slots. Templates: A0 (curl-curl), A1 (−mass, per unit
+    // eps), B0 (eps-free blocks), B1 (−e_z mass, per unit eps), every raw entry
+    // carries the class of the triangle.
     const maxNnz = nTris * MAXS * MAXS;
     const eAr = new Int32Array(maxNnz), eAc = new Int32Array(maxNnz);
-    const eA0 = new Float64Array(maxNnz);
-    const eA1Re = new Float64Array(maxNnz), eA1Im = new Float64Array(maxNnz);
+    const eA0 = new Float64Array(maxNnz), eA1 = new Float64Array(maxNnz);
+    const eAcls = new Int32Array(maxNnz);
     const eBr = new Int32Array(maxNnz), eBc = new Int32Array(maxNnz);
-    const eB0 = new Float64Array(maxNnz);
-    const eB1Re = new Float64Array(maxNnz), eB1Im = new Float64Array(maxNnz);
+    const eB0 = new Float64Array(maxNnz), eB1 = new Float64Array(maxNnz);
+    const eBcls = new Int32Array(maxNnz);
     let aNnz = 0, bNnz = 0;
 
     // Element templates in the 14×14 local DOF layout
-    const A0el = new Float64Array(196);
-    const A1elRe = new Float64Array(196), A1elIm = new Float64Array(196);
-    const B0el = new Float64Array(196);
-    const B1elRe = new Float64Array(196), B1elIm = new Float64Array(196);
+    const A0el = new Float64Array(196), A1el = new Float64Array(196);
+    const B0el = new Float64Array(196), B1el = new Float64Array(196);
     const globalDof = new Int32Array(nLocal);
     const signs = new Float64Array(nLocal);
     // Gauged scratch: per-element slot table and local T rows, accumulators per template.
     const slotCol = new Int32Array(MAXS);
     const rowSlot = new Int32Array(nLocal * MAXR), rowW = new Float64Array(nLocal * MAXR), rowLen = new Int32Array(nLocal);
     const cSlot = new Int32Array(nLocal);
-    const acc0 = new Float64Array(MAXS * MAXS), acc1Re = new Float64Array(MAXS * MAXS), acc1Im = new Float64Array(MAXS * MAXS);
-    const accB0 = new Float64Array(MAXS * MAXS), accB1Re = new Float64Array(MAXS * MAXS), accB1Im = new Float64Array(MAXS * MAXS);
-    const accs = [acc0, acc1Re, acc1Im, accB0, accB1Re, accB1Im];
+    const acc0 = new Float64Array(MAXS * MAXS), acc1 = new Float64Array(MAXS * MAXS);
+    const accB0 = new Float64Array(MAXS * MAXS), accB1 = new Float64Array(MAXS * MAXS);
+    const accs = [acc0, acc1, accB0, accB1];
 
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const eps = epsMap[t];
-        const m = computeTriP2Matrices(nodes, v0, v1, v2, eps.re, eps.im);
+        const cls = clsOf[t];
+        // Unit permittivity: Btt and Dzz2 come back as the eps-free mass templates.
+        const m = computeTriP2Matrices(nodes, v0, v1, v2, 1, 0);
 
-        A0el.fill(0); A1elRe.fill(0); A1elIm.fill(0);
-        B0el.fill(0); B1elRe.fill(0); B1elIm.fill(0);
+        A0el.fill(0); A1el.fill(0);
+        B0el.fill(0); B1el.fill(0);
         for (let i = 0; i < 8; i++) {
             for (let j = 0; j < 8; j++) {
                 A0el[i*14+j] = m.Att[i*8+j];
-                A1elRe[i*14+j] = -m.BttRe[i*8+j];
-                A1elIm[i*14+j] = -m.BttIm[i*8+j];
+                A1el[i*14+j] = -m.BttRe[i*8+j];
                 B0el[i*14+j] = m.Dtt[i*8+j];
             }
         }
@@ -802,8 +839,7 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
             }
             for (let j = 0; j < 6; j++) {
                 B0el[(i+8)*14+(j+8)] = m.Dzz1[i*6+j];
-                B1elRe[(i+8)*14+(j+8)] = -m.Dzz2Re[i*6+j];
-                B1elIm[(i+8)*14+(j+8)] = -m.Dzz2Im[i*6+j];
+                B1el[(i+8)*14+(j+8)] = -m.Dzz2Re[i*6+j];
             }
         }
 
@@ -832,15 +868,15 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
                     const gj = globalDof[lj]; if (gj < 0) continue;
                     const s = signs[li] * signs[lj];
                     const idx = li * nLocal + lj;
-                    const a0 = s * A0el[idx], a1re = s * A1elRe[idx], a1im = s * A1elIm[idx];
-                    if (a0 !== 0 || a1re !== 0 || a1im !== 0) {
+                    const a0 = s * A0el[idx], a1 = s * A1el[idx];
+                    if (a0 !== 0 || a1 !== 0) {
                         eAr[aNnz] = gi; eAc[aNnz] = gj;
-                        eA0[aNnz] = a0; eA1Re[aNnz] = a1re; eA1Im[aNnz] = a1im; aNnz++;
+                        eA0[aNnz] = a0; eA1[aNnz] = a1; eAcls[aNnz] = cls; aNnz++;
                     }
-                    const b0 = s * B0el[idx], b1re = s * B1elRe[idx], b1im = s * B1elIm[idx];
-                    if (b0 !== 0 || b1re !== 0 || b1im !== 0) {
+                    const b0 = s * B0el[idx], b1 = s * B1el[idx];
+                    if (b0 !== 0 || b1 !== 0) {
                         eBr[bNnz] = gi; eBc[bNnz] = gj;
-                        eB0[bNnz] = b0; eB1Re[bNnz] = b1re; eB1Im[bNnz] = b1im; bNnz++;
+                        eB0[bNnz] = b0; eB1[bNnz] = b1; eBcls[bNnz] = cls; bNnz++;
                     }
                 }
             }
@@ -872,17 +908,16 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
             for (let lj = 0; lj < nLocal; lj++) {
                 if (rowLen[lj] === 0) continue;
                 const idx = li * nLocal + lj;
-                const a1re = A1elRe[idx], a1im = A1elIm[idx], b0 = B0el[idx], b1re = B1elRe[idx], b1im = B1elIm[idx];
+                const a1 = A1el[idx], b0 = B0el[idx], b1 = B1el[idx];
                 if (cSlot[li] >= 0 && cSlot[lj] >= 0)
                     acc0[cSlot[li] * MAXS + cSlot[lj]] += signs[li] * signs[lj] * A0el[idx];
-                if (a1re === 0 && a1im === 0 && b0 === 0 && b1re === 0 && b1im === 0) continue;
+                if (a1 === 0 && b0 === 0 && b1 === 0) continue;
                 for (let ki = 0; ki < rowLen[li]; ki++) {
                     const si = rowSlot[li*MAXR + ki], wi = rowW[li*MAXR + ki];
                     for (let kj = 0; kj < rowLen[lj]; kj++) {
                         const k = si * MAXS + rowSlot[lj*MAXR + kj];
                         const w = wi * rowW[lj*MAXR + kj];
-                        acc1Re[k] += w * a1re; acc1Im[k] += w * a1im;
-                        accB0[k] += w * b0; accB1Re[k] += w * b1re; accB1Im[k] += w * b1im;
+                        acc1[k] += w * a1; accB0[k] += w * b0; accB1[k] += w * b1;
                     }
                 }
             }
@@ -897,15 +932,15 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
             const gi = slotCol[r];
             for (let s = 0; s < nSlot; s++) {
                 const k = r*MAXS + s, gj = slotCol[s];
-                const a0 = acc0[k], a1re = acc1Re[k], a1im = acc1Im[k];
-                if (a0 !== 0 || a1re !== 0 || a1im !== 0) {
+                const a0 = acc0[k], a1 = acc1[k];
+                if (a0 !== 0 || a1 !== 0) {
                     eAr[aNnz] = gi; eAc[aNnz] = gj;
-                    eA0[aNnz] = a0; eA1Re[aNnz] = a1re; eA1Im[aNnz] = a1im; aNnz++;
+                    eA0[aNnz] = a0; eA1[aNnz] = a1; eAcls[aNnz] = cls; aNnz++;
                 }
-                const b0 = accB0[k], b1re = accB1Re[k], b1im = accB1Im[k];
-                if (b0 !== 0 || b1re !== 0 || b1im !== 0) {
+                const b0 = accB0[k], b1 = accB1[k];
+                if (b0 !== 0 || b1 !== 0) {
                     eBr[bNnz] = gi; eBc[bNnz] = gj;
-                    eB0[bNnz] = b0; eB1Re[bNnz] = b1re; eB1Im[bNnz] = b1im; bNnz++;
+                    eB0[bNnz] = b0; eB1[bNnz] = b1; eBcls[bNnz] = cls; bNnz++;
                 }
             }
         }
@@ -921,9 +956,10 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
     //
     // The matched coefficient is the local plane-wave wavenumber k*sqrt(er), not vacuum k.
     // A wall edge in dielectric uses one triangle adjacent to the boundary to
-    // sample the permittivity.
+    // sample the permittivity: the entry is stored per unit sqrt(eps) with that
+    // triangle's material class, and femFromDecomposition applies sqrt(eps)_class.
     // Gauged: a diagonal entry r on DOF g becomes r*T_g^T*T_g (symmetric by construction).
-    const rR = [], rC = [], rV = [];
+    const rR = [], rC = [], rV = [], rCls = [];
     if (abc.top === true || abc.left === true || abc.right === true || abc.bottom === true) {
         const ymax = condRect.ymax_domain, ymin = condRect.ymin_domain;
         const xmin = condRect.xmin_domain, xmax = condRect.xmax_domain;
@@ -936,12 +972,12 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
                 if (edgeTri[eIdx] < 0) edgeTri[eIdx] = t;
             }
         }
-        const pushRobin = (g, val) => {
+        const pushRobin = (g, val, cls) => {
             if (g < 0) return;
-            if (!gauge) { rR.push(g); rC.push(g); rV.push(val); return; }
+            if (!gauge) { rR.push(g); rC.push(g); rV.push(val); rCls.push(cls); return; }
             for (let p = T.rowPtr[g]; p < T.rowPtr[g+1]; p++)
                 for (let q = T.rowPtr[g]; q < T.rowPtr[g+1]; q++) {
-                    rR.push(T.cols[p]); rC.push(T.cols[q]); rV.push(val * T.coefs[p] * T.coefs[q]);
+                    rR.push(T.cols[p]); rC.push(T.cols[q]); rV.push(val * T.coefs[p] * T.coefs[q]); rCls.push(cls);
                 }
         };
         for (let e = 0; e < nEdges; e++) {
@@ -956,59 +992,165 @@ export function assembleTriFEMDecomposed(mesh, fm, epsMap, abc, condRect, gauge 
             if (!isBoundary) continue;
             const L = Math.sqrt((x1-x0)**2 + (y1-y0)**2);
             const tAdj = edgeTri[e];
-            const erAdj = (tAdj >= 0 && epsMap && epsMap[tAdj]) ? epsMap[tAdj].re : 1;
-            const nWall = erAdj > 0 ? Math.sqrt(erAdj) : 1;   // local k = k₀·n_wall
-            pushRobin(edgeF[2*e], nWall / L);
-            pushRobin(edgeF[2*e+1], nWall / (3 * L));
+            // An edge with no adjacent triangle (cannot happen on a conforming mesh)
+            // keeps the vacuum coefficient: class -1 -> sqrt(eps) = 1 at combine time.
+            const cls = tAdj >= 0 ? clsOf[tAdj] : -1;
+            pushRobin(edgeF[2*e], 1 / L, cls);
+            pushRobin(edgeF[2*e+1], 1 / (3 * L), cls);
         }
     }
 
-    // Combined A pattern = element entries + ABC entries. The SAME (row, col)
-    // sequence is converted for each value template, so the dedup produces an
-    // identical pattern and the templates line up entry-for-entry.
+    // Combined A pattern = element entries + ABC entries (the latter with zero
+    // element templates, so the pattern covers them). One pattern build per
+    // matrix, then every template is scattered onto it through the raw to CSR map.
     const nAe = aNnz, nR = rR.length, nA = nAe + nR;
     const rowsA = new Int32Array(nA), colsA = new Int32Array(nA);
     rowsA.set(eAr.subarray(0, nAe)); colsA.set(eAc.subarray(0, nAe));
-    const v0A = new Float64Array(nA), v1ReA = new Float64Array(nA), v1ImA = new Float64Array(nA);
-    const vrA = new Float64Array(nA);
-    v0A.set(eA0.subarray(0, nAe)); v1ReA.set(eA1Re.subarray(0, nAe)); v1ImA.set(eA1Im.subarray(0, nAe));
-    for (let i = 0; i < nR; i++) {
-        rowsA[nAe + i] = rR[i]; colsA[nAe + i] = rC[i];
-        vrA[nAe + i] = rV[i];
-    }
-    // One conversion per pattern (A and B), each carrying all of its aligned value
-    // templates, not one conversion per template.
-    const csrA = tripletsToCSRMulti(rowsA, colsA, N, [v0A, v1ReA, v1ImA, vrA]);
-    const csrB = tripletsToCSRMulti(eBr.subarray(0, bNnz), eBc.subarray(0, bNnz), N,
-        [eB0.subarray(0, bNnz), eB1Re.subarray(0, bNnz), eB1Im.subarray(0, bNnz)]);
-
-    return {
-        N,
-        A: { rowPtr: csrA.rowPtr, colIdx: csrA.colIdx,
-             v0Re: csrA.vals[0], v1Re: csrA.vals[1], v1Im: csrA.vals[2], vrIm: csrA.vals[3] },
-        B: { rowPtr: csrB.rowPtr, colIdx: csrB.colIdx,
-             v0Re: csrB.vals[0], v1Re: csrB.vals[1], v1Im: csrB.vals[2] },
+    for (let i = 0; i < nR; i++) { rowsA[nAe + i] = rR[i]; colsA[nAe + i] = rC[i]; }
+    const patA = tripletsToCSRPattern(rowsA, colsA, N);
+    const patB = tripletsToCSRPattern(eBr.subarray(0, bNnz), eBc.subarray(0, bNnz), N);
+    const nCls = classes.length;
+    const A = {
+        rowPtr: patA.rowPtr, colIdx: patA.colIdx,
+        v0Re: scatterTemplate(patA.pos, eA0, nAe, patA.nnz),
+        v1: scatterTemplateByClass(patA.pos, eA1, eAcls, nAe, patA.nnz, nCls),
+        robin: { pos: patA.pos.slice(nAe, nA), val: Float64Array.from(rV), cls: Int32Array.from(rCls) },
     };
+    const B = {
+        rowPtr: patB.rowPtr, colIdx: patB.colIdx,
+        v0Re: scatterTemplate(patB.pos, eB0, bNnz, patB.nnz),
+        v1: scatterTemplateByClass(patB.pos, eB1, eBcls, bNnz, patB.nnz, nCls),
+    };
+    const dec = { N, nTris, classes, clsOf, A, B };
+    // Eps-scaled templates for the assembly-time permittivity, computed on demand
+    // (tests and diagnostics read them; the solve path never does).
+    defineScaledTemplates(dec, A, true);
+    defineScaledTemplates(dec, B, false);
+    return dec;
 }
 
-// Combine a decomposition into the concrete A(k), B(k) CSR pair for one k².
-export function femFromDecomposition(dec, k2) {
+// Raw to CSR position map for a (rows, cols) triplet sequence: the same double
+// counting sort tripletsToCSR does, returning where each raw entry landed
+// instead of summed values. Templates are then scattered with scatterTemplate.
+function tripletsToCSRPattern(rows, cols, N) {
+    const nRaw = rows.length;
+    const start = new Int32Array(N + 1);
+    for (let i = 0; i < nRaw; i++) start[cols[i] + 1]++;
+    for (let c = 0; c < N; c++) start[c + 1] += start[c];
+    const perm = new Int32Array(nRaw);
+    for (let i = 0; i < nRaw; i++) perm[start[cols[i]]++] = i;
+    const rowStart = new Int32Array(N + 1);
+    for (let i = 0; i < nRaw; i++) rowStart[rows[i] + 1]++;
+    for (let r = 0; r < N; r++) rowStart[r + 1] += rowStart[r];
+    // Bucket by row in column order (stable), then dedup per row.
+    const bCol = new Int32Array(nRaw), bIdx = new Int32Array(nRaw);
+    const fill = rowStart.slice(0, N);
+    for (let k = 0; k < nRaw; k++) {
+        const i = perm[k], p = fill[rows[i]]++;
+        bCol[p] = cols[i]; bIdx[p] = i;
+    }
+    const colIdx = new Int32Array(nRaw);
+    const pos = new Int32Array(nRaw);
+    const rowPtr = new Int32Array(N + 1);
+    let nnz = 0;
+    for (let r = 0; r < N; r++) {
+        let p = rowStart[r];
+        const e = rowStart[r + 1];
+        while (p < e) {
+            const c = bCol[p];
+            colIdx[nnz] = c;
+            while (p < e && bCol[p] === c) { pos[bIdx[p]] = nnz; p++; }
+            nnz++;
+        }
+        rowPtr[r + 1] = nnz;
+    }
+    return { rowPtr, colIdx: colIdx.slice(0, nnz), pos, nnz };
+}
+
+function scatterTemplate(pos, vals, n, nnz) {
+    const out = new Float64Array(nnz);
+    for (let k = 0; k < n; k++) out[pos[k]] += vals[k];
+    return out;
+}
+
+function scatterTemplateByClass(pos, vals, cls, n, nnz, nCls) {
+    const out = [];
+    for (let c = 0; c < nCls; c++) out.push(new Float64Array(nnz));
+    for (let k = 0; k < n; k++) out[cls[k]][pos[k]] += vals[k];
+    return out;
+}
+
+// v1Re / v1Im (and vrIm on A): the per-class templates combined with the
+// assembly-time class permittivities, the layout the decomposition used to
+// store. Lazy, uncached: only tests read them.
+function defineScaledTemplates(dec, M, withRobin) {
+    const combine = (part) => {
+        const out = new Float64Array(M.colIdx.length);
+        for (let c = 0; c < dec.classes.length; c++) {
+            const w = dec.classes[c][part], v = M.v1[c];
+            if (w === 0) continue;
+            for (let i = 0; i < out.length; i++) out[i] += w * v[i];
+        }
+        return out;
+    };
+    Object.defineProperty(M, 'v1Re', { get: () => combine('re'), enumerable: false });
+    Object.defineProperty(M, 'v1Im', { get: () => combine('im'), enumerable: false });
+    if (withRobin) Object.defineProperty(M, 'vrIm', { get: () => {
+        const out = new Float64Array(M.colIdx.length);
+        addRobin(out, M.robin, dec.classes, 1);
+        return out;
+    }, enumerable: false });
+}
+
+// A += k0*sqrt(eps)_class*robin (imaginary part). Class -1 keeps the vacuum coefficient.
+function addRobin(aIm, robin, classEps, k0) {
+    const { pos, val, cls } = robin;
+    for (let i = 0; i < pos.length; i++) {
+        const c = cls[i];
+        const er = c >= 0 ? classEps[c].re : 1;
+        aIm[pos[i]] += k0 * (er > 0 ? Math.sqrt(er) : 1) * val[i];
+    }
+}
+
+// Per-class permittivities of `epsMap` on the decomposition's class partition, or
+// null when the map does not follow the partition (a different material layout:
+// the caller must re-assemble). A causal-materials rebuild of the map changes the
+// values per dielectric but never the partition, so it lands here.
+export function decompositionClassEps(dec, epsMap) {
+    if (!epsMap || epsMap.length !== dec.clsOf.length) return null;
+    const out = new Array(dec.classes.length).fill(null);
+    const clsOf = dec.clsOf;
+    for (let t = 0; t < epsMap.length; t++) {
+        const c = clsOf[t], e = epsMap[t], o = out[c];
+        if (o === null) out[c] = { re: e.re, im: e.im };
+        else if (o.re !== e.re || o.im !== e.im) return null;
+    }
+    for (let c = 0; c < out.length; c++) if (out[c] === null) out[c] = dec.classes[c];
+    return out;
+}
+
+// Combine a decomposition into the concrete A(k), B(k) CSR pair for one k^2 and a
+// per-class permittivity list (default: the assembly-time values).
+export function femFromDecomposition(dec, k2, classEps = dec.classes) {
     const k0 = Math.sqrt(k2);
-    const A = dec.A, nA = A.v0Re.length;
-    const aRe = new Float64Array(nA), aIm = new Float64Array(nA);
-    for (let i = 0; i < nA; i++) {
-        aRe[i] = A.v0Re[i] + k2 * A.v1Re[i];
-        aIm[i] = k2 * A.v1Im[i] + k0 * A.vrIm[i];
-    }
-    const B = dec.B, nB = B.v0Re.length;
-    const bRe = new Float64Array(nB), bIm = new Float64Array(nB);
-    for (let i = 0; i < nB; i++) {
-        bRe[i] = B.v0Re[i] + k2 * B.v1Re[i];
-        bIm[i] = k2 * B.v1Im[i];
-    }
+    const combine = (M) => {
+        const n = M.colIdx.length;
+        const re = new Float64Array(n), im = new Float64Array(n);
+        re.set(M.v0Re);
+        for (let c = 0; c < dec.classes.length; c++) {
+            const v = M.v1[c];
+            const wr = k2 * classEps[c].re, wi = k2 * classEps[c].im;
+            if (wr !== 0) for (let i = 0; i < n; i++) re[i] += wr * v[i];
+            if (wi !== 0) for (let i = 0; i < n; i++) im[i] += wi * v[i];
+        }
+        return { re, im };
+    };
+    const a = combine(dec.A);
+    if (dec.A.robin) addRobin(a.im, dec.A.robin, classEps, k0);
+    const b = combine(dec.B);
     return {
-        csrA: { rowPtr: A.rowPtr, colIdx: A.colIdx, valRe: aRe, valIm: aIm },
-        csrB: { rowPtr: B.rowPtr, colIdx: B.colIdx, valRe: bRe, valIm: bIm },
+        csrA: { rowPtr: dec.A.rowPtr, colIdx: dec.A.colIdx, valRe: a.re, valIm: a.im },
+        csrB: { rowPtr: dec.B.rowPtr, colIdx: dec.B.colIdx, valRe: b.re, valIm: b.im },
         N: dec.N,
     };
 }
