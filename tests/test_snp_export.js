@@ -627,4 +627,5 @@ async function test_s4p_generation_lossless() {
     }
 }
 
-export { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation, test_s2p_generation2 };
+export { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation, test_s2p_generation2,
+         parseS4P_MA, complexAbsDiff };

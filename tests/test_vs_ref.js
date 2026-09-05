@@ -16,7 +16,11 @@ class BroadsideStriplineSolver extends _BroadsideStriplineSolver {
 import { computeSParamsSingleEnded, computeSParamsDifferential } from '../src/sparameters.js';
 import { Complex } from '../src/complex.js';
 import { readFileSync } from 'fs';
-import { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation, test_s2p_generation2 } from './test_snp_export.js';
+import { test_s4p_generation_lossless, test_s4p_generation, test_s2p_generation, test_s2p_generation2,
+         parseS4P_MA, complexAbsDiff } from './test_snp_export.js';
+import { fileURLToPath } from 'url';
+import { join, dirname } from 'path';
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Test microstrip solver results against reference values.
@@ -1098,6 +1102,100 @@ async function solve_differential_gcpw() {
     return results;
 }
 
+// 500 mm enclosed differential microstrip. Ports 1,2 are the two traces at one
+// end, 3,4 at the other.
+//
+// The line is long on purpose. The even and odd modes travel at different
+// speeds (eps_eff 3.19 vs 2.92), so a signal launched on one trace beats
+// between the two: over 500 mm the far-end crosstalk S41 climbs to about -2 dB
+// near 3.5 GHz while the through S31 dips to -22 dB, then the pattern repeats
+// (nulls near 7.5 GHz). The complex error below is dominated by eps_eff
+// accuracy: a 0.5% error in eps_eff alone would put |dS| near 0.5. Reference
+// values are S-parameters, so the comparison is the per-frequency max over all
+// 16 entries of |S_ij - S_ij,ref|.
+async function solve_differential_microstrip_500mm_s4p() {
+    console.log(`\n${'='.repeat(80)}`);
+    console.log('DIFFERENTIAL MICROSTRIP 500 MM S4P TEST');
+    console.log(`${'='.repeat(80)}`);
+
+    const reference = parseS4P_MA(join(__dirname, 'data/ms_diff_2d_low_loss_500mm.s4p'));
+    console.log(`Loaded ${reference.length} frequency points from reference`);
+
+    const solver = new MicrostripSolver({
+        substrate_height: 0.2104e-3,
+        trace_width: 0.35e-3,
+        trace_thickness: 50e-6,
+        gnd_thickness: 35e-6,
+        epsilon_r: 4.4,
+        tan_delta: 0.002,
+        sigma_cond: 5.8e7,
+        freq: reference[0].freq,
+        nx: 10,
+        ny: 10,
+        trace_spacing: 0.5e-3,       // enables differential mode
+        enclosure_width: 3e-3,       // x_sub
+        // z_air = 1 mm in the reference is measured from the top of the trace;
+        // enclosure_height is measured from the top of the substrate.
+        enclosure_height: 1e-3 + 50e-6,
+        boundaries: ["gnd", "gnd", "gnd", "gnd"]
+    });
+    solver.use_causal_materials = false;
+
+    // 0.001 rather than the app default: over 500 mm the phase is ~190 rad at 10 GHz, so
+    // the comparison is a test of the S-parameter passes only if the mesh error is well
+    // under 0.1% in eps_eff.
+    const sweepResults = await solver.solve_sweep({
+        frequencies: reference.map(r => r.freq),
+        energy_tol: 0.001
+    });
+    console.log(`Mesh: ${JSON.stringify(sweepResults.mesh)}`);
+
+    const odd = sweepResults.modes.find(m => m.mode === 'odd');
+    const even = sweepResults.modes.find(m => m.mode === 'even');
+    const length = 0.5;
+    const Z_ref = 50;
+
+    const tolerance = MESH_BACKEND === 'triangular' ? 0.8 : 0.07;
+
+    let all_passed = true;
+    let worst = { err: 0, freq: 0, param: '' };
+    console.log(`\n${'Freq'.padEnd(8)} ${'eps_odd'.padEnd(9)} ${'eps_even'.padEnd(9)} ${'|S31| dB'.padEnd(16)} ${'|S41| dB'.padEnd(16)} ${'Max|dSij|'.padEnd(11)} ${'Worst'.padEnd(6)} Status`);
+    console.log(`${'-'.repeat(90)}`);
+    for (let i = 0; i < reference.length; i++) {
+        const freq = sweepResults.frequencies[i];
+        const rlgc = m => ({ R: m.RLGC.R[i], L: m.RLGC.L[i], G: m.RLGC.G[i], C: m.RLGC.C[i] });
+        const sp = computeSParamsDifferential(freq, rlgc(odd), rlgc(even), length, Z_ref);
+
+        let maxError = 0, worstParam = '';
+        for (let row = 0; row < 4; row++) {
+            for (let col = 0; col < 4; col++) {
+                const error = complexAbsDiff(sp.S[row][col], reference[i].S[row][col]);
+                if (error > maxError) { maxError = error; worstParam = `S${row + 1}${col + 1}`; }
+            }
+        }
+        if (maxError > worst.err) worst = { err: maxError, freq, param: worstParam };
+        const passed = maxError < tolerance;
+        all_passed = all_passed && passed;
+
+        // Every 10th row keeps the log readable and failures always print.
+        if (i % 10 === 0 || i === reference.length - 1 || !passed) {
+            const db = s => (20 * Math.log10(Math.max(s.abs(), 1e-15))).toFixed(1);
+            const pair = (r, c) => `${db(sp.S[r][c]).padStart(6)}/${db(reference[i].S[r][c]).padStart(6)}`;
+            console.log(`${(freq / 1e9).toFixed(2).padEnd(8)} ${odd.eps_eff[i].toFixed(4).padEnd(9)} ${even.eps_eff[i].toFixed(4).padEnd(9)} ` +
+                        `${pair(2, 0).padEnd(16)} ${pair(3, 0).padEnd(16)} ${maxError.toFixed(4).padEnd(11)} ${worstParam.padEnd(6)} ${passed ? '✓' : '✗'}`);
+        }
+    }
+    console.log(`${'-'.repeat(90)}`);
+    console.log(`Worst: |d${worst.param}| = ${worst.err.toFixed(4)} at ${(worst.freq / 1e9).toFixed(2)} GHz (tolerance ${tolerance})`);
+    console.log(`Overall Result: ${all_passed ? '✓ ALL TESTS PASSED' : '✗ SOME TESTS FAILED'}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (!all_passed) {
+        throw new Error(`Differential microstrip 500 mm S4P test failed: worst |d${worst.param}| = ${worst.err.toFixed(4)} at ${(worst.freq / 1e9).toFixed(2)} GHz`);
+    }
+    return sweepResults;
+}
+
 // Run tests. Each case is isolated so the whole suite reports even when some
 // cases fail (useful when comparing the two backends).
 async function runTests() {
@@ -1108,6 +1206,7 @@ async function runTests() {
         solve_rough_stripline, solve_differential_stripline,
         solve_differential_stripline_rlgc, solve_differential_microstrip,
         solve_broadside_stripline, solve_broadside_stripline_offset,
+        solve_differential_microstrip_500mm_s4p,
         test_s2p_generation2, test_s2p_generation,
         test_s4p_generation_lossless, test_s4p_generation,
     ];
