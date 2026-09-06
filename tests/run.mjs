@@ -73,6 +73,7 @@ const TIERS = {
         { file: 'tests/test_corner_loss_regularization.js', cost: 43 },
         { file: 'tests/test_coax_plating.js', cost: 30 },
         { file: 'tests/test_surface_reactance.js', cost: 75 },
+        { file: 'tests/test_anchor_caches.js', cost: 90 },
         { file: 'tests/test_certification.js', cost: 39 },
         { file: 'tests/test_invariants.js', cost: 110 },
         { file: 'tests/test_sm_certification.js', cost: 21 },

@@ -684,12 +684,15 @@ function waveguideEigen(ctx, mesh, fm, abc, condRect, epsMap, f, seed, kcAnalyti
     };
 }
 
-// ---- Dispersion cache (eps_d(f) interpolation between exact eigensolve anchors) ----
-// The full-wave eps_d(f) is a smooth, slowly-varying scalar (quasi-TEM dispersion).
-// On the MQS loss path the eigensolve contributes ONLY this scalar, so sweep points
-// between exact anchors can interpolate it — monotone piecewise-cubic (PCHIP, no
-// overshoot) over x = ln f — once a leave-one-out check proves the local
-// interpolation error is within tolerance. Fritsch–Carlson slopes.
+// ---- Anchor caches (interpolation between exact solves along a sweep) ----
+// Three per-mode scalars are smooth, slowly varying functions of ln f on the MQS
+// loss path: the full-wave eps_d (quasi-TEM dispersion) and the MQS R and
+// L_internal. Sweep points between exact anchors interpolate them with a
+// monotone piecewise cubic (PCHIP, Fritsch-Carlson slopes, no overshoot) over
+// x = ln f once a leave-one-out check says the local interpolation is within
+// tolerance. A cache with `log` set stores ln(value), so power laws such as the
+// skin-regime R ~ sqrt(f) are straight lines the cubic reproduces exactly and
+// the check only reacts to genuine curvature (the skin transition).
 function pchipEval(xs, ys, x) {
     const n = xs.length;
     if (n < 2 || x < xs[0] || x > xs[n - 1]) return null;
@@ -722,20 +725,29 @@ function pchipEval(xs, ys, x) {
          + ys[lo + 1] * (-2 * t3 + 3 * t2) + hh * d[lo + 1] * (t3 - t2);
 }
 
-// Insert an exact anchor (keeps xs ascending; ignores duplicate frequencies).
-function dispersionInsert(dc, f, eps) {
+// Insert an exact anchor (keeps xs ascending; ignores duplicate frequencies and
+// values a log cache cannot hold).
+function dispersionInsert(dc, f, v) {
+    const y = dc.log ? Math.log(v) : v;
+    if (!Number.isFinite(y)) return;
     const x = Math.log(f);
     let lo = 0, hi = dc.xs.length;
     while (lo < hi) { const m = (lo + hi) >> 1; if (dc.xs[m] < x) lo = m + 1; else hi = m; }
     if (lo < dc.xs.length && Math.abs(dc.xs[lo] - x) < 1e-12) return;
-    dc.xs.splice(lo, 0, x); dc.eps.splice(lo, 0, eps);
+    dc.xs.splice(lo, 0, x); dc.ys.splice(lo, 0, y);
 }
 
-// Interpolate eps_d at f, or null when not (yet) trustworthy. Trust requires:
-// ≥5 anchors, f strictly interior, and a leave-one-out check on the interior
-// anchors bracketing f: removing that anchor and predicting it from the rest
-// must land within tol (relative). The LOO gap (~2 intervals) is wider than any
-// interpolation gap actually bridged, so passing it is a conservative bound.
+// Interpolate at f, or null when not (yet) trustworthy. Trust requires >= 5
+// anchors, f strictly interior, and a leave-one-out check on each interior
+// anchor bracketing f: removing that anchor and predicting it from the rest must
+// land within tol (relative). The check only says something about the gap it
+// is made across when the removed anchor sits well inside that gap: a cubic is
+// always accurate next to its own end points, so an anchor at the edge of a wide
+// gap (a frequency list ascending towards an anchor solved first at f_max)
+// would pass while the interpolant is wrong in the middle. The two intervals
+// meeting at the removed anchor may differ by at most 2x, which is what
+// bisection produces; anything more lopsided fails outright, which sends the
+// point to an exact solve and narrows the gap.
 function dispersionInterp(dc, f, tol) {
     const n = dc.xs.length;
     if (n < 5) return null;
@@ -744,12 +756,17 @@ function dispersionInterp(dc, f, tol) {
     let lo = 0, hi = n - 1;
     while (hi - lo > 1) { const m = (lo + hi) >> 1; if (dc.xs[m] <= x) lo = m; else hi = m; }
     for (const j of new Set([Math.max(1, lo), Math.min(n - 2, hi)])) {
+        const tj = (dc.xs[j] - dc.xs[j - 1]) / (dc.xs[j + 1] - dc.xs[j - 1]);
+        if (tj < 1 / 3 - 1e-9 || tj > 2 / 3 + 1e-9) return null;
         const xsL = dc.xs.slice(0, j).concat(dc.xs.slice(j + 1));
-        const epL = dc.eps.slice(0, j).concat(dc.eps.slice(j + 1));
-        const pred = pchipEval(xsL, epL, dc.xs[j]);
-        if (pred === null || Math.abs(pred - dc.eps[j]) > tol * Math.abs(dc.eps[j])) return null;
+        const ysL = dc.ys.slice(0, j).concat(dc.ys.slice(j + 1));
+        const pred = pchipEval(xsL, ysL, dc.xs[j]);
+        if (pred === null) return null;
+        const err = dc.log ? Math.abs(pred - dc.ys[j]) : Math.abs(pred - dc.ys[j]) / Math.abs(dc.ys[j]);
+        if (!(err <= tol)) return null;
     }
-    return pchipEval(dc.xs, dc.eps, x);
+    const y = pchipEval(dc.xs, dc.ys, x);
+    return dc.log ? Math.exp(y) : y;
 }
 
 // Per-mode solve config: wall boundary conditions + energy→capacitance factor kC.
@@ -2089,7 +2106,7 @@ export class TriBackend {
             // quantity downstream. The perturbation path needs the eigenvector (SIBC
             // projection), so it never interpolates.
             const dispTol = this.opts.dispTol ?? 1e-3;
-            const dc = useMQS ? (st.disp || (st.disp = { xs: [], eps: [] })) : null;
+            const dc = useMQS ? (st.disp || (st.disp = { xs: [], ys: [] })) : null;
             const epsI = dc ? dispersionInterp(dc, f, dispTol) : null;
             // Raw eigenvalue (exact or interpolated); anchored to the static solve below.
             let haveEigen = false;
@@ -2339,28 +2356,27 @@ export class TriBackend {
                     `finer mesh than the full-wave solver's budget allows. ` +
                     `Conductor loss can be several percent high.` });
             }
-            // R(f) and X_int(f) = omega*L_internal anchor caches: the sweep consumes
-            // only these two scalars from the solve, and both are smooth on the ln-f
-            // axis — so past the first few anchor frequencies, interpolate them the
-            // same way the eigensolve's ε_eff dispersion cache does (PCHIP +
-            // leave-one-out gate) and skip the MQS factorization entirely. Keyed to
-            // the skin mesh so a finer rebuild (higher f seen) discards anchors from
-            // the coarser mesh.
+            // R(f) and L_internal(f) anchor caches: the sweep consumes only these
+            // two scalars from the solve, so past the first few anchor frequencies
+            // interpolate them the same way the eigensolve's eps_d dispersion cache
+            // does (log-space PCHIP + leave-one-out gate) and skip the MQS
+            // factorization entirely. Keyed to the skin mesh so a finer rebuild
+            // (higher f seen) discards anchors from the coarser mesh.
             //
-            // The two caches are written in lockstep so they always hold the same
-            // anchors, but each is gated on its OWN leave-one-out check and both must
-            // pass: a hit on R alone would otherwise force X_int to be reconstructed
-            // from it, which is exactly the R/ω assumption this path must avoid.
+            // Each cache is gated on its own leave-one-out check and both must
+            // pass: a hit on R alone would otherwise force L_internal to be
+            // reconstructed from it, which is exactly the R/omega assumption this
+            // path must avoid.
             const rTol = this.opts.mqsInterpTol ?? 2e-3;
             const rc = (st.mqsR && st.mqsR.mesh === mqsMesh) ? st.mqsR
-                : (st.mqsR = { mesh: mqsMesh, xs: [], eps: [] });
-            const xc = (st.mqsX && st.mqsX.mesh === mqsMesh) ? st.mqsX
-                : (st.mqsX = { mesh: mqsMesh, xs: [], eps: [] });
+                : (st.mqsR = { mesh: mqsMesh, xs: [], ys: [], log: true });
+            const lc = (st.mqsL && st.mqsL.mesh === mqsMesh) ? st.mqsL
+                : (st.mqsL = { mesh: mqsMesh, xs: [], ys: [], log: true });
             const rInterp = dispersionInterp(rc, f, rTol);
-            const xInterp = dispersionInterp(xc, f, rTol);
-            if (rInterp !== null && rInterp > 0 && xInterp !== null && xInterp > 0) {
+            const lInterp = dispersionInterp(lc, f, rTol);
+            if (rInterp !== null && rInterp > 0 && lInterp !== null && lInterp > 0) {
                 R_total = rInterp;
-                L_internal = (omega > 0) ? Math.max(0, xInterp / omega) : 0;
+                L_internal = lInterp;
                 lossVia = 'mqs';                      // interpolated MQS anchors
             } else {
             // Per-face plating ⇒ weight each face's smooth current by its own surface
@@ -2416,7 +2432,7 @@ export class TriBackend {
                 }
                 L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
                 dispersionInsert(rc, f, R_total);
-                dispersionInsert(xc, f, omega * L_internal);
+                dispersionInsert(lc, f, L_internal);
             }
             }   // end R-cache miss (exact MQS solve)
         }
@@ -2651,11 +2667,11 @@ export class TriBackend {
         if (!this._isWG && modes.length > 1 && !this._noMqsThisSolve) {
             const via = modes.map(m => m.lossVia);
             if (via.some(v => v === 'mqs') && via.some(v => v !== 'mqs')) {
-                // Drop the MQS R/X anchors the succeeding mode already cached
+                // Drop the MQS R/L anchors the succeeding mode already cached
                 // so that they aren't used in frequency sweep other points.
                 for (const m of this.modeNames) {
                     const st = this._static && this._static[m];
-                    if (st) { st.mqsR = null; st.mqsX = null; }
+                    if (st) { st.mqsR = null; st.mqsL = null; }
                 }
                 this._noMqsThisSolve = true;
                 try {

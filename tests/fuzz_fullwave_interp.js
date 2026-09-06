@@ -28,17 +28,31 @@
 // sizing ≤0.8%, skin band ≤1% on R) with headroom; a genuine regression in
 // any layer blows well past them.
 //
+// A second comparison isolates the anchor caches on the frequency-list path
+// (solve_sweep): the adaptive solve at f_max seeds one anchor at the top and
+// the list then comes ascending, an order the caches' leave-one-out gate must
+// handle without the sweep's own midpoint checks behind it. Typical use is
+// compared with the same solver and the caches off (every point exact) on the
+// identical mesh, so its gates are the caches' own tolerances with a little
+// headroom (see test_anchor_caches.js for the deterministic version).
+//
 // Usage:   node tests/fuzz_fullwave_interp.js [N] [seed]
 //   e.g.   node tests/fuzz_fullwave_interp.js 12 1
-// Reproduce a flagged case: rerun with the same N and seed.
+// Reproduce a flagged case: rerun with the same N and seed; ONLY=4,11 solves
+// just those case indices (the others are drawn and skipped).
 
 import { createRng, randomSpec, buildSolver } from './fuzz_qs_vs_fullwave.js';
 import { InterpolatingSweep } from '../src/interpolating_sweep.js';
 
 const N    = parseInt(process.argv[2]) || 12;
 const SEED = process.argv[3] !== undefined ? parseInt(process.argv[3]) : 1;
+const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number)) : null;
 
 const GATES = { R: 0.04, L: 0.02, G: 0.04, C: 0.02 };
+// Frequency-list path, caches on vs off on the same mesh: R and L_internal anchors
+// are gated at 0.2%, eps_d at 0.1%.
+const LIST_GATES = { R: 0.003, L: 0.003, G: 0.0015, C: 0.0015 };
+const N_LIST = 9;   // interpolation needs five anchors, so the last four points exercise the gate
 const ADAPTIVE = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
 const F_START = 0.1e9;
 
@@ -46,6 +60,26 @@ const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1
 const pickModes = r => r.modes.map(m => ({
     mode: m.mode, R: m.RLGC.R, L: m.RLGC.L, G: m.RLGC.G, C: m.RLGC.C,
 }));
+
+// Worst gate ratio over frequencies, modes and RLGC components.
+function worstOf(typ, ref, freqs, gates) {
+    let worst = null;
+    for (let fi = 0; fi < freqs.length; fi++) {
+        const nModes = Math.min(typ[fi].length, ref[fi].length);
+        for (let mi = 0; mi < nModes; mi++)
+            for (const q of Object.keys(gates)) {
+                const a = ref[fi][mi][q], b = typ[fi][mi][q];
+                if (!isFinite(a) || !isFinite(b)) continue;
+                const d = relDiff(a, b);
+                const over = d / gates[q];
+                if (!worst || over > worst.over)
+                    worst = { over, q, d, gate: gates[q], f: freqs[fi], mode: ref[fi][mi].mode, a, b };
+            }
+    }
+    return worst;
+}
+const fmtWorst = w => `${w.q} ${(w.d * 100).toFixed(2)}%`;
+const fmtMismatch = w => `${w.q} ${(w.d * 100).toFixed(2)}% (gate ${(w.gate * 100).toFixed(2)}%) @ ${(w.f / 1e9).toFixed(2)} GHz [${w.mode}] ref=${w.a.toExponential(4)} typ=${w.b.toExponential(4)}`;
 
 // Typical use: adaptive solve + InterpolatingSweep, read results off the splines.
 async function solveTypical(spec, fStop, compareFs) {
@@ -75,6 +109,17 @@ async function solveReference(spec, fStop, compareFs) {
     return out;
 }
 
+// Frequency-list sweep through solve_sweep (f_max solved first, then ascending);
+// cachesOff makes every point an exact solve on the same mesh.
+async function solveList(spec, listFs, cachesOff) {
+    const s = buildSolver(spec, 'triangular');
+    s.tri_opts = cachesOff ? { lossMethod: 'auto', dispTol: 0, mqsInterpTol: 0 } : { lossMethod: 'auto' };
+    const r = await s.solve_sweep({ frequencies: listFs, energy_tol: ADAPTIVE.energy_tol, max_nodes: ADAPTIVE.max_nodes });
+    return listFs.map((_, i) => r.modes.map(m => ({
+        mode: m.mode, R: m.RLGC.R[i], L: m.RLGC.L[i], G: m.RLGC.G[i], C: m.RLGC.C[i],
+    })));
+}
+
 function fmtSpec(spec) {
     const u = (x, sc = 1e3, d = 3) => (x * sc).toFixed(d);
     let s = spec.tl;
@@ -98,10 +143,20 @@ async function main() {
         const fStop = rng.logf(5e9, 20e9);
         const compareFs = [];
         for (let k = 0; k < 5; k++) compareFs.push(F_START * Math.pow(fStop / F_START, k / 4));
+        const listFs = [];
+        for (let k = 0; k < N_LIST; k++) listFs.push(F_START * Math.pow(fStop / F_START, k / (N_LIST - 1)));
+        if (ONLY && !ONLY.has(i)) { skipped++; continue; }
         const quiet = console.log; console.log = () => {};
         let typ = null, ref = null, typErr = null, refErr = null;
+        let typL = null, refL = null, listErr = null;
         try { typ = await solveTypical(spec, fStop, compareFs); } catch (e) { typErr = e.message || String(e); }
         try { ref = await solveReference(spec, fStop, compareFs); } catch (e) { refErr = e.message || String(e); }
+        if (!typErr && !refErr) {
+            try {
+                typL = await solveList(spec, listFs, false);
+                refL = await solveList(spec, listFs, true);
+            } catch (e) { listErr = e.message || String(e); }
+        }
         console.log = quiet;
         if (typErr && refErr) { skipped++; continue; }   // invalid random geometry
         if (typErr || refErr) {
@@ -110,26 +165,24 @@ async function main() {
             console.log(`[${i}] ✗ ONE-SIDED FAILURE — ${who}\n      ${fmtSpec(spec)}`);
             continue;
         }
-        let worst = null;
-        for (let fi = 0; fi < compareFs.length; fi++) {
-            const nModes = Math.min(typ[fi].length, ref[fi].length);
-            for (let mi = 0; mi < nModes; mi++)
-                for (const q of Object.keys(GATES)) {
-                    const a = ref[fi][mi][q], b = typ[fi][mi][q];
-                    if (!isFinite(a) || !isFinite(b)) continue;
-                    const d = relDiff(a, b);
-                    const over = d / GATES[q];
-                    if (!worst || over > worst.over)
-                        worst = { over, q, d, f: compareFs[fi], mode: ref[fi][mi].mode, a, b };
-                }
+        if (listErr) {
+            flagged.push({ i, spec, why: 'frequency-list sweep threw: ' + listErr });
+            console.log(`[${i}] ✗ LIST SWEEP FAILURE — ${listErr}\n      ${fmtSpec(spec)}`);
+            continue;
         }
-        if (worst && worst.over > 1) {
-            flagged.push({ i, spec, why: `${worst.q} ${(worst.d * 100).toFixed(2)}% @ ${(worst.f / 1e9).toFixed(2)} GHz [${worst.mode}]` });
-            console.log(`[${i}] ✗ MISMATCH ${worst.q} ${(worst.d * 100).toFixed(2)}% (gate ${(GATES[worst.q] * 100).toFixed(0)}%) @ ${(worst.f / 1e9).toFixed(2)} GHz [${worst.mode}] ref=${worst.a.toExponential(4)} typ=${worst.b.toExponential(4)}\n      ${fmtSpec(spec)}`);
+        const worst = worstOf(typ, ref, compareFs, GATES);
+        const worstL = worstOf(typL, refL, listFs, LIST_GATES);
+        const bad = [];
+        if (worst && worst.over > 1) bad.push(`MISMATCH ${fmtMismatch(worst)}`);
+        if (worstL && worstL.over > 1) bad.push(`LIST MISMATCH ${fmtMismatch(worstL)}`);
+        if (bad.length) {
+            flagged.push({ i, spec, why: bad.join('; ') });
+            console.log(`[${i}] ✗ ${bad.join('\n      ')}\n      ${fmtSpec(spec)}`);
         } else {
             ok++;
-            const w = worst ? `worst ${worst.q} ${(worst.d * 100).toFixed(2)}%` : 'no comparable quantities';
-            console.log(`[${i}] ✓ ${fmtSpec(spec)}  (${w})`);
+            const w = worst ? `worst ${fmtWorst(worst)}` : 'no comparable quantities';
+            const wl = worstL ? `list ${fmtWorst(worstL)}` : 'list n/a';
+            console.log(`[${i}] ✓ ${fmtSpec(spec)}  (${w} | ${wl})`);
         }
     }
     console.log(`\n${'='.repeat(72)}`);
