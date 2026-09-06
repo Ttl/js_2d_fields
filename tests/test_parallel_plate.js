@@ -19,9 +19,11 @@
 // plate formula (upper-bounded by 6H/W = 12%, converged under mesh refinement), and
 // Z0 shifts correspondingly — those comparisons get a ±4% band. The sharp
 // assertions are the ones fringing cancels out of: C/C0, G/(ωC), and R(f)/coth.
-// KNOWN LIMIT (asserted only loosely): near DC (t ≪ δ) the MQS R comes out ~16%
-// below R_DC and L_int ~25% high — the near-DC internal-impedance estimation is a
-// separate open issue; this test pins today's behavior from drifting further.
+// Near DC (δ ≈ 2t at 1 MHz) the internal impedance is the sheet-resistance
+// limit: the trace from the volume eddy solve referenced against its PEC-limit
+// inductance, the wall-absorbed grounds from the finite-thickness slab formula.
+// Both hold to a few percent there (the trace's L_int is ~16% above the 1-D slab
+// value from the plate's edge current, ~1.5% of the total L).
 //
 // Run: node tests/test_parallel_plate.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -101,15 +103,15 @@ check('R increases with frequency, L decreases (skin effect direction)',
     solved[0].R < solved[1].R && solved[1].R < solved[2].R &&
     solved[0].L > solved[1].L && solved[1].L >= solved[2].L);
 
-// ---- near-DC: known-imperfect regime, pinned loosely so it can't silently worsen ----
+// ---- near-DC (δ ≈ 2t): sheet-resistance limit of trace and ground slabs ----
 {
     const f = 1e6;
     const m = await solveAt(f);
     const ex = exactRL(f);
-    console.log(`(info)  near-DC (1 MHz): R ${m.RLGC.R.toFixed(4)} vs exact ${ex.R.toFixed(4)} Ω/m (${pct(m.RLGC.R, ex.R)}), ` +
-        `L ${(m.RLGC.L * 1e9).toFixed(2)} vs ${((Lx + ex.Lint) * 1e9).toFixed(2)} nH/m (${pct(m.RLGC.L, Lx + ex.Lint)}) — known MQS DC-limit bias`);
-    check('near-DC R within the known ~±25% envelope', relErr(m.RLGC.R, ex.R) < 0.25);
-    check('near-DC L within the known ~±35% envelope', relErr(m.RLGC.L, Lx + ex.Lint) < 0.35);
+    check('R at 1 MHz matches coth model (near DC, t/δ≈0.5)', relErr(m.RLGC.R, ex.R) < 0.03,
+        `${m.RLGC.R.toFixed(4)} vs ${ex.R.toFixed(4)} Ω/m, ${pct(m.RLGC.R, ex.R)}`);
+    check('L at 1 MHz matches plate + internal (near DC)', relErr(m.RLGC.L, Lx + ex.Lint) < 0.04,
+        `${(m.RLGC.L * 1e9).toFixed(3)} vs ${((Lx + ex.Lint) * 1e9).toFixed(3)} nH/m, ${pct(m.RLGC.L, Lx + ex.Lint)}`);
 }
 
 console.log(failures === 0 ? '\nPARALLEL PLATE OK' : `\nPARALLEL PLATE: ${failures} FAILURE(S)`);

@@ -33,7 +33,7 @@ import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, re
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
          projectH, computePoyntingFromProjectedH } from './conductor_loss.js';
 import { csqrt } from './fem_core.js';
-import { mqsConductorLoss, refineSkinBand } from './mqs_loss.js';
+import { mqsConductorLoss, mqsPecInductance, refineSkinBand } from './mqs_loss.js';
 import { checkMeshQuality } from './tri_mesh.js';
 
 // Below this frequency use the static solve. Above it, the full-wave eigenmode
@@ -2339,17 +2339,18 @@ export class TriBackend {
                     `finer mesh than the full-wave solver's budget allows. ` +
                     `Conductor loss can be several percent high.` });
             }
-            // R(f) and X(f) anchor caches: the sweep consumes only these two scalars
-            // from the solve, and both are smooth on the ln-f axis — so past the first
-            // few anchor frequencies, interpolate them the same way the eigensolve's
-            // ε_eff dispersion cache does (PCHIP + leave-one-out gate) and skip the
-            // MQS factorization entirely. Keyed to the skin mesh so a finer rebuild (higher f
-            // seen) discards anchors from the coarser mesh.
+            // R(f) and X_int(f) = omega*L_internal anchor caches: the sweep consumes
+            // only these two scalars from the solve, and both are smooth on the ln-f
+            // axis — so past the first few anchor frequencies, interpolate them the
+            // same way the eigensolve's ε_eff dispersion cache does (PCHIP +
+            // leave-one-out gate) and skip the MQS factorization entirely. Keyed to
+            // the skin mesh so a finer rebuild (higher f seen) discards anchors from
+            // the coarser mesh.
             //
             // The two caches are written in lockstep so they always hold the same
             // anchors, but each is gated on its OWN leave-one-out check and both must
-            // pass: a hit on R alone would otherwise force X to be reconstructed from
-            // it, which is exactly the R_ac/ω assumption this path exists to avoid.
+            // pass: a hit on R alone would otherwise force X_int to be reconstructed
+            // from it, which is exactly the R/ω assumption this path must avoid.
             const rTol = this.opts.mqsInterpTol ?? 2e-3;
             const rc = (st.mqsR && st.mqsR.mesh === mqsMesh) ? st.mqsR
                 : (st.mqsR = { mesh: mqsMesh, xs: [], eps: [] });
@@ -2359,7 +2360,7 @@ export class TriBackend {
             const xInterp = dispersionInterp(xc, f, rTol);
             if (rInterp !== null && rInterp > 0 && xInterp !== null && xInterp > 0) {
                 R_total = rInterp;
-                L_internal = (omega > 0) ? Math.max(0, Math.min(xInterp / omega, 0.5 * L_external)) : 0;
+                L_internal = (omega > 0) ? Math.max(0, xInterp / omega) : 0;
                 lossVia = 'mqs';                      // interpolated MQS anchors
             } else {
             // Per-face plating ⇒ weight each face's smooth current by its own surface
@@ -2369,7 +2370,7 @@ export class TriBackend {
             // modeCurrents instead, and shares one cache across both modes. The
             // assembly and the per-frequency unit solves are mode-independent
             // there, so the second mode at each frequency skips the factorization.
-            const mqsOpts = { wallPEC: cr.wallPEC || null,
+            const mqsOpts = { wallPEC: cr.wallPEC || null, wallThick: cr.wallThick || null,
                               topGround: !!(cr.wallPEC && cr.wallPEC.top),   // legacy fallback
                               oddSymmetry: this.symmetry && mode === 'odd',
                               diffPair: !!s.is_differential,
@@ -2399,21 +2400,23 @@ export class TriBackend {
                 && isFinite(mqs.X_total) && mqs.X_total > 0) {
                 R_total = s.is_differential ? mqs.R_total / 2 : mqs.R_total;
                 lossVia = 'mqs';
-                // Internal (skin) inductance from the surface REACTANCE X_total, NOT from
-                // the difference (mqs.L_loop − L_external): that subtracts two large
-                // near-equal numbers (~L_external each, computed on different bases — MQS
-                // magnetic energy vs analytic 1/c²C0) so the small ~1 nH internal part is
-                // lost to noise and clamps to 0 at high f, undershooting eps_eff vs the
-                // FDM/static backends. X_total is that same reactance assembled directly
-                // from the |K|²-weighted Im(Zs) instead of by cancellation, so it is well
-                // conditioned AND carries the roughness/plating tilt that the earlier
-                // R_ac/ω form here could not (it holds only while Zs = Rs(1+j), costing a
-                // factor ~5 in the increment at 1 µm rms). Smooth metal has X_total ===
-                // R_total, so bare lines are unchanged.
-                const X_total = s.is_differential ? mqs.X_total / 2 : mqs.X_total;
-                L_internal = (omega > 0) ? Math.max(0, Math.min(X_total / omega, 0.5 * L_external)) : 0;
+                // Internal inductance from the volume solve: the MQS loop inductance
+                // minus the loop inductance of the same box with perfect conductors
+                // (mqsPecInductance, one real solve per skin mesh), plus the skin
+                // reactance of the A = 0 walls. The difference is taken on one mesh
+                // with one set of walls, so the external part cancels exactly and
+                // what remains holds at every skin depth. The surface reactance
+                // X_total/omega would only be right for delta well below the
+                // conductor thickness (Zs = Rs(1+j)); a film thinner than delta has
+                // R/omega orders of magnitude above its true internal inductance.
+                const pc = mqsOpts.cache;
+                if (!(pc.pecMesh === mqsMesh && pc.pecMode === mode)) {
+                    pc.Lpec = mqsPecInductance(mqsMesh, cr, this.ctx.helpers.solveSparseMulti, mqsOpts);
+                    pc.pecMesh = mqsMesh; pc.pecMode = mode;
+                }
+                L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
                 dispersionInsert(rc, f, R_total);
-                dispersionInsert(xc, f, X_total);
+                dispersionInsert(xc, f, omega * L_internal);
             }
             }   // end R-cache miss (exact MQS solve)
         }

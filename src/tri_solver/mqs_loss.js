@@ -366,6 +366,109 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     };
 }
 
+// Loop inductance of the same problem with every conductor perfect, on the same
+// mesh with the same walls and drive convention. L_loop(f) minus this is the
+// internal inductance: the volume skin/proximity part plus the excess of the
+// finite-sigma current distribution over the surface (TEM) one, which for a film
+// thinner than the skin depth is the dominant term (a 100 nm microstrip: ~20 nH/m
+// at low frequency, where the deep-skin identity L_int = R/omega would give
+// microhenries). Referencing against the static L_external instead would not
+// work: that one comes from the open-boundary static solve, this box has A = 0
+// on every wall.
+//
+// In the sigma -> infinity limit A is constant on each conductor, so the exterior
+// problem is Laplace's equation with phi = 1 on the driven group, 0 on the other
+// metal and on the walls, and the inductance is mu0 over the Dirichlet energy
+// Phi = phi^T S phi (the magnetostatic twin of C = eps0 * energy). Conductor
+// interiors carry a constant and add nothing to Phi, so the full S of the MQS
+// assembly serves as is. Several driven groups (modeCurrents) give the matrix
+// Phi_jk from unit solves and L = mu0 * Phi^-1, contracted with the target
+// currents the way the MQS Zmode is. Real solve, frequency-independent, cached
+// per skin mesh by the caller. Same I_mesh normalization as mqsConductorLoss.
+export function mqsPecInductance(mesh, condRect, solveSparseMulti, opts = {}) {
+    const { tris, triEdges, nNodes, nTris } = mesh;
+    const rects = condRect.rects || [condRect];
+    const roles = condRect.rectRoles || null;
+    const sym = condRect.symmetry > 1 ? 2 : 1;
+    const cc = opts.cache;
+    let pre = (cc && cc.mesh === mesh && cc.odd === !!opts.oddSymmetry) ? cc.pre : null;
+    if (!pre) {
+        pre = mqsPrecompute(mesh, condRect, opts);
+        if (cc) { cc.mesh = mesh; cc.odd = !!opts.oddSymmetry; cc.pre = pre; }
+    }
+    const { isCondTri, dofOf, nF, triGroup, rowPtr, colIdx, valS } = pre;
+    const nG = pre.groups.length;
+    // Metal DOF classes: 1 + group for signal metal, -1 for passive ground metal,
+    // 0 free. Signal wins where a DOF touches both (touching rects).
+    const cls = new Int32Array(nF);
+    for (let t = 0; t < nTris; t++) {
+        const c = isCondTri[t]; if (!c) continue;
+        const v = c === 1 ? 1 + triGroup[t] : -1;
+        for (let k = 0; k < 3; k++) {
+            const gv = dofOf[tris[3*t+k]], ge = dofOf[nNodes + triEdges[3*t+k]];
+            if (gv >= 0 && cls[gv] <= 0 && (v > 0 || cls[gv] === 0)) cls[gv] = v;
+            if (ge >= 0 && cls[ge] <= 0 && (v > 0 || cls[ge] === 0)) cls[ge] = v;
+        }
+    }
+    // Reduced system on the free DOFs, one right-hand side per driven group.
+    const red = new Int32Array(nF).fill(-1);
+    let nR = 0;
+    for (let i = 0; i < nF; i++) if (cls[i] === 0) red[i] = nR++;
+    const rp = new Int32Array(nR + 1), ci = [], cv = [];
+    const rhs = Array.from({ length: nG }, () => new Float64Array(nR));
+    for (let i = 0, r = 0; i < nF; i++) {
+        if (cls[i] !== 0) continue;
+        for (let k = rowPtr[i]; k < rowPtr[i+1]; k++) {
+            const j = colIdx[k], sv = valS[k];
+            if (cls[j] === 0) { ci.push(red[j]); cv.push(sv); }
+            else if (cls[j] > 0) rhs[cls[j] - 1][r] -= sv;
+        }
+        rp[++r] = ci.length;
+    }
+    const sols = nR > 0 ? solveSparseMulti(nR, { rowPtr: rp, colIdx: new Int32Array(ci), valRe: new Float64Array(cv) }, rhs) : [];
+    // Full potentials (1 on the group, solution outside, 0 elsewhere) and the
+    // energy matrix Phi_jk = phi_j^T S phi_k.
+    const phi = [];
+    for (let g = 0; g < nG; g++) {
+        const v = new Float64Array(nF);
+        for (let i = 0; i < nF; i++) v[i] = cls[i] === 0 ? sols[g][red[i]] : (cls[i] === 1 + g ? 1 : 0);
+        phi.push(v);
+    }
+    const Phi = [];
+    for (let j = 0; j < nG; j++) {
+        Phi.push([]);
+        const Sp = new Float64Array(nF);
+        for (let i = 0; i < nF; i++) {
+            let a = 0;
+            for (let k = rowPtr[i]; k < rowPtr[i+1]; k++) a += valS[k] * phi[j][colIdx[k]];
+            Sp[i] = a;
+        }
+        for (let k = 0; k < nG; k++) { let a = 0; for (let i = 0; i < nF; i++) a += Sp[i] * phi[k][i]; Phi[j].push(a); }
+    }
+    // Same current normalization as the MQS solve. Signal cut by the symmetry
+    // plane carries half the current.
+    const straddles = rects.some((r, i) => (!roles || roles[i].is_signal) && r.xmin <= condRect.xmin_domain + 1e-12);
+    const I_mesh = (sym === 2 && straddles) ? 0.5 : 1;
+    const I = (opts.modeCurrents && sym === 1 && nG > 1 && opts.modeCurrents.length === nG) ? opts.modeCurrents : null;
+    if (!I) return I_mesh * MU0 / Phi[0][0];
+    // L = mu0 * Phi^-1 contracted with the mode currents: (I^T L I) / (I^T I).
+    const M = Phi.map(row => row.slice());
+    const B = I.slice();
+    for (let c = 0; c < nG; c++) {   // Gaussian elimination with partial pivoting
+        let p = c; for (let r = c + 1; r < nG; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+        [M[c], M[p]] = [M[p], M[c]]; [B[c], B[p]] = [B[p], B[c]];
+        for (let r = 0; r < nG; r++) {
+            if (r === c) continue;
+            const f = M[r][c] / M[c][c]; if (f === 0) continue;
+            for (let k = c; k < nG; k++) M[r][k] -= f * M[c][k];
+            B[r] -= f * B[c];
+        }
+    }
+    let num = 0, den = 0;
+    for (let k = 0; k < nG; k++) { num += (B[k] / M[k][k]) * I[k]; den += I[k] * I[k]; }
+    return MU0 * num / den;
+}
+
 // Dense complex NxN solve (Gauss-Jordan, partial pivot) for the drive-to-current
 // matrix, N is the number of driven nets (2 for a differential pair).
 // A: rows of {re, im}; b: array of {re, im}. Returns array of {re, im}.
@@ -398,6 +501,29 @@ function solveComplexLinear(A, b) {
         return { re: (row[n][0] * ar + row[n][1] * ai) / den,
                  im: (row[n][1] * ar - row[n][0] * ai) / den };
     });
+}
+
+// Lateral spreading of the return current in a thin wall. A line current over an
+// infinitely wide resistive sheet has the sheet current K(k) = -I e^{-|k|h} / (1 - j k Lambda)
+// in the transverse wavenumber k, Lambda = delta^2 / d the lateral diffusion length of a
+// sheet of thickness d << delta. The dissipation relative to the PEC distribution
+// (Lambda -> 0) is g(u) = 2 * integral_0^inf e^{-2s} / (1 + u^2 s^2) ds with u = Lambda / h,
+// which is 1 - u^2/2 for small u and pi/u for large u (R ~ 1/(sigma delta^2), vanishing at
+// DC, where the PEC distribution would leave the sheet resistance over the PEC current
+// width). Written for a general PEC distribution through its effective width
+// W_K = I^2 / integral(|K|^2 dl) = 2 pi h for the line source, so u = 2 pi Lambda / W_K.
+// Evaluated with t = tan(theta) on theta in [0, pi/2), where the integrand is smooth
+// for every u.
+function wallSpreadFactor(u) {
+    if (!(u > 0.05)) return 1 - u * u / 2;
+    const a = 2 / u, n = 2000, h = (Math.PI / 2) / n;
+    let acc = 0;
+    for (let i = 0; i <= n; i++) {
+        const th = i * h;
+        const v = i < n ? Math.exp(-a * Math.tan(th)) : 0;
+        acc += (i === 0 || i === n) ? v : (i % 2 ? 4 * v : 2 * v);
+    }
+    return (2 / u) * acc * h / 3;
 }
 
 export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmetric, Z0 = 0, opts = {}) {
@@ -560,28 +686,43 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // plane are boundary conditions, not surfaces. opts.wallPEC carries that
     // distinction from the mesher (which clears `left` on a half domain, so the
     // symmetry plane can never be mistaken for metal).
-    let Pgnd = 0;
+    let Pgnd = 0, Xgnd = 0;
     // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
     // conductor surfaces, used below to scale the smooth loss per face.
     let gndS = 0, gndZreS = 0, gndZimS = 0;
-    // Dallback for a caller with no wall map: bottom is ground on every
+    // Fallback for a caller with no wall map: bottom is ground on every
     // geometry the mesher builds, top came from opts.topGround, sides skipped.
     const wp = opts.wallPEC || { bottom: true, top: !!opts.topGround };
     const onLine = (a, b, v) => Math.abs(a - v) < 1e-9 && Math.abs(b - v) < 1e-9;
-    // Orientation of the metal wall this edge lies on ('h' | 'v'), else null.
-    function wallOrient(x0, y0, x1, y1) {
-        if (wp.bottom && onLine(y0, y1, ymin_d)) return 'h';
-        if (wp.top && onLine(y0, y1, ymax_d)) return 'h';
-        if (wp.left && onLine(x0, x1, xmin_d)) return 'v';
-        if (wp.right && onLine(x0, x1, xmax_d)) return 'v';
+    // The metal wall this edge lies on, else null.
+    function wallOf(x0, y0, x1, y1) {
+        if (wp.bottom && onLine(y0, y1, ymin_d)) return 'bottom';
+        if (wp.top && onLine(y0, y1, ymax_d)) return 'top';
+        if (wp.left && onLine(x0, x1, xmin_d)) return 'left';
+        if (wp.right && onLine(x0, x1, xmax_d)) return 'right';
         return null;
+    }
+    // Smooth surface impedance of a wall: the slab formula (1+j)Rs*coth((1+j)d/delta)
+    // for an absorbed slab of thickness d with a field-free back, which is Rs(1+j)
+    // for d well above delta and tends to the sheet resistance 1/(sigma*d) with a
+    // vanishing reactance as delta grows past d. A 'gnd' boundary is infinitely thick.
+    const wt = opts.wallThick || {};
+    const zWall = {}, wS1 = {}, wS2 = {}, wLen = {};
+    for (const w of ['bottom', 'top', 'left', 'right']) {
+        wS1[w] = 0; wS2[w] = 0; wLen[w] = 0;
+        const d = wt[w] ?? Infinity;
+        if (!(d < Infinity)) { zWall[w] = { re: Rs, im: Rs }; continue; }
+        const x = d / delta, den = Math.cosh(2 * x) - Math.cos(2 * x);
+        const cr = Math.sinh(2 * x) / den, ci = -Math.sin(2 * x) / den;
+        zWall[w] = { re: Rs * (cr - ci), im: Rs * (cr + ci) };
     }
     for (let e = 0; e < nEdges; e++) {
         const n0 = edges[2*e], n1 = edges[2*e+1];
         const x0 = nodes[2*n0], y0 = nodes[2*n0+1];
         const x1 = nodes[2*n1], y1 = nodes[2*n1+1];
-        const orient = wallOrient(x0, y0, x1, y1);
-        if (!orient) continue;
+        const wall = wallOf(x0, y0, x1, y1);
+        if (!wall) continue;
+        const orient = (wall === 'bottom' || wall === 'top') ? 'h' : 'v';
         const adj = edgeToTri[e];
         // A meshed conductor sitting on the wall (a GCPW pour or via slab reaching
         // it) bonds to it. There is no exposed wall surface there, and the adjacent
@@ -593,6 +734,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         lg[0] = dofOf[v0]; lg[1] = dofOf[v1]; lg[2] = dofOf[v2];
         for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*adj+k]];
         const L = Math.hypot(x1 - x0, y1 - y0);
+        wLen[wall] += L;
         // Tangential H comes from the gradient component along the wall normal.
         const comp = orient === 'h' ? 1 : 0;
         // Walls are bare metal (never plated). Evaluate Zs once at the edge midpoint.
@@ -606,7 +748,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 gR += gr[comp] * sol[g]; gI += gr[comp] * sol[nF + g];
             }
             const K2 = Cmag2 * (gR*gR + gI*gI) / (MU0*MU0);
-            Pgnd += 0.5 * Rs * K2 * GL3w[q] * L;
+            wS1[wall] += Math.sqrt(K2) * GL3w[q] * L;
+            wS2[wall] += K2 * GL3w[q] * L;
             if (Zg) {
                 const Sseg = (gR*gR + gI*gI) * GL3w[q] * L;   // ∝ |K|² (global factors cancel in the ratio)
                 gndS += Sseg; gndZreS += Zg.re * Sseg; gndZimS += Zg.im * Sseg;
@@ -619,7 +762,25 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // on the EXTERIOR (dielectric) side of the face — like the ground above. K is
     // the tangential H: ∂A/∂y for a horizontal (top/bottom) face, ∂A/∂x for a side.
     // Signal faces and ground-rect faces accumulate separate buckets: each scales
-    // its own volume loss (a plated trace next to a bare ground must not dilute).
+    // its own volume loss (a plated trace next to a bare ground must not dilute).    // Per-wall totals: slab impedance times the PEC-distribution integral, reduced by
+    // the lateral spreading of a thin wall (wallSpreadFactor). The spread current
+    // cannot be wider than the wall itself, so the factor is floored at W_K / W_wall
+    // (the ratio the DC limit of a wall of finite width reaches: sheet resistance over
+    // the wall length). A wall of infinite thickness has no spreading. The half-domain
+    // integrals cover half the wall; the width ratios are the same on either.
+    for (const w of ['bottom', 'top', 'left', 'right']) {
+        const S2 = wS2[w];
+        if (!(S2 > 0)) continue;
+        const d = wt[w] ?? Infinity;
+        let g = 1;
+        if (d < Infinity) {
+            const Wk = sym * wS1[w] * wS1[w] / S2;
+            g = Math.max(wallSpreadFactor(2 * Math.PI * (delta * delta / d) / Wk), Wk / (sym * wLen[w]));
+        }
+        Pgnd += 0.5 * zWall[w].re * S2 * g;
+        Xgnd += 0.5 * zWall[w].im * S2 * g;
+    }
+
     let trS = 0, trZreS = 0, trZimS = 0;
     let grS = 0, grZreS = 0, grZimS = 0;
     if (opts.surfaceZs) {
@@ -689,6 +850,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     let R_trace = 2 * sym * Psig;
     let R_gr = 2 * sym * PgndRect;
     let R_gw = 2 * sym * Pgnd;
+    const X_gw_smooth = 2 * sym * Xgnd;
     // Z_pul = C/I = R + jωL (trace internal L included). On the multi-drive path
     // the per-line mode impedance Zmode plays the role of C (per-line current
     // normalized to the target vector), same convention.
@@ -707,16 +869,15 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // per-trace — so the surface-reactance increment must use the per-trace R.
     const perTrace = opts.diffPair ? 0.5 : 1;
     // X_* are the REACTANCE twins of the R components: the same smooth-metal
-    // loss weighted by Im(Zs)/Rs where R is weighted by Re(Zs)/Rs. They are what the
-    // internal inductance is built from (X_total/omega), and they carry the same units
-    // and the same differential convention as R, so the caller halves them alike.
-    // Smooth metal has Im(Zs) = Re(Zs) = Rs, so these stay equal to R, the seed
-    // value below is that smooth case, and each branch overwrites it from the
-    // SMOOTH R before R is scaled by psiR. Each component scales by its own
-    // face bucket: signal faces -> R_trace, ground-rect faces -> R_gr, boundary
-    // walls -> R_gw (walls are bare metal unless surfaceZs says otherwise).
-    let X_trace = R_trace, X_gr = R_gr, X_gw = R_gw;
-    const R_smooth_total = R_trace + R_gr + R_gw;   // before psiR rewrites any part
+    // loss weighted by Im(Zs)/Rs where R is weighted by Re(Zs)/Rs. They carry the
+    // same units and the same differential convention as R, so the caller halves
+    // them alike. Smooth eddy metal has Im(Zs) = Re(Zs) = Rs, so X_trace and X_gr
+    // seed equal to R; the walls seed from their slab reactance. Each branch
+    // overwrites its X from the SMOOTH value before R is scaled by psiR, per face
+    // bucket: signal faces -> R_trace, ground-rect faces -> R_gr, boundary walls
+    // -> R_gw (walls are bare metal unless surfaceZs says otherwise).
+    let X_trace = R_trace, X_gr = R_gr, X_gw = X_gw_smooth;
+    const X_smooth_total = R_trace + R_gr + X_gw_smooth;   // before psi rewrites any part
     if (opts.surfaceZs) {
         if (trS > 0) {
             const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
@@ -731,7 +892,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         }
         if (gndS > 0) {
             const psiR = gndZreS / (Rs * gndS), psiX = gndZimS / (Rs * gndS);
-            X_gw = R_gw * psiX;
+            X_gw = X_gw_smooth * psiX;
             R_gw *= psiR;
         }
     } else if (Rq > 0) {
@@ -740,7 +901,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         const PsiX = Zs.im / Rs;
         X_trace = R_trace * PsiX;
         X_gr = R_gr * PsiX;
-        X_gw = R_gw * PsiX;
+        X_gw = X_gw_smooth * PsiX;
         R_trace *= PsiR;
         R_gr *= PsiR;
         R_gw *= PsiR;
@@ -750,14 +911,18 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     const X_gnd = X_gr + X_gw;
     const R_total = R_trace + R_gnd;
     const X_total = X_trace + X_gnd;
-    // The surface-reactance increment on the loop inductance is (X − R_smooth)/ω by
+    // The surface-reactance increment on the loop inductance is (X − X_smooth)/ω by
     // construction, so it is formed ONCE from X_total here rather than accumulated
     // branch by branch. That keeps L_loop and X_total from ever describing different
-    // surfaces, and it is identically zero for smooth metal (X_total === R_smooth_total).
-    L_loop += perTrace * (X_total - R_smooth_total) / omega;
+    // surfaces, and it is identically zero for smooth metal (X_total === X_smooth_total).
+    L_loop += perTrace * (X_total - X_smooth_total) / omega;
+    // Internal inductance of the domain walls. They are A = 0 in the solve, so
+    // their skin layer is not in L_loop; the smooth slab reactance over omega
+    // supplies it (their rough/plated increment is in L_loop above).
+    const L_wall = perTrace * X_gw_smooth / omega;
     const alpha_c = Z0 > 0 ? R_total / (2 * Z0) : NaN;
     return {
-        R_trace, R_gnd, R_total, X_total, L_loop, PsiR,
+        R_trace, R_gnd, R_total, X_total, L_loop, L_wall, PsiR,
         alpha_c, alpha_c_dBm: alpha_c * 8.686,
         Rs, delta, nDofs: nF, modeZ: Zmode,
     };

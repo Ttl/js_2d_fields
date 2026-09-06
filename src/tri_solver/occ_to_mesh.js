@@ -137,6 +137,14 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
     let { x_min: X0, x_max: X1, y_min: Y0, y_max: Y1 } = domain;
     const b = boundaries || ['open', 'open', 'open', 'gnd'];
     const wallPEC = { left: b[0] === 'gnd', right: b[1] === 'gnd', top: b[2] === 'gnd', bottom: b[3] === 'gnd' };
+    // Metal thickness of each PEC wall: the absorbed slab's thickness (stacked
+    // slabs add up), Infinity for a bare 'gnd' boundary. A slab against a 'gnd'
+    // boundary is the ground plane itself, so its thickness is the slab's.
+    const wallThick = { left: Infinity, right: Infinity, top: Infinity, bottom: Infinity };
+    const absorb = (side, t) => {
+        wallThick[side] = (Number.isFinite(wallThick[side]) ? wallThick[side] : 0) + t;
+        wallPEC[side] = true;
+    };
     let changed = true;
     while (changed) {
         changed = false;
@@ -149,13 +157,13 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
             const r = _rectOf(c);
             const touchesL = r.xmin <= X0 + tol, touchesR = r.xmax >= X1 - tol;
             const touchesB = r.ymin <= Y0 + tol, touchesT = r.ymax >= Y1 - tol;
-            if (touchesB && touchesL && touchesR && r.ymax < Y1 - tol && r.ymax > Y0 + tol) { Y0 = r.ymax; wallPEC.bottom = true; changed = true; continue; }
-            if (touchesT && touchesL && touchesR && r.ymin > Y0 + tol && r.ymin < Y1 - tol) { Y1 = r.ymin; wallPEC.top = true; changed = true; continue; }
-            if (touchesL && touchesB && touchesT && r.xmax < X1 - tol && r.xmax > X0 + tol) { X0 = r.xmax; wallPEC.left = true; changed = true; continue; }
-            if (touchesR && touchesB && touchesT && r.xmin > X0 + tol && r.xmin < X1 - tol) { X1 = r.xmin; wallPEC.right = true; changed = true; continue; }
+            if (touchesB && touchesL && touchesR && r.ymax < Y1 - tol && r.ymax > Y0 + tol) { absorb('bottom', r.ymax - Y0); Y0 = r.ymax; changed = true; continue; }
+            if (touchesT && touchesL && touchesR && r.ymin > Y0 + tol && r.ymin < Y1 - tol) { absorb('top', Y1 - r.ymin); Y1 = r.ymin; changed = true; continue; }
+            if (touchesL && touchesB && touchesT && r.xmax < X1 - tol && r.xmax > X0 + tol) { absorb('left', r.xmax - X0); X0 = r.xmax; changed = true; continue; }
+            if (touchesR && touchesB && touchesT && r.xmin > X0 + tol && r.xmin < X1 - tol) { absorb('right', X1 - r.xmin); X1 = r.xmin; changed = true; continue; }
         }
     }
-    return { X0, X1, Y0, Y1, wallPEC };
+    return { X0, X1, Y0, Y1, wallPEC, wallThick };
 }
 
 // Pre-mesh triangle-count estimate for the Distance->Threshold size field that
@@ -217,16 +225,17 @@ export function buildOccMeshFromGeometry(G, opts) {
     // Containment, however, always tests the FULL polygon (see condRects below).
     const meshOpts = { half: symmetry };
 
-    let X0, X1, Y0, Y1, wallPEC;
+    let X0, X1, Y0, Y1, wallPEC, wallThick;
     if (domainShape) {
         // The meshed domain IS the shape, so there is no full-span slab to absorb and
         // no rectangle to clip: the bounds are simply the materialized polygon's bbox.
         ({ xmin: X0, xmax: X1, ymin: Y0, ymax: Y1 } = shapeBBox(domainShape, meshOpts));
         const b = boundaries || ['gnd', 'gnd', 'gnd', 'gnd'];
         wallPEC = { left: b[0] === 'gnd', right: b[1] === 'gnd', top: b[2] === 'gnd', bottom: b[3] === 'gnd' };
+        wallThick = { left: Infinity, right: Infinity, top: Infinity, bottom: Infinity };
         if (symmetry) { X0 = 0; wallPEC.left = false; }
     } else {
-        ({ X0, X1, Y0, Y1, wallPEC } = _clipDomain(domain, conductors, boundaries, tol));
+        ({ X0, X1, Y0, Y1, wallPEC, wallThick } = _clipDomain(domain, conductors, boundaries, tol));
         if (symmetry) { X0 = 0; wallPEC = { ...wallPEC, left: false }; }
     }
 
@@ -703,7 +712,7 @@ export function buildOccMeshFromGeometry(G, opts) {
         // tests need it: an exact-zero tolerance would reject boundary nodes that are
         // one ULP off the polygon side after the mesher's own arithmetic.
         geomTol: tol,
-        wallPEC, symmetry: symmetry ? 2 : 1,
+        wallPEC, wallThick, symmetry: symmetry ? 2 : 1,
         xmin: condRects.length ? Math.min(...condRects.map(c => c.xmin)) : X0,
         xmax: condRects.length ? Math.max(...condRects.map(c => c.xmax)) : X1,
         ymin: condRects.length ? Math.min(...condRects.map(c => c.ymin)) : Y0,
@@ -753,6 +762,6 @@ export function buildOccMeshFromGeometry(G, opts) {
         // Size-field statistics + the sizing this mesh was built with, for
         // estimateOccTriCount (tri_backend's budget pre-sizing / diagnostics).
         sizeStats,
-        meshedDomain: { X0, X1, Y0, Y1, wallPEC },
+        meshedDomain: { X0, X1, Y0, Y1, wallPEC, wallThick },
     };
 }

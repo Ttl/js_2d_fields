@@ -123,15 +123,18 @@ const waveguide = (extra = {}) => new RectWaveguideSolver({
 
 // One ratio check: L_int moved by exactly the ratio of the surface REACTANCES, and
 // demonstrably NOT by the ratio of the surface resistances.
-function checkRatio(label, bareL, caseL, zsOf, freqs = FREQS) {
+// tolPct: 0.5% where L_int is itself the surface reactance integral (the mesh is
+// shared, so the geometric integral cancels outright and the ratio is an identity).
+// The MQS paths take L_int from the volume eddy solve and add the roughness as the
+// surface increment (Im(Zs) - Rs) * integral, so the ratio matches Im(Zs)'s only as
+// closely as the volume L_int matches the surface value: ~1% in the skin regime.
+function checkRatio(label, bareL, caseL, zsOf, freqs = FREQS, tolPct = 0.5) {
     for (const f of freqs) {
         const ghz = (f / 1e9).toFixed(0);
         const zBare = calculate_Zrough(f, SIG, 0), zCase = zsOf(f);
         const got = caseL.get(f) / bareL.get(f);
         const wantIm = zCase.im / zBare.im, wantRe = zCase.re / zBare.re;
-        // The mesh is shared, so the geometric integral cancels outright — this is an
-        // identity, not an approximation, and 0.5% is loose for it by three decades.
-        near(`${label} @ ${ghz} GHz: L_int ratio == Im(Zs) ratio`, got, wantIm, 0.5);
+        near(`${label} @ ${ghz} GHz: L_int ratio == Im(Zs) ratio`, got, wantIm, tolPct);
         // ...and the resistance ratio is somewhere else entirely. Without this the gate
         // above could be satisfied by a coincidence at one frequency.
         check(`${label} @ ${ghz} GHz: Re(Zs) ratio is a clearly different answer`,
@@ -175,7 +178,7 @@ checkRatio('coax tin-plated', coaxBare,
 // covered on the same rectangular faces (coax only exercises the shaped-'all' branch).
 console.log('\n=== gcpw: rectangular faces, coplanar grounds (MQS, passive ground rects) ===');
 checkRatio('gcpw rough 1um', await internalL(gcpw()), await internalL(gcpw({ rq: RQ })),
-    (f) => calculate_Zrough(f, SIG, RQ));
+    (f) => calculate_Zrough(f, SIG, RQ), FREQS, 2.0);
 console.log('\n=== gcpw: forced perturbation (per-face surface groups) ===');
 const pert = { lossMethod: 'perturbation' };
 checkRatio('gcpw pert rough 1um', await internalL(gcpw({}, pert)),
@@ -183,12 +186,13 @@ checkRatio('gcpw pert rough 1um', await internalL(gcpw({}, pert)),
 
 // ------------------------------------------------------------------- mqs
 // A centred microstrip over a wall-absorbed ground is symmetric with no ground rect, so
-// it takes the MQS volume eddy solve instead — a different assembly of L_int (X_total
-// out of mqs_loss.js) reaching the same identity. The R(f)/X(f) anchor caches inside
-// that path interpolate BOTH, so a mismatch there would surface here as well.
+// it takes the MQS volume eddy solve instead — a different assembly of L_int (the
+// loop inductance against its PEC reference, plus the surface increment out of
+// mqs_loss.js) reaching the same identity to ~1%. The R(f)/X_int(f) anchor caches
+// inside that path interpolate BOTH, so a mismatch there would surface here as well.
 console.log('\n=== microstrip: MQS path ===');
 checkRatio('microstrip rough 1um', await internalL(microstrip()),
-    await internalL(microstrip({ rq: RQ })), (f) => calculate_Zrough(f, SIG, RQ));
+    await internalL(microstrip({ rq: RQ })), (f) => calculate_Zrough(f, SIG, RQ), FREQS, 2.0);
 
 // ------------------------------------------------------------------- waveguide
 // The TE mode has no conductors at all — the loss is on the enclosing wall, and its
