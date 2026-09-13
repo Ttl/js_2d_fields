@@ -184,8 +184,12 @@ class MicrostripSolver extends FieldSolver2D {
         checkPositive(options.trace_width, 'trace_width');
         checkPositive(options.epsilon_r, 'epsilon_r');
 
-        // Allow negative thickness for conductors inside the substrate
-        isValidNumber(options.trace_thickness, 'trace_thickness');
+        // Negative thickness embeds the trace in the substrate, but zero leaves no metal.
+        if (!isValidNumber(options.trace_thickness)) {
+            errors.push(`trace_thickness must be a valid number (got ${options.trace_thickness})`);
+        } else if (options.trace_thickness === 0) {
+            errors.push('trace_thickness must be nonzero');
+        }
 
         checkNonNegative(options.freq, 'frequency');
 
@@ -224,15 +228,10 @@ class MicrostripSolver extends FieldSolver2D {
             checkPositive(options.top_diel_er, 'top_diel_er');
         }
 
-        // Solder mask parameters - sm_t_sub and sm_t_trace can be negative
-        // But sm_er must be positive if solder mask is used
+        // Solder mask thicknesses: zero means that part of the mask is absent.
         if (options.use_sm) {
-            if (options.sm_t_sub !== undefined && !isValidNumber(options.sm_t_sub)) {
-                errors.push(`sm_t_sub must be a valid number (got ${options.sm_t_sub})`);
-            }
-            if (options.sm_t_trace !== undefined && !isValidNumber(options.sm_t_trace)) {
-                errors.push(`sm_t_trace must be a valid number (got ${options.sm_t_trace})`);
-            }
+            checkNonNegative(options.sm_t_sub, 'sm_t_sub');
+            checkNonNegative(options.sm_t_trace, 'sm_t_trace');
             checkNonNegative(options.sm_t_side, 'sm_t_side');
             checkPositive(options.sm_er, 'sm_er');
             checkNonNegative(options.sm_tand, 'sm_tand');
@@ -322,11 +321,11 @@ class MicrostripSolver extends FieldSolver2D {
         this.y_trace_start = this.y_top_diel_start;
         this.y_trace_end = this.y_trace_start + this.t;
 
-        // Solder mask extents
-        this.y_sm_sub_end = this.y_top_diel_end + this.sm_t_sub;
-        // For negative trace thickness, solder mask top should be at substrate surface
-        const y_trace_top = Math.max(this.y_trace_start, this.y_trace_end);
-        this.y_sm_trace_end = y_trace_top + this.sm_t_trace;
+        // Solder mask extents. The mask sits on the exposed metal: for an embedded
+        // trace (t < 0) the exposed face is the substrate surface, so the trace-top
+        // mask starts there and the side bands have only the mask's own height.
+        this.y_trace_top = Math.max(this.y_trace_start, this.y_trace_end);
+        this.sm_side_h = this.y_trace_top - this.y_trace_start + this.sm_t_trace;
 
         this.y_top_start = this.y_top_diel_end;
 
@@ -667,18 +666,18 @@ class MicrostripSolver extends FieldSolver2D {
             // Left trace side solder masks
             dielectrics.push(new Dielectric(
                 xl_left - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr_left, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Left trace top solder mask
             dielectrics.push(new Dielectric(
-                xl_left, this.y_trace_end,
+                xl_left, this.y_trace_top,
                 this.w, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
@@ -686,18 +685,18 @@ class MicrostripSolver extends FieldSolver2D {
             // Right trace side solder masks
             dielectrics.push(new Dielectric(
                 xl_right - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr_right, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Right trace top solder mask
             dielectrics.push(new Dielectric(
-                xl_right, this.y_trace_end,
+                xl_right, this.y_trace_top,
                 this.w, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
@@ -728,20 +727,20 @@ class MicrostripSolver extends FieldSolver2D {
             // Trace left side solder mask
             dielectrics.push(new Dielectric(
                 xl - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Trace right side solder mask
             dielectrics.push(new Dielectric(
                 xr, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Trace top solder mask
             dielectrics.push(new Dielectric(
-                xl, this.y_trace_end,
+                xl, this.y_trace_top,
                 this.w, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
@@ -795,47 +794,47 @@ class MicrostripSolver extends FieldSolver2D {
             // Solder mask on sides of left trace
             dielectrics.push(new Dielectric(
                 xl - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr_left, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Solder mask on sides of right trace
             dielectrics.push(new Dielectric(
                 xl_right - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Solder mask on outer gap sides (ground side)
             dielectrics.push(new Dielectric(
                 xl_gap, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr_gap - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.t + this.sm_t_trace,
+                this.sm_t_side, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Solder mask on top of traces
             dielectrics.push(new Dielectric(
-                xl, this.y_trace_end,
+                xl, this.y_trace_top,
                 this.w, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
-                xl_right, this.y_trace_end,
+                xl_right, this.y_trace_top,
                 this.w, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
@@ -844,12 +843,12 @@ class MicrostripSolver extends FieldSolver2D {
             const x_min = -this.domain_width / 2;
             const x_max = this.domain_width / 2;
             dielectrics.push(new Dielectric(
-                x_min, this.y_trace_end,
+                x_min, this.y_trace_top,
                 xl_gap - x_min, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
-                xr_gap, this.y_trace_end,
+                xr_gap, this.y_trace_top,
                 x_max - xr_gap, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
@@ -895,7 +894,7 @@ class MicrostripSolver extends FieldSolver2D {
             if (xsl > -this.domain_width/2) {
                 dielectrics.push(new Dielectric(
                     xsl, this.y_trace_start,
-                    this.sm_t_side, this.t + this.sm_t_trace,
+                    this.sm_t_side, this.sm_side_h,
                     this.sm_er, this.sm_tand
                 ));
             }
@@ -904,7 +903,7 @@ class MicrostripSolver extends FieldSolver2D {
             if (xsr <= this.domain_width/2) {
                 dielectrics.push(new Dielectric(
                     xr, this.y_trace_start,
-                    this.sm_t_side, this.t + this.sm_t_trace,
+                    this.sm_t_side, this.sm_side_h,
                     this.sm_er, this.sm_tand
                 ));
             }
@@ -913,7 +912,7 @@ class MicrostripSolver extends FieldSolver2D {
             if (xl_gnd_side_end > xl_gap) {
                 dielectrics.push(new Dielectric(
                     xl_gap, this.y_trace_start,
-                    xl_gnd_side_end - xl_gap, this.t + this.sm_t_trace,
+                    xl_gnd_side_end - xl_gap, this.sm_side_h,
                     this.sm_er, this.sm_tand
                 ));
             }
@@ -922,14 +921,14 @@ class MicrostripSolver extends FieldSolver2D {
             if (xr_gap > xr_gnd_side_start) {
                 dielectrics.push(new Dielectric(
                     xr_gnd_side_start, this.y_trace_start,
-                    xr_gap - xr_gnd_side_start, this.t + this.sm_t_trace,
+                    xr_gap - xr_gnd_side_start, this.sm_side_h,
                     this.sm_er, this.sm_tand
                 ));
             }
 
             // Solder mask on top of signal trace
             dielectrics.push(new Dielectric(
-                xl, this.y_trace_end,
+                xl, this.y_trace_top,
                 this.w, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
@@ -938,14 +937,14 @@ class MicrostripSolver extends FieldSolver2D {
             const x_min = -this.domain_width / 2;
             const x_max = this.domain_width / 2;
             dielectrics.push(new Dielectric(
-                x_min, this.y_trace_end,
+                x_min, this.y_trace_top,
                 xl_gap - x_min, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));
 
             // Solder mask on top of right ground
             dielectrics.push(new Dielectric(
-                xr_gap, this.y_trace_end,
+                xr_gap, this.y_trace_top,
                 x_max - xr_gap, this.sm_t_trace,
                 this.sm_er, this.sm_tand
             ));

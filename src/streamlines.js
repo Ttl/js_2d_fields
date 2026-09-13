@@ -110,14 +110,16 @@ function generateConductorSeedsWeighted(
     let totalPerimeter = 0;
     const signalConductors = conductors.filter(c => c.is_signal);
     for (const c of signalConductors) {
-        totalPerimeter += c.shape ? shapePerimeter(c) : 2 * (c.width + c.height);
+        totalPerimeter += c.shape ? shapePerimeter(c) : 2 * (Math.abs(c.width) + Math.abs(c.height));
     }
 
     for (const c of conductors) {
         if (!c.is_signal) continue;
 
-        const width = c.width;
-        const height = c.height;
+        // Rect extents: an embedded trace has a negative height, and the seed
+        // walks below run from y_min upward.
+        const width = Math.abs(c.width);
+        const height = Math.abs(c.height);
         const polarity = mode === 'odd' ? c.polarity : 1;
         const perimeter = c.shape ? shapePerimeter(c) : 2 * (width + height);
 
