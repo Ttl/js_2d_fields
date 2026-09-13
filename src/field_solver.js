@@ -1064,6 +1064,7 @@ export class FieldSolver2D {
             // skin-transition block, so its warning is cleared explicitly.
             const L_internal = this._dc_internal_inductance(Ex, Ey, Z0, vacuum_fields, mode);
             this._skinTransitionWarn = null;
+            this._platingTransitionWarn = null;
             return { R_ac: 0, R_dc, R_total: R_dc, L_internal };
         }
 
@@ -1416,6 +1417,7 @@ export class FieldSolver2D {
         // a rectangular conductor thickness. Leaving it set would carry a stale note
         // into the next sweep point.
         this._skinTransitionWarn = null;
+        this._platingTransitionWarn = this._plating_transition_note(this.freq);
         // |t|: an embedded trace (negative thickness) has the same skin transition.
         const tAbs = Math.abs(this.t);
         if (vacuum_fields && tAbs > 0 && this.freq > 0) {
@@ -1449,6 +1451,31 @@ export class FieldSolver2D {
         const pl = cond && cond.plating;
         return !!(pl && pl.sigma > 0 && (pl.top || pl.sides || pl.bottom)
             && (pl.thickness ?? 0) >= Math.abs(cond.height));
+    }
+
+    // Accuracy note for plated conductors in the skin transition: the layered
+    // plating-over-bulk surface impedance assumes a bulk thick against its skin
+    // depth. Returns null when no plated rectangular conductor has less than two
+    // bulk skin depths under its plating (solid plating is exact by convention).
+    _plating_transition_note(f) {
+        if (!(f > 0) || !this.conductors) return null;
+        const delta = Math.sqrt(2 / (2 * Math.PI * f * 4e-7 * Math.PI * this.sigma_cond));
+        let worst = null;
+        for (const c of this.conductors) {
+            const pl = c.plating;
+            if (c.shape || !pl || !(pl.sigma > 0) || !(pl.top || pl.sides || pl.bottom)) continue;
+            const tp = pl.thickness ?? 0, t = Math.abs(c.height);
+            if (tp >= t) continue;
+            const bulk = t - tp;
+            if (bulk < 2 * delta && (!worst || bulk < worst.bulk)) worst = { bulk, t, tp };
+        }
+        if (!worst) return null;
+        return { type: 'accuracy', reason: 'plating-transition', mode: 'all', message:
+            `Plating accuracy is reduced: the ${(worst.tp * 1e6).toFixed(2)} µm plating on a ` +
+            `${(worst.t * 1e6).toFixed(2)} µm conductor leaves ${(worst.bulk * 1e6).toFixed(2)} µm of bulk metal ` +
+            `under it, less than two skin depths (${(delta * 1e6).toFixed(2)} µm) at this frequency. ` +
+            `The layered surface impedance assumes a thick bulk, so conductor loss and internal ` +
+            `inductance can be off by tens of percent here.` };
     }
 
     // DC conductivity of the signal metal: the plating's when every signal
@@ -2814,6 +2841,7 @@ export class FieldSolver2D {
         const warns = [];
         if (this._certWarn) warns.push(this._certWarn);
         if (this._skinTransitionWarn) warns.push(this._skinTransitionWarn);
+        if (this._platingTransitionWarn) warns.push(this._platingTransitionWarn);
         // Geometry-level accuracy note a subclass may set at construction (e.g. the
         // broadside strong-coupling warning). Like the two above, this only reaches
         // rectilinear results: the triangular backend returns from solveAt before

@@ -58,6 +58,9 @@ class RectWaveguideSolver extends FieldSolver2D {
         this.sigma_cond = options.sigma_cond ?? 5.8e7;
         this.rq = options.rq ?? 0;
         this.freq = options.freq ?? 10e9;
+        // Wall thickness: bounds the wall's internal inductance once the skin depth
+        // exceeds it (far below any propagating frequency for a metal guide).
+        this.wall_thickness = options.wall_thickness ?? 1e-3;
 
         // Full-wave only. The UI locks the solver dropdown and buildSolverFromParams
         // overrides it; this is the backstop for a hand-edited link or an API caller.

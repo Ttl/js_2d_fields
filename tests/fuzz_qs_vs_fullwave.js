@@ -405,8 +405,9 @@ async function main() {
         // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
         // band). Certificate warnings describe C, not R, and do NOT relax the gate.
         const lossRelaxed =
-            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity')
-            || fw.warns.some(w => /^mqs-/.test(w.type));
+            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity'
+                || w.reason === 'plating-transition')
+            || fw.warns.some(w => /^mqs-/.test(w.type) || w.reason === 'plating-transition');
         const rGate = lossRelaxed ? R_RELAX : R_THRESH;
         let worstR = null;
         for (let mi = 0; mi < nModes; mi++) {

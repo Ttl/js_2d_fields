@@ -254,10 +254,40 @@ function solidPlated(r, pl) {
     return (pl.thickness ?? 0) >= h;
 }
 
+// Thickness a conductor's surface reactance saturates on: the slab reactance
+// (1+j) coth((1+j) d/delta) tends to omega mu0 d/3 once delta > d. A signal rect
+// carries current on both faces, so each face sees half its thinner dimension; a
+// ground rect is a one-sided slab of its full thinner dimension; a round wire of
+// radius r has the DC internal inductance mu0/(8 pi), which the slab form
+// reproduces with d = 3r/4; a complement shell (coax shield) has no meshed
+// thickness and takes the solver's declared wall thickness.
+function slabThickness(r, role) {
+    if (r.shape && isComplement(r.shape)) return (role && role.slab_thickness) || Infinity;
+    const dim = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+    if (r.shape) return 0.75 * dim / 2;
+    return role && role.is_signal ? dim / 2 : dim;
+}
+
+// Im part of (1+j) coth((1+j) x) relative to the semi-infinite value 1.
+function slabReactanceFactor(d, delta) {
+    const x = d / delta;
+    if (!(x > 0) || x > 20) return 1;
+    const den = Math.cosh(2 * x) - Math.cos(2 * x);
+    return (Math.sinh(2 * x) - Math.sin(2 * x)) / den;
+}
+
+// Face-classification tolerance: a fraction of the domain, capped so the thinnest
+// conductor's faces stay distinct (a 100 nm trace in a 50 mm enclosure).
 function platingTol(condRect) {
     const diag = Math.hypot((condRect.xmax_domain ?? condRect.xmax) - (condRect.xmin_domain ?? condRect.xmin),
                             (condRect.ymax_domain ?? condRect.ymax) - (condRect.ymin_domain ?? condRect.ymin));
-    return (diag > 0 ? diag : 1) * 1e-6;
+    let tol = (diag > 0 ? diag : 1) * 1e-6;
+    for (const r of condRect.rects || []) {
+        if (r.shape) continue;
+        const dim = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+        if (dim > 0) tol = Math.min(tol, dim / 4);
+    }
+    return tol;
 }
 
 // Point-based per-face surface impedance: Zs at a face midpoint (x, y) with edge
@@ -339,9 +369,14 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
         if (cache) { cache.clsMesh = mesh; cache.clsFm = fm; cache.clsMask = baseMask; cache.edgeFace = edgeFace; }
     }
 
-    const keyOf = (z) => `${z.re.toExponential(6)}|${z.im.toExponential(6)}`;
+    // Groups are keyed by surface impedance and by the slab thickness the
+    // reactance saturates on (per conductor), so the internal inductance can take
+    // its finite-thickness factor per group. Bare wall edges (fid < 0) belong to
+    // the PEC walls, semi-infinite here.
+    const roles = condRect.rectRoles || [];
+    const keyOf = (z, d) => `${z.re.toExponential(6)}|${z.im.toExponential(6)}|${d}`;
     const groupIdx = new Map();
-    const groupZ = [];
+    const groupZ = [], groupD = [];
     const edgeGroup = new Int32Array(nEdges).fill(-1);
     for (let e = 0; e < nEdges; e++) {
         if (!baseMask[e]) continue;
@@ -350,18 +385,20 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
         // single-layer plating impedance, resolved at the edge midpoint. 'all'
         // (shaped) faces have no wrap geometry, zAt falls through to zForFace.
         const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const ri = fid < 0 ? -1 : (fid / NFACE) | 0;
         const z = fid < 0 ? Zbare
-            : zAt((fid / NFACE) | 0, FACES[fid % NFACE],
+            : zAt(ri, FACES[fid % NFACE],
                   (nodes[2 * n0] + nodes[2 * n1]) / 2, (nodes[2 * n0 + 1] + nodes[2 * n1 + 1]) / 2);
-        const k = keyOf(z);
+        const d = ri < 0 ? Infinity : slabThickness(rects[ri], roles[ri]);
+        const k = keyOf(z, d);
         let gi = groupIdx.get(k);
-        if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); }
+        if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); groupD.push(d); }
         edgeGroup[e] = gi;
     }
     const groups = groupZ.map((z, gi) => {
         const mask = new Uint8Array(nEdges);
         for (let e = 0; e < nEdges; e++) if (edgeGroup[e] === gi) mask[e] = 1;
-        return { Zs: z, mask };
+        return { Zs: z, mask, slab: groupD[gi] };
     });
     return { uniform: groups.length <= 1, groups };
 }
@@ -952,7 +989,8 @@ export class TriBackend {
         const hints = s.tri_mesh_hints || {};
         // Clearance from the signal rects to the nearest other conductor rect or
         // PEC wall. Absorbed wall slabs do not survive the clip, the wall they
-        // became does. Touching conductors give 0, which disables the floor.
+        // became does. A touching pair is one conductor as far as sizing goes
+        // and does not count as a gap.
         let gapRef = Infinity;
         const rectsPre = s.conductors.filter(c => !c.shape && survives(c));
         for (const a of rectsPre) {
@@ -961,7 +999,8 @@ export class TriBackend {
                 if (b === a) continue;
                 const dx = Math.max(0, Math.max(a.x_min, b.x_min) - Math.min(a.x_max, b.x_max));
                 const dy = Math.max(0, Math.max(a.y_min, b.y_min) - Math.min(a.y_max, b.y_max));
-                gapRef = Math.min(gapRef, Math.hypot(dx, dy));
+                const dAB = Math.hypot(dx, dy);
+                if (dAB > 0) gapRef = Math.min(gapRef, dAB);
             }
             if (clip.wallPEC.left) gapRef = Math.min(gapRef, a.x_min - clip.X0);
             if (clip.wallPEC.right) gapRef = Math.min(gapRef, clip.X1 - a.x_max);
@@ -1696,7 +1735,9 @@ export class TriBackend {
         // The wall's internal inductance is its surface REACTANCE over omega, not its
         // resistance: those coincide only while Zs = Rs(1+j), which a rough or plated
         // wall breaks (Im(Zs)/Re(Zs) reaches ~5 at 1 um rms). Bare walls are unchanged.
-        const L_internal = omega > 0 ? Math.min(X_ac / omega, 0.5 * L_external) : 0;
+        const wallDelta = Math.sqrt(2 / (omega * MU0 * (s.sigma_cond ?? 5.8e7)));
+        const L_internal = omega > 0
+            ? X_ac / omega * slabReactanceFactor(s.wall_thickness ?? 1e-3, wallDelta) : 0;
         const L = L_external + L_internal;
         const C = (eps0 * er - kc * kc / (omega * omega * MU0)) / kappa;
         const G = omega * eps0 * er * tand / kappa;
@@ -2438,9 +2479,16 @@ export class TriBackend {
                     `MQS conductor-loss solve failed (${String(e && e.message || e).slice(0, 120)}); ` +
                     `using the perturbation loss estimate instead. Reduce Max Nodes if this persists.` });
             }
-            // Accept MQS only if physically sane.
-            if (mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop) && mqs.L_loop > 0
-                && isFinite(mqs.X_total) && mqs.X_total > 0) {
+            // Accept MQS only if physically sane. A warning is given and the
+            // solver falls back to less accurate perturbation estimate.
+            const mqsSane = mqs && isFinite(mqs.R_total) && mqs.R_total > 0 && isFinite(mqs.L_loop)
+                && mqs.L_loop > 0 && isFinite(mqs.X_total) && mqs.X_total > 0;
+            if (mqs && !mqsSane && this._modeWarnings && !this._modeWarnings.some(w => w.type === 'mqs-rejected')) {
+                this._modeWarnings.push({ type: 'mqs-rejected', mode, freq: f, message:
+                    `MQS conductor-loss solve returned a non-physical result (R=${mqs.R_total}, ` +
+                    `L=${mqs.L_loop}, X=${mqs.X_total}). Using the perturbation loss estimate instead.` });
+            }
+            if (mqsSane) {
                 R_total = s.is_differential ? mqs.R_total / 2 : mqs.R_total;
                 lossVia = 'mqs';
                 // Internal inductance from the volume solve: the MQS loop inductance
@@ -2579,7 +2627,11 @@ export class TriBackend {
                     baseg = (1 - wFW) * baseg + wFW * lossW.R_ac;
                 }
                 R_ac += baseg * (RsRef > 0 ? g.Zs.re / RsRef : 1);
-                X_ac += baseg * (RsRef > 0 ? g.Zs.im / RsRef : 1);
+                // The surface reactance of a finite-thickness conductor saturates at
+                // omega mu0 d/3 once delta exceeds d (slabReactanceFactor), so
+                // Im(Zs)/omega stays a bounded internal inductance down to DC.
+                X_ac += baseg * (RsRef > 0 ? g.Zs.im / RsRef : 1)
+                    * slabReactanceFactor(g.slab ?? Infinity, deltaRef);
             }
             R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
             // Internal (skin) inductance is the surface reactance over ω.
@@ -2589,16 +2641,21 @@ export class TriBackend {
             // R_ac/ω recovered under a fifth of the true increment and the line
             // came out measurably fast.  Neither the static-field nor the SIBC
             // routine returns a usable L_int of its own across the skin
-            // transition, which is why it is rebuilt here at all. The cap
-            // bounds it near dc, below the skin regime where no surface model
-            // holds.
-            L_internal = (omega > 0) ? Math.max(0, Math.min(X_ac / omega, 0.5 * L_external)) : 0;
+            // transition, which is why it is rebuilt here at all.
+            L_internal = (omega > 0) ? Math.max(0, X_ac / omega) : 0;
         }
 
         // A conductor never dissipates less than its DC resistance; the volume
         // eddy solve runs at the bulk sigma and can undercut R_dc on a solid-plated
         // thin film.
         if (f > 0 && R_total < R_dc) R_total = R_dc;
+
+        // Plating whose bulk underneath is thinner than two skin depths: the layered
+        // surface impedance both loss paths weight by has no bulk to stand on.
+        const platingNote = (f > 0 && s._plating_transition_note) ? s._plating_transition_note(f) : null;
+        if (platingNote && this._modeWarnings && !this._modeWarnings.some(w => w.reason === 'plating-transition')) {
+            this._modeWarnings.push({ ...platingNote, mode, freq: f });
+        }
 
         // assemble RLGC + Zc
         // Reported eps_eff = phase ε_eff = c²·L·C: dielectric dispersion (via eps_d)

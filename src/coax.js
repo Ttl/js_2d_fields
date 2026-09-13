@@ -59,6 +59,10 @@ class CoaxSolver extends FieldSolver2D {
         this.sigma_cond = options.sigma_cond ?? 5.8e7;
         this.rq = options.rq ?? 0;
         this.freq = options.freq ?? 1e9;
+        // Shield wall thickness: only the low-frequency internal inductance reads it
+        // (the slab reactance plateau once the skin depth exceeds the wall). The
+        // meshed shield stays a zero-thickness shell. Default: the drawn ring.
+        this.shield_thickness = options.shield_thickness ?? 0.10 * this.b;
 
         // Full-wave only. The UI locks the solver dropdown for coax; this is the
         // programmatic backstop for a hand-edited link or a direct API caller.
@@ -163,6 +167,7 @@ class CoaxSolver extends FieldSolver2D {
                 true, 1, innerPlating, inner),
             new Conductor(-Rd, -Rd, 2 * Rd, 2 * Rd, false, 0, outerPlating, shield),
         ];
+        this.conductors[1].slab_thickness = this.shield_thickness;
 
         // Domain box must strictly ENCLOSE the meshed disk (tri_backend derives its
         // plotting/resample box from it). t_gnd is the distance from y=0 to the box

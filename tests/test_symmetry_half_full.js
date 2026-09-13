@@ -110,6 +110,9 @@ for (const fam of FAMILIES) {
         check(`${fam.name}: half MQS R == full MQS R (±${100 * fam.rTol}%)`,
             relDiff(h.RLGC.R, f.RLGC.R) < fam.rTol,
             `${h.RLGC.R.toFixed(2)} vs ${f.RLGC.R.toFixed(2)} Ω/m`);
+        check(`${fam.name}: half MQS L_internal == full MQS L_internal (±${100 * fam.rTol}%)`,
+            relDiff(h.L_internal, f.L_internal) < fam.rTol,
+            `${(h.L_internal * 1e9).toFixed(3)} vs ${(f.L_internal * 1e9).toFixed(3)} nH/m`);
     } else {
         // 4 solves: half/full auto (MQS on both sides — mode walls vs
         // per-conductor drives) for C/Z0 and MQS R; half/full forced
@@ -126,6 +129,9 @@ for (const fam of FAMILIES) {
             check(`${fam.name} ${mode}: half MQS R == full MQS R (±${100 * fam.rTol}%)`,
                 relDiff(half.modes[i].RLGC.R, full.modes[i].RLGC.R) < fam.rTol,
                 `${half.modes[i].RLGC.R.toFixed(2)} vs ${full.modes[i].RLGC.R.toFixed(2)} Ω/m`);
+            check(`${fam.name} ${mode}: half MQS L_internal == full MQS L_internal (±${100 * fam.rTol}%)`,
+                relDiff(half.modes[i].L_internal, full.modes[i].L_internal) < fam.rTol,
+                `${(half.modes[i].L_internal * 1e9).toFixed(3)} vs ${(full.modes[i].L_internal * 1e9).toFixed(3)} nH/m`);
             check(`${fam.name} ${mode}: half pert R == full pert R (±${100 * fam.rTol}%)`,
                 relDiff(halfP.modes[i].RLGC.R, fullP.modes[i].RLGC.R) < fam.rTol,
                 `${halfP.modes[i].RLGC.R.toFixed(2)} vs ${fullP.modes[i].RLGC.R.toFixed(2)} Ω/m`);

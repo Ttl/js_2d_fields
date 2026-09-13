@@ -712,7 +712,11 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         wS1[w] = 0; wS2[w] = 0; wLen[w] = 0;
         const d = wt[w] ?? Infinity;
         if (!(d < Infinity)) { zWall[w] = { re: Rs, im: Rs }; continue; }
-        const x = d / delta, den = Math.cosh(2 * x) - Math.cos(2 * x);
+        // coth((1+j)x) is 1 to double precision past x ~ 20, and cosh(2x) overflows
+        // past x ~ 355.
+        const x = d / delta;
+        if (x > 20) { zWall[w] = { re: Rs, im: Rs }; continue; }
+        const den = Math.cosh(2 * x) - Math.cos(2 * x);
         const cr = Math.sinh(2 * x) / den, ci = -Math.sin(2 * x) / den;
         zWall[w] = { re: Rs * (cr - ci), im: Rs * (cr + ci) };
     }

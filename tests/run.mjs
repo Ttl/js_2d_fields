@@ -48,6 +48,7 @@ const TIERS = {
         { file: 'tests/test_gcpw_qs_continuity.js', cost: 9 },
         { file: 'tests/test_qs_edge_cases.js', cost: 30 },
         { file: 'tests/test_shared_edge_cases.js', cost: 25 },
+        { file: 'tests/test_fullwave_edge_cases.js', cost: 13 },
     ],
     slow: [
         { file: 'tests/test_fullwave_correctness.js', cost: 98 },

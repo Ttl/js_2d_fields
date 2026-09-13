@@ -257,7 +257,8 @@ export function buildOccMeshFromGeometry(G, opts) {
                 xmin: bb.xmin, xmax: bb.xmax, ymin: bb.ymin, ymax: bb.ymax,
                 shape: c.shape, meshArea: shapeArea(c, meshOpts),
             });
-            condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null });
+            condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
+                             slab_thickness: c.slab_thickness ?? null });
             continue;
         }
         const r = _rectOf(c);
@@ -265,7 +266,8 @@ export function buildOccMeshFromGeometry(G, opts) {
         const ymin = Math.max(r.ymin, Y0), ymax = Math.min(r.ymax, Y1);
         if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
         condRects.push({ xmin, xmax, ymin, ymax, meshArea: (xmax - xmin) * (ymax - ymin) });
-        condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null });
+        condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
+                         slab_thickness: c.slab_thickness ?? null });
     }
 
     const stack = G.stackSave();
@@ -603,9 +605,12 @@ export function buildOccMeshFromGeometry(G, opts) {
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.Smoothing'), 1, ierr);
     G._gmshOptionSetNumber(_cstr(G, 'Mesh.RandomSeed'), 1, ierr);
     // Caller overrides (experimental tuning of the gmsh mesher, e.g. Mesh.Optimize).
+    // Length-valued options are given in metres like every other input and scaled
+    // to the model's micrometre units here.
     if (opts.gmshOptions) {
         for (const [k, v] of Object.entries(opts.gmshOptions)) {
-            G._gmshOptionSetNumber(_cstr(G, k), v, ierr); check('opt ' + k);
+            const isLength = /MeshSize|CharacteristicLength|Tolerance/.test(k) && !/Factor|FromCurvature|FromPoints|Extend/.test(k);
+            G._gmshOptionSetNumber(_cstr(G, k), isLength ? v * OCC_SCALE : v, ierr); check('opt ' + k);
         }
     }
 
