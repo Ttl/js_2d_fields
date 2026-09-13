@@ -147,6 +147,11 @@ class InterpolatingSweep {
      */
     async _computeExact(freq) {
         const result = await this.solver.computeAtFrequency(freq, this.cachedResults);
+        // L_external = 1/(c^2 C0) is set by the vacuum field alone, so it is the same at
+        // every sample. Keep the first sample's per-mode value for buildResults.
+        if (!this._lExt && result && result.modes) {
+            this._lExt = new Map(result.modes.map(m => [m.mode, m.L_external]));
+        }
         // Collect per-point solver warnings (e.g. the full-wave backend's eigensolve
         // failure / mode-ambiguity warnings) so the app can surface them after the
         // sweep — they would otherwise be silently discarded with the result object.
@@ -444,6 +449,12 @@ class InterpolatingSweep {
 
                 // Compute derived quantities from RLGC (same formulas as field_solver.js rlgc())
                 // Note: freq=0 is excluded by the useInterpolation guard (fMin > 0)
+                // Static Z0 = 1/(c sqrt(C C0)) = sqrt(L_external / C): the discrete solve's
+                // convention, which differs from Re(Zc) by tens of percent below the skin
+                // regime and by the internal-inductance share above it.
+                const L_external = (this._lExt && this._lExt.get(im.mode)) ?? L;
+                const L_internal = Math.max(0, L - L_external);
+                const Z0 = Math.sqrt(L_external / C);
                 const Z_num = new Complex(R, omega * L);
                 const Z_den = new Complex(G, omega * C);
                 const Zc = Z_num.div(Z_den).sqrt();
@@ -457,19 +468,14 @@ class InterpolatingSweep {
                 // alpha_c = R / (2 * Re(Zc))  in Np/m, convert to dB/m
                 const alpha_c = 8.686 * R / (2 * Zc.re);
 
-                // alpha_d from G: alpha_d = G * Re(Zc) / 2  in Np/m -> dB/m
-                const alpha_d = 8.686 * G * Zc.re / 2;
+                // alpha_d from G with the static Z0, inverting the solve's G = 2 alpha_d / Z0.
+                const alpha_d = 8.686 * G * Z0 / 2;
 
                 const alpha_total = alpha_c + alpha_d;
 
-                // L_external/L_internal split is not available from interpolated RLGC
-                // (would require the cached field data). Not used for S-params or plots.
-                const L_external = L;
-                const L_internal = 0;
-
                 return {
                     mode: im.mode,
-                    Z0: Zc.re, // Use real part of complex Zc as Z0
+                    Z0,
                     eps_eff,
                     C, C0: C, // C0 not meaningful for interpolated; use C as placeholder
                     RLGC: { R, L, G, C },

@@ -14,13 +14,12 @@
 // QS-vs-fullwave fuzzer (imported generator — same seed ⇒ same geometry list).
 //
 // Compares the per-mode RLGC — the quantities the sweep actually splines and
-// everything downstream (Zc, alpha, eps_eff, S-params) derives from. The
-// DERIVED quantities can't be compared across the two paths directly: the
-// sweep's buildResults computes Z0/eps_eff from RLGC via the RF formulas
-// (gamma and Zc including R and G — significant at low f where R/omega·L is
-// not small), while an exact solve reports the static Z0 and the phase
-// convention eps_eff = c²·L·C. Identical RLGC ⇒ identical derived values
-// within each convention.
+// everything downstream (Zc, alpha, eps_eff, S-params) derives from. Z0 and
+// alpha_d follow the discrete solve's conventions on both paths (static Z0 from
+// the vacuum L_external, alpha_d = G Z0 / 2, see test_shared_edge_cases.js);
+// eps_eff does not: the sweep uses (beta/k0)^2 from gamma while the full-wave
+// exact solve reports the phase convention c^2 L C. Identical RLGC ⇒ identical
+// derived values within each convention.
 //
 // Flags a case when any RLGC component at any compare frequency exceeds its
 // gate: L/C > 2%, R/G > 4%. The gates are the measured stack-up of the

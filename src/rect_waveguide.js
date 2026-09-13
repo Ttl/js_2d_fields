@@ -82,9 +82,12 @@ class RectWaveguideSolver extends FieldSolver2D {
         const L = Math.max(this.a, this.b);
         this.kc_analytic = Math.PI / L;
         this.fc = C0 * this.kc_analytic / (2 * Math.PI * Math.sqrt(this.epsilon_r));
-        // Second cutoff: TE20 (2*pi/a) or TE01 (pi/b), whichever is lower. Above it the
-        // guide is over-moded and this solver still reports only the fundamental.
-        this.kc2_analytic = Math.min(2 * Math.PI / this.a, Math.PI / this.b);
+        // Second cutoff: the fundamental is TE along the longer side L, the next mode is
+        // either its second harmonic (2*pi/L) or the fundamental along the shorter side
+        // (pi/S), whichever is lower. Above it the guide is over-moded and this solver
+        // still reports only the fundamental.
+        const S = Math.min(this.a, this.b);
+        this.kc2_analytic = Math.min(2 * Math.PI / L, Math.PI / S);
         this.fc2 = C0 * this.kc2_analytic / (2 * Math.PI * Math.sqrt(this.epsilon_r));
 
         // --- Backend dispatch flags ---------------------------------------------

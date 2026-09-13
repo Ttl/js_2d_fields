@@ -318,10 +318,14 @@ function computeSParamsDifferentialMTL(freq, R2, L2, G2, C2, length, Z_ref) {
     const omega = 2 * Math.PI * freq;
     const Z = mComplex(R2, L2.map(row => row.map(v => v * omega)));   // [R] + jω[L]
     const Y = mComplex(G2, C2.map(row => row.map(v => v * omega)));   // [G] + jω[C]
-    const gamma = Z.mul(Y).sqrt();                                     // [γ] = √([Z][Y])
-    const gl = gamma.mul(length);
-    const sinch = gamma.inv().mul(gl.sinh());                          // γ⁻¹·sinh(γℓ)
-    const A = gl.cosh();
+    // At DC [γ] = 0 and γ⁻¹ sinh(γℓ) -> ℓ·I: the chain blocks reduce to A = D = I,
+    // B = ℓ[R], C = ℓ[G], a series-resistance network with shunt conductance.
+    const dc = omega === 0;
+    const gamma = dc ? null : Z.mul(Y).sqrt();                         // [γ] = √([Z][Y])
+    const gl = dc ? null : gamma.mul(length);
+    const sinch = dc ? Matrix2x2.identity().mul(length)
+                     : gamma.inv().mul(gl.sinh());                     // γ⁻¹·sinh(γℓ)
+    const A = dc ? Matrix2x2.identity() : gl.cosh();
     const B = sinch.mul(Z);   // γ⁻¹sinh(γℓ)·[Z] — γ and [Z] do NOT commute for an asymmetric pair
     const Cb = Y.mul(sinch);
     const D = A.transpose();                                           // reciprocal: D = Aᵀ

@@ -201,6 +201,7 @@ function makePlatingZs(solver, condRect, freq) {
     // the plating covers the whole boundary (CoaxSolver sets pl.all).
     const zForFace = (ri, face) => {
         const pl = roles[ri] && roles[ri].plating;
+        if (solidPlated(rects[ri], pl)) return zSingle(pl.sigma, pl.rq ?? 0);
         if (!(pl && pl[face] && pl.sigma > 0)) return Zbare;
         const key = `${pl.sigma}|${pl.rq}|${pl.thickness}`;
         let z = layeredCache.get(key);
@@ -234,7 +235,7 @@ function makePlatingZs(solver, condRect, freq) {
     const zAt = (ri, face, x, y) => {
         const pl = roles[ri] && roles[ri].plating;
         const r = rects[ri];
-        if (pl && pl.sigma > 0 && r && !r.shape && (pl.thickness ?? 0) > 0 &&
+        if (pl && pl.sigma > 0 && r && !r.shape && (pl.thickness ?? 0) > 0 && !solidPlated(r, pl) &&
             face === 'bottom' && pl.sides && !pl.bottom && pl.thick_corners) {
             const d = Math.min(x - r.xmin, r.xmax - x);
             if (d <= pl.thickness) return zSingle(pl.sigma, rqBase);
@@ -242,6 +243,15 @@ function makePlatingZs(solver, condRect, freq) {
         return zForFace(ri, face);
     };
     return { Zbare, zForFace, zAt };
+}
+
+// Plating at least as thick as a rectangular conductor makes the whole cross-section
+// plating metal: every face is solid plating and the layered model has no bulk.
+function solidPlated(r, pl) {
+    if (!(pl && pl.sigma > 0 && (pl.top || pl.sides || pl.bottom || pl.all)) || !r || r.shape) return false;
+    const h = r.height !== undefined ? Math.abs(r.height)
+        : ((r.ymax !== undefined ? r.ymax : r.y_max) - (r.ymin !== undefined ? r.ymin : r.y_min));
+    return (pl.thickness ?? 0) >= h;
 }
 
 function platingTol(condRect) {
@@ -1985,6 +1995,23 @@ export class TriBackend {
     // eps_eff comes from the full-wave eigenmode (f ≥ 100 MHz), anchored to the
     // static solve (_eigenBias), or the static solve alone (below), conductor loss is
     // from the robust static-field method.
+    // Internal inductance at DC: the loss solve evaluated where the skin depth is
+    // 100x the thickest conductor, so the current is uniform across every
+    // cross-section and L_internal sits on its low-frequency plateau.
+    _dcInternalInductance(mode, cr) {
+        let tMax = 0;
+        for (const c of cr.rects) {
+            if (c.shape && isComplement(c.shape)) continue;
+            tMax = Math.max(tMax, Math.min(c.xmax - c.xmin, c.ymax - c.ymin));
+        }
+        if (!(tMax > 0)) return 0;
+        const sigma = this.solver.sigma_cond ?? 5.8e7;
+        const delta = 100 * tMax;
+        const fDc = 2 / (2 * Math.PI * MU0 * sigma * delta * delta);
+        const r = this._modeAtFreq(mode, fDc);
+        return r.L_internal > 0 ? r.L_internal : 0;
+    }
+
     _modeAtFreq(mode, f) {
         const { mesh } = this;
         const s = this.solver;
@@ -2454,15 +2481,19 @@ export class TriBackend {
         // series. cr.rects can NOT be used for this: it contains coplanar ground
         // rects (which are return path, not parallel signal metal) and omits
         // wall-absorbed grounds entirely.
+        // Per-unit-length DC conductance of the signal and ground metal. Solid
+        // plating (plating at least as thick as the conductor) conducts at the
+        // plating sigma.
         const sigmaDC = s.sigma_cond ?? 5.8e7;
-        let sigArea = 0, gndArea = 0;
+        let sigArea = 0, gndArea = 0, sigCond = 0, gndCond = 0;
         for (const c of s.conductors) {
             // shapeArea is the bbox product for a plain rect (unchanged) but
             // the true cross-section for a shaped one. A complement shell
             // returns 0: the coax shield is modelled as infinitely thick, so it
             // carries no DC resistance.
             const a = shapeArea(c);
-            if (c.is_signal) sigArea += a; else gndArea += a;
+            const sg = solidPlated(c, c.plating) ? c.plating.sigma : sigmaDC;
+            if (c.is_signal) { sigArea += a; sigCond += sg * a; } else { gndArea += a; gndCond += sg * a; }
         }
         // Mode-aware per-line convention for a differential pair (mirrors
         // field_solver.calculate_conductor_loss): sigArea sums both traces, the odd
@@ -2470,18 +2501,18 @@ export class TriBackend {
         // mode returns 2I through the ground.
         let R_dc;
         if (s.is_differential && (mode === 'odd' || mode === 'even')) {
-            const R_trace = sigArea > 0 ? 2 / (sigmaDC * sigArea) : 0;
+            const R_trace = sigArea > 0 ? 2 / sigCond : 0;
             R_dc = mode === 'odd' ? R_trace
-                 : R_trace + (gndArea > 0 ? 2 / (sigmaDC * gndArea) : 0);
+                 : R_trace + (gndArea > 0 ? 2 / gndCond : 0);
         } else {
-            R_dc = (sigArea > 0 ? 1 / (sigmaDC * sigArea) : 0)
-                 + (gndArea > 0 ? 1 / (sigmaDC * gndArea) : 0);
+            R_dc = (sigArea > 0 ? 1 / sigCond : 0)
+                 + (gndArea > 0 ? 1 / gndCond : 0);
         }
         if (f === 0) {
-            // Pure DC point: no skin effect, R is the geometric DC resistance
-            // (the FDM backend returns the same; this used to return R = 0).
+            // DC point: R is the geometric DC resistance, L_internal the low-frequency
+            // plateau of the loss solve (current uniform across every conductor).
             R_total = R_dc;
-            L_internal = 0;
+            L_internal = this._dcInternalInductance(mode, cr);
         }
         if (f > 0 && R_total === 0) {
             // Per-edge surface groups (one group = one surface impedance), evaluated
@@ -2563,6 +2594,11 @@ export class TriBackend {
             // holds.
             L_internal = (omega > 0) ? Math.max(0, Math.min(X_ac / omega, 0.5 * L_external)) : 0;
         }
+
+        // A conductor never dissipates less than its DC resistance; the volume
+        // eddy solve runs at the bulk sigma and can undercut R_dc on a solid-plated
+        // thin film.
+        if (f > 0 && R_total < R_dc) R_total = R_dc;
 
         // assemble RLGC + Zc
         // Reported eps_eff = phase ε_eff = c²·L·C: dielectric dispersion (via eps_d)

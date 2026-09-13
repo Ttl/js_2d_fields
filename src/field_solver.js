@@ -1045,27 +1045,26 @@ export class FieldSolver2D {
         //          => R_dc = R_one_trace + 2*R_gnd.
         // The mode-blind form 1/(σ*signal_area) + 1/(σ*ground_area) is ~2x low
         // per line.
+        // Signal metal is the plating metal when the plating is at least as thick
+        // as the trace (the whole cross-section is plating).
+        const sigma_sig = this._signal_sigma();
         const R_gnd0 = ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
         let R_dc;
         if (this.is_differential && (mode === 'odd' || mode === 'even')) {
-            const R_trace = 2.0 / (this.sigma_cond * signal_area);
+            const R_trace = 2.0 / (sigma_sig * signal_area);
             R_dc = mode === 'odd' ? R_trace : R_trace + 2.0 * R_gnd0;
         } else {
-            R_dc = 1.0 / (this.sigma_cond * signal_area) + R_gnd0;
+            R_dc = 1.0 / (sigma_sig * signal_area) + R_gnd0;
         }
 
-        // Handle DC case (frequency = 0)
         if (this.freq === 0) {
-            // Returning before the skin-transition block below, so clear its warning
-            // explicitly, otherwise a DC point in a sweep inherits the previous
-            // frequency's note.
+            // DC point: R is the geometric DC resistance and the internal inductance
+            // is the low-frequency plateau of the surface integral below (slab
+            // reactance mu0 d/3 per face once delta >> d). Returning before the
+            // skin-transition block, so its warning is cleared explicitly.
+            const L_internal = this._dc_internal_inductance(Ex, Ey, Z0, vacuum_fields, mode);
             this._skinTransitionWarn = null;
-            return {
-                R_ac: 0,
-                R_dc: R_dc,
-                R_total: R_dc,
-                L_internal: 0
-            };
+            return { R_ac: 0, R_dc, R_total: R_dc, L_internal };
         }
 
         // Use roughness from constructor
@@ -1105,6 +1104,16 @@ export class FieldSolver2D {
             if (!this.conductors || ci < 0) return Z_surf_default;
             const cond = this.conductors[ci];
             if (!cond || !cond.plating) return Z_surf_default;
+
+            // Plating at least as thick as the conductor: the whole cross-section is
+            // plating metal and every face sees the solid plating impedance.
+            if (this._solid_plating(cond)) {
+                const key = `${ci}_solid`;
+                if (!Z_cache.has(key)) {
+                    Z_cache.set(key, calculate_Zrough(this.freq, cond.plating.sigma, cond.plating.rq ?? 0));
+                }
+                return Z_cache.get(key);
+            }
 
             // Map direction to surface face:
             // 'u' = dielectric is below conductor neighbor = conductor's BOTTOM face
@@ -1275,16 +1284,18 @@ export class FieldSolver2D {
         // fitted against the semi-infinite R_ac. Signal traces carry current on
         // both faces, so each face sees half the thickness; ground planes and
         // pours are treated as one-sided slabs of their full thickness.
-        const delta = Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * this.sigma_cond));
-        const slabReactanceFactor = (d) => {
-            const x = d / delta;
+        const deltaOf = (sigma) => Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * sigma));
+        const delta = deltaOf(this.sigma_cond);
+        const slabReactanceFactor = (d, dlt = delta) => {
+            const x = d / dlt;
             if (!(x > 0)) return 1;
             if (x > 20) return 1;
             const den = Math.cosh(2 * x) - Math.cos(2 * x);
             return (Math.sinh(2 * x) - Math.sin(2 * x)) / den;
         };
-        const kX = (this.conductors || []).map(c =>
-            slabReactanceFactor(c.is_signal ? Math.abs(c.height) / 2 : Math.abs(c.height)));
+        const kX = (this.conductors || []).map(c => slabReactanceFactor(
+            c.is_signal ? Math.abs(c.height) / 2 : Math.abs(c.height),
+            this._solid_plating(c) ? deltaOf(c.plating.sigma) : delta));
         const kXDefault = slabReactanceFactor(Math.abs(this.t) / 2);
         const reactanceFactor = ci => (ci >= 0 && ci < kX.length) ? kX[ci] : kXDefault;
 
@@ -1432,6 +1443,36 @@ export class FieldSolver2D {
     // The only production caller lacking vacuum fields on a rect solver is
     // _solve_single_mode(vacuum_first=false), whose loss output is discarded
     // and recomputed by the caller with the cached vacuum fields.
+    // Plating at least as thick as the conductor makes the whole cross-section
+    // plating metal; the layered plating-over-bulk impedance has no bulk to stand on.
+    _solid_plating(cond) {
+        const pl = cond && cond.plating;
+        return !!(pl && pl.sigma > 0 && (pl.top || pl.sides || pl.bottom)
+            && (pl.thickness ?? 0) >= Math.abs(cond.height));
+    }
+
+    // DC conductivity of the signal metal: the plating's when every signal
+    // conductor is solid plating, else the bulk.
+    _signal_sigma() {
+        const sig = (this.conductors || []).filter(c => c.is_signal);
+        if (sig.length && sig.every(c => this._solid_plating(c))) return sig[0].plating.sigma;
+        return this.sigma_cond;
+    }
+
+    // Internal inductance at DC: the surface integral evaluated where the skin depth
+    // is 100x the thickest conductor, so every face sits on its mu0 d/3 plateau.
+    _dc_internal_inductance(...args) {
+        let tMax = 0;
+        for (const c of this.conductors || []) tMax = Math.max(tMax, Math.abs(c.height));
+        if (!(tMax > 0)) return 0;
+        const delta = 100 * tMax;
+        const fDc = 2 / (2 * Math.PI * 4e-7 * Math.PI * this.sigma_cond * delta * delta);
+        const f0 = this.freq;
+        this.freq = fDc;
+        try { return this.calculate_conductor_loss(...args).L_internal; }
+        finally { this.freq = f0; }
+    }
+
     _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode = null) {
         if (this.conductor_id && Ex0 && Ey0 && C0 > 0) {
             const Z0_vac = 1 / (CONSTANTS.C * C0);
