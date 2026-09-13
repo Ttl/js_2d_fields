@@ -16,6 +16,10 @@
 //      domain: a 20 nm trace in a 50 mm enclosure must keep its top and bottom faces
 //      distinct.
 //   F10 the eigen-anchor fallback must surface its warning and keep eps_eff sane.
+//   F11 dielectric interfaces stay conforming through adaptive refinement: no triangle
+//      straddles the substrate top after the refinement passes, and the mesh quality
+//      stays sane with that line constrained (a solder mask thinner than two fine
+//      element sizes keeps its faces unconstrained, or its slivers cannot be fixed).
 //
 // Run: node tests/test_fullwave_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -137,6 +141,35 @@ for (const backend of ['rectilinear', 'triangular']) {
     check('eigen-anchor warning surfaced', !!w, w ? w.message.slice(0, 80) : 'none');
     check('eps_eff stays within 5% of the static value', rel(rf.modes[0].eps_eff, r.modes[0].eps_eff) < 0.05,
         `${rf.modes[0].eps_eff.toFixed(4)} vs ${r.modes[0].eps_eff.toFixed(4)}`);
+}
+
+// F11
+{
+    console.log('F11 dielectric interfaces conforming after refinement');
+    const straddling = (mesh, yLines) => {
+        const { nodes, tris, nTris } = mesh;
+        let n = 0;
+        for (let t = 0; t < nTris; t++) {
+            const ys = [0, 1, 2].map(k => nodes[2 * tris[3 * t + k] + 1]);
+            for (const yl of yLines) if (ys.some(y => y > yl + 1e-9) && ys.some(y => y < yl - 1e-9)) { n++; break; }
+        }
+        return n;
+    };
+    const cases = [
+        ['microstrip', {}, [MS.substrate_height]],
+        ['microstrip + solder mask', { use_sm: true, sm_t_sub: 20e-6, sm_t_trace: 20e-6, sm_t_side: 20e-6, sm_er: 3.5, sm_tand: 0.02 },
+            [MS.substrate_height]],
+        ['gcpw', { use_coplanar_gnd: true, use_vias: true, gap: 0.15e-3, via_gap: 0.3e-3 }, [MS.substrate_height]],
+    ];
+    for (const [name, opts, lines] of cases) {
+        const { s } = await solved(ms({ ...opts, freq: 5e9 }));
+        const tb = await s._ensureTriBackend();
+        const n = straddling(tb.mesh, lines);
+        check(`${name}: no triangle straddles a dielectric interface`, n === 0, `${n} of ${tb.mesh.nTris}`);
+        const q = s.meshQuality;
+        check(`${name}: mesh quality sane`, !!q && q.crossings === 0 && q.badFraction < 0.05 && q.maxQ < 50,
+            q ? `maxQ ${q.maxQ.toFixed(1)}, badFraction ${(q.badFraction * 100).toFixed(2)}%, crossings ${q.crossings}` : 'no meshQuality');
+    }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

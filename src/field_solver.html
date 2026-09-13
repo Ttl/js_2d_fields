@@ -675,7 +675,9 @@
             <label style="color:var(--text-muted); font-size:0.9em;">Number of modes:
                 <input type="number" id="modes-nev" value="6" min="1" max="30" style="width:60px;"></label>
             <label style="color:var(--text-muted); font-size:0.9em;">Mesh density (cells/λ):
-                <input type="number" id="modes-mesh-density" value="12" min="3" max="40" style="width:60px;"> <span class="help-icon" onclick="showHelpModal('modes_mesh_density', event)">?</span></label>
+                <input type="number" id="modes-mesh-density" value="8" min="3" max="40" style="width:60px;"> <span class="help-icon" onclick="showHelpModal('modes_mesh_density', event)">?</span></label>
+            <label style="color:var(--text-muted); font-size:0.9em;">
+                <input type="checkbox" id="modes-shrink-domain" checked> Shrink open domain <span class="help-icon" onclick="showHelpModal('modes_shrink_domain', event)">?</span></label>
             <button id="btn-solve-modes" style="width:auto; padding:8px 18px;">Solve Modes</button>
             <span id="modes-status" style="color:var(--text-muted); font-size:0.85em;"></span>
             <span class="help-icon" onclick="showHelpModal('modes', event)">?</span>
@@ -1132,7 +1134,11 @@
         },
         modes_mesh_density: {
             title: 'Mesh Density (cells/λ)',
-            body: '<p>Minimum number of mesh cells per wavelength in the bulk of the domain, evaluated at the Modes frequency in the densest dielectric. The mode solver needs the whole cross-section wavelength-resolved, unlike the main solve, because higher-order and cavity mode fields fill the bulk.</p><p><b>12</b> (default) resolves higher-order modes reliably. Lower values shrink the mesh quadratically (triangle count &prop; density&sup2;) and solve much faster, but under-resolved higher-order modes can shift in &epsilon;<sub>eff</sub>, be misclassified as spurious, or be missed entirely, results near the bottom of the range (3&ndash;6) are only trustworthy for the fundamental quasi-TEM mode. Higher values cost triangles and rarely help.</p><p>The mesh is still capped by Max Nodes: if the requested density blows the budget, the mesh is coarsened to fit and the density is not honored.</p>'
+            body: '<p>Minimum number of mesh cells per wavelength in the bulk of the domain, evaluated at the Modes frequency in the densest dielectric. The mode solver needs the whole cross-section wavelength-resolved, unlike the main solve, because higher-order and cavity mode fields fill the bulk.</p><p><b>8</b> (default) resolves higher-order modes reliably with the quadratic elements in use. Lower values shrink the mesh quadratically (triangle count &prop; density&sup2;) and solve much faster, but under-resolved higher-order modes can shift in &epsilon;<sub>eff</sub>, be misclassified as spurious, or be missed entirely, results near the bottom of the range (3&ndash;6) are only trustworthy for the fundamental quasi-TEM mode. Higher values cost triangles and rarely help.</p><p>The mesh is still capped by Max Nodes: if the requested density blows the budget, the mesh is coarsened to fit and the density is not honored.</p>'
+        },
+        modes_shrink_domain: {
+            title: 'Shrink open domain',
+            body: '<p>Automatically shrink the open field boundaries to reduce the mesh size, can slightly affect the solved &epsilon;<sub>eff</sub>. The far field of an open line carries no guided mode, it only adds modes of the artificial box and shrinking it keeps the Modes solve within the node budget at high frequencies.</p><p>Not available with an enclosure.</p>'
         }
     };
 
@@ -1494,6 +1500,8 @@
         });
         document.getElementById('chk_enclosure').addEventListener('change', () => {
             toggleCheckboxSection('chk_enclosure', 'enclosure-params');
+            // An enclosure is a physical boundary: the Modes tab cannot shrink it.
+            document.getElementById('modes-shrink-domain').disabled = document.getElementById('chk_enclosure').checked;
         });
         document.getElementById('chk_plating').addEventListener('change', () => {
             toggleCheckboxSection('chk_plating', 'plating-params');
@@ -1508,6 +1516,7 @@
         toggleCheckboxSection('chk_top_diel', 'top-diel-params');
         toggleCheckboxSection('chk_gnd_cut', 'gnd-cut-params');
         toggleCheckboxSection('chk_enclosure', 'enclosure-params');
+        document.getElementById('modes-shrink-domain').disabled = document.getElementById('chk_enclosure').checked;
         toggleCheckboxSection('chk_plating', 'plating-params');
 
         // Setup unit parsing for all unit-input fields

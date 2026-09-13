@@ -394,9 +394,11 @@ export class FieldSolver2D {
     // TriBackend._wavelengthCap) rather than just the active patch.
     _check_meshability(maxNodes = 20000, freqOverride = undefined, modesOpts = null) {
         const freq = freqOverride ?? this.freq;
-        const W = this.domain_width;
-        const yBottom = -(this.t_gnd ?? 0);
-        const H = (this.domain_height ?? NaN) - yBottom;
+        // modesOpts.domainBox: the Modes tab's shrunken open domain (see _modes_domain_box).
+        const box = modesOpts && modesOpts.domainBox;
+        const W = box ? box.x_max - box.x_min : this.domain_width;
+        const yBottom = box ? box.y_min : -(this.t_gnd ?? 0);
+        const H = (box ? box.y_max : (this.domain_height ?? NaN)) - yBottom;
         // Subclasses that haven't set up a domain yet (or degenerate inputs) — nothing to check.
         if (!(W > 0) || !(H > 0) || !this.conductors || this.conductors.length === 0) return;
 
@@ -497,7 +499,7 @@ export class FieldSolver2D {
                 // electrically huge domain must be rejected here rather than degraded
                 // through the coarsen-and-rebuild loop (whose FIRST gmsh build would
                 // also be enormous).
-                const nLambda = modesOpts.wavelengthDensity > 0 ? modesOpts.wavelengthDensity : 12;
+                const nLambda = modesOpts.wavelengthDensity > 0 ? modesOpts.wavelengthDensity : 8;
                 const hBulk = CONSTANTS.C / (freq * Math.sqrt(epsMax)) / nLambda;
                 if (hBulk < triCoarse) {
                     triCoarse = Math.max(hBulk, hFine);
@@ -2217,7 +2219,40 @@ export class FieldSolver2D {
     // refinement loop, exactly like solve_adaptive does for the main solve, plus
     // wavelengthDensity ← the Modes tab's Mesh density (cells/λ for the bulk
     // wavelength cap — see TriBackend._wavelengthCap).
+    // Field region of an auto-sized open domain for the Modes solve: the signal
+    // cluster padded by four substrate-stack heights on the open sides, the ground
+    // side kept. Returns null when the box would not be smaller than the domain, or
+    // when the domain is user-sized (an enclosure is a physical boundary).
+    _modes_domain_box() {
+        if (this.enclosure_width != null || this.enclosure_height != null) return null;
+        if (!this.conductors || !this.domain_width || !(this.domain_height > 0)) return null;
+        const W = this.domain_width, H = this.domain_height, yBottom = -(this.t_gnd ?? 0);
+        const stack = [...this.conductors,
+            ...(this.dielectrics || []).filter(d => (d.epsilon_r || 1) > 1.001)];
+        let yLo = Infinity, yHi = -Infinity, xLo = Infinity, xHi = -Infinity;
+        for (const r of stack) { yLo = Math.min(yLo, r.y_min); yHi = Math.max(yHi, r.y_max); }
+        for (const c of this.conductors) {
+            if (Math.abs(c.width) >= W * 0.99) continue;
+            xLo = Math.min(xLo, c.x_min); xHi = Math.max(xHi, c.x_max);
+        }
+        if (!(yHi > yLo) || !(xHi > xLo)) return null;
+        const G = yHi - yLo, pad = 4 * G;
+        const b = (this.boundaries || ['open', 'open', 'open', 'gnd']);
+        const box = {
+            x_min: b[0] === 'open' ? Math.max(-W / 2, xLo - pad) : -W / 2,
+            x_max: b[1] === 'open' ? Math.min(W / 2, xHi + pad) : W / 2,
+            y_min: yBottom,
+            y_max: b[2] === 'open' ? Math.min(H, yHi + pad) : H,
+        };
+        const shrunk = (box.x_max - box.x_min) * (box.y_max - box.y_min) < 0.95 * W * (H - yBottom);
+        return shrunk ? box : null;
+    }
+
     async solveModes(freq, nev = 4, onProgress = null, refineOpts = {}) {
+        // Optional shrink of an auto-sized open domain to the field region: the modes
+        // solve wavelength-resolves the whole meshed box, and the padded far field of an
+        // open line costs triangles for modes of the artificial box only.
+        const domainBox = refineOpts.shrinkDomain ? this._modes_domain_box() : null;
         // Same pre-mesh guard as solve_adaptive, evaluated at the MODES frequency and
         // ALWAYS on the triangular estimate — this solve runs the triangular backend
         // regardless of the sidebar Solver selection, so branching on this.mesh_backend
@@ -2225,7 +2260,7 @@ export class FieldSolver2D {
         // the tri mesher grades locally, and skipping the whole-domain wavelength check
         // that stops an electrically huge modes mesh from hanging gmsh).
         this._check_meshability(refineOpts.maxNodes ?? 20000, freq,
-            { wavelengthDensity: refineOpts.wavelengthDensity });
+            { wavelengthDensity: refineOpts.wavelengthDensity, domainBox });
         const { initTriBackend, TriBackend } = await import('./tri_solver/tri_backend.js');
         const ctx = await initTriBackend();
         // modesFreq lets buildMesh size the bulk to the wavelength at this frequency, so
@@ -2233,9 +2268,9 @@ export class FieldSolver2D {
         // spurious by the mesh-convergence test).
         // Mesh.Algorithm 1 (MeshAdapt) gives the cleanest eigenmode spectrum for the mode
         // viewer (fewer spurious low-ε_eff artifacts than the default frontal-Delaunay).
-        const { shouldStop = null, ...meshOpts } = refineOpts;
+        const { shouldStop = null, shrinkDomain = false, ...meshOpts } = refineOpts;
         const opts = { ...(this.tri_opts || {}), symmetry: false, modesFreq: freq,
-            gmshOptions: { 'Mesh.Algorithm': 1 }, ...meshOpts };
+            gmshOptions: { 'Mesh.Algorithm': 1 }, ...meshOpts, domainBox };
         const tri = new TriBackend(ctx, this, opts);
         await tri.buildMesh(onProgress, shouldStop);   // adaptive refinement passes, emitted via onProgress
         this._modesBackend = tri;

@@ -559,7 +559,9 @@ export function buildOccMeshFromGeometry(G, opts) {
         // current distribution (skin/proximity loss) and a narrow inter-trace gap (only
         // ~1·hFine wide) are resolved WITHOUT globally refining the far field. Adaptive ZZ
         // passes sharpen it further.
-        const addCurveField = (curveSet, sMin) => {
+        // dMin: distance from the curves over which the size stays at sMin before
+        // grading up to hCoarse (the conductor fields use sMin itself).
+        const addCurveField = (curveSet, sMin, dMin = sMin) => {
             const fd = G._gmshModelMeshFieldAdd(_cstr(G, 'Distance'), -1, ierr); check('FieldAdd Distance');
             const cl = [...curveSet];
             const clBuf = G.stackAlloc(cl.length * 8);
@@ -570,14 +572,21 @@ export function buildOccMeshFromGeometry(G, opts) {
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'InField'), fd, ierr);
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMin'), sMin * OCC_SCALE, ierr);
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMax'), hCoarse * OCC_SCALE, ierr);
-            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMin'), sMin * OCC_SCALE, ierr);
-            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), (hFine + (hCoarse - hFine) / gradeRate) * OCC_SCALE, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMin'), dMin * OCC_SCALE, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), (dMin + (hCoarse - sMin) / gradeRate) * OCC_SCALE, ierr);
             return ft;
         };
         const fields = [];
         if (sigCurves.size > 0) fields.push(addCurveField(sigCurves, sizeMin));
         // A fully relaxed ground field would be constant hCoarse — skip it.
         if (gndCurves.size > 0 && sizeMinGnd < hCoarse) fields.push(addCurveField(gndCurves, sizeMinGnd));
+        // Near-field wavelength cap (main solve): the quasi-TEM eigenmode lives within a
+        // few substrate heights of the signal conductors, so only that patch needs
+        // wavelength resolution; the far field keeps the geometric hCoarse.
+        const nf = opts.nearField;
+        if (nf && nf.size > 0 && nf.size < hCoarse && sigCurves.size > 0) {
+            fields.push(addCurveField(sigCurves, nf.size, nf.dist));
+        }
         if (fields.length === 1) {
             G._gmshModelMeshFieldSetAsBackgroundMesh(fields[0], ierr); check('SetBackground');
         } else if (fields.length > 1) {
@@ -729,12 +738,13 @@ export function buildOccMeshFromGeometry(G, opts) {
     // one of these lines may only move ALONG it. Constrained lines are the
     // CONDUCTOR faces (all four sides, over the rect's own extent — the freedom
     // map classifies PEC nodes/edges by the exact rect coordinates, and the
-    // loss/MQS surface integrals live there) plus the symmetry plane.
-    // Dielectric interfaces are deliberately NOT constrained: epsMap is re-tagged
-    // by centroid after every refinement pass, so a node sliding off a dielectric
-    // line only displaces that interface locally by ~one element (second-order),
-    // while forbidding the move can leave unfixable slivers that ill-condition
-    // the whole solve (fuzzer: Qmax 183 on solder-mask cases when constrained).
+    // loss/MQS surface integrals live there) plus the symmetry plane, and the
+    // axis-aligned dielectric interfaces. The refiner lets a node on a constraint
+    // line slide along it but not off it, and never swaps an edge lying on one, so
+    // the material boundaries stay where the geometry puts them: epsMap is
+    // re-tagged by centroid after every pass, and an unconstrained interface
+    // turned into a one-element-wide jagged zone wherever the mesh was refined
+    // (visible on every field plot along the substrate top next to the trace).
     const constraintYRanges = {};
     const addYR = (y, lo, hi) => { const e = constraintYRanges[y]; constraintYRanges[y] = e ? [Math.min(e[0], lo), Math.max(e[1], hi)] : [lo, hi]; };
     const constraintXRanges = {};
@@ -750,6 +760,21 @@ export function buildOccMeshFromGeometry(G, opts) {
         addXR(c.xmin, c.ymin, c.ymax); addXR(c.xmax, c.ymin, c.ymax);
     }
     if (symmetry) addXR(X0, Y0, Y1);
+    // Only layers at least two fine element sizes thick contribute their faces: a
+    // thinner layer (a solder mask on a 35 um trace) with both faces constrained
+    // leaves slivers the smoother cannot fix by sliding nodes along the lines
+    // (maxQ ~150), and its faces stay as they were. opts.constrainDielectrics false
+    // disables the dielectric lines; opts.minDielThickness (metres) overrides the
+    // threshold.
+    const minDielT = opts.minDielThickness ?? 2 * hFine;
+    for (const d of (opts.constrainDielectrics === false ? [] : dielectrics)) {
+        if (d.shape) continue;
+        const r = clipToDomain(_rectOf(d));
+        if (r.xmax - r.xmin <= tol || r.ymax - r.ymin <= tol) continue;
+        if (Math.min(r.xmax - r.xmin, r.ymax - r.ymin) < minDielT) continue;
+        for (const y of [r.ymin, r.ymax]) if (y > Y0 + tol && y < Y1 - tol) addYR(y, r.xmin, r.xmax);
+        for (const x of [r.xmin, r.xmax]) if (x > X0 + tol && x < X1 - tol) addXR(x, r.ymin, r.ymax);
+    }
     const constraintXs = Object.keys(constraintXRanges).map(Number);
 
     return {

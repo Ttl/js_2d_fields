@@ -202,7 +202,8 @@ const DEFAULT_SETTINGS = {
     // Modes tab (eigenmode viewer)
     modes_freq: 10,    // GHz
     modes_nev: 6,
-    modes_mesh_density: 12,   // bulk cells per wavelength (TriBackend wavelengthDensity)
+    modes_mesh_density: 8,    // bulk cells per wavelength (TriBackend wavelengthDensity)
+    modes_shrink_domain: true, // mesh only the field region of an auto-sized open domain
     // Broadside coupled stripline (display units: mm, μm)
     bs_w: 0.2,           // mm
     bs_t: 35,            // μm
@@ -327,6 +328,7 @@ function getUISettings() {
         modes_freq: getDisplayValue('modes-freq'),
         modes_nev: parseInt(document.getElementById('modes-nev').value),
         modes_mesh_density: parseInt(document.getElementById('modes-mesh-density').value),
+        modes_shrink_domain: document.getElementById('modes-shrink-domain').checked,
         bs_w: getDisplayValue('inp_bs_w'),
         bs_t: getDisplayValue('inp_bs_t'),
         bs_x_offset: getDisplayValue('inp_bs_x_offset'),
@@ -576,6 +578,7 @@ function restoreSettings(settings) {
         setValueWithUnit('modes-freq', fullSettings.modes_freq);
         document.getElementById('modes-nev').value = fullSettings.modes_nev;
         document.getElementById('modes-mesh-density').value = fullSettings.modes_mesh_density;
+        document.getElementById('modes-shrink-domain').checked = fullSettings.modes_shrink_domain !== false;
 
         setValueWithUnit('sparam-length', fullSettings.sparam_length);
         document.getElementById('sparam-z-ref').value = fullSettings.sparam_z_ref;
@@ -1131,7 +1134,7 @@ async function runModesSolve() {
     if (!isFinite(nev) || nev < 1) { nev = 1; document.getElementById('modes-nev').value = '1'; }
     nev = Math.min(nev, 30);
     let meshDensity = parseInt(document.getElementById('modes-mesh-density').value);
-    if (!isFinite(meshDensity)) meshDensity = 12;
+    if (!isFinite(meshDensity)) meshDensity = 8;
     meshDensity = Math.min(Math.max(meshDensity, 3), 40);
     document.getElementById('modes-mesh-density').value = String(meshDensity);
 
@@ -1169,6 +1172,10 @@ async function runModesSolve() {
         // the user sees.
         certify: false,
         wavelengthDensity: meshDensity,
+        // Only an auto-sized open domain can be shrunk. An enclosure is a physical
+        // boundary (the checkbox is disabled in the UI while an enclosure is on).
+        shrinkDomain: document.getElementById('modes-shrink-domain').checked
+            && !document.getElementById('chk_enclosure').checked,
     };
 
     try {
@@ -1326,7 +1333,7 @@ function plotModesField(grid, mode, idx, resetView = false) {
 
     const eeff = mode.eps_eff != null ? `, ε_eff=${mode.eps_eff.toFixed(3)}` : '';
     const STATUS_LABEL = { propagating: 'propagating', near_cutoff: 'near cutoff (evan?)', evanescent: 'evanescent', spurious: 'spurious', nullspace: 'null-space' };
-    const title = `Mode ${idx} — transverse |E| (${STATUS_LABEL[mode.status] || mode.status}${eeff})`;
+    const title = `Mode ${idx} transverse |E| (${STATUS_LABEL[mode.status] || mode.status}${eeff})`;
 
     // Switching modes (a plot already exists, no view reset): update only the field data
     // and title in place — leaving the axes untouched preserves the current zoom/pan
@@ -1367,7 +1374,7 @@ function plotModesGeometry() {
     // Invisible scatter spanning the view so the axes (and shapes) scale correctly.
     const traces = [{ type: 'scatter', x: [view.xRange[0], view.xRange[1]], y: [view.yRange[0], view.yRange[1]],
         mode: 'markers', marker: { size: 0, opacity: 0 }, hoverinfo: 'skip', showlegend: false }];
-    const layout = modesPlotLayout('Geometry — click Solve Modes to compute fields', view, buildGeometryShapes(maxY));
+    const layout = modesPlotLayout('Geometry (click Solve Modes to compute fields)', view, buildGeometryShapes(maxY));
     Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
 }
 

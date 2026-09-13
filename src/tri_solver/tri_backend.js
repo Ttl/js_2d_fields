@@ -896,10 +896,53 @@ export class TriBackend {
     _wavelengthCap(h) {
         const f = this.opts.modesFreq;
         if (!f) return h;
-        const nLambda = this.opts.wavelengthDensity > 0 ? this.opts.wavelengthDensity : 12;
+        const nLambda = this.opts.wavelengthDensity > 0 ? this.opts.wavelengthDensity : 8;
         const epsMax = Math.max(1, ...this.solver.dielectrics.map(d => d.epsilon_r || 1));
         const lamMin = c0 / (f * Math.sqrt(epsMax));
         return Math.min(h, lamMin / nLambda);
+    }
+
+    // Wavelength cap for the main solve at the highest frequency the solve will see
+    // (the sweep maximum): the whole domain at 3 cells per wavelength (the floor
+    // below which the finite-element eigenproblem returns spurious pairs around the
+    // shift, however fine the trace region is) plus a near-field patch at lamMin/N
+    // within three substrate-stack heights of the signal conductors, where the
+    // quasi-TEM field lives. Sized against the triangle budget: the patch density
+    // drops as far as 3 cells per wavelength to fit, and when even the bulk floor
+    // does not fit the cap is left off (the eigensolve then warns as before).
+    // Returns null when the geometric sizing already resolves the wavelength.
+    _nearFieldCap(hCoarse, maxTris) {
+        if (this.opts.modesFreq || this.opts.nearFieldCap === false) return null;
+        const s = this.solver;
+        const f = Math.max(s.freq || 0, s._sweepFmax || 0);
+        if (!(f > 0)) return null;
+        const epsMax = Math.max(1, ...s.dielectrics.map(d => d.epsilon_r || 1));
+        const lamMin = c0 / (f * Math.sqrt(epsMax));
+        // Field scale: the conductor + substrate stack height, as in
+        // FieldSolver2D._check_meshability; the patch pads the signal cluster by 3 G.
+        const stack = [...s.conductors, ...s.dielectrics.filter(d => (d.epsilon_r || 1) > 1.001)];
+        let yLo = Infinity, yHi = -Infinity, xLo = Infinity, xHi = -Infinity;
+        for (const r of stack) { yLo = Math.min(yLo, r.y_min); yHi = Math.max(yHi, r.y_max); }
+        for (const c of s.conductors) {
+            if (!c.is_signal) continue;
+            xLo = Math.min(xLo, c.x_min); xHi = Math.max(xHi, c.x_max);
+        }
+        if (!(yHi > yLo) || !(xHi > xLo)) return null;
+        const G = yHi - yLo, dist = 3 * G;
+        const patchArea = (xHi - xLo + 2 * dist) * (yHi - yLo + 2 * dist);
+        const dom = this.domain;
+        const domainArea = (dom.x_max - dom.x_min) * (dom.y_max - dom.y_min) * (this.symmetry ? 0.5 : 1);
+        const bulk = lamMin / 3;
+        let nLambda = this.opts.nearFieldDensity ?? 8;
+        let size = lamMin / nLambda;
+        if (size >= hCoarse) return null;
+        const trisFor = (h, area) => 2 * area / (h * h);
+        // Bulk floor first: if it alone takes over half the budget, no cap.
+        if (bulk < hCoarse && trisFor(bulk, domainArea) > maxTris / 2) return null;
+        // Then the patch at or below a third of the budget; coarsen its density if needed.
+        while (nLambda > 3 && trisFor(size, patchArea) > maxTris / 3) { nLambda -= 1; size = lamMin / nLambda; }
+        if (trisFor(size, patchArea) > maxTris / 3) return null;
+        return { size, dist, nLambda, bulk: Math.min(bulk, hCoarse) };
     }
 
     // Build mesh (with symmetry + adaptive refinement), then solve & cache the
@@ -912,8 +955,13 @@ export class TriBackend {
     // the current mesh is kept and the solve proceeds on it.
     async buildMesh(onProgress = null, shouldStop = null) {
         const s = this.solver;
-        const dom = { x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
-                      y_min: -s.t_gnd, y_max: s.domain_height };
+        // opts.domainBox: a smaller box to mesh instead of the solver's domain (the
+        // Modes tab shrinks an open domain to the field region at high frequency);
+        // rects and dielectrics outside it are clipped by the OCC builder.
+        const dom = this.opts.domainBox
+            ? { ...this.opts.domainBox }
+            : { x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
+                y_min: -s.t_gnd, y_max: s.domain_height };
         this.domain = dom;
         // Use a half-domain symmetry solve when the geometry is mirror-symmetric (the
         // shared halfDomainSymmetry disables symmetry for broadside).
@@ -923,7 +971,7 @@ export class TriBackend {
         // way resampleStatic does, so the plotted mode field would be blank for x < 0.
         // (Routed through the solver, not tri_opts: app_solver overwrites tri_opts wholesale
         // after construction. MicrostripSolver also sets it for {symmetry: false}.)
-        this.symmetry = (this.opts.symmetry ?? true) && s.tri_symmetry !== false &&
+        this.symmetry = (this.opts.symmetry ?? true) && s.tri_symmetry !== false && !this.opts.domainBox &&
             halfDomainSymmetry(s.conductors, s.dielectrics, s.domain_width, s.is_differential).ok;
 
         const tAbs = Math.max(Math.abs(s.t ?? 35e-6), 1e-9);
@@ -1018,6 +1066,9 @@ export class TriBackend {
         // The refinement loop below also stops at this budget; capping the initial mesh too is
         // what prevents the very first eigensolve from running on an unbounded mesh.
         const maxTris = maxTrisForBudget(this.opts.maxNodes ?? 18000);
+        const nearField = this._nearFieldCap(hCoarse, maxTris);
+        this.nearField = nearField;
+        if (nearField) hCoarse = nearField.bulk;
         let mesh, prevAtt = null;   // previous attempt's (h, nTris), for the scaling fit
         // Passive-ground surface-size relaxation: when the initial mesh
         // overruns the budget, first coarsen the size painted on passive-ground
@@ -1043,7 +1094,8 @@ export class TriBackend {
         const surfScaleB = this.opts.occSurfScale ?? 0.35;
         const occBase = {
             conductors: s.conductors, dielectrics: s.dielectrics,
-            domain: dom, boundaries: s.boundaries, symmetry: this.symmetry,
+            domain: dom, boundaries: s.boundaries, symmetry: this.symmetry, nearField,
+            constrainDielectrics: this.opts.constrainDielectrics, minDielThickness: this.opts.minDielThickness,
             // Non-rectangular meshed domain (coax: the dielectric disk itself).
             domainShape: s.domain_shape || null,
             // Conductor interiors are meshed only for the MQS volume eddy-current
@@ -2195,19 +2247,19 @@ export class TriBackend {
                 const reason = fwErr ? `eigensolver error: ${fwErr.message || fwErr}`
                                      : 'no converged quasi-TEM candidate';
                 const msg = `${mode} mode: full-wave eigensolve failed at ${(f / 1e9).toFixed(2)} GHz `
-                    + `(${reason}) — falling back to the quasi-static ε_eff=${eps_eff_static.toFixed(3)} `
-                    + `for this point; the dispersion curve may show a kink here.`;
+                    + `(${reason}), falling back to the quasi-static ε_eff=${eps_eff_static.toFixed(3)} `
+                    + `for this point. The dispersion curve may show a kink here.`;
                 if (!this._modeWarnings.some(w => w.mode === mode && w.type === 'eigensolve')) {
                     this._modeWarnings.push({ type: 'eigensolve', mode, freq: f, message: msg });
                     globalThis.__TRI_DEBUG__ && console.warn('[tri full-wave] ' + msg);
                 }
             }
             if (fw && fw.ambiguous && this._modeWarnings) {
-                const msg = `${mode} mode: full-wave quasi-TEM pick is ambiguous at ${(f / 1e9).toFixed(2)} GHz — `
-                    + `picked ε_eff=${fw.bestEps.toFixed(3)} (overlap ${fw.bestOvl.toFixed(2)}) but a competing mode `
-                    + `ε_eff=${fw.altEps.toFixed(3)} (overlap ${fw.altOvl.toFixed(2)}) carries comparable weight; `
-                    + `static ε_eff=${eps_eff_static.toFixed(3)}. The quasi-TEM has likely fragmented across degenerate `
-                    + `modes (inhomogeneous fill) — reported ε_eff/Z0 may be unreliable.`;
+                const msg = `${mode} mode: full-wave quasi-TEM pick is ambiguous at ${(f / 1e9).toFixed(2)} GHz. `
+                    + `Picked ε_eff=${fw.bestEps.toFixed(3)} (overlap ${fw.bestOvl.toFixed(2)}) but a competing mode `
+                    + `ε_eff=${fw.altEps.toFixed(3)} (overlap ${fw.altOvl.toFixed(2)}) carries comparable weight. `
+                    + `Static ε_eff=${eps_eff_static.toFixed(3)}. The quasi-TEM has likely fragmented across degenerate `
+                    + `modes (inhomogeneous fill), reported ε_eff/Z0 may be unreliable.`;
                 if (!this._modeWarnings.some(w => w.mode === mode)) {
                     // Surfaced to the UI via result.warnings / solver.modeWarnings; the console
                     // line is dev-only (avoid duplicate user-facing noise).

@@ -81,6 +81,7 @@ const TIERS = {
         { file: 'tests/test_certification.js', cost: 39 },
         { file: 'tests/test_invariants.js', cost: 110 },
         { file: 'tests/test_sm_certification.js', cost: 21 },
+        { file: 'tests/test_thz_mesh.js', cost: 60 },
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['6', '3', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [smoke N=6 seed=3]', cost: 74 },
         { file: 'tests/fuzz_fullwave_interp.js', args: ['3', '1'], label: 'tests/fuzz_fullwave_interp.js [smoke N=3 seed=1]', cost: 176 },
     ],
