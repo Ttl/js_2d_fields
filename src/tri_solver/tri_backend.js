@@ -45,7 +45,7 @@ import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample
 import { Complex } from '../complex.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
-import { djordjevic_sarkar } from '../djordjevic_sarkar.js';
+import { djordjevic_sarkar, causalModelWarning } from '../djordjevic_sarkar.js';
 
 const c0 = 299792458;
 const eps0 = 8.854187817e-12;
@@ -2697,6 +2697,7 @@ export class TriBackend {
     _applyCausal(f, skipFields = false) {
         const s = this.solver;
         const fref = this.opts.causalFref ?? 1e9;
+        let causalInvalid = null;
         const causalDiel = s.dielectrics.map(d => {
             const er = d.epsilon_r, td = d.tan_delta || 0;
             // `shape` must ride along: without it the rebuilt dielectric is only a
@@ -2704,9 +2705,13 @@ export class TriBackend {
             // real body (the polygon's vertex "horns") as air.
             const rect = { x_min: d.x_min, x_max: d.x_max, y_min: d.y_min, y_max: d.y_max, shape: d.shape || null };
             if (Math.abs(er - 1) < 1e-6 || Math.abs(td) < 1e-10) return { ...rect, epsilon_r: er, tan_delta: td };
-            const { eps_real, tand_actual } = djordjevic_sarkar(f, er, td, fref);
+            const { eps_real, tand_actual, valid } = djordjevic_sarkar(f, er, td, fref);
+            if (!valid && !causalInvalid) causalInvalid = { er, td };
             return { ...rect, epsilon_r: eps_real, tan_delta: tand_actual };
         });
+        if (causalInvalid && this._modeWarnings && !this._modeWarnings.some(w => w.reason === 'causal-model')) {
+            this._modeWarnings.push({ ...causalModelWarning(causalInvalid.er, causalInvalid.td), freq: f });
+        }
         const { epsMap, lossMap } = tagMaterials(this.mesh, causalDiel);
         this.mesh.epsMap = epsMap; this.mesh.lossMap = lossMap;
         // A waveguide has no static solve to redo and no field to resample: kc is purely
@@ -2746,8 +2751,8 @@ export class TriBackend {
 
     solveAt(f, opts = {}) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
-        if (this.solver.use_causal_materials) this._applyCausal(f, opts.skipFieldResample === true);
         this._modeWarnings = [];
+        if (this.solver.use_causal_materials) this._applyCausal(f, opts.skipFieldResample === true);
         // Surface the buildMesh-time accuracy warning (failed verification certificate)
         // through the same per-solve channel as the mode warnings, so the UI logs it.
         if (this._certWarn) this._modeWarnings.push(this._certWarn);

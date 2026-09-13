@@ -2847,6 +2847,7 @@ export class FieldSolver2D {
         // rectilinear results: the triangular backend returns from solveAt before
         // _build_results and models these regimes accurately (MQS).
         if (this._proximityWarn) warns.push(this._proximityWarn);
+        if (this._causalWarn) warns.push(this._causalWarn);
         if (warns.length) {
             result.warnings = warns;
             this.modeWarnings = result.warnings;

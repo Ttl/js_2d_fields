@@ -145,7 +145,7 @@ class InterpolatingSweep {
      * @param {number} freq - Frequency in Hz
      * @returns {object} - The result from computeAtFrequency
      */
-    async _computeExact(freq) {
+    async _computeExact(freq, tKey = null) {
         const result = await this.solver.computeAtFrequency(freq, this.cachedResults);
         // L_external = 1/(c^2 C0) is set by the vacuum field alone, so it is the same at
         // every sample. Keep the first sample's per-mode value for buildResults.
@@ -164,7 +164,10 @@ class InterpolatingSweep {
         // interpolated results would otherwise silently fall back to the symmetric odd/even
         // combination. The matrices are static (mesh-level), so any sample's copy is valid.
         if (result && result.physMatrix) this.physMatrix = result.physMatrix;
-        const t = Math.log10(freq);
+        // Samples are keyed by the log-frequency the caller asked for: log10(10^t)
+        // is not always t to the last bit, and the refinement loop looks its
+        // midpoints up by key.
+        const t = tKey ?? Math.log10(freq);
         const modeData = result.modes.map(m => ({
             mode: m.mode,
             R: m.RLGC.R,
@@ -284,7 +287,7 @@ class InterpolatingSweep {
         for (let i = 0; i < initialTs.length; i++) {
             if (shouldStop && shouldStop()) return this.samplePoints.size;
             const freq = Math.pow(10, initialTs[i]);
-            await this._computeExact(freq);
+            await this._computeExact(freq, initialTs[i]);
             if (onProgress) {
                 onProgress({
                     phase: 'initial',
@@ -356,7 +359,7 @@ class InterpolatingSweep {
 
                 // Compute exact
                 const freq = Math.pow(10, tMid);
-                await this._computeExact(freq);
+                await this._computeExact(freq, tMid);
                 await new Promise(resolve => setTimeout(resolve, 0)); // Yield to UI
 
                 const exact = this.samplePoints.get(tMid);

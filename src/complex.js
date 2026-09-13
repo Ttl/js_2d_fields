@@ -87,7 +87,9 @@ class Complex {
     }
 
     tanh() {
-        // tanh(z) = sinh(z) / cosh(z)
+        // tanh(z) = sinh(z) / cosh(z). Past |Re z| ~ 20 the ratio is +-1 to double
+        // precision, and past ~710 sinh and cosh both overflow to Infinity.
+        if (Math.abs(this.re) > 20) return new Complex(Math.sign(this.re), 0);
         return this.sinh().div(this.cosh());
     }
 

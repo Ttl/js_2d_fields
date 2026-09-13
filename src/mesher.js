@@ -147,62 +147,69 @@ class Mesher {
         return result;
     }
 
-    // Merge interfaces that are numerically coincident or closer than the grid
-    // can meaningfully resolve. Geometry construction can produce the same
-    // physical edge through two float paths, creating a zero-width region that
-    // still receives the 5-point minimum allocation. Faces closer than a
-    // thousandth of the smallest conductor dimension (a trace top a few nm from
-    // a mask top when t ~ sm thickness) are snapped together: a sliver cell
-    // there sets the face's H sample and moves R by several percent, while the
-    // snap shifts an interface by far less than the discretization error.
-    _merge_interfaces(values, span) {
-        const tol = Math.max(1e-12, span * 1e-9, this._min_conductor_dimension() * 1e-3);
-        const sorted = Array.from(values).sort((a, b) => a - b);
-        const out = [sorted[0]];
-        for (let i = 1; i < sorted.length; i++) {
-            if (sorted[i] - out[out.length - 1] > tol) out.push(sorted[i]);
+    // Merge interfaces the grid cannot meaningfully separate. Conductor faces and
+    // domain walls merge only when numerically coincident (the same physical
+    // edge reached through two float paths), so a gap between two conductors,
+    // however small, always keeps its own cells. A dielectric interface closer
+    // than a thousandth of the smallest conductor dimension to a conductor face
+    // or to another dielectric interface (a mask top a few nm from a trace top
+    // when t ~ sm thickness) is dropped: a sliver cell there sets the face's H
+    // sample and moves R by several percent, while dropping it shifts the
+    // dielectric boundary by far less than the discretization error.
+    _merge_interfaces(condValues, dielValues, span) {
+        const tolExact = Math.max(1e-12, span * 1e-9);
+        const tolDiel = Math.max(tolExact, this._min_conductor_dimension() * 1e-3);
+        const cond = Array.from(condValues).sort((a, b) => a - b);
+        const out = [cond[0]];
+        for (let i = 1; i < cond.length; i++) {
+            if (cond[i] - out[out.length - 1] > tolExact) out.push(cond[i]);
         }
-        return out;
+        for (const v of Array.from(dielValues).sort((a, b) => a - b)) {
+            if (out.every(u => Math.abs(u - v) > tolDiel)) out.push(v);
+        }
+        return out.sort((a, b) => a - b);
     }
 
     _collect_interfaces_x() {
-        const x_if = new Set([this.x_min, this.x_max]);
+        const x_cond = new Set([this.x_min, this.x_max]);
+        const x_diel = new Set();
 
         for (const cond of this.conductors) {
-            x_if.add(cond.x_min);
-            x_if.add(cond.x_max);
+            x_cond.add(cond.x_min);
+            x_cond.add(cond.x_max);
         }
 
         for (const diel of this.dielectrics) {
             if (diel.x_min > this.x_min) {
-                x_if.add(diel.x_min);
+                x_diel.add(diel.x_min);
             }
             if (diel.x_max < this.x_max) {
-                x_if.add(diel.x_max);
+                x_diel.add(diel.x_max);
             }
         }
 
-        return this._merge_interfaces(x_if, this.x_max - this.x_min);
+        return this._merge_interfaces(x_cond, x_diel, this.x_max - this.x_min);
     }
 
     _collect_interfaces_y() {
-        const y_if = new Set([this.y_min, this.y_max]);
+        const y_cond = new Set([this.y_min, this.y_max]);
+        const y_diel = new Set();
 
         for (const cond of this.conductors) {
-            y_if.add(cond.y_min);
-            y_if.add(cond.y_max);
+            y_cond.add(cond.y_min);
+            y_cond.add(cond.y_max);
         }
 
         for (const diel of this.dielectrics) {
             if (diel.y_min > this.y_min) {
-                y_if.add(diel.y_min);
+                y_diel.add(diel.y_min);
             }
             if (diel.y_max < this.y_max) {
-                y_if.add(diel.y_max);
+                y_diel.add(diel.y_max);
             }
         }
 
-        return this._merge_interfaces(y_if, this.y_max - this.y_min);
+        return this._merge_interfaces(y_cond, y_diel, this.y_max - this.y_min);
     }
 
     _region_weight_x(x0, x1) {

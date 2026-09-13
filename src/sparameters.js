@@ -97,8 +97,11 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
     // Characteristic impedance: Z0 = sqrt(Z / Y)
     const Z0 = Z_per_length.div(Y_per_length).sqrt();
 
-    // gamma * length
-    const gl = gamma.mul(length);
+    // Beyond e^-300 of attenuation the line is semi-infinite to double precision
+    // (S21 underflows, S11 has converged to (Z0 - Zr)/(Z0 + Zr)); cosh(gamma l)
+    // itself overflows past ~710, so the length is capped there.
+    const lenEff = gamma.re * length > 300 ? 300 / gamma.re : length;
+    const gl = gamma.mul(lenEff);
 
     // ABCD matrix elements
     // A = cosh(gamma * l)
@@ -322,7 +325,17 @@ function computeSParamsDifferentialMTL(freq, R2, L2, G2, C2, length, Z_ref) {
     // B = ℓ[R], C = ℓ[G], a series-resistance network with shunt conductance.
     const dc = omega === 0;
     const gamma = dc ? null : Z.mul(Y).sqrt();                         // [γ] = √([Z][Y])
-    const gl = dc ? null : gamma.mul(length);
+    // Attenuation cap as in computeSParamsSingleEnded: past e^-300 on the most
+    // attenuated mode the matrix cosh overflows. The cap is exact when both modes
+    // are beyond it; with one mode far more lossy than the other the less lossy
+    // mode's phase is truncated at the cap.
+    let lenEff = length;
+    if (!dc) {
+        const h = gamma.trace().mul(0.5), q = h.mul(h).sub(gamma.det()).sqrt();
+        const maxRe = Math.max(h.add(q).re, h.sub(q).re);
+        if (maxRe * length > 300) lenEff = 300 / maxRe;
+    }
+    const gl = dc ? null : gamma.mul(lenEff);
     const sinch = dc ? Matrix2x2.identity().mul(length)
                      : gamma.inv().mul(gl.sinh());                     // γ⁻¹·sinh(γℓ)
     const A = dc ? Matrix2x2.identity() : gl.cosh();

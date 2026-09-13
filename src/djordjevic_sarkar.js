@@ -38,25 +38,18 @@ export function djordjevic_sarkar(freq, eps_ref, tand_ref, f_ref = 1e9) {
     const term_num_ref = Math.sqrt(f_high**2 + f_ref**2);
     const term_den_ref = Math.sqrt(f_low**2 + f_ref**2);
     const eps_inf = eps_ref - K * Math.log(term_num_ref / term_den_ref);
+    // The wideband Debye fit spans f_low..f_high with a single slope K; a loss
+    // tangent large enough to pull eps_inf below 1 has no physical solution in
+    // this band (eps_r would go negative at high frequency). Report the nominal
+    // constant material and flag it, rather than a negative permittivity.
+    if (!(eps_inf >= 1)) {
+        return { eps_real: eps_ref, tand_actual: tand_ref, valid: false };
+    }
 
-    // 4. Calculate Complex Log Term at simulation frequency
-    // We need the natural log of the complex ratio: ln( (fh + jf) / (fl + jf) )
-    const numerator_real = f_high;
-    const numerator_imag = freq;
-    const denominator_real = f_low;
-    const denominator_imag = freq;
-
-    // Complex division: (a + jb) / (c + jd) = ((ac + bd) + j(bc - ad)) / (c^2 + d^2)
-    const denom_mag_sq = denominator_real**2 + denominator_imag**2;
-    const ratio_real = (numerator_real * denominator_real + numerator_imag * denominator_imag) / denom_mag_sq;
-    const ratio_imag = (numerator_imag * denominator_real - numerator_real * denominator_imag) / denom_mag_sq;
-
-    // Complex logarithm: ln(a + jb) = ln(|z|) + j*arg(z)
-    const ratio_mag = Math.sqrt(ratio_real**2 + ratio_imag**2);
-    const ratio_arg = Math.atan2(ratio_imag, ratio_real);
-
-    const log_real = Math.log(ratio_mag);
-    const log_imag = ratio_arg;
+    // 4. Complex log term at the simulation frequency, ln((fh + jf) / (fl + jf)),
+    // as a difference of logs so no squared frequency can overflow.
+    const log_real = Math.log(Math.hypot(f_high, freq) / Math.hypot(f_low, freq));
+    const log_imag = Math.atan2(freq, f_high) - Math.atan2(freq, f_low);
 
     // 5. Final Complex Permittivity: eps_complex = eps_inf + K * log_term
     const eps_complex_real = eps_inf + K * log_real;
@@ -70,7 +63,7 @@ export function djordjevic_sarkar(freq, eps_ref, tand_ref, f_ref = 1e9) {
     // We return positive tand for readability.
     const tand_actual = -eps_complex_imag / eps_complex_real;
 
-    return { eps_real, tand_actual };
+    return { eps_real, tand_actual, valid: true };
 }
 
 /**
@@ -98,6 +91,7 @@ export function applyDjordjevicSarkar(solver, f_ref = 1e9) {
         !orig || orig.length !== arr.length ||
         (arr.length > 0 && (!orig[0] || orig[0].length !== arr[0].length));
 
+    let invalid = null;
     const apply = (eps, tand, origEps, origTand) => {
         for (let i = 0; i < eps.length; i++) {
             const epsRow = eps[i], tandRow = tand[i];
@@ -108,7 +102,8 @@ export function applyDjordjevicSarkar(solver, f_ref = 1e9) {
                 // anchored on a finite loss tangent.
                 if (Math.abs(eps_ref - 1.0) < 1e-6) continue;
                 if (Math.abs(tand_ref) < 1e-10) continue;
-                const { eps_real, tand_actual } = djordjevic_sarkar(freq, eps_ref, tand_ref, f_ref);
+                const { eps_real, tand_actual, valid } = djordjevic_sarkar(freq, eps_ref, tand_ref, f_ref);
+                if (!valid && !invalid) invalid = { eps_ref, tand_ref };
                 epsRow[j] = eps_real;
                 tandRow[j] = tand_actual;
             }
@@ -129,4 +124,16 @@ export function applyDjordjevicSarkar(solver, f_ref = 1e9) {
         apply(solver.epsilon_cell, solver.tand_cell,
               solver._original_epsilon_cell, solver._original_tand_cell);
     }
+    solver._causalWarn = invalid ? causalModelWarning(invalid.eps_ref, invalid.tand_ref) : null;
+}
+
+// Accuracy note for a material the wideband Debye model cannot represent
+// (djordjevic_sarkar returned valid: false); the solve keeps the nominal
+// constant material for it.
+export function causalModelWarning(eps_ref, tand_ref) {
+    return { type: 'accuracy', reason: 'causal-model', mode: 'all', message:
+        `Causal (Djordjevic-Sarkar) model not applied to the material with epsilon_r ` +
+        `${eps_ref} and tan_delta ${tand_ref}: a loss tangent this large has no wideband ` +
+        `Debye fit between 1 kHz and 1 THz (the fitted permittivity would go negative). ` +
+        `That material is treated as frequency-independent.` };
 }
