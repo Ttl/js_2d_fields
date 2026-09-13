@@ -203,7 +203,9 @@ class MicrostripSolver extends FieldSolver2D {
         checkNonNegative(options.gnd_cut_sub_h, 'gnd_cut_sub_h');
         checkNonNegative(options.top_diel_h, 'top_diel_h');
         checkNonNegative(options.top_diel_tand, 'top_diel_tand');
-        checkNonNegative(options.gap, 'gap');
+        // A zero gap makes the coplanar ground touch the trace
+        if (options.use_coplanar_gnd) checkPositive(options.gap, 'gap');
+        else checkNonNegative(options.gap, 'gap');
         checkNonNegative(options.via_gap, 'via_gap');
         checkNonNegative(options.rq, 'rq');
 
@@ -211,8 +213,10 @@ class MicrostripSolver extends FieldSolver2D {
             errors.push("trace_thickness must be > -substrate_height");
         }
 
-        if (options.enclosure_height != null && (options.trace_thickness > options.enclosure_height)) {
-            errors.push("trace_thickness > enclosure_height");
+        // Equal heights put the top ground flush on the trace's top face.
+        if (options.enclosure_height != null && options.enclosure_height !== "auto"
+            && options.trace_thickness >= options.enclosure_height) {
+            errors.push("trace_thickness must be < enclosure_height");
         }
 
         // Top dielectric epsilon_r should be positive if top dielectric is used
@@ -434,6 +438,7 @@ class MicrostripSolver extends FieldSolver2D {
 
         // Solder mask regions (overwrites previous)
         if (this.use_sm) {
+            const n0 = dielectrics.length;
             if (this.use_coplanar_gnd) {
                 // Coplanar solder mask: in gaps between signals and grounds
                 this._add_coplanar_solder_mask(dielectrics);
@@ -441,6 +446,9 @@ class MicrostripSolver extends FieldSolver2D {
                 // Standard microstrip solder mask
                 this._add_standard_solder_mask(dielectrics, xl, xr, x_min, x_max);
             }
+            // Thin sheets: the mesher brackets their faces regardless of how they
+            // compare to the conductor dimensions.
+            for (let k = n0; k < dielectrics.length; k++) dielectrics[k].thin_sheet = true;
         }
 
         // Conductors
@@ -976,8 +984,9 @@ class MicrostripSolver extends FieldSolver2D {
         const ny = this.y.length;
 
         // Initialize mask and material arrays
+        // Nodes no dielectric rect covers are air: lossless, epsilon_r = 1.
         this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1));
-        this.tand = Array(ny).fill().map(() => new Float64Array(nx).fill(1));
+        this.tand = Array(ny).fill().map(() => new Float64Array(nx).fill(0));
         this.signal_mask = Array(ny).fill().map(() => new Uint8Array(nx));
         this.ground_mask = Array(ny).fill().map(() => new Uint8Array(nx));
 

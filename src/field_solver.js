@@ -1266,6 +1266,28 @@ export class FieldSolver2D {
         let sum_H2_dl_R = 0.0; // Sum for Resistance
         let sum_H2_dl_L = 0.0; // Sum for Inductance
 
+        // Surface impedances above assume a semi-infinite metal, whose reactance
+        // Im(Zs) = Rs grows as sqrt(f) and makes Im(Zs)/omega diverge as f -> 0.
+        // A conductor of finite thickness d has Zs = Rs (1+j) coth((1+j) d/delta),
+        // whose reactance tends to omega mu0 d/3 (a finite internal inductance)
+        // once delta > d. Only the reactance takes the slab factor: the resistance
+        // path has its own DC limit (R_total below) and a transition calibration
+        // fitted against the semi-infinite R_ac. Signal traces carry current on
+        // both faces, so each face sees half the thickness; ground planes and
+        // pours are treated as one-sided slabs of their full thickness.
+        const delta = Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * this.sigma_cond));
+        const slabReactanceFactor = (d) => {
+            const x = d / delta;
+            if (!(x > 0)) return 1;
+            if (x > 20) return 1;
+            const den = Math.cosh(2 * x) - Math.cos(2 * x);
+            return (Math.sinh(2 * x) - Math.sin(2 * x)) / den;
+        };
+        const kX = (this.conductors || []).map(c =>
+            slabReactanceFactor(c.is_signal ? Math.abs(c.height) / 2 : Math.abs(c.height)));
+        const kXDefault = slabReactanceFactor(Math.abs(this.t) / 2);
+        const reactanceFactor = ci => (ci >= 0 && ci < kX.length) ? kX[ci] : kXDefault;
+
         const isSignal = (i, j) => this.signal_mask[i][j];
         const isGround = (i, j) => this.ground_mask[i][j];
         const isConductor = (i, j) => isSignal(i,j) || isGround(i,j);
@@ -1325,7 +1347,7 @@ export class FieldSolver2D {
                                 const Zs = getZsurf(ci, direction, i, j, dseg, this.x[js]);
                                 const H2 = H_tan * H_tan * dseg / 2;
                                 sum_H2_dl_R += Zs.re * H2;
-                                sum_H2_dl_L += Zs.im * H2;
+                                sum_H2_dl_L += Zs.im * reactanceFactor(ci) * H2;
                             }
                         } else {
                             const dl = dl_func(dl_idx);
@@ -1333,7 +1355,7 @@ export class FieldSolver2D {
 
                             const H2_dl = H_tan * H_tan * dl;
                             sum_H2_dl_R += Z_surf.re * H2_dl;
-                            sum_H2_dl_L += Z_surf.im * H2_dl;
+                            sum_H2_dl_L += Z_surf.im * reactanceFactor(ci) * H2_dl;
                         }
                     }
                 }
@@ -1361,10 +1383,9 @@ export class FieldSolver2D {
         // AC Resistance per unit length from skin effect (Ohm/m)
         const R_ac = power_factor * sum_H2_dl_R * Z0_sq;
 
-        // This doesn't hold if conductor thickness is smaller than skin depth
-        // Need to solve magnetic field for accurate L_internal at low frequency
-        // but is not a problem at even moderately high frequency >1 MHz.
-        // In practice very minimal error since DC can be solved correctly.
+        // Bounded below the skin regime by the slab reactance factor above; the
+        // surface-field weighting still lacks the lateral current spreading of a
+        // true magnetostatic solve, so delta > t carries the skin-transition note.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
 		// DC-skin transition correction (vacuum-field path only): against
@@ -1384,11 +1405,12 @@ export class FieldSolver2D {
         // a rectangular conductor thickness. Leaving it set would carry a stale note
         // into the next sweep point.
         this._skinTransitionWarn = null;
-        if (vacuum_fields && this.t > 0 && this.freq > 0) {
-            const delta = Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * this.sigma_cond));
-            const lx = Math.log(delta / this.t / 0.4);
+        // |t|: an embedded trace (negative thickness) has the same skin transition.
+        const tAbs = Math.abs(this.t);
+        if (vacuum_fields && tAbs > 0 && this.freq > 0) {
+            const lx = Math.log(delta / tAbs / 0.4);
             transitionCal = 1 - 0.07 * Math.exp(-(lx * lx) / (2 * 0.45 * 0.45));
-            const tMin = this.t_gnd > 0 ? Math.min(this.t, this.t_gnd) : this.t;
+            const tMin = this.t_gnd > 0 ? Math.min(tAbs, this.t_gnd) : tAbs;
             // reason distinguishes loss-accuracy notes from certificate notes for
             // machine consumers (the fuzzer relaxes its R gate on loss reasons).
             this._skinTransitionWarn = (delta > 0.5 * tMin)

@@ -116,7 +116,7 @@ class Mesher {
     _min_conductor_dimension() {
         let min_dim = Infinity;
         for (const cond of this.conductors) {
-            min_dim = Math.min(min_dim, cond.width, cond.height);
+            min_dim = Math.min(min_dim, Math.abs(cond.width), Math.abs(cond.height));
         }
         return min_dim !== Infinity ? min_dim : 1e-3;
     }
@@ -147,12 +147,16 @@ class Mesher {
         return result;
     }
 
-	// Merge interfaces that are numerically coincident. Geometry construction
-	// can produce the same physical edge through two float paths, creating
-	// a zero-width region that still receives the 5-point minimum allocation,
-	// wasted lines that are later removed as near-duplicates anyway.
+    // Merge interfaces that are numerically coincident or closer than the grid
+    // can meaningfully resolve. Geometry construction can produce the same
+    // physical edge through two float paths, creating a zero-width region that
+    // still receives the 5-point minimum allocation. Faces closer than a
+    // thousandth of the smallest conductor dimension (a trace top a few nm from
+    // a mask top when t ~ sm thickness) are snapped together: a sliver cell
+    // there sets the face's H sample and moves R by several percent, while the
+    // snap shifts an interface by far less than the discretization error.
     _merge_interfaces(values, span) {
-        const tol = Math.max(1e-12, span * 1e-9);
+        const tol = Math.max(1e-12, span * 1e-9, this._min_conductor_dimension() * 1e-3);
         const sorted = Array.from(values).sort((a, b) => a - b);
         const out = [sorted[0]];
         for (let i = 1; i < sorted.length; i++) {
@@ -565,7 +569,7 @@ class Mesher {
         const axis_max = axis === 'x' ? this.x_max : this.y_max;
 
         for (const cond of this.conductors) {
-            const boundary_offset = Math.min(cond.width, cond.height) / 20;
+            const boundary_offset = Math.min(Math.abs(cond.width), Math.abs(cond.height)) / 20;
             const cond_min = axis === 'x' ? cond.x_min : cond.y_min;
             const cond_max = axis === 'x' ? cond.x_max : cond.y_max;
             const edges = [cond_min, cond_max];
@@ -595,15 +599,18 @@ class Mesher {
             }
         }
 
-		// Thin dielectric sheets (solder-mask bands) get the same bracket-line
-		// treatment as conductor edges. Thick slabs (substrate, top dielectric,
-		// stripline cover) are excluded. Faces coincident with conductor
-		// surfaces are naturally skipped by the min-distance dedup below.
-        const min_cond_dim = this._min_conductor_dimension();
+        // Thin dielectric sheets (solder-mask bands, flagged thin_sheet by the
+        // geometry builder) get the same bracket-line treatment as conductor
+        // edges. Thick slabs (substrate, top dielectric, stripline cover) are not
+        // flagged. The criterion is the sheet's own flag, not its size relative
+        // to the conductors, so the grid does not jump when a trace thickness
+        // crosses the mask thickness. Faces coincident with conductor surfaces
+        // are naturally skipped by the min-distance dedup below.
         for (const diel of this.dielectrics) {
+            if (!diel.thin_sheet) continue;
             const dmin = Math.min(Math.abs(diel.x_max - diel.x_min),
                                   Math.abs(diel.y_max - diel.y_min));
-            if (dmin <= 0 || dmin >= min_cond_dim) continue;
+            if (dmin <= 0) continue;
             const offset = dmin / 10;
             const lo = axis === 'x' ? Math.min(diel.x_min, diel.x_max) : Math.min(diel.y_min, diel.y_max);
             const hi = axis === 'x' ? Math.max(diel.x_min, diel.x_max) : Math.max(diel.y_min, diel.y_max);
