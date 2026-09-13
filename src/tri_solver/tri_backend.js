@@ -510,8 +510,13 @@ function perElementKelly(phi, mesh, epsMap, fm) {
 // Throws on assembly/eigensolver failure (callers catch and surface a warning);
 // returns null when the eigensolve converged but no quasi-TEM candidate passed
 // the physicality gates.
-function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static, cache = null) {
+function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_static, cache = null, pickOpts = {}) {
     const k2 = (2 * Math.PI * f / c0) ** 2;
+    // pickOpts.epsShift: eps_eff the shift-invert is centred on and the tie-break
+    // reference (default the static eps_eff, the caller's shift ladder moves it toward
+    // max eps_r when the quasi-TEM has dispersed far above the static value).
+    // pickOpts.nev: eigenpairs requested (default 8).
+    const epsRef = pickOpts.epsShift ?? eps_static;
     // The system is affine in k² with the ABC term linear in k₀, so the expensive
     // quadrature assembly is done ONCE per (mesh, fm, epsMap, abc) as a
     // decomposition A0 + k²·A1 + j·k0·Ar and combined per frequency in O(nnz).
@@ -564,7 +569,7 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // (refinement metric, enclosed structures) pays the modest ncv 9→17.
     const hasRadiatingAbc = abc && Object.values(abc).some(v => v === true);
     // Clamp nev to the problem size (a tiny mesh can have N ≤ 8).
-    const nev = Math.max(1, Math.min(8, N - 1));
+    const nev = Math.max(1, Math.min(pickOpts.nev ?? 8, N - 1));
     const ncv = Math.min(hasRadiatingAbc ? Math.max(2 * nev + 1, 20) : 2 * nev + 1, N - 1);
     // Absolute ceiling (mirrors the FDM "Problem too large" guard): refuse a solve that
     // would overrun the eigensolver heap with a clear error rather than an opaque abort().
@@ -573,7 +578,7 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem, GAUGED_NNZ_SCALE) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
     // solveGeneralized throws on solver failure (negative return code) — let it
     // propagate so the caller can warn. nconv === 0 (nothing converged) → null.
-    const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * eps_static, 0], nev, ncv, seed);
+    const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * epsRef, 0], nev, ncv, seed);
     if (!res || res.nconv <= 0) return null;
     // Pick the quasi-TEM mode by overlap with the static drive (the static field IS the
     // quasi-TEM shape), with a tie-break by proximity to eps_static. A loose eps gate drops
@@ -598,7 +603,7 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         let dot = 0, nS = 0, nV = 0;
         for (let k = 0; k < fm.nFreeTransverse; k++) { dot += staticSeed[k] * vR[k]; nS += staticSeed[k] ** 2; nV += vR[k] ** 2; }
         const ovl = nS > 0 && nV > 0 ? Math.abs(dot) / Math.sqrt(nS * nV) : 0;
-        globalThis.__TRI_DEBUG__ && console.log(`    cand ${i}: eps=${epsMode.toFixed(4)} ovl=${ovl.toFixed(3)} (target ${eps_static.toFixed(4)})`);
+        globalThis.__TRI_DEBUG__ && console.log(`    cand ${i}: eps=${epsMode.toFixed(4)} ovl=${ovl.toFixed(3)} (shift ${epsRef.toFixed(4)})`);
         if (ovl > 0.3) cands.push({ i, eps: epsMode, ovl, vR });   // require overlap > 0.3
     }
     if (!cands.length) return null;
@@ -611,7 +616,7 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     const maxOvl = Math.max(...cands.map(c => c.ovl));
     const competitive = cands.filter(c => c.ovl >= maxOvl - 0.05);
     let pick = competitive[0];
-    for (const c of competitive) if (Math.abs(c.eps - eps_static) < Math.abs(pick.eps - eps_static)) pick = c;
+    for (const c of competitive) if (Math.abs(c.eps - epsRef) < Math.abs(pick.eps - epsRef)) pick = c;
     const bestIdx = pick.i, bestEps = pick.eps, bestOvl = pick.ovl;
     // Ambiguity: a competitive runner-up carries comparable overlap but a very different ε
     // (near-degenerate modes). The pick is now robust, but the closeness is still worth flagging.
@@ -795,6 +800,17 @@ function dispersionInsert(dc, f, v) {
 // meeting at the removed anchor may differ by at most 2x, which is what
 // bisection produces; anything more lopsided fails outright, which sends the
 // point to an exact solve and narrows the gap.
+// Value of the anchor nearest to f in log-frequency, or null with no anchors: the
+// starting shift for an eigensolve at a new sweep point.
+function dispersionNearest(dc, f) {
+    if (!dc || !dc.xs.length) return null;
+    const x = Math.log(f);
+    let best = 0;
+    for (let i = 1; i < dc.xs.length; i++) if (Math.abs(dc.xs[i] - x) < Math.abs(dc.xs[best] - x)) best = i;
+    const y = dc.ys[best];
+    return dc.log ? Math.exp(y) : y;
+}
+
 function dispersionInterp(dc, f, tol) {
     const n = dc.xs.length;
     if (n < 5) return null;
@@ -1997,39 +2013,74 @@ export class TriBackend {
     // One exact quasi-TEM eigensolve at f for a prepared mode: the closed-wall pick
     // first, escalating to the radiating-ABC pick when that fails or is ambiguous (the
     // two-stage pick is explained in _modeAtFreq). Returns { fw, fwErr }.
-    _eigenPick(st, f, phiEps, eps_eff_static) {
+    //
+    // The shift-invert returns the eigenpairs nearest its centre. Far above the
+    // quasi-TEM regime (substrate a good fraction of a wavelength thick) the
+    // quasi-TEM eps_eff has dispersed toward max eps_r and the eigenvalues near the
+    // static eps_eff are a dense cluster of surface-wave / box modes, so a single
+    // solve centred there never sees it. The pick therefore walks a ladder of
+    // shifts: the caller's guess (a neighbouring sweep anchor), the static eps_eff,
+    // then steps toward max eps_r, and stops at the first candidate that clearly
+    // overlaps the static drive. Each step costs one factorization and runs only
+    // when the previous step found nothing convincing.
+    _eigenPick(st, f, phiEps, eps_eff_static, epsGuess = null) {
         const { mesh } = this, cr = this.condRect, fm = st.fm;
-        let fw = null, fwErr = null;
-        // The closed pick at this exact frequency, material map and static field may
-        // already exist from the final refinement pass (st.fwSeed, see _prepareStatic).
-        const seed = st.fwSeed;
-        if (seed && seed.f === f && seed.epsMap === mesh.epsMap && seed.phiEps === phiEps) {
-            fw = seed.fw;
-        } else {
-            try {
-                fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                    st.femCache || (st.femCache = {}));
-            } catch (e) { fw = null; fwErr = e; }
-        }
-        if (!fw || fw.ambiguous) {
-            const pickAbc = {};
-            let radiates = false;
-            for (const k of ['left', 'right', 'top', 'bottom']) {
-                const v = st.abc[k];
-                if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
-                const rad = !(this.symmetry && k === 'left');
-                pickAbc[k] = rad ? true : 'pmc';
-                if (rad) radiates = true;
-            }
-            if (radiates) {
+        const tryShift = (epsShift, nev) => {
+            let fw = null, fwErr = null;
+            const pickOpts = { epsShift, nev };
+            // The closed pick at this exact frequency, material map and static field may
+            // already exist from the final refinement pass (st.fwSeed, see _prepareStatic).
+            const seed = st.fwSeed;
+            if (epsShift === eps_eff_static && nev === 8 && seed && seed.f === f
+                && seed.epsMap === mesh.epsMap && seed.phiEps === phiEps) {
+                fw = seed.fw;
+            } else {
                 try {
-                    const fw2 = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f,
-                        phiEps, eps_eff_static, st.femCacheAbc || (st.femCacheAbc = {}));
-                    if (fw2) { fw = fw2; fwErr = null; }
-                } catch (e) { if (!fw) fwErr = e; }
+                    fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
+                        st.femCache || (st.femCache = {}), pickOpts);
+                } catch (e) { fw = null; fwErr = e; }
+            }
+            if (!fw || fw.ambiguous) {
+                const pickAbc = {};
+                let radiates = false;
+                for (const k of ['left', 'right', 'top', 'bottom']) {
+                    const v = st.abc[k];
+                    if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
+                    const rad = !(this.symmetry && k === 'left');
+                    pickAbc[k] = rad ? true : 'pmc';
+                    if (rad) radiates = true;
+                }
+                if (radiates) {
+                    try {
+                        const fw2 = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f,
+                            phiEps, eps_eff_static, st.femCacheAbc || (st.femCacheAbc = {}), pickOpts);
+                        if (fw2) { fw = fw2; fwErr = null; }
+                    } catch (e) { if (!fw) fwErr = e; }
+                }
+            }
+            return { fw, fwErr };
+        };
+        const epsRMax = maxEpsRe(mesh.epsMap);
+        const span = epsRMax - eps_eff_static;
+        const ladder = [];
+        const add = (v) => { if (v > 0 && !ladder.some(u => Math.abs(u - v) < 0.01 * v)) ladder.push(v); };
+        if (epsGuess > 0) add(Math.min(epsGuess, epsRMax * 0.985));
+        add(eps_eff_static);
+        if (span > 0.05 * eps_eff_static) {
+            add(eps_eff_static + 0.5 * span);
+            add(eps_eff_static + 0.8 * span);
+            add(Math.min(epsRMax * 0.985, eps_eff_static + 0.97 * span));
+        }
+        let best = { fw: null, fwErr: null };
+        for (const nev of [8, 16]) {
+            for (const epsShift of ladder) {
+                const r = tryShift(epsShift, nev);
+                if (r.fw && (!best.fw || r.fw.bestOvl > best.fw.bestOvl)) best = r;
+                else if (!best.fw && r.fwErr && !best.fwErr) best.fwErr = r.fwErr;
+                if (best.fw && best.fw.bestOvl >= 0.5) return best;
             }
         }
-        return { fw, fwErr };
+        return best;
     }
 
     // Static anchoring of the eigensolve. On a given mesh the quasi-TEM
@@ -2234,7 +2285,7 @@ export class TriBackend {
                 eps_d = epsI; haveEigen = true;
             } else {
             let fwErr = null;
-            ({ fw, fwErr } = this._eigenPick(st, f, phiEps, eps_eff_static));
+            ({ fw, fwErr } = this._eigenPick(st, f, phiEps, eps_eff_static, dc ? dispersionNearest(dc, f) : null));
             if (fw && fw.eps > 0) {
                 eps_d = fw.eps; haveEigen = true;
                 if (dc) dispersionInsert(dc, f, fw.eps);
@@ -2986,6 +3037,19 @@ export class TriBackend {
                 else { eps_eff = epsCand; status = (!isEnclosed && eps_eff < 1.0) ? 'spurious' : 'propagating'; }
             } else status = 'evanescent';
             list.push({ idx: i, g2Re, g2Im, eps_eff, overlap, status, vRe, vIm });
+        }
+        // Quasi-TEM hunt: when none of the modes near the static shift overlaps the
+        // conductor drive, the quasi-TEM has dispersed out of the requested set (far
+        // above the quasi-TEM regime it approaches max eps_r behind a dense cluster of
+        // surface-wave modes). The shift-ladder pick finds it and it joins the list, so
+        // the tab always shows the mode the line is driven in.
+        if (!this._isWG && !list.some(m => m.status === 'propagating' && m.overlap >= 0.5)) {
+            const { fw } = this._eigenPick(st, f, phiEps, eps_eff_static);
+            if (fw && fw.vRe && fw.vRe.length === N && fw.bestOvl >= 0.5
+                && !list.some(m => Math.abs(m.g2Re - fw.g2Re) <= 1e-3 * Math.abs(fw.g2Re))) {
+                list.push({ idx: -1, g2Re: fw.g2Re, g2Im: fw.g2Im, eps_eff: fw.eps, overlap: fw.bestOvl,
+                            status: 'propagating', vRe: fw.vRe, vIm: fw.vIm, hunted: true });
+            }
         }
         list.sort((a, b) => a.g2Re - b.g2Re);
         this._modesState = { fm, list, f, k2 };

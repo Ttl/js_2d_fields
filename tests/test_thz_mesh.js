@@ -3,15 +3,21 @@
 //   T1 near-field wavelength cap: at 300 GHz the main-solve mesh used to be sized by
 //      geometry only (400 triangles), the eigensolve found no quasi-TEM candidate and
 //      the reported eps_eff fell back to the static value (3.17 where dispersion puts
-//      it near 4.1). The cap holds the whole domain at 3 cells per wavelength (below
-//      that the eigenproblem returns spurious pairs) and the region within three
-//      substrate-stack heights of the trace at 8, at the sweep's top frequency.
+//      it near 4.1). The cap holds the whole domain at 3 cells per wavelength and the
+//      region within three substrate-stack heights of the trace at 8, at the sweep's
+//      top frequency, so the dispersed mode is resolved rather than merely found.
 //   T2 the cap is inert where the geometric sizing already resolves the wavelength:
 //      a 10 GHz solve builds the same mesh with the cap on and off.
 //   T3 Modes tab domain shrink: on an auto-sized open domain the shrunken box gives the
 //      same quasi-TEM eps_eff with fewer triangles at 100 GHz, and makes 300 GHz solvable
 //      within the default budget (the full 6.3 mm domain is refused there).
 //   T4 an enclosure is never shrunk.
+//   T5 shift ladder: far above the quasi-TEM regime (0.15 mm trace on 0.1 mm FR4 at
+//      0.4 to 1 THz) the eigenvalues near the static eps_eff are a dense cluster of
+//      surface-wave modes and the quasi-TEM sits near max eps_r; the pick must walk its
+//      shifts up to it instead of falling back to the static value (a 25% kink).
+//   T6 Modes tab: with six modes requested the quasi-TEM is still listed at 800 GHz
+//      (the hunt appends it when the modes near the shift do not overlap the drive).
 //
 // Run: node tests/test_thz_mesh.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -64,8 +70,10 @@ async function modes(opts, f, extra) {
     check('cap applied', !!a.tb.nearField, a.tb.nearField ? `size ${(a.tb.nearField.size * 1e6).toFixed(1)} um, ${a.tb.nearField.nLambda} cells/lambda, dist ${(a.tb.nearField.dist * 1e3).toFixed(2)} mm` : 'null');
     check('eigensolve succeeds (no fallback warning)', !a.warns.includes('eigensolve'), a.warns.join(',') || 'none');
     check('dispersion resolved: eps_eff well above the static 3.17', a.m.eps_eff > 3.8, `eps_eff ${a.m.eps_eff.toFixed(4)}, ${a.tb.mesh.nTris} tris, ${a.secs.toFixed(1)} s`);
+    // Without the cap the shift ladder still finds the mode on the geometric mesh;
+    // the cap is resolution insurance for it, so the two must agree closely.
     const off = await main({ freq: 300e9 }, { nearFieldCap: false });
-    check('without the cap the eigensolve falls back (control)', off.warns.includes('eigensolve'), `eps_eff ${off.m.eps_eff.toFixed(4)}`);
+    check('eps_eff with and without the cap within 2%', rel(a.m.eps_eff, off.m.eps_eff) < 0.02, `${a.m.eps_eff.toFixed(4)} vs ${off.m.eps_eff.toFixed(4)}`);
     check('conductor loss unchanged by the cap (< 3%)', rel(a.m.RLGC.R, off.m.RLGC.R) < 0.03, `${a.m.RLGC.R.toFixed(2)} vs ${off.m.RLGC.R.toFixed(2)} ohm/m`);
 }
 
@@ -106,6 +114,41 @@ async function modes(opts, f, extra) {
     console.log('T4 enclosure is never shrunk');
     const enc = ms({ freq: 100e9, enclosure_width: 2e-3, enclosure_height: 1e-3, boundaries: ['gnd', 'gnd', 'gnd', 'gnd'] });
     check('no box for an enclosed line', enc._modes_domain_box() === null);
+}
+
+// T5
+const THIN = { trace_width: 0.15e-3, substrate_height: 0.1e-3, tan_delta: 0.002 };
+{
+    console.log('T5 quasi-TEM pick far above the quasi-TEM regime');
+    const a = await main({ ...THIN, freq: 1e12 });
+    check('1 THz: eigensolve succeeds', !a.warns.includes('eigensolve'), a.warns.join(',') || 'none');
+    check('1 THz: eps_eff dispersed toward eps_r (> 3.8)', a.m.eps_eff > 3.8, `eps_eff ${a.m.eps_eff.toFixed(4)}, ${a.tb.mesh.nTris} tris, ${a.secs.toFixed(1)} s`);
+    const eps = [];
+    let warned = false;
+    for (const f of [200e9, 400e9, 600e9, 800e9]) {
+        const rf = await quiet(() => a.s.computeAtFrequency(f, a.r));
+        eps.push(rf.modes[0].eps_eff);
+        if ((a.s.modeWarnings || []).some(w => w.type === 'eigensolve')) warned = true;
+    }
+    eps.push(a.m.eps_eff);
+    check('200 GHz .. 1 THz: no eigensolve fallback', !warned);
+    let monotone = true;
+    for (let k = 1; k < eps.length; k++) if (eps[k] < eps[k - 1] * 0.99) monotone = false;
+    check('eps_eff rises monotonically with frequency (no kink)', monotone, eps.map(v => v.toFixed(3)).join(' -> '));
+}
+
+// T6
+{
+    console.log('T6 Modes tab lists the quasi-TEM at 800 GHz with six modes');
+    const s = ms({ ...THIN, freq: 800e9 });
+    const t0 = Date.now();
+    // 800 GHz needs a larger node budget even on the shrunken box (5.1k triangles at
+    // 8 cells per wavelength against the 5k the default budget allows).
+    const r = await quiet(() => s.solveModes(800e9, 6, null, { ...MODES, maxNodes: 40000, shrinkDomain: true }));
+    const tem = r.modes.filter(m => m.status === 'propagating' && (m.overlap ?? 0) >= 0.5).sort((a, b) => b.overlap - a.overlap)[0];
+    check('a propagating mode with overlap >= 0.5 is listed', !!tem,
+        tem ? `eps_eff ${tem.eps_eff.toFixed(4)}, overlap ${tem.overlap.toFixed(3)}, ${r.modes.length} modes, ${r.nTris} tris, ${((Date.now() - t0) / 1000).toFixed(1)} s` : r.modes.map(m => `${m.eps_eff?.toFixed(3)}(${m.overlap.toFixed(2)})`).join(' '));
+    if (tem) check('its eps_eff is well above the static value', tem.eps_eff > 3.8, tem.eps_eff.toFixed(4));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
