@@ -98,6 +98,7 @@ const TIERS = {
         'src/tri_solver/tests/e2e_occ.mjs',
         'src/tri_solver/tests/e2e_modes.mjs',
         'src/tri_solver/tests/e2e_waveguide.mjs',
+        'src/tri_solver/tests/e2e_custom_geometry.mjs',
     ],
     fuzz: [
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['40', '1', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [N=40 seed=1]', cost: 600 },

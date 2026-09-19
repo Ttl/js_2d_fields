@@ -23,6 +23,8 @@ function overlapArea(a, b) {
     return (w > 0 && h > 0) ? { w, h } : null;
 }
 
+const shift0 = (shift, tol) => (Math.abs(shift) > tol ? shift : 0);
+
 // True when the intervals cover [lo, hi] without a gap larger than tol.
 function intervalsCover(intervals, lo, hi, tol) {
     let reach = lo;
@@ -244,6 +246,9 @@ class CustomGeometrySolver extends FieldSolver2D {
         this.domain_width = 2 * half;
         this.domain_y_min = TY0;
         this.domain_height = TY1;
+        // The box given by the user (without the ground slabs), for the preview.
+        this.user_domain = { x_min: X0 - shift0(shift, tol), x_max: X1 - shift0(shift, tol), y_min: Y0, y_max: Y1,
+            auto: [d.x_min === null, d.x_max === null, d.y_min === null, d.y_max === null] };
 
         return out;
     }
@@ -281,16 +286,21 @@ class CustomGeometrySolver extends FieldSolver2D {
     _build_lists(rects, platingMaterial) {
         this.dielectrics = [];
         this.conductors = [];
+        this._wall_slab = [];   // per conductor: the slab added behind a gnd boundary
         for (const r of rects) {
             if (r.kind === 'diel') {
                 const d = new Dielectric(r.x, r.y, r.w, r.h, r.er, r.tand);
                 if (r.thin) d.thin_sheet = true;
+                d.src_line = r.line;
                 this.dielectrics.push(d);
                 continue;
             }
             const plating = r.faces ? { ...platingMaterial, ...r.faces } : null;
             const polarity = r.kind === 'sig+' ? 1 : (r.kind === 'sig-' ? -1 : 0);
-            this.conductors.push(new Conductor(r.x, r.y, r.w, r.h, polarity !== 0, polarity, plating));
+            const c = new Conductor(r.x, r.y, r.w, r.h, polarity !== 0, polarity, plating);
+            c.src_line = r.line;   // source line, the editor highlights the rectangle from it
+            this.conductors.push(c);
+            this._wall_slab.push(!!r.wall);
         }
     }
 
@@ -317,10 +327,43 @@ class CustomGeometrySolver extends FieldSolver2D {
         return false;
     }
 
+    // Conductors that reach a domain boundary. An open boundary cuts the conductor off
+    // where the domain ends, which is rarely what was drawn, and a ground boundary
+    // connects it to ground. A ground lying flat along a ground boundary is that
+    // boundary's own metal and is not reported, the symmetry plane is no boundary.
+    boundaryContactWarnings() {
+        const out = [];
+        const tol = this.domain_width * 1e-9;
+        const b = this.boundaries;
+        const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;
+        const Y0 = this.domain_y_min, Y1 = this.domain_height;
+        const names = ['left', 'right', 'top', 'bottom'];
+        this.conductors.forEach((c, i) => {
+            if (this._wall_slab[i]) return;
+            const touches = [c.x_min <= X0 + tol, c.x_max >= X1 - tol, c.y_max >= Y1 - tol, c.y_min <= Y0 + tol];
+            const along = [c.y_max - c.y_min, c.y_max - c.y_min, c.x_max - c.x_min, c.x_max - c.x_min];
+            const wallLen = [Y1 - Y0, Y1 - Y0, X1 - X0, X1 - X0];
+            // Part of a ground boundary: a ground that runs along the whole of it.
+            const isWallMetal = !c.is_signal && names.some((_, k) =>
+                touches[k] && b[k] === 'gnd' && along[k] >= wallLen[k] - 2 * this.wall_t - tol);
+            if (isWallMetal) return;
+            const what = c.is_signal ? 'Signal conductor' : 'Ground conductor';
+            const where = c.src_line ? ` (line ${c.src_line})` : '';
+            names.forEach((name, k) => {
+                if (!touches[k]) return;
+                out.push(b[k] === 'open'
+                    ? `${what}${where} reaches the open ${name} boundary and is cut off there. ` +
+                      `Give it a finite size, or enlarge the domain, unless a conductor running to the edge of the solved region is intended.`
+                    : `${what}${where} touches the ${name} ground boundary and is connected to it.`);
+            });
+        });
+        return out;
+    }
+
     // A signal conductor that runs into an open wall (a slotline half plane) has no
     // quasi-static limit: its capacitance grows with the logarithm of the domain size.
     openBoundaryWarnings() {
-        const out = super.openBoundaryWarnings();
+        const out = [...super.openBoundaryWarnings(), ...this.boundaryContactWarnings()];
         const tol = this.domain_width * 1e-9;
         const b = this.boundaries;
         const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;

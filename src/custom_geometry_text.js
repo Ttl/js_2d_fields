@@ -203,6 +203,7 @@ export function parseGeometryText(text) {
             try {
                 const st = parseStatement(part);
                 st.line = line;
+                st.part = pi;   // position among the ';' separated statements of the line
                 st.comment = pi === parts.length - 1 ? comment : null;
                 statements.push(st);
             } catch (e) {
@@ -247,6 +248,108 @@ export function serializeGeometry(model) {
     }
     while (out.length && out[out.length - 1] === '') out.pop();
     return out.join('\n') + '\n';
+}
+
+// --- In-place edits ---------------------------------------------------------------
+// The editor keeps the text as written by the user, so a change made from a sidebar
+// control rewrites one statement and leaves the rest of the text alone.
+
+function splitComment(line) {
+    const hash = line.indexOf('#');
+    return hash >= 0 ? [line.slice(0, hash), line.slice(hash)] : [line, ''];
+}
+
+// Replaces the expression of parameter `name`. Returns the text unchanged when the
+// parameter is not defined.
+export function setParamInText(text, name, expr) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    const re = new RegExp(`^(\\s*${name}\\s*=\\s*)(.*?)(\\s*)$`);
+    for (let i = 0; i < lines.length; i++) {
+        const [code, comment] = splitComment(lines[i]);
+        const parts = code.split(';');
+        for (let k = 0; k < parts.length; k++) {
+            const m = re.exec(parts[k]);
+            if (!m) continue;
+            parts[k] = m[1] + expr + m[3];
+            lines[i] = parts.join(';') + comment;
+            return lines.join('\n');
+        }
+    }
+    return text;
+}
+
+// Statement text for a rectangle, the inverse of the parser for one statement.
+export function rectStatementText(kind, fields) {
+    return `${kind}  ${fieldsToText(fields,
+        ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'plating'])}`;
+}
+
+// Replaces the statement `st` (from parseGeometryText of the same text) by `code`, or
+// removes it when code is null. A line left empty by a removal is dropped.
+export function replaceStatementInText(text, st, code) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    const i = st.line - 1;
+    if (i < 0 || i >= lines.length) return text;
+    const [src, comment] = splitComment(lines[i]);
+    const parts = src.split(';');
+    // st.part counts non-empty statements, the split keeps the empty ones.
+    let seen = -1, k = -1;
+    for (let j = 0; j < parts.length; j++) {
+        if (parts[j].trim().length === 0) continue;
+        if (++seen === st.part) { k = j; break; }
+    }
+    if (k < 0) return text;
+    if (code === null) parts.splice(k, 1);
+    else parts[k] = (k > 0 ? ' ' : '') + code;
+    const rest = parts.join(';');
+    if (code === null && rest.trim().length === 0) lines.splice(i, 1);
+    else lines[i] = rest + (comment && code !== null && !rest.endsWith(' ') ? '  ' : '') + comment;
+    return lines.join('\n');
+}
+
+// Inserts a line after 1-based line `after` (0 puts it first, a value past the end
+// appends).
+export function insertLineInText(text, after, code) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    // Append before the trailing empty line of a text that ends with a newline.
+    let at = Math.min(Math.max(after, 0), lines.length);
+    if (at === lines.length && lines.length && lines[lines.length - 1] === '') at = lines.length - 1;
+    lines.splice(at, 0, code);
+    return lines.join('\n');
+}
+
+// Swaps the statement `st` with the rectangle statement before (dir = -1) or after it
+// (dir = 1). Both must be alone on their lines. Order matters between dielectrics.
+export function moveRectInText(text, model, st, dir) {
+    const rects = model.statements.filter(s => s.type === 'rect');
+    const other = rects[rects.indexOf(st) + dir];
+    const alone = s => model.statements.filter(o => o.line === s.line && o.type !== 'comment' && o.type !== 'blank').length === 1;
+    if (!other || !alone(st) || !alone(other)) return text;
+    const lines = String(text ?? '').split(/\r?\n/);
+    [lines[st.line - 1], lines[other.line - 1]] = [lines[other.line - 1], lines[st.line - 1]];
+    return lines.join('\n');
+}
+
+// Replaces the first statement starting with `keyword` (bounds, domain, units, plating)
+// by `statement`, or inserts it after the units line (at the top without one).
+export function setStatementInText(text, keyword, statement) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    const starts = s => s.trim() === keyword || s.trim().startsWith(keyword + ' ');
+    let unitsLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+        const [code, comment] = splitComment(lines[i]);
+        const parts = code.split(';');
+        const k = parts.findIndex(starts);
+        if (k >= 0) {
+            const lead = /^\s*/.exec(parts[k])[0];
+            parts[k] = lead + statement + (k < parts.length - 1 || !comment ? '' : '  ');
+            lines[i] = parts.join(';') + comment;
+            return lines.join('\n');
+        }
+        if (unitsLine < 0 && parts.some(s => s.trim().startsWith('units '))) unitsLine = i;
+    }
+    lines.splice(unitsLine + 1, 0, statement);
+    return lines.join('\n');
 }
 
 // --- Evaluation -------------------------------------------------------------------

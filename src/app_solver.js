@@ -2,7 +2,10 @@ import { Complex } from './complex.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usableSweepPoints } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView } from './plot.js';
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop } from './plot.js';
+import { initCustomGeometryEditor, activateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
+         getCustomOverrides, customSweepParams } from './custom_geometry_editor.js';
+import { solverToGeometryText } from './custom_geometry_text.js';
 import { buildSolverFromParams as _buildSolverFromParams, platingOptions } from './solver_factory.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
@@ -41,6 +44,7 @@ let lastModesFrequency = null;   // modes frequency at the last modes solve (sta
 // Full parameter config table. Each entry drives input writing + axis labeling.
 // fixedUnit: cosmetic axis label for plain-number inputs (sigma). Absent = derive from geometry input.
 const SWEEP_PARAM_CONFIG = {
+    custom_sigma:       { label: 'Conductivity',          inputId: 'inp_custom_sigma', fixedUnit: 'S/m', group: 'custom' },
     // Always available
     w:                  { label: 'Trace Width',          inputId: 'inp_w',             group: 'always' },
     h:                  { label: 'Substrate Height',     inputId: 'inp_h',             group: 'always' },
@@ -146,6 +150,11 @@ function getInputValueUnitless(id) {
  * Doesn't need to match HTML defaults.
  * DO NOT CHANGE OR ALL EXISTING LINKS WILL BREAK.
  */
+// Sweep config of a key: a fixed entry, or a geometry parameter of the custom type.
+function sweepParamConfig(key) {
+    return SWEEP_PARAM_CONFIG[key] || customSweepParams().find(c => c.key === key) || null;
+}
+
 const DEFAULT_SETTINGS = {
     tl_type: 'microstrip',
     mesh_backend: 'rectilinear',
@@ -240,6 +249,10 @@ const DEFAULT_SETTINGS = {
     wg_er: 1.0,
     wg_tand: 0,
     wg_sigma: 5.8e7,
+
+    // Custom geometry: the geometry text and the conductor conductivity.
+    custom_geom: '',
+    custom_sigma: 5.8e7,
 };
 
 // Certified error (fraction) as a percentage with three significant digits,
@@ -274,6 +287,8 @@ function getUISettings() {
     return {
         tl_type: document.getElementById('tl_type').value,
         mesh_backend: (document.getElementById('mesh_backend')?.value) ?? 'rectilinear',
+        custom_geom: getCustomGeometryText(),
+        custom_sigma: getInputValueUnitless('inp_custom_sigma'),
         w: getDisplayValue('inp_w'),
         h: getDisplayValue('inp_h'),
         t: getDisplayValue('inp_t'),
@@ -411,11 +426,14 @@ const TYPE_ONLY_KEYS = {
     broadside_stripline: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('bs_')),
     coax: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('coax_')),
     rect_waveguide: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('wg_')),
+    custom: Object.keys(DEFAULT_SETTINGS).filter(k => k.startsWith('custom_')),
 };
 const EXCLUDED_BY_TYPE = {
     broadside_stripline: BROADSIDE_EXCLUDED_KEYS,
     coax: COAX_EXCLUDED_KEYS,
     rect_waveguide: WAVEGUIDE_EXCLUDED_KEYS,
+    // The text carries the whole stackup, the boundaries and the plated faces.
+    custom: new Set([...COAX_EXCLUDED_KEYS, 'plating_top', 'plating_sides', 'plating_bottom']),
 };
 
 function settingsToURL(settings) {
@@ -614,6 +632,9 @@ function restoreSettings(settings) {
         document.getElementById('chk_plating_inner').checked = !!fullSettings.coax_plating_inner;
         document.getElementById('chk_plating_outer').checked = !!fullSettings.coax_plating_outer;
 
+        document.getElementById('inp_custom_sigma').value = fullSettings.custom_sigma;
+        setCustomGeometryText(fullSettings.custom_geom || '');
+
         setValueWithUnit('inp_wg_a', fullSettings.wg_a);
         setValueWithUnit('inp_wg_b', fullSettings.wg_b);
         document.getElementById('inp_wg_er').value = fullSettings.wg_er;
@@ -635,13 +656,55 @@ function restoreSettings(settings) {
     }
 }
 
+// Custom geometry links carry the geometry text, so they go into the URL fragment (never
+// sent to the server, no length limit on its side) as deflate + base64url with a "z."
+// prefix. Every other type keeps the original ?params= form, so existing links and the
+// links of the fixed types do not change.
+async function streamBytes(stream) {
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function encodeLongSettings(settings) {
+    const json = JSON.stringify(settings);
+    if (typeof CompressionStream === 'undefined') return btoa(encodeURIComponent(json));
+    const bytes = await streamBytes(new Blob([json]).stream().pipeThrough(new CompressionStream('deflate-raw')));
+    let bin = '';
+    for (const v of bytes) bin += String.fromCharCode(v);
+    return 'z.' + btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function decodeLongSettings(encoded) {
+    if (!encoded.startsWith('z.')) return settingsFromURL(encoded);
+    try {
+        const b64 = encoded.slice(2).replace(/-/g, '+').replace(/_/g, '/');
+        const bin = atob(b64 + '='.repeat((4 - b64.length % 4) % 4));
+        const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+        const out = await streamBytes(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw')));
+        return JSON.parse(new TextDecoder().decode(out));
+    } catch (e) {
+        log('Failed to parse URL parameters:', e);
+        return null;
+    }
+}
+
 /**
  * Copy current settings as URL to clipboard
  */
-function copySettingsLink() {
+async function copySettingsLink() {
     const settings = getUISettings();
-    const encoded = settingsToURL(settings);
-    const url = `${window.location.origin}${window.location.pathname}?params=${encoded}`;
+    const base = `${window.location.origin}${window.location.pathname}`;
+    let url;
+    if (settings.tl_type === 'custom') {
+        // Same default filtering as settingsToURL, then the compressed fragment form.
+        const filtered = JSON.parse(decodeURIComponent(atob(settingsToURL(settings))));
+        url = `${base}#params=${await encodeLongSettings(filtered)}`;
+        if (url.length > 8000) {
+            log(`The link is ${url.length} characters long. Some applications truncate long links, ` +
+                `the geometry text file (Save file) is the safer way to share this geometry.`);
+        }
+    } else {
+        url = `${base}?params=${settingsToURL(settings)}`;
+    }
 
     navigator.clipboard.writeText(url).then(() => {
         const btn = document.getElementById('copy-link-btn');
@@ -669,6 +732,20 @@ function loadSettingsFromURL() {
         }
     }
     return false;
+}
+
+// The fragment form decodes asynchronously, so it is applied after init has drawn the
+// default geometry.
+async function loadSettingsFromFragment() {
+    const m = /[#&]params=([^&]+)/.exec(window.location.hash);
+    if (!m) return;
+    const settings = await decodeLongSettings(m[1]);
+    if (!settings || !restoreSettings(settings)) return;
+    log('Settings restored from URL');
+    updateGeometry();
+    draw(true);
+    updateSweepParamList();
+    autoFillSweepRange();
 }
 
 // Solver log.
@@ -904,6 +981,8 @@ function getGeometryHash() {
     const p = getParams();
     return JSON.stringify({
         tl_type: p.tl_type,
+        custom_geom: p.custom_geom,
+        custom_overrides: p.custom_overrides,
         w: p.w,
         h: p.h,
         t: p.t,
@@ -1335,9 +1414,7 @@ function plotModesField(grid, mode, idx, resetView = false) {
         return;
     }
 
-    const maxY = Math.max(
-        modesSolver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
-        modesSolver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
+    const maxY = displayTop(modesSolver);
 
     const yArr = Array.from(grid.y);
     const maxYIdx = yArr.findIndex(y => y > maxY);
@@ -1389,9 +1466,7 @@ function plotModesGeometry() {
     const Plotly = getPlotly();
     const container = document.getElementById('modes-plot');
     if (!Plotly || !container || !modesSolver || !modesSolver.conductors) return;
-    const maxY = Math.max(
-        modesSolver.dielectrics.reduce((m, d) => Math.max(m, d.y_max), 0),
-        modesSolver.conductors.reduce((m, c) => Math.max(m, c.y_max), 0));
+    const maxY = displayTop(modesSolver);
     const view = computeModesView(maxY);
     // Invisible scatter spanning the view so the axes (and shapes) scale correctly.
     const traces = [{ type: 'scatter', x: [view.xRange[0], view.xRange[1]], y: [view.yRange[0], view.yRange[1]],
@@ -1434,15 +1509,20 @@ function modesPlotLayout(title, view, shapes) {
 // Translate the "Solver" dropdown value into the backend + triangular loss options.
 // Accepts the legacy 'triangular' value (maps to the accurate MQS full-wave mode).
 function getParams() {
+    const isCustom = document.getElementById('tl_type').value === 'custom';
     return {
         tl_type: document.getElementById('tl_type').value,
         mesh_backend: (document.getElementById('mesh_backend')?.value) ?? 'rectilinear',
+        // Custom geometry: the text, plus sidebar parameter values that differ from it
+        // (a parameter sweep sets the input without touching the text).
+        custom_geom: isCustom ? getCustomGeometryText() : '',
+        custom_overrides: isCustom ? getCustomOverrides() : {},
         w: getInputValue('inp_w'),
         h: getInputValue('inp_h'),
         t: getInputValue('inp_t'),
         er: getInputValueUnitless('inp_er'),
         tand: getInputValueUnitless('inp_tand'),
-        sigma: getInputValueUnitless('inp_sigma'),
+        sigma: getInputValueUnitless(isCustom ? 'inp_custom_sigma' : 'inp_sigma'),
         freq: getInputValue('freq-start'),
         nx: 30,  // Fixed initial grid size
         ny: 30,  // Fixed initial grid size
@@ -1540,7 +1620,33 @@ function updateGeometry() {
     const pbar = document.getElementById('progress_bar');
     pbar.style.width = "0%";
 
-    solver = buildSolverFromParams(getParams());
+    const p = getParams();
+    const built = buildSolverFromParams(p);
+    // While the custom geometry text is being edited it is invalid most of the time.
+    // Keep the last valid geometry on screen, the editor lists the errors.
+    const keep = !built && p.tl_type === 'custom' && solver && solver.geometry_params;
+    if (!keep) solver = built;
+}
+
+// Writes the current geometry (every rectangle the native solver builds, solder mask,
+// vias, enclosure walls and all) as custom geometry text and switches to the custom type.
+function convertToCustomGeometry() {
+    const p = getParams();
+    const native = buildSolverFromParams(p, log);
+    if (!native) return;
+    let text;
+    try {
+        text = solverToGeometryText(native, { units: 'mm', pinWalls: true });
+    } catch (e) { log('ERROR: ' + e.message); return; }
+    const names = { microstrip: 'Microstrip', diff_microstrip: 'Differential microstrip', stripline: 'Stripline',
+        diff_stripline: 'Differential stripline', gcpw: 'GCPW', diff_gcpw: 'Differential GCPW',
+        broadside_stripline: 'Broadside coupled stripline' };
+    document.getElementById('inp_custom_sigma').value = native.sigma_cond;
+    setCustomGeometryText(`# Converted from: ${names[p.tl_type] || p.tl_type}\n` + text);
+    const sel = document.getElementById('tl_type');
+    sel.value = 'custom';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    log('Converted the geometry to custom geometry text.');
 }
 
 // Build a FieldSolver from the given sidebar params WITHOUT touching any global state.
@@ -1809,7 +1915,7 @@ function updateSweepDiffCheckbox() {
 function redrawSweepPlot() {
     if (!parameterSweepResults || parameterSweepResults.length === 0 || !lastSweepParam) return;
     const ySel = document.getElementById('sweep-y-selector').value;
-    const cfg = SWEEP_PARAM_CONFIG[lastSweepParam];
+    const cfg = sweepParamConfig(lastSweepParam);
     const xLabel = cfg ? cfg.label + (lastSweepDisplayUnit ? ` (${lastSweepDisplayUnit})` : '') : lastSweepParam;
     drawParameterSweepPlot(parameterSweepResults, xLabel, ySel, getSweepDiffMode());
 }
@@ -1848,8 +1954,9 @@ function updateSweepParamList() {
     const isStripline = tlType.includes('stripline');
     const isCoax      = tlType === 'coax';
     const isWaveguide = tlType === 'rect_waveguide';
-    // Both replace the microstrip stackup entirely with their own geometry block.
-    const isSelfBounded = isCoax || isWaveguide;
+    const isCustom    = tlType === 'custom';
+    // All three replace the microstrip stackup entirely with their own geometry block.
+    const isSelfBounded = isCoax || isWaveguide || isCustom;
     const useSm       = document.getElementById('chk_solder_mask').checked;
     const useTopDiel  = document.getElementById('chk_top_diel').checked;
     const useGndCut   = document.getElementById('chk_gnd_cut').checked;
@@ -1867,6 +1974,7 @@ function updateSweepParamList() {
         stripline: isStripline,
         coax: isCoax,
         waveguide: isWaveguide,
+        custom: isCustom,
         sm: useSm && !isSelfBounded,
         top_diel: useTopDiel && !isSelfBounded,
         gnd_cut: useGndCut && !isSelfBounded,
@@ -1884,6 +1992,17 @@ function updateSweepParamList() {
         opt.textContent = cfg.label;
         sel.appendChild(opt);
     }
+    // Geometry parameters of the custom type, first in the list.
+    if (isCustom) {
+        const first = sel.firstChild;
+        for (const cfg of customSweepParams()) {
+            const opt = document.createElement('option');
+            opt.value = cfg.key;
+            opt.textContent = cfg.label;
+            sel.insertBefore(opt, first);
+        }
+        if (sel.options.length) sel.selectedIndex = 0;
+    }
     // Restore previous selection if still available
     if ([...sel.options].some(o => o.value === previousValue)) sel.value = previousValue;
 }
@@ -1897,7 +2016,7 @@ function getZeroDefaultMax(displayUnit) {
 
 function autoFillSweepRange() {
     const xSel = document.getElementById('sweep-x-selector').value;
-    const cfg = SWEEP_PARAM_CONFIG[xSel];
+    const cfg = sweepParamConfig(xSel);
     if (!cfg) return;
     const inputEl = document.getElementById(cfg.inputId);
     if (!inputEl) return;
@@ -1966,7 +2085,7 @@ function convertToDisplayUnit(valueSI, unit) {
 async function runParameterSweep() {
     const xSel = document.getElementById('sweep-x-selector').value;
     const ySel = document.getElementById('sweep-y-selector').value;
-    const cfg = SWEEP_PARAM_CONFIG[xSel];
+    const cfg = sweepParamConfig(xSel);
     const displayUnit = getSweepDisplayUnit(cfg);
     const isUnitless = !displayUnit || cfg.fixedUnit;
     const parseVal = (str) => {
@@ -2430,6 +2549,7 @@ function bindEvents() {
         'inp_bs_h_top', 'inp_bs_er_top', 'inp_bs_tand_top',
         'inp_coax_d', 'inp_coax_D', 'inp_coax_er', 'inp_coax_tand', 'inp_coax_sigma',
         'inp_wg_a', 'inp_wg_b', 'inp_wg_er', 'inp_wg_tand', 'inp_wg_sigma',
+        'inp_custom_sigma',
         'freq-start'
     ];
 
@@ -2466,8 +2586,27 @@ function bindEvents() {
         }
     });
 
+    // Custom geometry editor: every edit rebuilds the preview, and the parameter list
+    // of the sweep tab follows the parameters defined in the text.
+    let customParamKeys = '';
+    initCustomGeometryEditor({
+        log,
+        onGeometryChange: (resetZoom = false) => {
+            if (document.getElementById('tl_type').value !== 'custom') return;
+            updateGeometry();
+            draw(resetZoom === true);
+            const keys = customSweepParams().map(c => c.key).join();
+            if (keys !== customParamKeys) { customParamKeys = keys; updateSweepParamList(); autoFillSweepRange(); }
+            updateResultNotices();
+            updateSweepNotice();
+            updateModesNotice();
+        },
+    });
+    document.getElementById('btn-convert-custom').addEventListener('click', convertToCustomGeometry);
+
     // Transmission line type selector - reset zoom when type changes
     document.getElementById('tl_type').addEventListener('change', () => {
+        if (document.getElementById('tl_type').value === 'custom') activateCustomGeometry();
         updateGeometry();
         draw(true);  // Reset zoom/pan for new geometry
         updateResultNotices();
@@ -2764,6 +2903,8 @@ function init() {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     log("Ready. Click 'Solve' to start simulation.");
+    loadSettingsFromFragment();
+    window.addEventListener('hashchange', loadSettingsFromFragment);
 }
 
 // Start when DOM is ready

@@ -1,7 +1,8 @@
 // Custom geometry text: parser, expressions, units, pinned edges, round trip, and the
 // rejection cases of CustomGeometrySolver. No solves, runs in well under a second.
 import { parseGeometryText, evaluateGeometry, parseAndEvaluate, serializeGeometry,
-    evaluateExpression } from '../src/custom_geometry_text.js';
+    evaluateExpression, setParamInText, setStatementInText, replaceStatementInText,
+    insertLineInText, moveRectInText, rectStatementText } from '../src/custom_geometry_text.js';
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 
 let failures = 0;
@@ -60,6 +61,46 @@ check('round trip evaluates identically',
     JSON.stringify(geo2.rects.map(r => [r.kind, r.x, r.y, r.er])) === JSON.stringify(geo.rects.map(r => [r.kind, r.x, r.y, r.er])));
 check('round trip keeps comments', text2.includes('# second layer') && text2.includes('# trace'));
 check('round trip is stable', serializeGeometry(parseGeometryText(text2)) === text2);
+
+// In-place edits keep the rest of the text as written.
+{
+    const edited = setParamInText(TEXT, 's', '300');
+    check('setParamInText rewrites one statement', edited.includes('w = 200; s = 300; t = 35   # trace')
+        && parseAndEvaluate(edited).params.s === 300 && edited.split('\n').length === TEXT.split('\n').length);
+    check('setParamInText leaves other parameters alone', setParamInText(TEXT, 'h', '5') === TEXT
+        && parseAndEvaluate(setParamInText(TEXT, 'h1', '50')).params.h2 === 200);
+    const b = setStatementInText(TEXT, 'bounds', 'bounds gnd gnd gnd gnd');
+    check('setStatementInText replaces a statement', b.includes('bounds gnd gnd gnd gnd') && !b.includes('open')
+        && parseAndEvaluate(b).bounds.join() === 'gnd,gnd,gnd,gnd');
+    const ins = setStatementInText('units mm\nsig+ x=0 y=1 w=1 h=1', 'bounds', 'bounds open open open gnd');
+    check('setStatementInText inserts after units', ins.split('\n')[1] === 'bounds open open open gnd');
+}
+
+// Statement-level edits used by the form editor.
+{
+    const m = parseGeometryText(TEXT);
+    const sigN = m.statements.find(s => s.type === 'rect' && s.kind === 'sig-');
+    const r1 = replaceStatementInText(TEXT, sigN, rectStatementText('sig-', { ...sigN.fields, w: '2*w' }));
+    check('replaceStatementInText rewrites one rectangle', close(parseAndEvaluate(r1).rects[2].x.size, 400e-6)
+        && r1.split('\n').length === TEXT.split('\n').length);
+    const pS = m.statements.find(s => s.type === 'param' && s.name === 's');
+    const r2 = replaceStatementInText(TEXT, pS, 's = 99');
+    check('replaceStatementInText edits one of several statements on a line',
+        /w = 200; s = 99; t = 35   # trace/.test(r2));
+    const r3 = replaceStatementInText(TEXT, sigN, null);
+    check('removing a statement drops its line', parseAndEvaluate(r3).rects.length === 3
+        && r3.split('\n').length === TEXT.split('\n').length - 1);
+    const r4 = replaceStatementInText(TEXT, pS, null);
+    check('removing one of several statements keeps the others', /w = 200; t = 35   # trace/.test(r4), r4.split('\n')[2]);
+    const r5 = insertLineInText(TEXT, 1e9, 'gnd  x=0 y=-10 w=5 h=5');
+    check('insertLineInText appends before the final newline', r5.endsWith('gnd  x=0 y=-10 w=5 h=5\n')
+        && parseAndEvaluate(r5).rects.length === 5);
+    const d2 = m.statements.filter(s => s.type === 'rect')[1];
+    const r6 = moveRectInText(TEXT, m, d2, -1);
+    const e6 = parseAndEvaluate(r6);
+    check('moveRectInText swaps two rectangles', e6.errors.length === 0 && e6.rects[0].er === 3 && e6.rects[1].er === 4.3
+        && r6.includes('# second layer'));
+}
 
 // Shared edges written as the same expression are the same double.
 check('shared edges are exactly equal', geo.rects[0].y.max === geo.rects[1].y.min);

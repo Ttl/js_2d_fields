@@ -187,6 +187,30 @@ function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, lay
     return out;
 }
 
+// Top of what the geometry and field plots show: the highest rectangle, which for the
+// fixed line types is their air box. A custom geometry has no air rectangle of its own,
+// its solved region is the air, so the plots run to the top of that.
+function displayTop(solver) {
+    if (solver.user_domain) return solver.domain_height;
+    return Math.max(
+        solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0),
+        solver.conductors.reduce((max, c) => Math.max(max, c.y_max), 0));
+}
+
+// Outline of the rectangles written on the text line the custom geometry editor's cursor
+// is on (window.customHighlightLine, 0 for none).
+function sourceLineHighlightShapes(solver, maxY) {
+    const line = window.customHighlightLine;
+    if (!line) return [];
+    return [...(solver.dielectrics || []), ...(solver.conductors || [])]
+        .filter(o => o.src_line === line && o.y_min <= maxY)
+        .map(o => ({
+            type: 'rect',
+            x0: o.x_min * 1000, y0: o.y_min * 1000, x1: o.x_max * 1000, y1: Math.min(o.y_max, maxY) * 1000,
+            fillcolor: 'rgba(56, 189, 248, 0.25)', line: { color: 'rgba(56, 189, 248, 1)', width: 2 }, layer: 'above',
+        }));
+}
+
 // Focused view (mm) around the signal conductors: the signal cluster fills `fraction` of
 // the x-axis; with a top ground the full stack height is shown, otherwise the conductors
 // sit in the bottom `fraction` of the view. Shared by the geometry tab's initial zoom and
@@ -209,8 +233,16 @@ function computeGeometryView(solver, maxY, fraction = SIGNAL_CONDUCTOR_VIEW_FRAC
             yRange: [(w.y_min - outer - pad) * 1000, (w.y_max + outer + pad) * 1000],
         };
     }
-    const xl = Math.min(...signal.map(c => c.x_min));
-    const xr = Math.max(...signal.map(c => c.x_max));
+    // A signal edge on the domain wall (a slotline half plane) says nothing about where
+    // the fields are, so the view is framed by the other signal edges and the ground
+    // edges facing them.
+    const W2 = (solver.domain_width || 0) / 2, tolW = W2 * 1e-9;
+    const inner = v => !(W2 > 0) || Math.abs(Math.abs(v) - W2) > tolW;
+    let xs = signal.flatMap(c => [c.x_min, c.x_max]).filter(inner);
+    if (xs.length < 2) xs = xs.concat(grounds.flatMap(c => [c.x_min, c.x_max]).filter(inner));
+    if (xs.length < 2) xs = signal.flatMap(c => [c.x_min, c.x_max]);
+    let xl = Math.min(...xs), xr = Math.max(...xs);
+    if (!(xr > xl)) { xl -= W2 / 20; xr += W2 / 20; }
     const center = (xl + xr) / 2;
     const viewWidth = (xr - xl) / fraction;
     const xRange = [(center - viewWidth / 2) * 1000, (center + viewWidth / 2) * 1000];
@@ -223,7 +255,11 @@ function computeGeometryView(solver, maxY, fraction = SIGNAL_CONDUCTOR_VIEW_FRAC
     } else {
         const topOfConductors = Math.max(...solver.conductors.map(c => c.y_max));
         const viewHeight = (topOfConductors - bottomY) / fraction;
-        yRange = [bottomY * 1000, (bottomY + viewHeight) * 1000];
+        // Air below the lowest ground (a custom geometry with an open bottom boundary):
+        // show part of it, the structure is not sitting on the edge of the solved region.
+        const airBelow = solver.user_domain && solver.user_domain.y_min < bottomY - 1e-9 * viewHeight;
+        const yLow = airBelow ? Math.max(solver.user_domain.y_min, bottomY - viewHeight / 3) : bottomY;
+        yRange = [yLow * 1000, (bottomY + viewHeight) * 1000];
     }
     return { xRange, yRange };
 }
@@ -321,10 +357,7 @@ function draw(resetZoom = false) {
         title = "Transmission Line Geometry";
 
         // Determine display bounds using actual domain extent
-        const maxY = Math.max(
-            solver.dielectrics.reduce((max, d) => Math.max(max, d.y_max), 0),
-            solver.conductors.reduce((max, c) => Math.max(max, c.y_max), 0)
-        );
+        const maxY = displayTop(solver);
 
         // Calculate intelligent zoom ranges for initial view (only if no current view exists)
         if (!currentXRange || resetZoom) {
@@ -332,9 +365,16 @@ function draw(resetZoom = false) {
             if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
         }
 
+        // The solved region of a custom geometry, drawn as air under everything else.
+        if (solver.user_domain) {
+            const u = solver.user_domain;
+            shapes.push({ type: 'rect', x0: u.x_min * 1000, y0: u.y_min * 1000, x1: u.x_max * 1000, y1: u.y_max * 1000,
+                fillcolor: 'rgba(255, 255, 255, 0.8)', line: { color: 'rgba(128, 128, 128, 0.6)', width: 1, dash: 'dot' }, layer: 'below' });
+        }
         // Dielectrics (opaque, below the field contours) + conductors above.
         shapes.push(...dielectricFillShapes(solver, maxY));
         shapes.push(...conductorFillShapes(solver, maxY));
+        shapes.push(...sourceLineHighlightShapes(solver, maxY));
 
         // If solution available, overlay E-field contours
         if (solver.solution_valid && solver.mesh_generated) {
@@ -1351,4 +1391,4 @@ function unfreeze() {
 function isFrozen() { return frozenResultsData !== null; }
 
 export { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView };
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop };
