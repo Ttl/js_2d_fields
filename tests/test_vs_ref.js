@@ -1,5 +1,6 @@
 import { MicrostripSolver as _MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver as _BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
 
 // Backend selection: `MESH_BACKEND=triangular node tests/test_vs_ref.js` runs the
 // whole suite on the triangular FEM backend; default is the rectilinear FDM solver.
@@ -1205,6 +1206,100 @@ async function solve_differential_microstrip_500mm_s4p() {
 
 // Run tests. Each case is isolated so the whole suite reports even when some
 // cases fail (useful when comparing the two backends).
+// Coplanar strips on a finite substrate, air and open boundaries on all sides, from
+// Ansys 2D Extractor at 1 GHz: two copper strips 1 mm wide and 50 um thick, 0.3 mm
+// apart, on a 4 mm x 0.2104 mm substrate. One strip is the signal, the other the
+// return, so the return current has no wall to close through.
+function coplanar_strips_solver(er, tand) {
+    const s = new CustomGeometrySolver({
+        text: `units mm
+bounds open open open open
+diel x=-2 w=4 y=-0.2104 h=0.2104 er=${er} tand=${tand}
+sig+ x=-1.15 w=1 y=0 h=0.05
+gnd  x=0.15  w=1 y=0 h=0.05
+`,
+        sigma_cond: 5.8e7, freq: 1e9, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
+    });
+    s.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
+    return s;
+}
+
+function coplanar_strips_results(mode) {
+    return { 'Z0': mode.Z0, 'eps_eff': mode.eps_eff, 'diel_loss': mode.alpha_d, 'cond_loss': mode.alpha_c,
+        'C': mode.RLGC.C, 'R': mode.RLGC.R, 'L': mode.RLGC.L, 'G': mode.RLGC.G };
+}
+
+async function solve_coplanar_strips_vacuum() {
+    const results = await coplanar_strips_solver(1, 0).solve_adaptive({ energy_tol: 0.001 });
+    const reference = {
+        "Z0": 157.46,
+        "eps_eff": 1.0036,
+        "cond_loss": 0.52895,
+        "C": 21.223e-12,
+        "R": 19.178,
+        "L": 526.18e-9,
+    };
+    test_microstrip_solution(coplanar_strips_results(results.modes[0]), reference, "Coplanar strips, vacuum substrate");
+}
+
+// Lossy-substrate offset in the reference C. 2D Extractor reports a larger C as soon as
+// the substrate material has a nonzero loss tangent, whatever its permittivity. On the
+// finite-ground microstrip below, with er = 1: vacuum 30.218 pF/m, tand = 0 30.22,
+// tand = 0.002 32.564, tand = 0.02 32.603. On the strips here: vacuum 21.223,
+// er = 1 with tand = 0.02 25.35, and er = 1.2 gives 26.466, above the er * C0 bound.
+// The step does not depend on the loss, a 2% loss tangent can move C by a term of order
+// tand^2 only, and the reference L agrees with the vacuum C0 (L * C0 * c^2 = 1.003).
+// The slopes dC/der and G agree with both backends to 1-3%, so the offset is a constant.
+//
+// The strips take C = C_reported - (C(er = 1, tand = 0.02) - C(vacuum)), with eps_eff
+// and Z0 recomputed from that C and the reported L (as reported: C 41.121 pF/m,
+// eps_eff 1.9442, Z0 113.1). The microstrip takes C from a lossless er = 4.4 run,
+// 103.19 pF/m, which the same subtraction predicts as 103.27 (as reported with
+// tand = 0.02: C 105.65 pF/m, eps_eff 3.5373, Z0 59.377).
+async function solve_coplanar_strips_fr4() {
+    const results = await coplanar_strips_solver(4.4, 0.02).solve_adaptive({ energy_tol: 0.001 });
+    const reference = {
+        "Z0": 119.25,
+        "eps_eff": 1.7491,
+        "C": 36.994e-12,
+        "R": 19.175,
+        "L": 526.06e-9,
+        "G": 2.3234e-3,
+    };
+    test_microstrip_solution(coplanar_strips_results(results.modes[0]), reference, "Coplanar strips, FR4 substrate");
+}
+
+// Microstrip on a finite ground, open on all sides.
+// 0.35 mm x 35 um trace on a 3 mm x 0.2104 mm substrate, 0.5 mm x 35 um ground below
+// it, trace and ground outside the substrate.
+async function solve_finite_ground_microstrip() {
+    const s = new CustomGeometrySolver({
+        text: `units mm
+bounds open open open open
+diel x=-1.5   w=3    y=0      h=0.2104 er=4.4 tand=0.02
+sig+ x=-0.175 w=0.35 y=0.2104 h=0.035
+gnd  x=-0.25  w=0.5  y=-0.035 h=0.035
+`,
+        sigma_cond: 5.8e7, freq: 1e9, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
+    });
+    s.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
+    const results = await s.solve_adaptive({ energy_tol: 0.001 });
+    const mode = results.modes[0];
+    // C from the lossless run, eps_eff and Z0 recomputed from it, see above. The total
+    // loss is as reported: the Z0 change moves it by 0.1%.
+    const reference = {
+        "Z0": 60.083,
+        "eps_eff": 3.4548,
+        "loss": 5.0917,
+        "C": 103.19e-12,
+        "R": 28.285,
+        "L": 372.52e-9,
+        "G": 11.722e-3,
+    };
+    test_microstrip_solution({ ...coplanar_strips_results(mode), 'loss': mode.alpha_d + mode.alpha_c },
+        reference, "Finite-ground microstrip");
+}
+
 async function runTests() {
     const cases = [
         solve_microstrip, solve_microstrip_1khz, solve_microstrip_embed,
@@ -1213,6 +1308,7 @@ async function runTests() {
         solve_rough_stripline, solve_differential_stripline,
         solve_differential_stripline_rlgc, solve_differential_microstrip,
         solve_broadside_stripline, solve_broadside_stripline_offset,
+        solve_coplanar_strips_vacuum, solve_coplanar_strips_fr4, solve_finite_ground_microstrip,
         solve_differential_microstrip_500mm_s4p,
         test_s2p_generation2, test_s2p_generation,
         test_s4p_generation_lossless, test_s4p_generation,

@@ -980,7 +980,7 @@ export class TriBackend {
         const dom = this.opts.domainBox
             ? { ...this.opts.domainBox }
             : { x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
-                y_min: -s.t_gnd, y_max: s.domain_height };
+                y_min: s.domain_y_min ?? -s.t_gnd, y_max: s.domain_height };
         this.domain = dom;
         // Use a half-domain symmetry solve when the geometry is mirror-symmetric (the
         // shared halfDomainSymmetry disables symmetry for broadside).
@@ -1049,7 +1049,7 @@ export class TriBackend {
             && s.conductors.some(c => c.is_signal && (c.polarity || 1) > 0 && survives(c))
             && s.conductors.some(c => c.is_signal && (c.polarity || 1) < 0 && survives(c));
         const mqsPre = ((lmPre === 'mqs' && !shapedPre && sigCondPre)
-            || (lmPre === 'auto' && (this.symmetry || diffMultiPre) && !shapedPre && sigCondPre))
+            || (lmPre === 'auto' && (this.symmetry || diffMultiPre || !s.is_differential) && !shapedPre && sigCondPre))
             && (!s.is_differential || this.symmetry || diffMultiPre);
         // A medium may supply its own base sizing (coax: derived from the conductor
         // radii, since w/t have no meaning for a round conductor).
@@ -2237,8 +2237,9 @@ export class TriBackend {
         // is what makes the dispersion-cache fast path below safe on that path. MQS
         // applies to rectangular conductors, explicit ground rects (coplanar GCPW
         // grounds, via slabs, cutout remnants) are handled inside the solve as passive
-        // C = 0 return conductors, and on 'auto' a symmetric domain (mode set by
-        // the BC). Shaped conductors (coax) have no rect-based skin-band/
+        // C = 0 return conductors. On 'auto' a differential pair needs a way to select
+        // the mode (the symmetry-plane BC or the per-conductor drives below), a
+        // single-ended line has one mode and runs on a full domain too. Shaped conductors (coax) have no rect-based skin-band/
         // classification support, so they fall back to the H-field perturbation.
         // Per-face plating is handled inside MQS (surfaceZs weights each face's smooth
         // current by its own impedance), so plating doesn't force perturbation.
@@ -2279,7 +2280,7 @@ export class TriBackend {
         // disagree, on a mesh with no conductor interior MQS would return a plausible
         // but wrong R rather than fail, so fall back to perturbation and say so.
         let useMQS = ((lossMethod === 'mqs' && mqsOk)
-            || (lossMethod === 'auto' && (this.symmetry || mqsMulti) && mqsOk))
+            || (lossMethod === 'auto' && (this.symmetry || mqsMulti || !this.solver.is_differential) && mqsOk))
             && mqsModeSelectable;
         // Both modes need to use MQS if one uses it. Otherwise R12 could be
         // non-physical.

@@ -237,6 +237,114 @@ export class FieldSolver2D {
         this.Ey = null;
     }
 
+    // Bottom of the solve domain. Rectangular line types put their bottom ground
+    // below y=0, so it defaults to -t_gnd. Solvers without a bottom ground set it.
+    get domain_y_min() { return this._domain_y_min ?? -(this.t_gnd ?? 0); }
+    set domain_y_min(v) { this._domain_y_min = v; }
+
+    ensure_mesh() {
+        // Triangular backend builds & owns its own mesh in TriBackend.
+        if (this.mesh_backend === 'triangular') return;
+        if (this.mesh_generated) {
+            return;
+        }
+
+        // Generate mesh
+        [this.x, this.y] = this.mesher.generate_mesh();
+
+        // Calculate spacing arrays
+        this.dx = new Float64Array(this.x.length - 1);
+        for (let i = 0; i < this.x.length - 1; i++) {
+            this.dx[i] = this.x[i + 1] - this.x[i];
+        }
+
+        this.dy = new Float64Array(this.y.length - 1);
+        for (let i = 0; i < this.y.length - 1; i++) {
+            this.dy[i] = this.y[i + 1] - this.y[i];
+        }
+
+        // Setup geometry
+        this._setup_geometry();
+        this.mesh_generated = true;
+    }
+
+    _setup_geometry() {
+        const tol = 1e-11;
+        const nx = this.x.length;
+        const ny = this.y.length;
+
+        // Initialize mask and material arrays
+        // Nodes no dielectric rect covers are air: lossless, epsilon_r = 1.
+        this.epsilon_r = Array(ny).fill().map(() => new Float64Array(nx).fill(1));
+        this.tand = Array(ny).fill().map(() => new Float64Array(nx).fill(0));
+        this.signal_mask = Array(ny).fill().map(() => new Uint8Array(nx));
+        this.ground_mask = Array(ny).fill().map(() => new Uint8Array(nx));
+
+        // For differential mode, track positive and negative traces separately
+        if (this.is_differential) {
+            this.signal_p_mask = Array(ny).fill().map(() => new Uint8Array(nx));
+            this.signal_n_mask = Array(ny).fill().map(() => new Uint8Array(nx));
+        }
+
+        // Apply dielectrics (last overwrites)
+        for (const diel of this.dielectrics) {
+            for (let i = 0; i < ny; i++) {
+                const yc = this.y[i];
+                if (yc >= diel.y_min - tol && yc <= diel.y_max + tol) {
+                    for (let j = 0; j < nx; j++) {
+                        const xc = this.x[j];
+                        if (xc >= diel.x_min - tol && xc <= diel.x_max + tol) {
+                            this.epsilon_r[i][j] = diel.epsilon_r;
+                            this.tand[i][j] = diel.tan_delta;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply conductors (also build conductor_id map for per-conductor loss calc)
+        this.conductor_id = Array(ny).fill().map(() => new Int16Array(nx).fill(-1));
+        for (let ci = 0; ci < this.conductors.length; ci++) {
+            const cond = this.conductors[ci];
+            for (let i = 0; i < ny; i++) {
+                const yc = this.y[i];
+                if (yc >= cond.y_min - tol && yc <= cond.y_max + tol) {
+                    for (let j = 0; j < nx; j++) {
+                        const xc = this.x[j];
+                        if (xc >= cond.x_min - tol && xc <= cond.x_max + tol) {
+                            this.conductor_id[i][j] = ci;
+                            if (cond.is_signal) {
+                                this.signal_mask[i][j] = 1;
+                                if (this.is_differential) {
+                                    if (cond.polarity > 0) {
+                                        this.signal_p_mask[i][j] = 1;
+                                    } else {
+                                        this.signal_n_mask[i][j] = 1;
+                                    }
+                                }
+                            } else {
+                                this.ground_mask[i][j] = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Finalize conductor mask
+        this.conductor_mask = Array(ny).fill().map((_, i) => {
+            const row = new Uint8Array(nx);
+            for (let j = 0; j < nx; j++) {
+                row[j] = this.signal_mask[i][j] | this.ground_mask[i][j];
+            }
+            return row;
+        });
+
+        // Cell-centred permittivity for the flux coefficients (see
+        // FieldSolver2D._paint_cell_materials).
+        this._paint_cell_materials();
+    }
+
     /**
      * Cell-centred material arrays: epsilon_cell[i][j] / tand_cell[i][j] describe
      * the rectangle [x[j], x[j+1]] x [y[i], y[i+1]], sampled at its centre.
@@ -322,7 +430,7 @@ export class FieldSolver2D {
         const b = this.boundaries;
         if (!b || !this.conductors || !this.conductors.length) return out;
         const xMin = -this.domain_width / 2, xMax = this.domain_width / 2;
-        const yMin = -(this.t_gnd ?? 0), yMax = this.domain_height;
+        const yMin = this.domain_y_min, yMax = this.domain_height;
         if (!(xMax > xMin) || !(yMax > yMin)) return out;
         // Decay scale: substrate stack thickness (non-air dielectrics); if there is
         // none (all-air line), fall back to the conductor stack height.
@@ -397,7 +505,7 @@ export class FieldSolver2D {
         // modesOpts.domainBox: the Modes tab's shrunken open domain (see _modes_domain_box).
         const box = modesOpts && modesOpts.domainBox;
         const W = box ? box.x_max - box.x_min : this.domain_width;
-        const yBottom = box ? box.y_min : -(this.t_gnd ?? 0);
+        const yBottom = box ? box.y_min : this.domain_y_min;
         const H = (box ? box.y_max : (this.domain_height ?? NaN)) - yBottom;
         // Subclasses that haven't set up a domain yet (or degenerate inputs) — nothing to check.
         if (!(W > 0) || !(H > 0) || !this.conductors || this.conductors.length === 0) return;
@@ -2267,7 +2375,7 @@ export class FieldSolver2D {
     _modes_domain_box() {
         if (this.enclosure_width != null || this.enclosure_height != null) return null;
         if (!this.conductors || !this.domain_width || !(this.domain_height > 0)) return null;
-        const W = this.domain_width, H = this.domain_height, yBottom = -(this.t_gnd ?? 0);
+        const W = this.domain_width, H = this.domain_height, yBottom = this.domain_y_min;
         const stack = [...this.conductors,
             ...(this.dielectrics || []).filter(d => (d.epsilon_r || 1) > 1.001)];
         let yLo = Infinity, yHi = -Infinity, xLo = Infinity, xHi = -Infinity;

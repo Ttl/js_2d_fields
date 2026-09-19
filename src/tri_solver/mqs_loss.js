@@ -188,8 +188,8 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   Z0          — (optional) line impedance for α_c conversion
 //   opts.wallPEC — {left,right,top,bottom} flags saying which domain walls are metal
 //   (from the mesher. `left` is already cleared on a half domain so the symmetry
-//   plane is never counted). Only these walls contribute to the wall loss, every
-//   wall is Dirichlet in the solve regardless. Omit it and the legacy behaviour
+//   plane is never counted). Only these walls contribute to the wall loss. Every
+//   wall is Dirichlet in the solve, unless none of them is metal (see mqsPrecompute). Omit it and the legacy behaviour
 //   applies: bottom always, top per opts.topGround, sides never.
 //   opts.topGround — legacy fallback for opts.wallPEC.top (stripline)
 //   opts.oddSymmetry — odd-mode symmetry: A = 0 (Dirichlet) on the symmetry plane
@@ -282,10 +282,20 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     const xmin_d = condRect.xmin_domain, xmax_d = condRect.xmax_domain;
     const ymax_d = condRect.ymax_domain;
     const ymin_d = condRect.ymin_domain ?? 0;
+    // A domain with no metal wall at all (a line whose return conductor is a
+    // ground rect, open on every side) keeps the natural BC on the outer walls.
+    // No current can then close through a wall: the enclosed net current is zero,
+    // so the ground rects carry the whole return current whatever the domain size.
+    // The conductor mass term keeps the system regular without a Dirichlet wall.
+    const wpec = opts.wallPEC;
+    const openDomain = !!wpec && !wpec.left && !wpec.right && !wpec.top && !wpec.bottom
+        && gndRects.length > 0;
     function isDirichletPt(x, y) {
+        const onPlane = Math.abs(x - xmin_d) < 1e-9;
+        if (openDomain) return !!opts.oddSymmetry && sym === 2 && onPlane;
         if (Math.abs(y - ymin_d) < 1e-9 || Math.abs(y - ymax_d) < 1e-9) return true;
         if (Math.abs(x - xmax_d) < 1e-9) return true;
-        if ((sym === 1 || opts.oddSymmetry) && Math.abs(x - xmin_d) < 1e-9) return true;
+        if ((sym === 1 || opts.oddSymmetry) && onPlane) return true;
         return false;
     }
     const dofOf = new Int32Array(nNodes + nEdges).fill(-1);

@@ -1,0 +1,169 @@
+// Custom geometry text: parser, expressions, units, pinned edges, round trip, and the
+// rejection cases of CustomGeometrySolver. No solves, runs in well under a second.
+import { parseGeometryText, evaluateGeometry, parseAndEvaluate, serializeGeometry,
+    evaluateExpression } from '../src/custom_geometry_text.js';
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
+
+let failures = 0;
+function check(name, ok, detail = '') {
+    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
+    if (!ok) failures++;
+}
+const close = (a, b, rel = 1e-12) => Math.abs(a - b) <= rel * Math.max(Math.abs(a), Math.abs(b), 1e-300);
+
+// --- Expressions ---
+check('precedence and parentheses', evaluateExpression('1+2*3-(4-6)/2') === 8);
+check('unary minus', evaluateExpression('-2*-3') === 6 && evaluateExpression('-(1+1)') === -2);
+check('parameters', evaluateExpression('s/2+w', { s: 3, w: 0.5 }) === 2);
+check('functions', evaluateExpression('max(1,min(5,3))+abs(-2)+sqrt(16)') === 9);
+check('exponent notation', evaluateExpression('2.5e-3*2') === 0.005);
+check('unit suffix converts to the declared unit', close(evaluateExpression('35um+1', {}, 1e-3), 1.035));
+check('inf', evaluateExpression('-inf') === -Infinity);
+for (const bad of ['1+', '2*(3', 'foo', '1 2', '3$', 'nofn(1)', '5furlong', 'inf-inf']) {
+    let threw = false;
+    try { evaluateExpression(bad); } catch { threw = true; }
+    check(`rejects '${bad}'`, threw);
+}
+
+// --- A complete geometry ---
+const TEXT = `
+units um
+w = 200; s = 150; t = 35   # trace
+h1 = 100; h2 = 4*h1; er2 = 3.0
+bounds open open open gnd
+domain auto
+
+diel  x=-inf    y=0      w=inf  h=h1   er=4.3 tand=0.02
+diel  x=-inf    y=h1     w=inf  h=h2   er=er2   # second layer
+sig-  x=-s/2-w  y=h1+h2  w=w    h=t
+sig+  x1=s/2    x2=s/2+w y1=h1+h2 y2=h1+h2+t
+`;
+const model = parseGeometryText(TEXT);
+check('parses without errors', model.errors.length === 0, JSON.stringify(model.errors));
+const geo = evaluateGeometry(model);
+check('evaluates without errors', geo.errors.length === 0, JSON.stringify(geo.errors));
+check('parameters evaluated in order', geo.params.h2 === 400 && geo.params.er2 === 3);
+check('lengths in metres', close(geo.rects[2].x.pos, -275e-6) && close(geo.rects[2].y.pos, 500e-6)
+    && close(geo.rects[2].x.size, 200e-6));
+check('er is not scaled by the unit', geo.rects[1].er === 3);
+check('x1,x2 form', close(geo.rects[3].x.min, 75e-6) && close(geo.rects[3].x.max, 275e-6));
+check('pinned edges', geo.rects[0].x.min === -Infinity && geo.rects[0].x.max === Infinity);
+check('bounds and auto domain', geo.bounds.join() === 'open,open,open,gnd' && geo.domain.x_min === null);
+
+const swept = evaluateGeometry(model, { s: 300 });
+check('override replaces a parameter', close(swept.rects[3].x.min, 150e-6) && swept.params.s === 300);
+check('override of an unknown parameter is an error', evaluateGeometry(model, { nope: 1 }).errors.length === 1);
+
+const text2 = serializeGeometry(model);
+const geo2 = parseAndEvaluate(text2);
+check('round trip evaluates identically',
+    JSON.stringify(geo2.rects.map(r => [r.kind, r.x, r.y, r.er])) === JSON.stringify(geo.rects.map(r => [r.kind, r.x, r.y, r.er])));
+check('round trip keeps comments', text2.includes('# second layer') && text2.includes('# trace'));
+check('round trip is stable', serializeGeometry(parseGeometryText(text2)) === text2);
+
+// Shared edges written as the same expression are the same double.
+check('shared edges are exactly equal', geo.rects[0].y.max === geo.rects[1].y.min);
+
+// --- Parse and evaluation errors carry the line ---
+const ERR = [
+    ['units parsec', 1, 'units'],
+    ['w = ', 1, null],
+    ['bounds open open gnd', 1, 'bounds'],
+    ['sig+ x=0 y=0 w=1', 1, 'h'],
+    ['sig+ x=0 x1=0 w=1 y=0 h=1', 1, 'either'],
+    ['sig+ x=0 y=0 w=-1 h=1', 1, 'positive'],
+    ['sig+ x=0 y=0 w=1 h=0', 1, 'nonzero'],
+    ['sig+ x=0 y=0 w=1 h=1 er=2', 1, 'diel only'],
+    ['diel x=0 y=0 w=1 h=1', 1, 'er'],
+    ['diel x=0 y=0 w=1 h=1 er=0.5', 1, 'er'],
+    ['sig+ x=-inf y=0 w=1 h=1', 1, 'x1,x2'],
+    ['sig+ x=0 y=0 w=1 h=1 color=red', 1, 'unknown'],
+    ['a = b\nb = 1', 1, 'unknown parameter'],
+    ['a = 1\na = 2', 2, 'twice'],
+    ['inf = 3', 1, 'reserved'],
+    ['units mm\nunits um', 2, 'more than one'],
+    ['\n\nwibble 3', 3, 'unknown statement'],
+    ['sig+ x=0 y=0 w=1 h=1 plating=left', 1, 'faces'],
+];
+for (const [text, line, word] of ERR) {
+    const g = parseAndEvaluate(text);
+    const e = g.errors[0];
+    check(`error: ${JSON.stringify(text)}`,
+        !!e && e.line === line && (word === null || e.message.includes(word)), e ? `line ${e.line}: ${e.message}` : 'no error');
+}
+
+// --- Solver construction and validation ---
+const build = (text, extra = {}) => new CustomGeometrySolver({ text, nx: 20, ny: 20, ...extra });
+const rejects = (name, text, word, extra) => {
+    let msg = null;
+    try { build(text, extra); } catch (e) { msg = e.message; }
+    check(`rejects: ${name}`, msg !== null && msg.includes(word), msg ?? 'accepted');
+};
+
+const s1 = build(TEXT);
+check('differential pair recognised', s1.is_differential === true && s1.conductors.filter(c => c.is_signal).length === 2);
+check('gnd wall becomes a ground slab below the substrate',
+    s1.conductors.some(c => !c.is_signal && close(c.y_max, 0) && close(c.y_min, -35e-6))
+    && close(s1.domain_y_min, -35e-6));
+check('pinned dielectric spans the domain',
+    close(s1.dielectrics[0].x_min, -s1.domain_width / 2) && close(s1.dielectrics[0].x_max, s1.domain_width / 2));
+check('symmetric geometry uses the half domain', s1.sym_half === true);
+check('sizing hints', close(s1.t, 35e-6) && close(s1.w, 200e-6));
+
+// Off-centre input is centred on x=0 and then solves on the half domain.
+const s2 = build(TEXT.replace('x=-s/2-w', 'x=1000-s/2-w').replace('x1=s/2 ', 'x1=1000+s/2 ').replace('x2=s/2+w', 'x2=1000+s/2+w'));
+check('off-centre geometry is recentred', close(s2.x_shift, 1000e-6, 1e-9) && s2.sym_half === true
+    && close(s2.conductors.find(c => c.polarity > 0).x_min, 75e-6, 1e-9));
+
+const s3 = build(`units mm\nbounds open open open open\ndiel x=-inf w=inf y=0 h=0.5 er=4\n` +
+    `gnd x=-2 w=4 y=-0.035 h=0.035\nsig+ x=-0.2 w=0.4 y=0.5 h=0.035`);
+check('all-open box with a finite ground', s3.domain_y_min < -0.035e-3 && s3.conductors.length === 2
+    && s3.dielectrics[0].y_min === 0);
+
+const s4 = build(`units mm\nbounds open open open open\ndomain -5 5 -3 3\n` +
+    `sig+ x1=-inf x2=-0.1 y=0 h=0.035\ngnd x1=0.1 x2=inf y=0 h=0.035\ndiel x=-inf w=inf y=-0.6 h=0.6 er=9.8`);
+check('slotline: half planes pinned to the walls', close(s4.conductors[0].x_min, -5e-3) && close(s4.conductors[1].x_max, 5e-3)
+    && s4.w === undefined && s4.is_differential === false);
+
+const RECT = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.5 er=4\n';
+rejects('no signal', RECT + 'gnd x=0 y=1 w=1 h=0.1', 'signal');
+rejects('no ground', 'units mm\nsig+ x=0 y=0 w=1 h=0.1', 'ground');
+rejects('sig- without sig+', RECT + 'sig- x=0 y=0.5 w=1 h=0.1', 'sig+');
+rejects('signal overlapping ground', RECT + 'sig+ x=0 y=0.5 w=1 h=0.1\ngnd x=0.5 y=0.55 w=1 h=0.1', 'shorted');
+rejects('signal touching ground', RECT + 'sig+ x=0 y=0.5 w=1 h=0.1\ngnd x=1 y=0.5 w=1 h=0.1', 'shorted');
+rejects('signal on a gnd wall', RECT + 'sig+ x=0 y=0 w=1 h=0.1', 'shorted');
+rejects('sig+ touching sig-', RECT + 'sig+ x=0 y=0.5 w=1 h=0.1\nsig- x=1 y=0.5 w=1 h=0.1', 'shorted');
+rejects('conductor outside the domain', RECT + 'domain -1 1 0 2\nsig+ x=0.5 y=0.5 w=1 h=0.1', 'outside');
+rejects('plating without a material', RECT + 'sig+ x=0 y=0.5 w=1 h=0.1 plating=top', 'plating');
+rejects('plating on a joined conductor', RECT + 'plating sigma=1e7 t=0.004\n' +
+    'sig+ x=0 y=0.5 w=1 h=0.1 plating=top\nsig+ x=1 y=0.5 w=1 h=0.1', 'touches');
+rejects('parse errors are reported with lines', RECT + 'sig+ x=0 y=0.5 w=oops h=0.1', 'line 4');
+
+const s5 = build(RECT + 'sig+ x=0 y=0.5 w=1 h=0.1 plating=top', { plating: { sigma: 1e7, thickness: 4e-6, rq: 0 } });
+check('plating material from the options', s5.conductors.find(c => c.is_signal).plating.top === true
+    && s5.conductors.find(c => c.is_signal).plating.sigma === 1e7);
+
+// Paint order and symmetry: mirrored overlapping dielectrics are only symmetric when
+// their order mirrors too.
+const OV = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.5 er=4\n';
+const sig = 'sig+ x=-0.2 w=0.4 y=0.5 h=0.035\n';
+const sOk = build(OV + 'diel x=-0.5 w=1 y=0.1 h=0.2 er=9\n' + sig);
+check('symmetric inset keeps the half domain', sOk.sym_half === true);
+const sBad = build(OV + 'diel x=-1 w=1.5 y=0.1 h=0.2 er=9\ndiel x=-0.5 w=1.5 y=0.1 h=0.2 er=2\n' + sig);
+check('mirrored rectangles painted asymmetrically use the full domain', sBad.sym_half === false && sBad.tri_symmetry === false);
+
+// --- Factory: the path the app and the worker use ---
+{
+    const { buildSolverFromParams } = await import('../src/solver_factory.js');
+    const p = { tl_type: 'custom', custom_geom: TEXT, custom_overrides: { s: 300 }, sigma: 4e7, freq: 2e9,
+        nx: 20, ny: 20, rq: 1e-7, use_plating: false, use_causal_materials: true, mesh_backend: 'fullwave_mqs' };
+    const s = buildSolverFromParams(p);
+    check('factory builds a custom solver', !!s && s.sigma_cond === 4e7 && s.freq === 2e9 && s.rq === 1e-7
+        && s.mesh_backend === 'triangular' && s.geometry_params.s === 300);
+    let msg = null;
+    const bad = buildSolverFromParams({ ...p, custom_geom: 'sig+ x=0' }, m => { msg = m; });
+    check('factory reports geometry errors', bad === null && /line 1/.test(msg ?? ''), msg ?? '');
+}
+
+console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY TEXT TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
+process.exit(failures === 0 ? 0 : 1);

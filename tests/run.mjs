@@ -52,9 +52,13 @@ const TIERS = {
         { file: 'tests/test_shared_edge_cases.js', cost: 25 },
         { file: 'tests/test_fullwave_edge_cases.js', cost: 13 },
         { file: 'tests/test_robustness_extremes.js', cost: 30 },
+        { file: 'tests/test_custom_geometry_text.js', cost: 1 },
+        { file: 'tests/test_custom_geometry_equivalence.js', cost: 25 },
     ],
     slow: [
         { file: 'tests/test_fullwave_correctness.js', cost: 98 },
+        { file: 'tests/test_dielectric_overlap.js', cost: 40 },
+        { file: 'tests/test_custom_geometry_lines.js', cost: 90 },
         { file: 'tests/test_gcpw_mqs.js', cost: 82 },
         { file: 'tests/test_symmetry_plane_mask.js', cost: 61 },
         { file: 'tests/test_symmetry_half_full.js', cost: 177 },

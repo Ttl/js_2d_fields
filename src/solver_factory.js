@@ -8,6 +8,7 @@ import { MicrostripSolver } from './microstrip.js';
 import { BroadsideStriplineSolver } from './broadside_stripline.js';
 import { CoaxSolver } from './coax.js';
 import { RectWaveguideSolver } from './rect_waveguide.js';
+import { CustomGeometrySolver } from './custom_geometry.js';
 
 // Line types with no quasi-static implementation. Coax: a rectilinear grid staircases a
 // circle. Rectangular waveguide: a hollow guide has no TEM mode at all, so there is
@@ -203,6 +204,20 @@ export function buildSolverFromParams(p, onError = null) {
             };
             addCommonOptions(options, p);
             solver = new MicrostripSolver(options);
+        } else if (p.tl_type === 'custom') {
+            // Geometry text plus parameter overrides (what a parameter sweep varies).
+            // The board-stackup options have no meaning here, only the plating material
+            // is passed on for rectangles that ask for plating.
+            solver = new CustomGeometrySolver({
+                text: p.custom_geom,
+                overrides: p.custom_overrides,
+                sigma_cond: p.sigma,
+                freq: p.freq,
+                nx: p.nx,
+                ny: p.ny,
+                rq: p.rq,
+                plating: platingOptions(p),
+            });
         } else if (p.tl_type === 'coax') {
             // Full-wave only. CoaxSolver throws on any other backend. addCommonOptions is
             // deliberately not used. Solder mask, top dielectric, ground cutout and the
