@@ -1,6 +1,6 @@
 import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
-import { calculate_Zrough, calculate_Zrough_layered } from './surface_roughness.js';
+import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { classifyModalDecomposition } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
@@ -1008,9 +1008,13 @@ export class FieldSolver2D {
     /**
      * Calculate conductor losses including both DC and AC (skin effect) contributions.
      *
-     * The total resistance is calculated as R_total = sqrt(R_dc^2 + R_ac^2) where:
-     * - R_dc: DC resistance from conductor cross-sectional area
-     * - R_ac: AC resistance from skin effect and surface roughness
+     * Signal and ground are conductors in series: R_total = R_signal + R_ground.
+     * - R_signal = sqrt(R_dc^2 + R_ac^2) of the signal conductors (DC resistance of
+     *   the cross-section, skin-effect surface integral with roughness)
+     * - R_ground = the surface integral on the ground conductors with the slab
+     *   resistance of their finite thickness and the lateral spreading of the return
+     *   current, floored at the geometric DC resistance
+     * R_ac and R_dc are returned as the sums over both.
      *
      * Two integrand variants:
      *
@@ -1051,13 +1055,17 @@ export class FieldSolver2D {
         // as the trace (the whole cross-section is plating).
         const sigma_sig = this._signal_sigma();
         const R_gnd0 = ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
-        let R_dc;
+        // Signal and ground are separate conductors in series, so each keeps its own
+        // DC term and the two resistances add.
+        let R_dc_sig, R_dc_gnd;
         if (this.is_differential && (mode === 'odd' || mode === 'even')) {
-            const R_trace = 2.0 / (sigma_sig * signal_area);
-            R_dc = mode === 'odd' ? R_trace : R_trace + 2.0 * R_gnd0;
+            R_dc_sig = 2.0 / (sigma_sig * signal_area);
+            R_dc_gnd = mode === 'odd' ? 0 : 2.0 * R_gnd0;
         } else {
-            R_dc = 1.0 / (sigma_sig * signal_area) + R_gnd0;
+            R_dc_sig = 1.0 / (sigma_sig * signal_area);
+            R_dc_gnd = R_gnd0;
         }
+        const R_dc = R_dc_sig + R_dc_gnd;
 
         if (this.freq === 0) {
             // DC point: R is the geometric DC resistance and the internal inductance
@@ -1301,6 +1309,29 @@ export class FieldSolver2D {
             this._solid_plating(c) ? deltaOf(c.plating.sigma) : delta));
         const kXDefault = slabReactanceFactor(Math.abs(this.t) / 2);
         const reactanceFactor = ci => (ci >= 0 && ci < kX.length) ? kX[ci] : kXDefault;
+        // Ground conductors take the resistance twin of that factor,
+        // Re[(1+j) coth((1+j) d/delta)]: 1 for a thick ground, delta/d (the sheet
+        // resistance 1/(sigma d)) once delta passes its thickness. The vacuum-field
+        // |H|^2 it weights is the return current confined under the traces, which holds
+        // far below the frequency where delta reaches the ground thickness, while the
+        // geometric DC resistance spreads the return over the whole ground width.
+        // Signal conductors keep the semi-infinite Rs: their DC limit and transition
+        // are handled by R_total below.
+        const slabResistanceFactor = (d, dlt = delta) => {
+            const x = d / dlt;
+            if (!(x > 0) || x > 20) return 1;
+            return (Math.sinh(2 * x) + Math.sin(2 * x)) / (Math.cosh(2 * x) - Math.cos(2 * x));
+        };
+        const kR = (this.conductors || []).map(c => (c.is_signal || !vacuum_fields) ? 1 : slabResistanceFactor(
+            Math.min(Math.abs(c.width), Math.abs(c.height)),
+            this._solid_plating(c) ? deltaOf(c.plating.sigma) : delta));
+        const isGroundCond = ci => ci >= 0 && ci < kR.length && !this.conductors[ci].is_signal;
+        // Per ground conductor: Re(Zs)-weighted |H|^2 and the plain |H|, |H|^2 moments
+        // that give the width of its return current.
+        const gndR = kR.map(() => 0), gndS1 = kR.map(() => 0), gndS2 = kR.map(() => 0);
+        const addGnd = (ci, zre, H, dl) => {
+            gndR[ci] += zre * kR[ci] * H * H * dl; gndS1[ci] += H * dl; gndS2[ci] += H * H * dl;
+        };
 
         const isSignal = (i, j) => this.signal_mask[i][j];
         const isGround = (i, j) => this.ground_mask[i][j];
@@ -1360,7 +1391,8 @@ export class FieldSolver2D {
                             for (const [js, dseg] of segs) {
                                 const Zs = getZsurf(ci, direction, i, j, dseg, this.x[js]);
                                 const H2 = H_tan * H_tan * dseg / 2;
-                                sum_H2_dl_R += Zs.re * H2;
+                                if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dseg / 2);
+                                else sum_H2_dl_R += Zs.re * H2;
                                 sum_H2_dl_L += Zs.im * reactanceFactor(ci) * H2;
                             }
                         } else {
@@ -1368,7 +1400,8 @@ export class FieldSolver2D {
                             const Z_surf = getZsurf(ci, direction, i, j, dl);
 
                             const H2_dl = H_tan * H_tan * dl;
-                            sum_H2_dl_R += Z_surf.re * H2_dl;
+                            if (isGroundCond(ci)) addGnd(ci, Z_surf.re, H_tan, dl);
+                            else sum_H2_dl_R += Z_surf.re * H2_dl;
                             sum_H2_dl_L += Z_surf.im * reactanceFactor(ci) * H2_dl;
                         }
                     }
@@ -1382,6 +1415,7 @@ export class FieldSolver2D {
         // unchanged.
         if (this.sym_half) {
             sum_H2_dl_R *= 2;
+            for (let c = 0; c < gndR.length; c++) gndR[c] *= 2;
             sum_H2_dl_L *= 2;
         }
 
@@ -1395,7 +1429,28 @@ export class FieldSolver2D {
         const Z0_sq = Z0 * Z0;
 
         // AC Resistance per unit length from skin effect (Ohm/m)
-        const R_ac = power_factor * sum_H2_dl_R * Z0_sq;
+        const R_ac_sig = power_factor * sum_H2_dl_R * Z0_sq;
+        // Lateral spreading of the return current in a ground thinner than delta
+        // (wallSpreadFactor): the current of effective width W_K = (int|K|)^2 / int|K|^2
+        // diffuses sideways over delta^2/d, and cannot get wider than the conductor.
+        let sum_H2_dl_Rgnd = 0.0;
+        for (let c = 0; c < gndR.length; c++) {
+            if (!(gndS2[c] > 0)) continue;
+            const cond = this.conductors[c];
+            const d = Math.min(Math.abs(cond.width), Math.abs(cond.height));
+            const wMax = Math.max(Math.abs(cond.width), Math.abs(cond.height));
+            // Half-domain moments cover x >= 0: a conductor straddling the plane has
+            // twice the width seen, one beside it is complete (its mirror image is a
+            // separate conductor).
+            const x0 = Math.min(cond.x, cond.x + cond.width), x1 = Math.max(cond.x, cond.x + cond.width);
+            const straddles = this.sym_half && x0 < 0 && x1 > 0;
+            const Wk = (straddles ? 2 : 1) * gndS1[c] * gndS1[c] / gndS2[c];
+            const dlt = this._solid_plating(cond) ? deltaOf(cond.plating.sigma) : delta;
+            const g = vacuum_fields ? Math.max(wallSpreadFactor(2 * Math.PI * (dlt * dlt / d) / Wk), Math.min(1, Wk / wMax)) : 1;
+            sum_H2_dl_Rgnd += gndR[c] * g;
+        }
+        const R_ac_gnd = power_factor * sum_H2_dl_Rgnd * Z0_sq;
+        const R_ac = R_ac_sig + R_ac_gnd;
 
         // Bounded below the skin regime by the slab reactance factor above; the
         // surface-field weighting still lacks the lateral current spreading of a
@@ -1436,7 +1491,10 @@ export class FieldSolver2D {
                     `transition-region current accurately.` }
                 : null;
         }
-        const R_total = Math.max(R_dc, transitionCal * Math.sqrt(R_dc * R_dc + R_ac * R_ac));
+        // The signal blends its DC and skin terms; the ground term is already valid at
+        // every delta and only floors at its geometric DC resistance.
+        const R_total = Math.max(R_dc_sig, transitionCal * Math.sqrt(R_dc_sig * R_dc_sig + R_ac_sig * R_ac_sig))
+            + Math.max(R_dc_gnd, R_ac_gnd);
 
         return { R_ac, R_dc, R_total, L_internal };
     }

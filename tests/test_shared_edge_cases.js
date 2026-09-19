@@ -9,6 +9,7 @@
 //      are exact, so the derived Z0 and alpha_d must match the discrete solve's
 //      conventions (static Z0, alpha_d = G Z0 / 2) at every frequency, including
 //      well below the skin regime where Re(Zc) and Z0 differ by tens of percent.
+//   S8 quasi-static ground return in a ground thinner than the skin depth.
 //   S4 plating thicker than the trace: the conductor is entirely plating metal, so
 //      R can never fall below the DC resistance of a solid plating-metal trace.
 //      Both backends, thin film in the skin transition.
@@ -145,6 +146,24 @@ for (const backend of ['rectilinear', 'triangular']) {
     const thick = await solved(ms({ freq: 5e9, plating: { ...opts.plating } }, 'rectilinear'));
     check('35 um trace with 1 um plating still uses the layered model (R well below solid plating)',
         thick.r.modes[0].RLGC.R < 0.5 * (1 / (sigP * w * 35e-6)) + 1e3, `${thick.r.modes[0].RLGC.R.toFixed(1)} ohm/m`);
+}
+
+// S8: ground return in a ground thinner than the skin depth. The return current stays
+// confined under the traces far below the frequency where delta passes the ground
+// thickness, so the ground resistance is its sheet resistance over that width (with the
+// lateral spreading of a thin sheet), not the DC resistance of the whole ground width,
+// and it adds to the trace resistance instead of blending with it in quadrature.
+{
+    console.log('S8 thin poor ground, delta > t_gnd (55 um / 20 um at sigma 5e5, diff microstrip)');
+    const opts = { trace_width: 1e-3, substrate_height: 0.2e-3, trace_thickness: 55e-6, gnd_thickness: 20e-6,
+        sigma_cond: 5e5, trace_spacing: 0.1e-3, epsilon_r: 4.3, tan_delta: 0.02 };
+    const qs = await solved(ms(opts, 'rectilinear')), fw = await solved(ms(opts, 'triangular'));
+    for (const f of [1e6, 1e8]) {
+        const q = await at(qs.s, qs.r, f), w = await at(fw.s, fw.r, f);
+        q.modes.forEach((m, k) => check(`${m.mode} R within 12% of the full-wave MQS at ${f / 1e6} MHz`,
+            rel(m.RLGC.R, w.modes[k].RLGC.R) < 0.12,
+            `${m.RLGC.R.toFixed(1)} vs ${w.modes[k].RLGC.R.toFixed(1)} ohm/m`));
+    }
 }
 
 // S5: waveguide second cutoff with b > a.

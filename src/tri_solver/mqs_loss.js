@@ -42,7 +42,7 @@
 import { tripletsToCSRMulti, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
          triP2Stiffness, P2_MASS, P2_LOAD, refineTriMesh } from './tri_fem.js';
-import { calculate_Zrough } from '../surface_roughness.js';
+import { calculate_Zrough, wallSpreadFactor } from '../surface_roughness.js';
 
 const MU0 = 4 * Math.PI * 1e-7;
 const edgeVerts = [[0,1],[1,2],[2,0]];
@@ -501,29 +501,6 @@ function solveComplexLinear(A, b) {
         return { re: (row[n][0] * ar + row[n][1] * ai) / den,
                  im: (row[n][1] * ar - row[n][0] * ai) / den };
     });
-}
-
-// Lateral spreading of the return current in a thin wall. A line current over an
-// infinitely wide resistive sheet has the sheet current K(k) = -I e^{-|k|h} / (1 - j k Lambda)
-// in the transverse wavenumber k, Lambda = delta^2 / d the lateral diffusion length of a
-// sheet of thickness d << delta. The dissipation relative to the PEC distribution
-// (Lambda -> 0) is g(u) = 2 * integral_0^inf e^{-2s} / (1 + u^2 s^2) ds with u = Lambda / h,
-// which is 1 - u^2/2 for small u and pi/u for large u (R ~ 1/(sigma delta^2), vanishing at
-// DC, where the PEC distribution would leave the sheet resistance over the PEC current
-// width). Written for a general PEC distribution through its effective width
-// W_K = I^2 / integral(|K|^2 dl) = 2 pi h for the line source, so u = 2 pi Lambda / W_K.
-// Evaluated with t = tan(theta) on theta in [0, pi/2), where the integrand is smooth
-// for every u.
-function wallSpreadFactor(u) {
-    if (!(u > 0.05)) return 1 - u * u / 2;
-    const a = 2 / u, n = 2000, h = (Math.PI / 2) / n;
-    let acc = 0;
-    for (let i = 0; i <= n; i++) {
-        const th = i * h;
-        const v = i < n ? Math.exp(-a * Math.tan(th)) : 0;
-        acc += (i === 0 || i === n) ? v : (i % 2 ? 4 * v : 2 * v);
-    }
-    return (2 / u) * acc * h / 3;
 }
 
 export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmetric, Z0 = 0, opts = {}) {
