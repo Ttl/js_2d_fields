@@ -1510,9 +1510,9 @@ export class FieldSolver2D {
         return this.calculate_conductor_loss(Ex, Ey, Z0, false, mode);
     }
 
-    calculate_dielectric_loss(Ex, Ey, Z0) {
+    calculate_dielectric_loss(V, Z0) {
         if (!this.solution_valid) {
-            throw new Error("Fields (Ex, Ey) are not valid. Run compute_fields() first.");
+            throw new Error("Potential V is not valid. Run the solve first.");
         }
 
         // No dielectric loss at DC
@@ -1526,47 +1526,30 @@ export class FieldSolver2D {
         const dx_array = diff(this.x);
         const dy_array = diff(this.y);
 
-        const get_dx = j => (j >= 0 && j < dx_array.length) ? dx_array[j] : dx_array[dx_array.length - 1];
-        const get_dy = i => (i >= 0 && i < dy_array.length) ? dy_array[i] : dy_array[dy_array.length - 1];
-
-        // Helper function for conductor detection based on mode
-        const isConductor = this.is_differential
-            ? (i, j) => this.signal_p_mask[i][j] || this.signal_n_mask[i][j] || this.ground_mask[i][j]
-            : (i, j) => this.conductor_mask[i][j];
-
+        // Cell-wise integral over the operator's cell-centred materials (see
+        // _paint_cell_materials): the field in a cell is the mean of its edge
+        // differences of V, so a cell next to a dielectric interface weights its own
+        // side's field with its own eps*tand. Sampling nodal material at the cell
+        // corner instead puts one region's eps*tand on an interface node against a
+        // field that belongs mostly to the other side (a lossy cover over an air layer
+        // read G 30% high). Cells inside a conductor have a constant V and drop out.
         let Pd = 0.0;
         const wPd = 0.5 * (2 * Math.PI * this.freq) * CONSTANTS.EPS0;
-
-        if (this.sym_half) {
-            // Half-domain solve: the full-domain loop samples each cell at its
-            // lower-left corner. A mirrored left-half cell's sample lands on the
-            // mirror of the right corner. Averaging both x-corners (each gated
-            // by its own conductor test) makes 2x the half sum reproduce the
-            // full-domain sum exactly on a symmetric grid.
-            const term = (i, j) => {
-                if (isConductor(i, j)) return 0;
-                const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
-                return this.epsilon_r[i][j] * this.tand[i][j] * E2;
-            };
-            for (let i = 0; i < ny - 1; i++) {
-                for (let j = 0; j < nx - 1; j++) {
-                    const dA = get_dx(j) * get_dy(i);
-                    Pd += wPd * 0.5 * (term(i, j) + term(i, j + 1)) * dA;
-                }
-            }
-            Pd *= 2;
-        } else {
-            for (let i = 0; i < ny - 1; i++) {
-                for (let j = 0; j < nx - 1; j++) {
-                    if (isConductor(i, j)) continue;
-
-                    const E2 = Ex[i][j] * Ex[i][j] + Ey[i][j] * Ey[i][j];
-                    const dA = get_dx(j) * get_dy(i);
-
-                    Pd += wPd * this.epsilon_r[i][j] * this.tand[i][j] * E2 * dA;
-                }
+        for (let i = 0; i < ny - 1; i++) {
+            const V0 = V[i], V1 = V[i + 1];
+            const ec = this.epsilon_cell[i], tc = this.tand_cell[i];
+            const dy = dy_array[i];
+            for (let j = 0; j < nx - 1; j++) {
+                const w = ec[j] * tc[j];
+                if (w === 0) continue;
+                const dx = dx_array[j];
+                const Ex = -0.5 * ((V0[j + 1] - V0[j]) + (V1[j + 1] - V1[j])) / dx;
+                const Ey = -0.5 * ((V1[j] - V0[j]) + (V1[j + 1] - V0[j + 1])) / dy;
+                Pd += wPd * w * (Ex * Ex + Ey * Ey) * dx * dy;
             }
         }
+        // Half-domain solve: the cells cover x >= 0 of a mirror-symmetric field.
+        if (this.sym_half) Pd *= 2;
 
         // Power normalization: differential has 0.5 factor
         const power_factor = this.is_differential ? 0.5 : 1.0;
@@ -2076,7 +2059,7 @@ export class FieldSolver2D {
             const eps_eff = Ck / C0k;
             const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
             const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0, label);
-            const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
+            const alpha_d = this.calculate_dielectric_loss(V, Z0);
             const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, Ck, Z0);
             const alpha_c = 8.686 * R_total / (2 * Zc.re);
             results.push({
@@ -2159,7 +2142,7 @@ export class FieldSolver2D {
         const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
         // Calculate dielectric loss (returns alpha in dB/m)
-        const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
+        const alpha_d = this.calculate_dielectric_loss(V, Z0);
 
         // Calculate RLGC using new surface roughness aware approach
         const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, C, Z0);
@@ -3182,7 +3165,7 @@ export class FieldSolver2D {
                 const recalc = (mode) => {
                     const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
                         mode.Ex, mode.Ey, mode.Z0, mode.C0, mode.Ex0, mode.Ey0, mode.mode);
-                    const alpha_d = this.calculate_dielectric_loss(mode.Ex, mode.Ey, mode.Z0);
+                    const alpha_d = this.calculate_dielectric_loss(mode.V, mode.Z0);
                     const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, mode.C, mode.Z0);
                     mode.RLGC = rlgc;
                     mode.Zc = Zc;
@@ -3216,7 +3199,7 @@ export class FieldSolver2D {
                 // Recalculate RLGC parameters with corrected Z0
                 const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
                     result.Ex, result.Ey, result.Z0, result.C0, result.Ex0, result.Ey0, result.mode);
-                const alpha_d = this.calculate_dielectric_loss(result.Ex, result.Ey, result.Z0);
+                const alpha_d = this.calculate_dielectric_loss(result.V, result.Z0);
                 const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, result.C, result.Z0);
 
                 result.RLGC = rlgc;
@@ -3244,7 +3227,7 @@ export class FieldSolver2D {
             const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
             // Recalculate dielectric loss (affects omega)
-            const alpha_d = this.calculate_dielectric_loss(Ex, Ey, Z0);
+            const alpha_d = this.calculate_dielectric_loss(V, Z0);
 
             // Recalculate RLGC with new frequency
             const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, C, Z0);
