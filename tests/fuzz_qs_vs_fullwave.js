@@ -21,8 +21,13 @@
 //                combo top/sides/bottom; plating rq up to 2 µm), surface
 //                roughness (rq up to 3 µm), differential gaps, causal
 //                (Djordjevic-Sarkar) dielectric dispersion
-//   materials  — bulk conductor σ 1e6–6e7 S/m; substrate er 2.2–10 (broadside
-//                layers 2.2–6), tanδ 0.001–0.02
+//   materials  — bulk conductor σ 5e5–6.3e7 S/m; substrate er 2.2–10 (broadside
+//                layers 2.2–6) with ~10% low-eps draws (1–2.2), tanδ 0.001–0.02
+//                with ~10% lossy draws (0.02–0.2)
+//   conductors — thickness 10–70 µm with ~15% thin films (0.5–10 µm); embedded
+//                (negative-thickness) traces on every family incl. broadside
+//   frequency  — 0.5–6 GHz, and ~30% of draws at 1–500 MHz (skin depth at and
+//                beyond the conductor thickness)
 //   modes      — single-ended lines compare the one quasi-TEM mode; differential pairs
 //                compare BOTH the odd and the even mode (the worst of the two is flagged)
 //
@@ -48,6 +53,8 @@ import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
 const N      = parseInt(process.argv[2]) || 40;
 const SEED   = process.argv[3] !== undefined ? parseInt(process.argv[3]) : 1;
 const THRESH = (parseFloat(process.argv[4]) || 15) / 100;
+// ONLY=4,11 solves just those case indices (the others are drawn and skipped).
+const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number)) : null;
 // Bad-mesh gate: structural errors (degenerate/NaN/constraint crossings/missing
 // constraint edges/extreme area ratio), systemic quality collapse (>5% of
 // triangles with Q>5 — checkMeshQuality's own warning threshold), or a single
@@ -73,6 +80,9 @@ const R_RELAX  = 0.60;
 // Shunt-conductance and inductance gates (see the G/L block in main).
 const G_THRESH = 0.15;
 const L_THRESH = 0.10;
+// Calibrated 2026-09-19 on seeds 201-206 (240 specs, 30% below 500 MHz, 15% thin
+// films): every L difference above 10% carried a loss-accuracy note, max 28%.
+const L_RELAX  = 0.35;
 
 // --- Seeded PRNG (deterministic, reproducible) ---
 export function createRng(seed) {
@@ -94,7 +104,20 @@ export function randomSpec(rng) {
     const tl = rng.pick(TL_TYPES);
     // rq up to 3 µm: at copper GHz skin depths that is rq/δ > 2, where the
     // roughness models diverge the most — exactly the regime worth comparing.
-    const spec = { tl, freq: rng.logf(0.5e9, 6e9), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 3e-6) : 0 };
+    // Frequency: the GHz band, and in ~30% of draws 1-500 MHz, where the skin depth
+    // reaches and passes the conductor thickness for every sigma drawn (35 um copper
+    // crosses at ~3.5 MHz): the regime the internal-inductance and R_dc models own.
+    const freq = rng.bool(0.3) ? rng.logf(1e6, 0.5e9) : rng.logf(0.5e9, 6e9);
+    const spec = { tl, freq, rq: rng.bool(0.3) ? rng.logf(0.1e-6, 3e-6) : 0 };
+    // Shared material draws. Substrates: the usual laminate range, ~10% low-eps
+    // (foam / air, eps_r 1-2.2). Loss tangent: ~10% lossy (0.02-0.2), so G is compared
+    // where it is not a small number. Conductors: resistive alloys up to silver.
+    const drawEr = (hi) => rng.bool(0.1) ? rng.f(1, 2.2) : rng.f(2.2, hi);
+    const drawTand = () => rng.bool(0.1) ? rng.logf(0.02, 0.2) : rng.f(0.001, 0.02);
+    const drawSigma = () => rng.logf(5e5, 6.3e7);
+    // Conductor thickness: foil weights, and in ~15% of draws a thin film (0.5-10 um)
+    // that sits below the skin depth over most of the band.
+    const drawT = (hi) => rng.bool(0.15) ? rng.logf(0.5e-6, 10e-6) : rng.logf(10e-6, hi);
     // Plating σ is drawn INDEPENDENTLY of the bulk σ over the same 1e6–6e7 range,
     // so plating lands both better- and worse-conducting than the bulk (silver
     // over copper vs nickel over copper); thickness spans thinner and thicker
@@ -126,17 +149,20 @@ export function randomSpec(rng) {
     spec.use_causal = rng.bool(0.2);
 
     if (tl === 'broadside_stripline') {
-        const bs_w = rng.logf(0.05e-3, 1e-3), bs_t = rng.logf(10e-6, 50e-6);
+        const bs_w = rng.logf(0.05e-3, 1e-3), bs_t = drawT(50e-6);
         Object.assign(spec, {
             bs_w, bs_t,
             bs_x_offset: rng.bool(0.5) ? rng.f(-0.15e-3, 0.15e-3) : 0,
-            bs_h_bottom: rng.logf(0.05e-3, 0.5e-3), bs_er_bottom: rng.f(2.2, 6), bs_tand_bottom: rng.f(0.001, 0.02),
+            bs_h_bottom: rng.logf(0.05e-3, 0.5e-3), bs_er_bottom: drawEr(6), bs_tand_bottom: drawTand(),
             // Floor of 2.5t: the middle layer must clear 2× trace_thickness or the
             // broadside pair collides and validation rejects the case on both backends.
-            bs_h_middle: rng.logf(Math.max(0.05e-3, 2.5 * bs_t), 0.5e-3), bs_er_middle: rng.f(2.2, 6), bs_tand_middle: rng.f(0.001, 0.02),
-            bs_h_top: rng.logf(0.05e-3, 0.5e-3), bs_er_top: rng.f(2.2, 6), bs_tand_top: rng.f(0.001, 0.02),
-            bs_sigma: rng.logf(1e6, 6e7),
+            bs_h_middle: rng.logf(Math.max(0.05e-3, 2.5 * bs_t), 0.5e-3), bs_er_middle: drawEr(6), bs_tand_middle: drawTand(),
+            bs_h_top: rng.logf(0.05e-3, 0.5e-3), bs_er_top: drawEr(6), bs_tand_top: drawTand(),
+            bs_sigma: drawSigma(),
         });
+        // Embedded (negative-thickness) traces in ~15% of draws: they grow into the
+        // outer layers, which validation requires to be thicker than the trace.
+        if (rng.bool(0.15)) spec.bs_t = -Math.min(bs_t, 0.8 * Math.min(spec.bs_h_bottom, spec.bs_h_top));
         spec.use_enclosure = rng.bool(0.3);
         // An enclosure always closes its side walls (see the enclosure block below).
         spec.use_side_gnd = spec.use_enclosure;
@@ -152,10 +178,10 @@ export function randomSpec(rng) {
     const w = rng.logf(0.05e-3, 3e-3), h = rng.logf(0.05e-3, 1.5e-3);
     // Embedded (negative-thickness) traces in ~15% of draws, kept above the
     // substrate floor (validation requires t > -h).
-    let t = rng.logf(10e-6, 70e-6);
+    let t = drawT(70e-6);
     if (rng.bool(0.15)) t = -Math.min(t, 0.8 * h);
     Object.assign(spec, {
-        w, h, t, er: rng.f(2.2, 10), tand: rng.f(0.001, 0.02), sigma: rng.logf(1e6, 6e7),
+        w, h, t, er: drawEr(10), tand: drawTand(), sigma: drawSigma(),
         gnd_thickness: rng.logf(10e-6, 35e-6),
     });
     const isDiff = tl.includes('diff');
@@ -169,8 +195,8 @@ export function randomSpec(rng) {
     if (tl.includes('stripline')) {
         if (rng.bool(0.5)) { spec.er_top = spec.er; spec.tand_top = spec.tand; }
         else if (rng.bool(0.4)) { spec.er_top = 1; spec.tand_top = 0; }
-        else { spec.er_top = rng.f(2.2, 10); spec.tand_top = rng.f(0.001, 0.02); }
-        spec.stripline_top_h = rng.logf(Math.max(0.05e-3, 2 * t), 1.5e-3);
+        else { spec.er_top = drawEr(10); spec.tand_top = drawTand(); }
+        spec.stripline_top_h = rng.logf(Math.max(0.05e-3, 2 * Math.abs(t)), 1.5e-3);
     }
     if (tl.includes('gcpw')) {
         spec.gap = rng.logf(0.05e-3, 0.5e-3); spec.via_gap = rng.logf(0.05e-3, 0.5e-3);
@@ -359,7 +385,7 @@ function fmtSpec(spec) {
     let s = spec.tl;
     if (spec.tl === 'broadside_stripline') s += ` w=${u(spec.bs_w)}mm t=${u(spec.bs_t, 1e6, 1)}µm off=${u(spec.bs_x_offset)}mm hM=${u(spec.bs_h_middle)}mm`;
     else s += ` w=${u(spec.w)}mm h=${u(spec.h)}mm t=${u(spec.t, 1e6, 1)}µm er=${spec.er.toFixed(2)}`;
-    s += ` sig=${((spec.sigma ?? spec.bs_sigma) / 1e6).toFixed(1)}e6 f=${(spec.freq / 1e9).toFixed(2)}GHz`;
+    s += ` sig=${((spec.sigma ?? spec.bs_sigma) / 1e6).toFixed(1)}e6 f=${spec.freq < 0.1e9 ? (spec.freq / 1e6).toFixed(2) + 'MHz' : (spec.freq / 1e9).toFixed(2) + 'GHz'}`;
     if (spec.trace_spacing) s += ` gap=${u(spec.trace_spacing)}mm`;
     if (spec.gnd_width) s += ` gnd_w=${u(spec.gnd_width)}mm`;
     if (spec.tl.includes('stripline') && spec.tl !== 'broadside_stripline' && spec.er_top !== spec.er) s += ` er_top=${spec.er_top.toFixed(2)}`;
@@ -391,6 +417,7 @@ async function main() {
     const byType = {};
     for (let i = 0; i < N; i++) {
         const spec = randomSpec(rng);
+        if (ONLY && !ONLY.has(i)) continue;
         byType[spec.tl] = (byType[spec.tl] || 0) + 1;
         const qs = await solveOn(spec, 'rectilinear');
         const fw = await solveOn(spec, 'triangular');
@@ -444,23 +471,38 @@ async function main() {
             const dMax = Math.max(dZ, dC);
             if (!worst || dMax > worst.dMax) worst = { mode: q.mode, dZ, dE, dC, dMax, q, w };
         }
+        // Conductor-loss gate (R per mode). Relaxed when either backend flagged
+        // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
+        // 'broadside-proximity', or any tri mqs-* warning — the backend downgrading
+        // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
+        // band). Certificate warnings describe C, not R, and do NOT relax the gate.
+        const lossRelaxed =
+            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity'
+                || w.reason === 'plating-transition')
+            || fw.warns.some(w => /^mqs-/.test(w.type) || w.reason === 'plating-transition');
         // Shunt conductance and total inductance, each at its own gate. G follows the
         // same static loss weighting on both backends, so it tracks C up to the mesh
         // (and the lossless-air-void class Q1 that C cannot see). L carries the
         // backends' different internal-inductance models on top of the shared vacuum
-        // C0, a few percent of L at these frequencies.
+        // C0, a few percent of L at these frequencies. Under a loss-accuracy note the
+        // L gate relaxes like the R gate: with the skin depth at or beyond the conductor
+        // thickness the quasi-static surface-field L_internal has no lateral current
+        // spreading and reads 10-30% of L away from the MQS volume solve, so only gross
+        // errors are detectable there.
+        const lGate = lossRelaxed ? L_RELAX : L_THRESH;
         let worstGL = null;
         for (let mi = 0; mi < nModes; mi++) {
             const q = qs.modes[mi], w = fw.modes[mi];
             const dG = (q.G > 0 && w.G > 0) ? relDiff(q.G, w.G) : 0;
             const dL = relDiff(q.L, w.L);
-            const over = Math.max(dG / G_THRESH, dL / L_THRESH);
+            const over = Math.max(dG / G_THRESH, dL / lGate);
             if (!worstGL || over > worstGL.over) worstGL = { mode: q.mode, dG, dL, over, q, w };
         }
         if (worstGL && worstGL.over > 1) {
             flagged.rlgc.push({ i, spec, mode: worstGL.mode, dG: worstGL.dG, dL: worstGL.dL });
             const tag = nModes > 1 ? ` [${worstGL.mode}]` : '';
-            console.log(`[${i}] ✗ G/L DISCREPANCY${tag} (G ${(worstGL.dG * 100).toFixed(0)}% L ${(worstGL.dL * 100).toFixed(0)}%)\n` +
+            console.log(`[${i}] ✗ G/L DISCREPANCY${tag} (G ${(worstGL.dG * 100).toFixed(0)}% L ${(worstGL.dL * 100).toFixed(0)}%)` +
+                `${lossRelaxed ? ' (relaxed L gate)' : ''}\n` +
                 `      ${fmtSpec(spec)}\n` +
                 `      qs: G=${worstGL.q.G.toExponential(3)} L=${(worstGL.q.L * 1e9).toFixed(2)}nH | ` +
                 `fw: G=${worstGL.w.G.toExponential(3)} L=${(worstGL.w.L * 1e9).toFixed(2)}nH`);
@@ -474,15 +516,6 @@ async function main() {
                 `fw: Z0=${worst.w.Z0.toFixed(2)} eps=${worst.w.eps_eff.toFixed(3)} C=${(worst.w.C * 1e12).toFixed(1)}pF`);
         }
 
-        // Conductor-loss gate (R per mode). Relaxed when either backend flagged
-        // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
-        // 'broadside-proximity', or any tri mqs-* warning — the backend downgrading
-        // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
-        // band). Certificate warnings describe C, not R, and do NOT relax the gate.
-        const lossRelaxed =
-            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity'
-                || w.reason === 'plating-transition')
-            || fw.warns.some(w => /^mqs-/.test(w.type) || w.reason === 'plating-transition');
         const rGate = lossRelaxed ? R_RELAX : R_THRESH;
         let worstR = null;
         for (let mi = 0; mi < nModes; mi++) {
