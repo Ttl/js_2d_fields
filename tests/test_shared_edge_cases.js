@@ -129,6 +129,17 @@ for (const backend of ['rectilinear', 'triangular']) {
     }
     check('backends agree within 25%', rel(R.rectilinear, R.triangular) < 0.25,
         `${R.rectilinear.toFixed(0)} vs ${R.triangular.toFixed(0)} ohm/m`);
+    // Solid plating on a poor bulk is the plating metal and nothing else: the full-wave
+    // volume solve must match the same trace made of the plating metal. Run at the bulk
+    // sigma and rescaled by sqrt(sigma_bulk / sigma_plating) it read 2.6x high here.
+    const film = { trace_thickness: 0.7e-6, trace_width: w, freq: 2e9 };
+    const plated = await solved(ms({ ...film, sigma_cond: 3e6,
+        plating: { sigma: 4e7, thickness: 0.8e-6, rq: 0, top: true, sides: true, bottom: true, thick_corners: true } }, 'triangular'));
+    const metal = await solved(ms({ ...film, sigma_cond: 4e7 }, 'triangular'));
+    // The ground wall stays the bulk metal (Rs 3.65x higher), which is the ~19% left.
+    check('[triangular] solid plating matches a trace of the plating metal within 25%',
+        rel(plated.r.modes[0].RLGC.R, metal.r.modes[0].RLGC.R) < 0.25,
+        `${plated.r.modes[0].RLGC.R.toFixed(1)} vs ${metal.r.modes[0].RLGC.R.toFixed(1)} ohm/m`);
     // Plating thinner than the trace keeps the layered model: the same solver at 35 um
     // must not change, the thick-plating tests pin that regime.
     const thick = await solved(ms({ freq: 5e9, plating: { ...opts.plating } }, 'rectilinear'));

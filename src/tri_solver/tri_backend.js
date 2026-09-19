@@ -2439,7 +2439,15 @@ export class TriBackend {
             // the bulk Rs). So with plating, use the bulk σ here — NOT effectiveSurface's
             // plating σ (which would bake plating into the body and make surfaceZs a
             // no-op). The skin band is sized by the matching bulk skin depth.
-            const mqsSigma = anyPlating ? (s.sigma_cond ?? 5.8e7) : sigma;
+            // Signal conductors that are solid plating metal (plating at least as
+            // thick as the trace) have no bulk: the body runs at the plating sigma,
+            // and the walls keep the bulk metal through wallSigma.
+            const bulkSigma = s.sigma_cond ?? 5.8e7;
+            const sigIdx = cr.rectRoles.map((r, i) => r.is_signal ? i : -1).filter(i => i >= 0);
+            const solidSig = anyPlating && sigIdx.length > 0
+                && sigIdx.every(i => solidPlated(cr.rects[i], cr.rectRoles[i].plating));
+            const mqsSigma = solidSig ? cr.rectRoles[sigIdx[0]].plating.sigma
+                : anyPlating ? bulkSigma : sigma;
             const mqsDelta = anyPlating ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
             // Skin-band element size at the conductor surface (xδ) and band width (xδ).
             // Resolve the skin layer to bandDelta*δ within mqsBand*δ of each surface,
@@ -2615,6 +2623,7 @@ export class TriBackend {
             // assembly and the per-frequency unit solves are mode-independent
             // there, so the second mode at each frequency skips the factorization.
             const mqsOpts = { wallPEC: cr.wallPEC || null, wallThick: cr.wallThick || null,
+                              wallSigma: solidSig ? bulkSigma : undefined,
                               topGround: !!(cr.wallPEC && cr.wallPEC.top),   // legacy fallback
                               oddSymmetry: this.symmetry && mode === 'odd',
                               diffPair: !!s.is_differential,

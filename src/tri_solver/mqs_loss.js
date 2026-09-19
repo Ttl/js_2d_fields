@@ -706,19 +706,23 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // for an absorbed slab of thickness d with a field-free back, which is Rs(1+j)
     // for d well above delta and tends to the sheet resistance 1/(sigma*d) with a
     // vanishing reactance as delta grows past d. A 'gnd' boundary is infinitely thick.
+    // The walls are the bulk ground metal: opts.wallSigma differs from the solve's
+    // sigma when the meshed conductors run at another metal (solid plating).
+    const sigmaW = opts.wallSigma ?? sigma;
+    const deltaW = Math.sqrt(2 / (omega * MU0 * sigmaW)), RsW = 1 / (sigmaW * deltaW);
     const wt = opts.wallThick || {};
     const zWall = {}, wS1 = {}, wS2 = {}, wLen = {};
     for (const w of ['bottom', 'top', 'left', 'right']) {
         wS1[w] = 0; wS2[w] = 0; wLen[w] = 0;
         const d = wt[w] ?? Infinity;
-        if (!(d < Infinity)) { zWall[w] = { re: Rs, im: Rs }; continue; }
+        if (!(d < Infinity)) { zWall[w] = { re: RsW, im: RsW }; continue; }
         // coth((1+j)x) is 1 to double precision past x ~ 20, and cosh(2x) overflows
         // past x ~ 355.
-        const x = d / delta;
-        if (x > 20) { zWall[w] = { re: Rs, im: Rs }; continue; }
+        const x = d / deltaW;
+        if (x > 20) { zWall[w] = { re: RsW, im: RsW }; continue; }
         const den = Math.cosh(2 * x) - Math.cos(2 * x);
         const cr = Math.sinh(2 * x) / den, ci = -Math.sin(2 * x) / den;
-        zWall[w] = { re: Rs * (cr - ci), im: Rs * (cr + ci) };
+        zWall[w] = { re: RsW * (cr - ci), im: RsW * (cr + ci) };
     }
     for (let e = 0; e < nEdges; e++) {
         const n0 = edges[2*e], n1 = edges[2*e+1];
@@ -779,7 +783,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         let g = 1;
         if (d < Infinity) {
             const Wk = sym * wS1[w] * wS1[w] / S2;
-            g = Math.max(wallSpreadFactor(2 * Math.PI * (delta * delta / d) / Wk), Wk / (sym * wLen[w]));
+            g = Math.max(wallSpreadFactor(2 * Math.PI * (deltaW * deltaW / d) / Wk), Wk / (sym * wLen[w]));
         }
         Pgnd += 0.5 * zWall[w].re * S2 * g;
         Xgnd += 0.5 * zWall[w].im * S2 * g;
@@ -915,7 +919,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             R_gr *= psiR;
         }
         if (gndS > 0) {
-            const psiR = gndZreS / (Rs * gndS), psiX = gndZimS / (Rs * gndS);
+            const psiR = gndZreS / (RsW * gndS), psiX = gndZimS / (RsW * gndS);
             X_gw = X_gw_smooth * psiX;
             R_gw *= psiR;
         }
