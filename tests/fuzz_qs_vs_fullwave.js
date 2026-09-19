@@ -155,8 +155,8 @@ export function randomSpec(rng) {
     // Advanced features. Solder mask applies to the microstrip AND gcpw families
     // (gcpw takes the coplanar solder mask path in MicrostripSolver); its material
     // and thicknesses are randomized — er well past the usual 3.5 to make the
-    // C/eps shift it causes clearly visible in the comparison. Top dielectric /
-    // ground cutout stay microstrip-family-only, as in the app.
+    // C/eps shift it causes clearly visible in the comparison. Ground cutout stays
+    // microstrip-family-only, as in the app.
     if (tl === 'microstrip' || tl === 'diff_microstrip' || tl === 'gcpw' || tl === 'diff_gcpw') {
         spec.use_sm = rng.bool(0.3);
         if (spec.use_sm) {
@@ -180,6 +180,16 @@ export function randomSpec(rng) {
             spec.top_diel_er = rng.f(2.2, 10); spec.top_diel_tand = rng.f(0.001, 0.02);
         }
         if (rng.bool(0.2)) { spec.use_gnd_cut = true; spec.gnd_cut_w = w * rng.f(0.2, 1.5); spec.gnd_cut_h = h * rng.f(0.1, 0.7); }
+    }
+    if (tl === 'stripline' || tl === 'diff_stripline') {
+        // Top dielectric layer carved out of the stripline cover (as in the app):
+        // the ground-to-ground spacing is unchanged, the layer takes the lowest part.
+        // Half the draws are air (eps_r = 1), the stripline-with-air-gap use case.
+        if (rng.bool(0.3)) {
+            spec.use_top_diel = true; spec.top_diel_h = spec.stripline_top_h * rng.f(0.2, 0.8);
+            spec.top_diel_er = rng.bool(0.5) ? 1 : rng.f(2.2, 10);
+            spec.top_diel_tand = spec.top_diel_er === 1 ? 0 : rng.f(0.001, 0.02);
+        }
     }
     // Enclosure walls apply to any of these. An enclosure is always a CLOSED box
     // (gnd sides + gnd top): it shrinks the domain to a few trace widths, and an
@@ -253,7 +263,10 @@ export function buildSolver(spec, backend) {
     const o = { ...base };
     if (spec.trace_spacing) o.trace_spacing = spec.trace_spacing;
     if (spec.tl.includes('gcpw')) { o.boundaries = ['open', 'open', 'open', 'gnd']; o.use_coplanar_gnd = true; o.gap = spec.gap; o.via_gap = spec.via_gap; o.use_vias = true; }
-    else if (spec.tl.includes('stripline')) { o.epsilon_r_top = spec.er_top; o.tan_delta_top = spec.tand_top; o.enclosure_height = spec.stripline_top_h; o.boundaries = ['open', 'open', 'gnd', 'gnd']; }
+    else if (spec.tl.includes('stripline')) {
+        o.epsilon_r_top = spec.er_top; o.tan_delta_top = spec.tand_top; o.boundaries = ['open', 'open', 'gnd', 'gnd'];
+        o.enclosure_height = spec.stripline_top_h - (spec.use_top_diel ? spec.top_diel_h : 0);
+    }
     else o.boundaries = ['open', 'open', 'open', 'gnd'];
     addCommon(o, spec);
     const s = new MicrostripSolver(o);

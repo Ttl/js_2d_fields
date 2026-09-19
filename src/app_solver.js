@@ -1193,6 +1193,7 @@ async function runModesSolve() {
         lastModesGeometry = solvedGeometry;
         lastModesFrequency = freq;
         updateModesNotice();
+        showModesWarnings(result.warnings || []);
         if (result.error) {
             setModesStatus('Solve failed: ' + result.error);
             log('Modes solve error: ' + result.error);
@@ -1224,6 +1225,18 @@ async function runModesSolve() {
 function setModesStatus(msg) {
     const el = document.getElementById('modes-status');
     if (el) el.textContent = msg;
+}
+
+// Solve-level warnings from solveModes (e.g. floating grounds), shown above the mode
+// list and logged. Cleared when there are none.
+function showModesWarnings(warnings) {
+    const box = document.getElementById('modes-warning');
+    const text = document.getElementById('modes-warning-text');
+    if (!box || !text) return;
+    if (!warnings.length) { box.style.display = 'none'; text.textContent = ''; return; }
+    text.textContent = warnings.map(w => w.message).join(' ');
+    box.style.display = 'block';
+    for (const w of warnings) log(`⚠ Warning: ${w.message}`);
 }
 
 // Show a staleness warning on the Modes tab (mirroring Results / S-parameters) when the

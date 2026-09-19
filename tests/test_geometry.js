@@ -16,7 +16,8 @@ import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
 import { CoaxSolver } from '../src/coax.js';
 import { RectWaveguideSolver } from '../src/rect_waveguide.js';
-import { _clipDomain } from '../src/tri_solver/occ_to_mesh.js';
+import { buildSolverFromParams } from '../src/solver_factory.js';
+import { _clipDomain, condRectsOf, groundBodyCount } from '../src/tri_solver/occ_to_mesh.js';
 import { polyRadiusForArea, circlePolygon, shapePoly, shapeArea, shapeContains,
          shapeSegments, shapeSignedDist, isComplement } from '../src/shapes.js';
 
@@ -118,6 +119,78 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
         !!top && top.epsilon_r === BASE.epsilon_r && top.tan_delta === BASE.tan_delta);
     check('stripline: no side slabs for open side boundaries',
         !grounds(s).some(c => c.y_max > 0 && c.y_min < lidY && (c.x_max - c.x_min) < 2 * TG + 1e-12));
+}
+
+// ---------- stripline with a top-dielectric layer (app semantics) ----------
+// The app carves the layer out of the bottom of the stripline cover: the lid stays
+// at h + stripline_top_h and the cover shrinks by the layer height. Built through
+// the factory because the subtraction lives there, not in MicrostripSolver.
+{
+    const H_TOP = 0.3e-3, H_LAYER = 0.1e-3, ER_LAYER = 1;
+    const P = { tl_type: 'stripline', w: W, h: H, t: T, er: BASE.epsilon_r, tand: BASE.tan_delta,
+        er_top: BASE.epsilon_r, tand_top: BASE.tan_delta, stripline_top_h: H_TOP, sigma: BASE.sigma_cond,
+        freq: 1e9, nx: 30, ny: 30, rq: 0, mesh_backend: 'rectilinear',
+        use_top_diel: 1, top_diel_h: H_LAYER, top_diel_er: ER_LAYER, top_diel_tand: 0 };
+    const errs = [];
+    const s = buildSolverFromParams(P, e => errs.push(e));
+    check('stripline+layer: factory builds the solver', !!s, errs.join(' '));
+    if (s) {
+        const lidY = H + H_TOP;
+        check('stripline+layer: lid stays at h + stripline_top_h',
+            !!grounds(s).find(c => near(c.y_min, lidY) && near(c.y_max, lidY + TG)));
+        const layer = s.dielectrics.find(d => near(d.y_min, H) && near(d.y_max, H + H_LAYER));
+        check('stripline+layer: layer spans h..h+top_diel_h with its own eps_r',
+            !!layer && layer.epsilon_r === ER_LAYER);
+        const cover = s.dielectrics.find(d => near(d.y_min, H + H_LAYER) && near(d.y_max, lidY));
+        check('stripline+layer: cover fills the rest up to the lid with er_top',
+            !!cover && cover.epsilon_r === BASE.epsilon_r);
+        check('stripline+layer: trace still sits on the substrate (y: h..h+t)',
+            signals(s).every(c => near(c.y_min, H) && near(c.y_max, H + T)));
+    }
+    // A trace taller than the remaining cover but shorter than the full top height fits.
+    const tall = buildSolverFromParams({ ...P, t: 0.25e-3 }, () => {});
+    check('stripline+layer: trace poking through the layer into the cover accepted', !!tall);
+    // The layer may not reach the lid.
+    const bad = [];
+    check('stripline+layer: top_diel_h >= stripline_top_h rejected',
+        buildSolverFromParams({ ...P, top_diel_h: H_TOP }, e => bad.push(e)) === null
+        && /stripline top/i.test(bad.join(' ')));
+    check('stripline+layer: diff_stripline takes the same path',
+        !!buildSolverFromParams({ ...P, tl_type: 'diff_stripline', trace_spacing: 0.2e-3 }, () => {}));
+}
+
+// ---------- ground connectivity (full-wave floating-ground rule) ----------
+// groundBodyCount is what TriBackend._eigenAbc uses to decide whether the grounds of
+// a cross-section float against each other in the eigenproblem. Rebuilt here from the
+// solver geometry the way the mesher does it, without meshing.
+{
+    const bodies = (s, wallOverride = null) => {
+        const dom = { x_min: -s.domain_width / 2, x_max: s.domain_width / 2, y_min: -s.t_gnd, y_max: s.domain_height };
+        const tol = 1e-9 * Math.hypot(dom.x_max - dom.x_min, dom.y_max - dom.y_min);
+        const c = _clipDomain(dom, s.conductors, s.boundaries, tol);
+        const { rects, roles } = condRectsOf(s.conductors, c, tol);
+        return groundBodyCount(rects, roles, { ...c.wallPEC, ...(wallOverride || {}) }, c, tol);
+    };
+    const ms = new MicrostripSolver({ ...BASE, boundaries: ['open', 'open', 'open', 'gnd'] });
+    check('bodies: microstrip has one ground body', bodies(ms) === 1);
+    const sl = new MicrostripSolver({ ...BASE, epsilon_r_top: 1, enclosure_height: 0.3e-3, boundaries: ['open', 'open', 'gnd', 'gnd'] });
+    check('bodies: stripline with open sides has two (floating grounds)', bodies(sl) === 2);
+    check('bodies: a PEC symmetry plane (odd mode) ties the stripline grounds', bodies(sl, { left: true }) === 1);
+    const slBox = new MicrostripSolver({ ...BASE, epsilon_r_top: 1, enclosure_height: 0.3e-3, enclosure_width: 3e-3,
+        boundaries: ['gnd', 'gnd', 'gnd', 'gnd'] });
+    check('bodies: enclosure side walls connect the stripline grounds', bodies(slBox) === 1);
+    const lid = new MicrostripSolver({ ...BASE, enclosure_height: 0.5e-3, boundaries: ['open', 'open', 'gnd', 'gnd'] });
+    check('bodies: microstrip with a lid and open sides floats', bodies(lid) === 2);
+    const gcpw = new MicrostripSolver({ ...BASE, use_coplanar_gnd: true, gap: 0.2e-3, via_gap: 0.3e-3, use_vias: true,
+        boundaries: ['open', 'open', 'open', 'gnd'] });
+    check('bodies: GCPW vias bond the coplanar grounds to the bottom ground', bodies(gcpw) === 1);
+    const gcpwLid = new MicrostripSolver({ ...BASE, use_coplanar_gnd: true, gap: 0.2e-3, via_gap: 0.3e-3, use_vias: true,
+        enclosure_height: 0.5e-3, boundaries: ['open', 'open', 'gnd', 'gnd'] });
+    check('bodies: GCPW with a lid and open sides floats', bodies(gcpwLid) === 2);
+    const bs = new BroadsideStriplineSolver({ trace_width: 0.3e-3, trace_thickness: 35e-6, x_offset: 0, sigma_cond: 5.8e7,
+        h_bottom: 0.2e-3, er_bottom: 4.4, tand_bottom: 0.02, h_middle: 0.3e-3, er_middle: 4.4, tand_middle: 0.02,
+        h_top: 0.2e-3, er_top: 4.4, tand_top: 0.02, freq: 1e9, boundaries: ['open', 'open', 'gnd', 'gnd'] });
+    check('bodies: broadside stripline with open sides floats', bodies(bs) === 2);
 }
 
 // ---------- GCPW ----------

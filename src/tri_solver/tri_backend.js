@@ -23,7 +23,8 @@
 import createModule from '../wasm_solver/eigen_solver.js';
 import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
-import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain } from './occ_to_mesh.js';
+import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
+         groundBodyCount } from './occ_to_mesh.js';
 import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
@@ -594,6 +595,8 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     let epsRMax = 1;
     for (let t = 0; t < epsMap.length; t++) if (epsMap[t].re > epsRMax) epsRMax = epsMap[t].re;
     const cands = [];
+    globalThis.__TRI_DEBUG__ && console.log(`    eigen nev=${nev} nconv=${res.nconv} abc=${JSON.stringify(abc)} `
+        + `shift=${epsRef.toFixed(3)} eps=[${Array.from(res.evalsRe.slice(0, res.nconv)).map(v => (-v / k2).toFixed(3)).join(', ')}]`);
     for (let i = 0; i < res.nconv; i++) {
         if (res.evalsRe[i] >= 0) continue;                 // physical: γ² < 0
         const epsMode = -res.evalsRe[i] / k2;
@@ -1324,7 +1327,7 @@ export class TriBackend {
                 // (fw.eps) and the H-field for the ZZ refinement metric. Computed every pass.
                 let fw = null;
                 const femCache = {};
-                try { fw = fullwaveMode(this.ctx, mesh, fm, abc, this.condRect, mesh.epsMap, fRef, phiEps, eps_static, femCache); } catch { fw = null; }
+                try { fw = fullwaveMode(this.ctx, mesh, fm, this._eigenAbc(abc, mesh.epsMap), this.condRect, mesh.epsMap, fRef, phiEps, eps_static, femCache); } catch { fw = null; }
                 passWork.byMode[rm] = { fm, phiEps, phiAir, W_eps, W_air, femCache, fw, fRef, epsMap: mesh.epsMap };
                 // Converge on the REPORTED quantities, not a static proxy:
                 //   • static characteristic impedance Z0 = sqrt(L/C) ∝ 1/sqrt(W_eps·W_air)
@@ -2023,34 +2026,88 @@ export class TriBackend {
     // then steps toward max eps_r, and stops at the first candidate that clearly
     // overlaps the static drive. Each step costs one factorization and runs only
     // when the previous step found nothing convincing.
+    // Ground bodies under a solve's wall map: a wall is PEC when its abc entry is absent
+    // (Dirichlet), so the odd mode's PEC symmetry plane counts as a tie. Memoized per
+    // conductor map (set on every refinement pass, unlike this.mesh) and wall map.
+    _groundsFloat(abc) {
+        const key = ['left', 'right', 'top', 'bottom'].map(k => (abc[k] === undefined ? 1 : 0)).join('');
+        const cr = this.condRect;
+        if (!this._groundBodies || this._groundBodies.condRect !== cr)
+            this._groundBodies = { condRect: cr, byKey: {} };
+        const cache = this._groundBodies.byKey;
+        if (cache[key] === undefined) {
+            const wallPEC = Object.fromEntries(['left', 'right', 'top', 'bottom'].map(k => [k, abc[k] === undefined]));
+            cache[key] = groundBodyCount(cr.rects || [], cr.rectRoles || [], wallPEC,
+                { X0: cr.xmin_domain, X1: cr.xmax_domain, Y0: cr.ymin_domain, Y1: cr.ymax_domain },
+                cr.geomTol || 0) > 1;
+        }
+        return cache[key];
+    }
+
+    // Radiating variant of a closed wall map: every open wall becomes a first-order
+    // ABC, the symmetry plane stays a natural (PMC) wall, PEC walls stay absent.
+    _radiatingAbc(abc) {
+        const out = {};
+        for (const k of ['left', 'right', 'top', 'bottom']) {
+            if (abc[k] === undefined) continue;
+            out[k] = (this.symmetry && k === 'left') ? 'pmc' : true;
+        }
+        return out;
+    }
+
+    // True when the material map carries more than one permittivity (memoized per map).
+    _fillInhomogeneous(epsMap) {
+        if (!epsMap) return false;
+        if (!this._fillCheck || this._fillCheck.epsMap !== epsMap) {
+            let lo = Infinity, hi = -Infinity;
+            for (let t = 0; t < epsMap.length; t++) { const v = epsMap[t].re; if (v < lo) lo = v; if (v > hi) hi = v; }
+            this._fillCheck = { epsMap, inhomogeneous: hi - lo > 1e-9 * hi };
+        }
+        return this._fillCheck.inhomogeneous;
+    }
+
+    // Wall map for the eigensolves of a mode. The closed ('pmc' walls) pencil is the
+    // cheap real-symmetric solve and is used whenever the grounds form one body. With
+    // the grounds floating against each other (stripline or lidded line with open
+    // sides) it is wrong on an inhomogeneous fill: the strip mode hybridizes with the
+    // parallel-plate mode between the grounds and its eigenvalue follows the box width
+    // (the odd mode is immune, its PEC symmetry plane ties the grounds). A homogeneous
+    // fill keeps the closed pencil: every TEM mode is degenerate there, so the hybrid
+    // has the same eigenvalue, and the radiating solve costs ~45% more per sweep.
+    // Radiating walls absorb the parallel-plate wave, so the strip mode comes out as for
+    // connected grounds, which is what the static solve and the quasi-static backend
+    // assume.
+    _eigenAbc(abc, epsMap) {
+        return this._eigenRadiates(abc, epsMap) ? this._radiatingAbc(abc) : abc;
+    }
+
+    _eigenRadiates(abc, epsMap) {
+        return this._groundsFloat(abc) && this._fillInhomogeneous(epsMap);
+    }
+
     _eigenPick(st, f, phiEps, eps_eff_static, epsGuess = null) {
         const { mesh } = this, cr = this.condRect, fm = st.fm;
+        const floating = this._eigenRadiates(st.abc, mesh.epsMap);
         const tryShift = (epsShift, nev) => {
             let fw = null, fwErr = null;
             const pickOpts = { epsShift, nev };
-            // The closed pick at this exact frequency, material map and static field may
-            // already exist from the final refinement pass (st.fwSeed, see _prepareStatic).
+            // The pick at this exact frequency, material map and static field may already
+            // exist from the final refinement pass (st.fwSeed, see _prepareStatic).
             const seed = st.fwSeed;
             if (epsShift === eps_eff_static && nev === 8 && seed && seed.f === f
                 && seed.epsMap === mesh.epsMap && seed.phiEps === phiEps) {
                 fw = seed.fw;
             } else {
+                const abc = floating ? this._radiatingAbc(st.abc) : st.abc;
+                const cache = floating ? (st.femCacheAbc || (st.femCacheAbc = {})) : (st.femCache || (st.femCache = {}));
                 try {
-                    fw = fullwaveMode(this.ctx, mesh, fm, st.abc, cr, mesh.epsMap, f, phiEps, eps_eff_static,
-                        st.femCache || (st.femCache = {}), pickOpts);
+                    fw = fullwaveMode(this.ctx, mesh, fm, abc, cr, mesh.epsMap, f, phiEps, eps_eff_static, cache, pickOpts);
                 } catch (e) { fw = null; fwErr = e; }
             }
-            if (!fw || fw.ambiguous) {
-                const pickAbc = {};
-                let radiates = false;
-                for (const k of ['left', 'right', 'top', 'bottom']) {
-                    const v = st.abc[k];
-                    if (v === undefined) continue;            // PEC ground wall → leave absent (Dirichlet)
-                    const rad = !(this.symmetry && k === 'left');
-                    pickAbc[k] = rad ? true : 'pmc';
-                    if (rad) radiates = true;
-                }
-                if (radiates) {
+            // A failed or ambiguous closed pick is retried with radiating walls.
+            if (!floating && (!fw || fw.ambiguous)) {
+                const pickAbc = this._radiatingAbc(st.abc);
+                if (Object.values(pickAbc).some(v => v === true)) {
                     try {
                         const fw2 = fullwaveMode(this.ctx, mesh, fm, pickAbc, cr, mesh.epsMap, f,
                             phiEps, eps_eff_static, st.femCacheAbc || (st.femCacheAbc = {}), pickOpts);
@@ -3053,9 +3110,22 @@ export class TriBackend {
         }
         list.sort((a, b) => a.g2Re - b.g2Re);
         this._modesState = { fm, list, f, k2 };
+        // The listed modes are those of the cross-section as drawn. Grounds that no
+        // conductor or PEC wall connects float against each other here, unlike in the
+        // RLGC solve (see _eigenAbc), so parallel-plate modes between them are listed
+        // as well and the quasi-TEM modes can hybridize with them.
+        const warnings = [];
+        if (!this._isWG && this._groundsFloat(abc)) {
+            warnings.push({ type: 'floating-grounds', message:
+                'The ground conductors are not connected in this cross-section, so modes with '
+                + 'the grounds at different potentials (parallel-plate modes) are listed too and '
+                + 'the quasi-TEM modes can hybridize with them at high frequency. The RLGC solve '
+                + 'treats the grounds as connected. Enable enclosure side walls to connect them '
+                + 'here as well (this adds box resonances at high frequency).' });
+        }
         return {
             modes: list.map(({ vRe, vIm, ...m }) => m),   // strip eigenvectors from the summary
-            nconv: res.nconv, N, nTris: mesh.nTris,
+            nconv: res.nconv, N, nTris: mesh.nTris, warnings,
         };
     }
 

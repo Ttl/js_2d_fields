@@ -30,6 +30,7 @@ import os from 'os';
 const TIERS = {
     fast: [
         { file: 'tests/test_geometry.js', cost: 1 },
+        { file: 'tests/test_stripline_top_diel.js', cost: 15 },
         { file: 'src/tri_solver/tests/eigen_pencil_test.mjs', cost: 1 },
         { file: 'src/tri_solver/tests/complex_symmetric_test.mjs', cost: 1 },
         { file: 'src/tri_solver/tests/gauge_test.mjs', cost: 19 },

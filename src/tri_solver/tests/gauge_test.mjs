@@ -60,10 +60,13 @@ const CASES = {
         substrate_height: 0.254e-3, trace_width: 0.3e-3, trace_thickness: 35e-6, gnd_thickness: 35e-6,
         epsilon_r: 3.66, tan_delta: 0.003, sigma_cond: 5.8e7, freq: 5e9, boundaries: ['open', 'open', 'open', 'gnd'],
     },
+    // Vias as in the app: without them the coplanar grounds are separate bodies and the
+    // backend's pick switches to radiating walls (TriBackend._eigenAbc), which is not
+    // the closed pencil this test exercises.
     'gcpw (open)': {
         substrate_height: 0.2e-3, trace_width: 0.2e-3, trace_thickness: 35e-6, gnd_thickness: 35e-6,
         epsilon_r: 3.66, tan_delta: 0.003, sigma_cond: 5.8e7, freq: 5e9, use_coplanar_gnd: true, gap: 0.15e-3,
-        boundaries: ['open', 'open', 'open', 'gnd'],
+        via_gap: 0.2e-3, use_vias: true, boundaries: ['open', 'open', 'open', 'gnd'],
     },
 };
 

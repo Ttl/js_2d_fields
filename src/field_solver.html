@@ -367,7 +367,7 @@
         </div>
 
         <div class="control-group">
-            <label><input type="checkbox" id="chk_top_diel"> Enable Top Dielectric</label>
+            <label><input type="checkbox" id="chk_top_diel"> Enable Top Dielectric <span class="help-icon" onclick="showHelpModal('top_diel_layer', event)">?</span></label>
         </div>
         <div id="top-diel-params" class="nested-options" style="display: none;">
             <div class="control-group">
@@ -684,6 +684,9 @@
         </div>
         <div id="modes-notice" style="display: none; margin: 0 10px 8px; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; color: #fbbf24;">
             <strong>⚠</strong> <span id="modes-notice-text"></span>
+        </div>
+        <div id="modes-warning" style="display: none; margin: 0 10px 8px; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; color: #fbbf24;">
+            <strong>⚠</strong> <span id="modes-warning-text"></span>
         </div>
         <div class="modes-body">
             <div id="modes-list" class="modes-list">
@@ -1114,7 +1117,11 @@
         },
         top_diel_height: {
             title: 'Top Dielectric Height',
-            body: '<p>Distance from the substrate surface (trace bottom) to the top ground plane. The trace extends upward into this region.</p><p>Total ground-to-ground spacing = substrate height + top dielectric height. Trace thickness does not add to the ground-to-ground spacing.</p>'
+            body: '<p>Distance from the substrate surface (trace bottom) to the top ground plane. The trace extends upward into this region.</p><p>Total ground-to-ground spacing = substrate height + top dielectric height. Trace thickness does not add to the ground-to-ground spacing.</p><p>With the advanced Top Dielectric option enabled, that layer replaces the lowest part of this region and the ground-to-ground spacing is unchanged.</p>'
+        },
+        top_diel_layer: {
+            title: 'Top Dielectric Layer',
+            body: '<p>Extra dielectric layer on the substrate surface. It starts at the trace bottom and extends upward by its height, so the trace is embedded in it (fully when the layer is thicker than the trace).</p><p>Microstrip and GCPW: the layer is added on top of the substrate, below the air (or enclosure) region.</p><p>Stripline: the layer is carved out of the bottom of the stripline top dielectric, so the ground-to-ground spacing stays substrate height + top dielectric height. Its height must be smaller than the stripline top dielectric height. Set its permittivity to 1 to model air beside the trace.</p>'
         },
         bs_h_bottom: {
             title: 'Bottom Substrate Height',
@@ -1260,7 +1267,7 @@
             if (chkEnclosure) chkEnclosure.disabled = false;
         } else if (tlType === 'stripline') {
             striplineParams.style.display = 'block';
-            // Show but disable all advanced options for stripline
+            // Show all advanced options for stripline; solder mask and ground cutout are disabled
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
@@ -1273,11 +1280,9 @@
                 chkSolderMask.checked = false;
                 solderMaskParams.style.display = 'none';
             }
-            if (chkTopDiel) {
-                chkTopDiel.disabled = true;
-                chkTopDiel.checked = false;
-                topDielParams.style.display = 'none';
-            }
+            // Top dielectric applies: a layer carved out of the bottom of the
+            // stripline's top dielectric (air beside the trace with eps_r = 1).
+            if (chkTopDiel) chkTopDiel.disabled = false;
             if (chkGndCut) {
                 chkGndCut.disabled = true;
                 chkGndCut.checked = false;
@@ -1289,7 +1294,7 @@
         } else if (tlType === 'diff_stripline') {
             diffParams.style.display = 'block';
             striplineParams.style.display = 'block';
-            // Show but disable all advanced options for diff stripline (same as stripline)
+            // Same as stripline
             if (solderMaskGroup) solderMaskGroup.style.display = 'block';
             if (topDielGroup) topDielGroup.style.display = 'block';
             if (gndCutGroup) gndCutGroup.style.display = 'block';
@@ -1302,11 +1307,9 @@
                 chkSolderMask.checked = false;
                 solderMaskParams.style.display = 'none';
             }
-            if (chkTopDiel) {
-                chkTopDiel.disabled = true;
-                chkTopDiel.checked = false;
-                topDielParams.style.display = 'none';
-            }
+            // Top dielectric applies: a layer carved out of the bottom of the
+            // stripline's top dielectric (air beside the trace with eps_r = 1).
+            if (chkTopDiel) chkTopDiel.disabled = false;
             if (chkGndCut) {
                 chkGndCut.disabled = true;
                 chkGndCut.checked = false;

@@ -217,10 +217,12 @@ class MicrostripSolver extends FieldSolver2D {
             errors.push("trace_thickness must be > -substrate_height");
         }
 
-        // Equal heights put the top ground flush on the trace's top face.
+        // The trace rises from the substrate surface through the top dielectric
+        // layer (if any) into the region above it. Equal heights put the top ground
+        // flush on the trace's top face.
         if (options.enclosure_height != null && options.enclosure_height !== "auto"
-            && options.trace_thickness >= options.enclosure_height) {
-            errors.push("trace_thickness must be < enclosure_height");
+            && options.trace_thickness >= options.enclosure_height + (options.top_diel_h ?? 0)) {
+            errors.push("trace_thickness must be < enclosure_height + top_diel_h");
         }
 
         // Top dielectric epsilon_r should be positive if top dielectric is used

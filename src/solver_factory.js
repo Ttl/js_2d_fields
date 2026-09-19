@@ -72,6 +72,20 @@ function addCommonOptions(options, p) {
     if (plating) options.plating = plating;
 }
 
+// Stripline: the top-dielectric option is a layer on the substrate surface that
+// replaces the lowest part of the stripline's own top dielectric, so the
+// ground-to-ground spacing stays h + stripline_top_h. With epsilon_r = 1 it
+// models air beside the trace. MicrostripSolver measures enclosure_height from the
+// top of that layer, hence the subtraction.
+function striplineCoverHeight(p) {
+    if (!p.use_top_diel) return p.stripline_top_h;
+    if (!(p.top_diel_h < p.stripline_top_h)) {
+        throw new Error('Top dielectric height must be smaller than the stripline top '
+            + 'dielectric height (it is carved out of the stripline top dielectric)');
+    }
+    return p.stripline_top_h - p.top_diel_h;
+}
+
 // The plating block on its own, so line types that take plating but none of the other
 // board-stackup options (coax) can reuse it instead of duplicating it. `extra` carries a
 // type's own surface selection where top/sides/bottom has no meaning, coax passes
@@ -175,7 +189,7 @@ export function buildSolverFromParams(p, onError = null) {
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
                 tan_delta_top: p.tand_top,
-                enclosure_height: p.stripline_top_h,
+                enclosure_height: striplineCoverHeight(p),
                 tan_delta: p.tand,
                 sigma_cond: p.sigma,
                 freq: p.freq,
@@ -272,7 +286,7 @@ export function buildSolverFromParams(p, onError = null) {
                 trace_spacing: p.trace_spacing,  // Enable differential mode
                 epsilon_r: p.er,
                 epsilon_r_top: p.er_top,
-                enclosure_height: p.stripline_top_h,
+                enclosure_height: striplineCoverHeight(p),
                 tan_delta: p.tand,
                 tan_delta_top: p.tand_top,
                 sigma_cond: p.sigma,

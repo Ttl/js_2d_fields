@@ -166,6 +166,71 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
     return { X0, X1, Y0, Y1, wallPEC, wallThick };
 }
 
+// Conductor rects clipped to the meshed box (absorbed / outside ones dropped) and
+// their roles, in matching order. Exported with _clipDomain so tests can rebuild the
+// condRect view of a geometry without meshing it.
+export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) {
+    const rects = [], roles = [];
+    const roleOf = (c) => ({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
+                             slab_thickness: c.slab_thickness ?? null });
+    for (const c of conductors) {
+        if (c.shape) {
+            // Bounds come from the shape's positive body. For a complement that is the
+            // hole it surrounds, which is exactly the extent of its boundary in the mesh
+            // (the shield itself has no meshed area). Downstream bbox prefilters stay
+            // meaningful, while every real test goes through `shape`.
+            //
+            // `shape` is the full polygon even in a half-domain solve: using the half
+            // would put the x=0 chord on the shield's boundary and make every symmetry
+            // -plane node PEC, shorting the plane. `meshArea` carries the half instead,
+            // because that is what the loss code multiplies back up by `symmetry`.
+            const bb = shapeBBox(c.shape);
+            rects.push({ xmin: bb.xmin, xmax: bb.xmax, ymin: bb.ymin, ymax: bb.ymax,
+                         shape: c.shape, meshArea: shapeArea(c, meshOpts) });
+            roles.push(roleOf(c));
+            continue;
+        }
+        const r = _rectOf(c);
+        const xmin = Math.max(r.xmin, X0), xmax = Math.min(r.xmax, X1);
+        const ymin = Math.max(r.ymin, Y0), ymax = Math.min(r.ymax, Y1);
+        if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
+        rects.push({ xmin, xmax, ymin, ymax, meshArea: (xmax - xmin) * (ymax - ymin) });
+        roles.push(roleOf(c));
+    }
+    return { rects, roles };
+}
+
+// Number of electrically separate ground bodies in a meshed cross-section: ground
+// rects (touching rects are one body) and PEC walls (adjacent PEC walls meet at the
+// corner, a rect on a PEC wall is bonded to it). `wallPEC` is the per-solve wall map,
+// so a PEC symmetry plane (odd mode) ties whatever it touches. More than one body means
+// the grounds float against each other in the eigenproblem, which the static solve
+// never sees because it drives every ground at V = 0.
+export function groundBodyCount(rects, roles, wallPEC, bounds, tol) {
+    const { X0, X1, Y0, Y1 } = bounds;
+    const walls = ['left', 'right', 'top', 'bottom'].filter(k => wallPEC && wallPEC[k]);
+    const gnd = [];
+    rects.forEach((r, i) => { if (!roles[i] || !roles[i].is_signal) gnd.push(r); });
+    const n = gnd.length + walls.length;
+    const parent = Array.from({ length: n }, (_, i) => i);
+    const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    const union = (a, b) => { parent[find(a)] = find(b); };
+    const touches = (a, b) => a.xmin <= b.xmax + tol && b.xmin <= a.xmax + tol
+                           && a.ymin <= b.ymax + tol && b.ymin <= a.ymax + tol;
+    const onWall = { left: r => r.xmin <= X0 + tol, right: r => r.xmax >= X1 - tol,
+                     bottom: r => r.ymin <= Y0 + tol, top: r => r.ymax >= Y1 - tol };
+    for (let i = 0; i < gnd.length; i++) {
+        for (let j = i + 1; j < gnd.length; j++) if (touches(gnd[i], gnd[j])) union(i, j);
+        walls.forEach((k, w) => { if (onWall[k](gnd[i])) union(i, gnd.length + w); });
+    }
+    const adjacent = (a, b) => (a === 'left' || a === 'right') !== (b === 'left' || b === 'right');
+    for (let a = 0; a < walls.length; a++)
+        for (let b = a + 1; b < walls.length; b++) if (adjacent(walls[a], walls[b])) union(gnd.length + a, gnd.length + b);
+    let bodies = 0;
+    for (let i = 0; i < n; i++) if (find(i) === i) bodies++;
+    return bodies;
+}
+
 // Pre-mesh triangle-count estimate for the Distance->Threshold size field that
 // buildOccMeshFromGeometry paints (see the field setup there). Triangles concentrate
 // in the graded band around each painted curve: with surface size s and the size
@@ -240,35 +305,7 @@ export function buildOccMeshFromGeometry(G, opts) {
     }
 
     // Conductor rects clipped to the meshed domain (absorbed/outside ones dropped).
-    const condRects = [], condRoles = [];
-    for (const c of conductors) {
-        if (c.shape) {
-            // Bounds come from the shape's positive body. For a complement that is the
-            // hole it surrounds, which is exactly the extent of its boundary in the mesh
-            // (the shield itself has no meshed area). Downstream bbox prefilters stay
-            // meaningful, while every real test goes through `shape`.
-            //
-            // `shape` is the full polygon even in a half-domain solve: using the half
-            // would put the x=0 chord on the shield's boundary and make every symmetry
-            // -plane node PEC, shorting the plane. `meshArea` carries the half instead,
-            // because that is what the loss code multiplies back up by `symmetry`.
-            const bb = shapeBBox(c.shape);
-            condRects.push({
-                xmin: bb.xmin, xmax: bb.xmax, ymin: bb.ymin, ymax: bb.ymax,
-                shape: c.shape, meshArea: shapeArea(c, meshOpts),
-            });
-            condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
-                             slab_thickness: c.slab_thickness ?? null });
-            continue;
-        }
-        const r = _rectOf(c);
-        const xmin = Math.max(r.xmin, X0), xmax = Math.min(r.xmax, X1);
-        const ymin = Math.max(r.ymin, Y0), ymax = Math.min(r.ymax, Y1);
-        if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
-        condRects.push({ xmin, xmax, ymin, ymax, meshArea: (xmax - xmin) * (ymax - ymin) });
-        condRoles.push({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
-                         slab_thickness: c.slab_thickness ?? null });
-    }
+    const { rects: condRects, roles: condRoles } = condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts);
 
     const stack = G.stackSave();
     const ierr = G.stackAlloc(4);
