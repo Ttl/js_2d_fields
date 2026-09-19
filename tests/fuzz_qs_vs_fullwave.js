@@ -140,7 +140,9 @@ export function randomSpec(rng) {
         spec.use_enclosure = rng.bool(0.3);
         // An enclosure always closes its side walls (see the enclosure block below).
         spec.use_side_gnd = spec.use_enclosure;
-        if (spec.use_enclosure) spec.enclosure_width = spec.bs_w * rng.f(3, 8);
+        // Sized from the offset pair's span: the offset upper trace must stay inside
+        // the walls or validation rejects the case.
+        if (spec.use_enclosure) spec.enclosure_width = (spec.bs_w + 2 * Math.abs(spec.bs_x_offset)) * rng.f(3, 8);
         spec.use_plating = rollPlating();
         return spec;
     }

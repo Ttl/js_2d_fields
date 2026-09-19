@@ -207,9 +207,9 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   opts.Rq — RMS surface roughness (m), gradient model (single layer, same Rq on
 //   all surfaces). The dissipation is scaled by Ψ_R(f) = Re(Z_rough)/Rs and the
 //   loop inductance gets the matching surface-reactance increment
-//   ΔL = (Im(Z_rough) − Rs)/ω · ∮|K|² = R_smooth·(Im(Z_rough)/Rs − 1)/ω, keeping
+//   ΔL = (Im(Z_rough) − Rs)/ω · ∮|K|², with ∮|K|² from the volume R, keeping
 //   R(f)/L(f) causal. With a single Rq the per-surface factor is uniform, so
-//   scaling the smooth-σ solution is exact in the skin regime (t ≫ δ) and
+//   scaling the smooth-σ dissipation is exact in the skin regime (t ≫ δ) and
 //   degrades gracefully to the correct DC limit (Ψ → 1 as δ grows).
 //   opts.surfaceZs(x, y, orient) — OPTIONAL per-face surface impedance {re,im} at a
 //   face midpoint (orient 'h' = top/bottom, 'v' = side), for per-side plating. The
@@ -880,18 +880,38 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // overwrites its X from the SMOOTH value before R is scaled by psiR, per face
     // bucket: signal faces -> R_trace, ground-rect faces -> R_gr, boundary walls
     // -> R_gw (walls are bare metal unless surfaceZs says otherwise).
+    // The reactance increment of a meshed conductor is (Im(Zs) - Rs) * |K|^2 over its
+    // faces. The volume R gives that integral as R / Rs only in the skin regime: a
+    // conductor thinner than delta has R near R_dc, and R * (Im(Zs)/Rs - 1) / omega
+    // would grow as 1/sqrt(f). Dividing by the slab resistance factor
+    // Re[(1+j) coth((1+j) d/delta)] recovers |K|^2 at every delta (it is 1 for a thick
+    // conductor and delta/d for a thin one, where R = |K|^2 / (sigma d)). A signal
+    // trace carries current on both faces, so each face sees half the thickness;
+    // ground rects are one-sided slabs.
+    const slabR = (d) => {
+        const x = d / delta;
+        if (!(x > 0) || x > 20) return 1;
+        return (Math.sinh(2*x) + Math.sin(2*x)) / (Math.cosh(2*x) - Math.cos(2*x));
+    };
+    const rolesX = condRect.rectRoles || null;
+    let dSig = Infinity, dGr = Infinity;
+    rects.forEach((r, i) => {
+        const d = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+        if (!rolesX || rolesX[i].is_signal) dSig = Math.min(dSig, d / 2); else dGr = Math.min(dGr, d);
+    });
+    const kTrace = 1 / slabR(dSig), kGr = 1 / slabR(dGr);
     let X_trace = R_trace, X_gr = R_gr, X_gw = X_gw_smooth;
     const X_smooth_total = R_trace + R_gr + X_gw_smooth;   // before psi rewrites any part
     if (opts.surfaceZs) {
         if (trS > 0) {
             const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
-            X_trace = R_trace * psiX;
+            X_trace = R_trace * (1 + kTrace * (psiX - 1));
             R_trace *= psiR;
             PsiR = psiR;
         }
         if (grS > 0) {
             const psiR = grZreS / (Rs * grS), psiX = grZimS / (Rs * grS);
-            X_gr = R_gr * psiX;
+            X_gr = R_gr * (1 + kGr * (psiX - 1));
             R_gr *= psiR;
         }
         if (gndS > 0) {
@@ -903,8 +923,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         const Zs = calculate_Zrough(freq, sigma, Rq);
         PsiR = Zs.re / Rs;
         const PsiX = Zs.im / Rs;
-        X_trace = R_trace * PsiX;
-        X_gr = R_gr * PsiX;
+        X_trace = R_trace * (1 + kTrace * (PsiX - 1));
+        X_gr = R_gr * (1 + kGr * (PsiX - 1));
         X_gw = X_gw_smooth * PsiX;
         R_trace *= PsiR;
         R_gr *= PsiR;

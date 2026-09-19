@@ -194,6 +194,25 @@ console.log('\n=== microstrip: MQS path ===');
 checkRatio('microstrip rough 1um', await internalL(microstrip()),
     await internalL(microstrip({ rq: RQ })), (f) => calculate_Zrough(f, SIG, RQ), FREQS, 2.0);
 
+// ------------------------------------------------------------------- mqs, thin film
+// Below the skin transition the volume R of a conductor tends to R_dc while the
+// roughness increment stays the surface integral (Im(Zs) - Rs) * |K|^2 / omega, which
+// is nearly constant in f there (the tolerance covers the current spreading across
+// the width as delta grows). Scaling the volume R by Im(Zs)/Rs instead makes the
+// increment grow as 1/sqrt(f), 2.4x between these two points.
+console.log('\n=== microstrip: MQS path, conductor thinner than delta ===');
+{
+    const FILM = { trace_thickness: 12e-6, gnd_thickness: 17e-6, sigma_cond: 1.3e6 };
+    const RQ_FILM = 2.5e-6, fs = [1e8, 6e8];   // delta 44 and 18 um
+    const bare = await internalL(microstrip(FILM), fs);
+    const rough = await internalL(microstrip({ ...FILM, rq: RQ_FILM }), fs);
+    const dL = fs.map(f => rough.get(f) - bare.get(f));
+    const dXs = fs.map(f => (calculate_Zrough(f, FILM.sigma_cond, RQ_FILM).im
+        - calculate_Zrough(f, FILM.sigma_cond, 0).im) / f);
+    near('thin film: roughness L increment follows (Im(Zs) - Rs)/omega across f',
+        dL[0] / dL[1], dXs[0] / dXs[1], 30);
+}
+
 // ------------------------------------------------------------------- waveguide
 // The TE mode has no conductors at all — the loss is on the enclosing wall, and its
 // equivalent circuit builds L_int from the same wall surface impedance. Swept above the
