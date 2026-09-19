@@ -178,6 +178,17 @@ class BroadsideStriplineSolver extends FieldSolver2D {
         if (options.x_offset != null && !isNum(options.x_offset)) {
             errors.push(`x_offset must be a valid number (got ${options.x_offset})`);
         }
+        // Both traces must sit strictly inside the enclosure: the lower one is centred,
+        // the upper one is shifted by x_offset, and a trace reaching the side wall is
+        // shorted to it (or cut by an open truncation).
+        if (options.enclosure_width != null && options.enclosure_width !== "auto") {
+            positive(options.enclosure_width, 'enclosure_width');
+            if (isNum(options.enclosure_width) && isNum(options.trace_width)) {
+                const active_width = options.trace_width + 2 * Math.abs(isNum(options.x_offset) ? options.x_offset : 0);
+                if (active_width >= options.enclosure_width)
+                    errors.push(`Active area width (${(active_width * 1000).toFixed(3)} mm, trace_width + 2 × |x_offset|) must be smaller than the enclosure inner width (${(options.enclosure_width * 1000).toFixed(3)} mm)`);
+            }
+        }
         if (errors.length > 0) {
             throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
         }

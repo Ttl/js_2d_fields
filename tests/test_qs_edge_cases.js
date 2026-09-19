@@ -20,6 +20,7 @@
 //
 // Run: node tests/test_qs_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
+import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
 
 let pass = 0, fail = 0;
 function check(name, cond, detail = '') {
@@ -141,6 +142,14 @@ async function solve(opts, backend) {
     check('stripline enclosure_height == t rejected', throws({ ...sl, enclosure_height: 35e-6 }));
     check('stripline enclosure_height < t rejected', throws({ ...sl, enclosure_height: 30e-6 }));
     check('stripline enclosure_height > t accepted', !throws({ ...sl, enclosure_height: 0.1e-3 }));
+    // Broadside: the x_offset trace must stay inside the enclosure side walls.
+    const bs = { trace_width: 0.06e-3, trace_thickness: 10e-6, h_bottom: 0.25e-3, h_middle: 0.1e-3, h_top: 0.25e-3,
+        er_bottom: 4, er_middle: 4, er_top: 4, sigma_cond: 5.8e7, freq: 1e9,
+        boundaries: ['gnd', 'gnd', 'gnd', 'gnd'], enclosure_width: 0.3e-3 };
+    const bsThrows = (x_offset) => { try { new BroadsideStriplineSolver({ ...bs, x_offset }); return false; }
+        catch (e) { return /enclosure inner width/.test(e.message); } };
+    check('broadside x_offset trace inside the side wall rejected', bsThrows(-0.136e-3));
+    check('broadside x_offset trace inside the enclosure accepted', !bsThrows(-0.05e-3));
 }
 
 // Q6: mesher helpers on an embedded trace.
