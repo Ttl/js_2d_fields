@@ -170,7 +170,11 @@ export function randomSpec(rng) {
         else { spec.er_top = rng.f(2.2, 10); spec.tand_top = rng.f(0.001, 0.02); }
         spec.stripline_top_h = rng.logf(Math.max(0.05e-3, 2 * t), 1.5e-3);
     }
-    if (tl.includes('gcpw')) { spec.gap = rng.logf(0.05e-3, 0.5e-3); spec.via_gap = rng.logf(0.05e-3, 0.5e-3); }
+    if (tl.includes('gcpw')) {
+        spec.gap = rng.logf(0.05e-3, 0.5e-3); spec.via_gap = rng.logf(0.05e-3, 0.5e-3);
+        // Finite coplanar grounds in ~40% of draws, via fence at least 50 um wide
+        if (rng.bool(0.4)) spec.gnd_width = 2 * spec.via_gap + rng.logf(0.05e-3, 3e-3);
+    }
 
     // Advanced features. Solder mask applies to the microstrip AND gcpw families
     // (gcpw takes the coplanar solder mask path in MicrostripSolver); its material
@@ -230,7 +234,7 @@ export function randomSpec(rng) {
         // GCPW: the enclosure must clear the full coplanar active width (trace +
         // gaps + via fences, matching MicrostripSolver's active_width), not just
         // the trace span — otherwise the combo always fails validation.
-        if (tl.includes('gcpw')) span += (isDiff ? 0 : w) + 2 * (spec.gap + spec.via_gap);
+        if (tl.includes('gcpw')) span += (isDiff ? 0 : w) + 2 * (spec.gap + (spec.gnd_width ?? spec.via_gap));
         const style = tl.includes('stripline') ? 'sides' : rng.pick(['box', 'box', 'lid', 'sides']);
         spec.enclosure_style = style;
         spec.use_side_gnd = style !== 'lid';
@@ -290,7 +294,10 @@ export function buildSolver(spec, backend) {
     };
     const o = { ...base };
     if (spec.trace_spacing) o.trace_spacing = spec.trace_spacing;
-    if (spec.tl.includes('gcpw')) { o.boundaries = ['open', 'open', 'open', 'gnd']; o.use_coplanar_gnd = true; o.gap = spec.gap; o.via_gap = spec.via_gap; o.use_vias = true; }
+    if (spec.tl.includes('gcpw')) {
+        o.boundaries = ['open', 'open', 'open', 'gnd']; o.use_coplanar_gnd = true; o.gap = spec.gap; o.via_gap = spec.via_gap; o.use_vias = true;
+        if (spec.gnd_width) o.coplanar_gnd_width = spec.gnd_width;
+    }
     else if (spec.tl.includes('stripline')) {
         o.epsilon_r_top = spec.er_top; o.tan_delta_top = spec.tand_top; o.boundaries = ['open', 'open', 'gnd', 'gnd'];
         o.enclosure_height = spec.stripline_top_h - (spec.use_top_diel ? spec.top_diel_h : 0);
@@ -352,6 +359,7 @@ function fmtSpec(spec) {
     else s += ` w=${u(spec.w)}mm h=${u(spec.h)}mm t=${u(spec.t, 1e6, 1)}µm er=${spec.er.toFixed(2)}`;
     s += ` sig=${((spec.sigma ?? spec.bs_sigma) / 1e6).toFixed(1)}e6 f=${(spec.freq / 1e9).toFixed(2)}GHz`;
     if (spec.trace_spacing) s += ` gap=${u(spec.trace_spacing)}mm`;
+    if (spec.gnd_width) s += ` gnd_w=${u(spec.gnd_width)}mm`;
     if (spec.tl.includes('stripline') && spec.tl !== 'broadside_stripline' && spec.er_top !== spec.er) s += ` er_top=${spec.er_top.toFixed(2)}`;
     const feats = ['use_sm', 'use_top_diel', 'use_gnd_cut', 'use_enclosure', 'use_side_gnd', 'use_top_gnd', 'use_plating', 'use_causal']
         .filter(k => spec[k]).map(k => {

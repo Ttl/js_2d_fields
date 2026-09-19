@@ -70,6 +70,7 @@ const SWEEP_PARAM_CONFIG = {
     // GCPW types only
     gap:                { label: 'GCPW Gap',              inputId: 'inp_gap',           group: 'gcpw' },
     via_gap:            { label: 'Via Gap',               inputId: 'inp_via_gap',       group: 'gcpw' },
+    gnd_width:          { label: 'Ground Width',          inputId: 'inp_gnd_width',     group: 'gcpw' },
     // Stripline types only
     stripline_top_h:    { label: 'Top Dielectric Height (stripline)', inputId: 'inp_air_top',    group: 'stripline' },
     er_top:             { label: 'Top Permittivity (stripline)',       inputId: 'inp_er_top',     group: 'stripline' },
@@ -115,7 +116,8 @@ function getInputValue(id) {
     if (!raw || raw.trim() === '') {
         raw = element.placeholder || '';
     }
-    if (raw === "auto") {
+    // Placeholder keywords pass through: "auto" (enclosure size), "full" (ground width)
+    if (raw === "auto" || raw === "full") {
         return raw;
     }
 
@@ -159,6 +161,7 @@ const DEFAULT_SETTINGS = {
     trace_spacing: 0.2, // mm
     gap: 0.1,          // mm
     via_gap: 0.1,      // mm
+    gnd_width: NaN,    // full domain width
     stripline_top_h: 0.4, // mm
     er_top: 4.5,
     tand_top: 0.02,
@@ -283,6 +286,7 @@ function getUISettings() {
         trace_spacing: getDisplayValue('inp_trace_spacing'),
         gap: getDisplayValue('inp_gap'),
         via_gap: getDisplayValue('inp_via_gap'),
+        gnd_width: getDisplayValue('inp_gnd_width'),
         stripline_top_h: getDisplayValue('inp_air_top'),
         er_top: getInputValueUnitless('inp_er_top'),
         tand_top: getInputValueUnitless('inp_tand_top'),
@@ -375,7 +379,7 @@ function getUISettings() {
 // and interpolation options) is shared and round-trips when non-default.
 const BROADSIDE_EXCLUDED_KEYS = new Set([
     'w', 'h', 't', 'er', 'tand', 'sigma',
-    'trace_spacing', 'gap', 'via_gap',
+    'trace_spacing', 'gap', 'via_gap', 'gnd_width',
     'stripline_top_h', 'er_top', 'tand_top',
     'use_sm', 'sm_t_sub', 'sm_t_trace', 'sm_t_side', 'sm_er', 'sm_tand',
     'use_top_diel', 'top_diel_h', 'top_diel_er', 'top_diel_tand',
@@ -479,7 +483,10 @@ function restoreSettings(settings) {
         // Helper to restore value with unit
         const setValueWithUnit = (id, value) => {
             const element = document.getElementById(id);
-            if (!element || value === undefined || value === null || isNaN(value)) return;
+            if (!element || value === undefined || value === null) return;
+            // NaN is the "auto"/"full" default of a placeholder input: clear it so a
+            // browser-remembered value does not survive the restore
+            if (isNaN(value)) { element.value = ''; return; }
             // Format number to remove floating point artifacts
             const formattedValue = parseFloat(value.toPrecision(12));
             const unit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
@@ -523,6 +530,7 @@ function restoreSettings(settings) {
         setValueWithUnit('inp_trace_spacing', fullSettings.trace_spacing);
         setValueWithUnit('inp_gap', fullSettings.gap);
         setValueWithUnit('inp_via_gap', fullSettings.via_gap);
+        setValueWithUnit('inp_gnd_width', fullSettings.gnd_width);
         setValueWithUnit('inp_air_top', fullSettings.stripline_top_h);
         document.getElementById('inp_er_top').value = fullSettings.er_top;
         document.getElementById('inp_tand_top').value = fullSettings.tand_top;
@@ -905,6 +913,7 @@ function getGeometryHash() {
         trace_spacing: p.trace_spacing,
         gap: p.gap,
         via_gap: p.via_gap,
+        gnd_width: p.gnd_width,
         stripline_top_h: p.stripline_top_h,
         er_top: p.er_top,
         tand_top: p.tand_top,
@@ -1442,6 +1451,7 @@ function getParams() {
         // GCPW specific parameters
         gap: getInputValue('inp_gap'),
         via_gap: getInputValue('inp_via_gap'),
+        gnd_width: getInputValue('inp_gnd_width'),
         // Stripline parameters
         stripline_top_h: getInputValue('inp_air_top'),
         er_top: getInputValueUnitless('inp_er_top'),
@@ -2406,7 +2416,7 @@ function bindEvents() {
     const geometryInputs = [
         'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma',
         'inp_trace_spacing',
-        'inp_gap', 'inp_via_gap',
+        'inp_gap', 'inp_via_gap', 'inp_gnd_width',
         'inp_air_top', 'inp_er_top', 'inp_tand_top',
         'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',
         'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',

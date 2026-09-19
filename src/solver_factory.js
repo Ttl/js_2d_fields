@@ -132,6 +132,7 @@ export function buildSolverFromParams(p, onError = null) {
                 use_coplanar_gnd: true,
                 gap: p.gap,
                 via_gap: p.via_gap,
+                coplanar_gnd_width: p.gnd_width,
                 use_vias: true,
                 // Surface roughness
                 rq: p.rq,
@@ -156,6 +157,7 @@ export function buildSolverFromParams(p, onError = null) {
                 use_coplanar_gnd: true,
                 gap: p.gap,
                 via_gap: p.via_gap,
+                coplanar_gnd_width: p.gnd_width,
                 use_vias: true,
                 // Surface roughness
                 rq: p.rq,

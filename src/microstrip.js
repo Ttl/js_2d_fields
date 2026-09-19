@@ -37,6 +37,12 @@ class MicrostripSolver extends FieldSolver2D {
         this.gap = options.gap ?? 0; // Gap from signal to top ground
         this.via_gap = options.via_gap ?? 0; // Gap from ground edge to via
         this.use_vias = options.use_vias ?? false; // Enable via generation
+        // Coplanar ground width, measured outward from the gap edge. null ('full')
+        // runs the grounds to the domain wall with the via fence from via_gap to
+        // the wall. A finite width puts the via fence via_gap inside both ground
+        // edges, so its width is coplanar_gnd_width - 2 * via_gap (must be > 0).
+        const gnd_width = options.coplanar_gnd_width;
+        this.coplanar_gnd_width = (gnd_width == null || gnd_width === 'full') ? null : gnd_width;
 
         // Enclosure options
         this.enclosure_width = options.enclosure_width ?? null;
@@ -86,18 +92,14 @@ class MicrostripSolver extends FieldSolver2D {
             // For differential, span includes both traces and spacing
             const trace_span = 2 * this.w + this.trace_spacing;
             if (this.use_coplanar_gnd) {
-                // Coplanar: active width includes gaps, top grounds, vias
-                const active_width = trace_span + 2 * (this.gap + this.via_gap + this.w / 2);
-                this.domain_width = Math.max(active_width * 1.5, this.h * 10);
+                this.domain_width = this._coplanar_auto_domain_width(trace_span);
             } else {
                 this.domain_width = 2 * Math.max(trace_span * 4, this.h * 15);
             }
         } else {
             // Single-ended
             if (this.use_coplanar_gnd) {
-                // Coplanar: active width includes gaps, top grounds, vias
-                const active_width = this.w + 2 * (this.gap + this.via_gap + this.w / 2);
-                this.domain_width = Math.max(active_width * 1.5, this.h * 10);
+                this.domain_width = this._coplanar_auto_domain_width(this.w);
             } else {
                 this.domain_width = 2 * Math.max(this.w * 8, this.h * 15);
             }
@@ -213,6 +215,19 @@ class MicrostripSolver extends FieldSolver2D {
         checkNonNegative(options.via_gap, 'via_gap');
         checkNonNegative(options.rq, 'rq');
 
+        // A finite coplanar ground must hold a via fence of positive width via_gap
+        // inside both edges
+        const gnd_width = options.coplanar_gnd_width;
+        const finite_gnd = !!options.use_coplanar_gnd && gnd_width != null && gnd_width !== 'full';
+        if (finite_gnd) {
+            checkPositive(gnd_width, 'coplanar_gnd_width');
+            const via_width = gnd_width - 2 * (options.via_gap || 0);
+            if (via_width <= 0) {
+                errors.push(`coplanar_gnd_width (${(gnd_width * 1e3).toFixed(3)} mm) must be > 2 * via_gap ` +
+                    `(${(2 * (options.via_gap || 0) * 1e3).toFixed(3)} mm): the via thickness would not be positive`);
+            }
+        }
+
         if (options.trace_thickness <= -options.substrate_height) {
             errors.push("trace_thickness must be > -substrate_height");
         }
@@ -272,16 +287,16 @@ class MicrostripSolver extends FieldSolver2D {
                 const trace_span = 2 * w + trace_spacing;
                 if (options.use_coplanar_gnd) {
                     const gap = options.gap || 0;
-                    const via_gap = options.via_gap || 0;
-                    active_width = trace_span + 2 * (gap + via_gap);
+                    const gnd_extent = finite_gnd ? gnd_width : (options.via_gap || 0);
+                    active_width = trace_span + 2 * (gap + gnd_extent);
                 } else {
                     active_width = trace_span;
                 }
             } else {
                 if (options.use_coplanar_gnd) {
                     const gap = options.gap || 0;
-                    const via_gap = options.via_gap || 0;
-                    active_width = w + 2 * (gap + via_gap);
+                    const gnd_extent = finite_gnd ? gnd_width : (options.via_gap || 0);
+                    active_width = w + 2 * (gap + gnd_extent);
                 } else {
                     active_width = w;
                 }
@@ -297,6 +312,19 @@ class MicrostripSolver extends FieldSolver2D {
         if (errors.length > 0) {
             throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
         }
+    }
+
+    // Auto domain width of a coplanar line whose traces span trace_span. Full-width
+    // grounds reach the wall, so the domain only has to clear the via fence. A
+    // finite ground leaves bare substrate outside its edge where the fields spread
+    // like a microstrip's, so the ground edge gets the microstrip wall clearance.
+    _coplanar_auto_domain_width(trace_span) {
+        if (this.coplanar_gnd_width === null) {
+            const active_width = trace_span + 2 * (this.gap + this.via_gap + this.w / 2);
+            return Math.max(active_width * 1.5, this.h * 10);
+        }
+        const active_width = trace_span + 2 * (this.gap + this.coplanar_gnd_width);
+        return Math.max(active_width * 1.5, active_width + 2 * Math.max(8 * this.w, 15 * this.h));
     }
 
     _calculate_coordinates() {
@@ -393,6 +421,23 @@ class MicrostripSolver extends FieldSolver2D {
             // Via positions (via_gap is distance from ground edge to via edge)
             this.via_x_left_inner = this.x_gap_l - this.via_gap;
             this.via_x_right_inner = this.x_gap_r + this.via_gap;
+        }
+
+        // Outer ground edges and the via fence's outer edge. Full-width grounds
+        // and their via fences run to the domain wall.
+        const x_gap_l = this.is_differential ? this.x_gap_outer_l : this.x_gap_l;
+        const x_gap_r = this.is_differential ? this.x_gap_outer_r : this.x_gap_r;
+        if (this.coplanar_gnd_width === null) {
+            this.x_gnd_outer_l = -this.domain_width / 2;
+            this.x_gnd_outer_r = this.domain_width / 2;
+            this.via_x_left_outer = this.x_gnd_outer_l;
+            this.via_x_right_outer = this.x_gnd_outer_r;
+        } else {
+            this.x_gnd_outer_l = x_gap_l - this.coplanar_gnd_width;
+            this.x_gnd_outer_r = x_gap_r + this.coplanar_gnd_width;
+            const fence_w = this.coplanar_gnd_width - 2 * this.via_gap;
+            this.via_x_left_outer = this.via_x_left_inner - fence_w;
+            this.via_x_right_outer = this.via_x_right_inner + fence_w;
         }
     }
 
@@ -506,20 +551,17 @@ class MicrostripSolver extends FieldSolver2D {
             const via_y_end = Math.max(this.y_trace_start, this.y_trace_end);
             const via_height = via_y_end - this.y_ext_start;
 
-            // Left via (from inner edge to left boundary)
-            if (this.via_x_left_inner > x_min) {
+            if (this.via_x_left_inner > this.via_x_left_outer) {
                 conductors.push(new Conductor(
-                    x_min, via_y_start,
-                    this.via_x_left_inner - x_min, via_height,
+                    this.via_x_left_outer, via_y_start,
+                    this.via_x_left_inner - this.via_x_left_outer, via_height,
                     false
                 ));
             }
-
-            // Right via (from inner edge to right boundary)
-            if (this.via_x_right_inner < x_max) {
+            if (this.via_x_right_inner < this.via_x_right_outer) {
                 conductors.push(new Conductor(
                     this.via_x_right_inner, via_y_start,
-                    x_max - this.via_x_right_inner, via_height,
+                    this.via_x_right_outer - this.via_x_right_inner, via_height,
                     false
                 ));
             }
@@ -550,39 +592,21 @@ class MicrostripSolver extends FieldSolver2D {
             ));
         }
 
-        // Coplanar top grounds (on same layer as signal traces)
+        // Coplanar grounds on the trace layer, from the gap edge out to the ground
+        // edge (the domain wall for full-width grounds)
         if (this.use_coplanar_gnd) {
-            if (this.is_differential) {
-                // Differential: grounds on outer edges only
-                // Left top ground (from left edge to outer gap edge)
-                conductors.push(new Conductor(
-                    x_min, this.y_trace_start,
-                    this.x_gap_outer_l - x_min, this.t,
-                    false, 0, this.plating
-                ));
-
-                // Right top ground (from outer gap edge to right edge)
-                conductors.push(new Conductor(
-                    this.x_gap_outer_r, this.y_trace_start,
-                    x_max - this.x_gap_outer_r, this.t,
-                    false, 0, this.plating
-                ));
-            } else {
-                // Single-ended: grounds on both sides of the trace
-                // Left top ground (from left edge to gap edge)
-                conductors.push(new Conductor(
-                    x_min, this.y_trace_start,
-                    this.x_gap_l - x_min, this.t,
-                    false, 0, this.plating
-                ));
-
-                // Right top ground (from gap edge to right edge)
-                conductors.push(new Conductor(
-                    this.x_gap_r, this.y_trace_start,
-                    x_max - this.x_gap_r, this.t,
-                    false, 0, this.plating
-                ));
-            }
+            const x_gap_l = this.is_differential ? this.x_gap_outer_l : this.x_gap_l;
+            const x_gap_r = this.is_differential ? this.x_gap_outer_r : this.x_gap_r;
+            conductors.push(new Conductor(
+                this.x_gnd_outer_l, this.y_trace_start,
+                x_gap_l - this.x_gnd_outer_l, this.t,
+                false, 0, this.plating
+            ));
+            conductors.push(new Conductor(
+                x_gap_r, this.y_trace_start,
+                this.x_gnd_outer_r - x_gap_r, this.t,
+                false, 0, this.plating
+            ));
         }
 
         // Top ground plane (if present, for stripline)
@@ -841,19 +865,7 @@ class MicrostripSolver extends FieldSolver2D {
                 this.sm_er, this.sm_tand
             ));
 
-            // Solder mask on top of grounds
-            const x_min = -this.domain_width / 2;
-            const x_max = this.domain_width / 2;
-            dielectrics.push(new Dielectric(
-                x_min, this.y_trace_top,
-                xl_gap - x_min, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
-            dielectrics.push(new Dielectric(
-                xr_gap, this.y_trace_top,
-                x_max - xr_gap, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
+            this._add_coplanar_gnd_solder_mask(dielectrics, xl_gap, xr_gap);
         } else {
             // Single-ended coplanar solder mask
             const xl = this.x_tr_l;
@@ -935,22 +947,25 @@ class MicrostripSolver extends FieldSolver2D {
                 this.sm_er, this.sm_tand
             ));
 
-            // Solder mask on top of left ground
-            const x_min = -this.domain_width / 2;
-            const x_max = this.domain_width / 2;
-            dielectrics.push(new Dielectric(
-                x_min, this.y_trace_top,
-                xl_gap - x_min, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
-
-            // Solder mask on top of right ground
-            dielectrics.push(new Dielectric(
-                xr_gap, this.y_trace_top,
-                x_max - xr_gap, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
+            this._add_coplanar_gnd_solder_mask(dielectrics, xl_gap, xr_gap);
         }
+    }
+
+    // Solder mask over the coplanar grounds: their top faces and, past a finite
+    // ground's outer edge, the side band and the bare substrate out to the wall.
+    _add_coplanar_gnd_solder_mask(dielectrics, xl_gap, xr_gap) {
+        const push = (x, y, w, h) => {
+            if (w > 0) dielectrics.push(new Dielectric(x, y, w, h, this.sm_er, this.sm_tand));
+        };
+        const gl = this.x_gnd_outer_l, gr = this.x_gnd_outer_r;
+        push(gl, this.y_trace_top, xl_gap - gl, this.sm_t_trace);
+        push(xr_gap, this.y_trace_top, gr - xr_gap, this.sm_t_trace);
+        if (this.coplanar_gnd_width === null) return;
+        const x_min = -this.domain_width / 2, x_max = this.domain_width / 2;
+        push(gl - this.sm_t_side, this.y_trace_start, this.sm_t_side, this.sm_side_h);
+        push(gr, this.y_trace_start, this.sm_t_side, this.sm_side_h);
+        push(x_min, this.y_sub_end, gl - this.sm_t_side - x_min, this.sm_t_sub);
+        push(gr + this.sm_t_side, this.y_sub_end, x_max - gr - this.sm_t_side, this.sm_t_sub);
     }
 
     ensure_mesh() {
