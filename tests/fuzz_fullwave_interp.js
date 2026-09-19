@@ -35,6 +35,12 @@
 // identical mesh, so its gates are the caches' own tolerances with a little
 // headroom (see test_anchor_caches.js for the deterministic version).
 //
+// MESH_BACKEND=rectilinear runs the same typical-vs-exact comparison on the
+// quasi-static backend: its InterpolatingSweep against computeAtFrequency at every
+// compare frequency on the same adaptive mesh (that backend has no anchor caches
+// or sizing options to disable, and the frequency-list path is the exact path
+// already, so the list comparison is skipped).
+//
 // Usage:   node tests/fuzz_fullwave_interp.js [N] [seed]
 //   e.g.   node tests/fuzz_fullwave_interp.js 12 1
 // Reproduce a flagged case: rerun with the same N and seed; ONLY=4,11 solves
@@ -43,6 +49,7 @@
 import { createRng, randomSpec, buildSolver } from './fuzz_qs_vs_fullwave.js';
 import { InterpolatingSweep } from '../src/interpolating_sweep.js';
 
+const BACKEND = process.env.MESH_BACKEND === 'rectilinear' ? 'rectilinear' : 'triangular';
 const N    = parseInt(process.argv[2]) || 12;
 const SEED = process.argv[3] !== undefined ? parseInt(process.argv[3]) : 1;
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number)) : null;
@@ -82,17 +89,21 @@ const fmtMismatch = w => `${w.q} ${(w.d * 100).toFixed(2)}% (gate ${(w.gate * 10
 
 // Typical use: adaptive solve + InterpolatingSweep, read results off the splines.
 async function solveTypical(spec, fStop, compareFs) {
-    const s = buildSolver(spec, 'triangular');
+    const s = buildSolver(spec, BACKEND);
     s.tri_opts = { lossMethod: 'auto' };
-    await s.solve_adaptive({ ...ADAPTIVE });
-    const sweep = new InterpolatingSweep(s, new Map(), { tolerance: 0.005 });
+    const r = await s.solve_adaptive({ ...ADAPTIVE });
+    // The quasi-static computeAtFrequency re-weights the adaptive solve's cached
+    // fields, so it needs that result (as the worker passes it); the triangular
+    // backend re-solves on its own mesh and ignores the argument.
+    const cached = BACKEND === 'rectilinear' ? r : new Map();
+    const sweep = new InterpolatingSweep(s, cached, { tolerance: 0.005 });
     await sweep.run(F_START, fStop, {});
     return sweep.buildResults(compareFs).map(r => pickModes(r.result));
 }
 
 // Reference: anchor caches off, pre-optimization mesh sizings, exact solve per point.
 async function solveReference(spec, fStop, compareFs) {
-    const s = buildSolver(spec, 'triangular');
+    const s = buildSolver(spec, BACKEND);
     const tAbs = Math.max(Math.abs(s.t ?? 35e-6), 1e-9);
     const wRef = Math.max(s.w ?? s.domain_width / 10, 1e-9);
     s.tri_opts = {
@@ -101,17 +112,18 @@ async function solveReference(spec, fStop, compareFs) {
         hFine: Math.min(tAbs, wRef / 4) * 1.5,        // pre-2026-07-25 thickness sizing
         mqsBandDelta: 0.5, mqsBand: 2,                // pre-tuning skin band (finer, wider)
     };
-    await s.solve_adaptive({ ...ADAPTIVE });
+    const r = await s.solve_adaptive({ ...ADAPTIVE });
     s._sweepFmax = fStop;    // size the skin band for the whole range, like a sweep does
+    const cached = BACKEND === 'rectilinear' ? r : null;
     const out = [];
-    for (const f of compareFs) out.push(pickModes(await s.computeAtFrequency(f, null)));
+    for (const f of compareFs) out.push(pickModes(await s.computeAtFrequency(f, cached)));
     return out;
 }
 
 // Frequency-list sweep through solve_sweep (f_max solved first, then ascending);
 // cachesOff makes every point an exact solve on the same mesh.
 async function solveList(spec, listFs, cachesOff) {
-    const s = buildSolver(spec, 'triangular');
+    const s = buildSolver(spec, BACKEND);
     s.tri_opts = cachesOff ? { lossMethod: 'auto', dispTol: 0, mqsInterpTol: 0 } : { lossMethod: 'auto' };
     const r = await s.solve_sweep({ frequencies: listFs, energy_tol: ADAPTIVE.energy_tol, max_nodes: ADAPTIVE.max_nodes });
     return listFs.map((_, i) => r.modes.map(m => ({
@@ -132,7 +144,7 @@ function fmtSpec(spec) {
 }
 
 async function main() {
-    console.log(`\n### Fuzz full-wave typical-use (interp sweep + caches) vs exact reference — N=${N} seed=${SEED} ###`);
+    console.log(`\n### Fuzz ${BACKEND === 'rectilinear' ? 'quasi-static' : 'full-wave'} typical-use (interp sweep${BACKEND === 'rectilinear' ? '' : ' + caches'}) vs exact reference — N=${N} seed=${SEED} ###`);
     console.log(`gates: ${Object.entries(GATES).map(([q, g]) => `${q} ${(g * 100).toFixed(0)}%`).join('  ')}\n`);
     const rng = createRng(SEED);
     let ok = 0, skipped = 0;
@@ -140,8 +152,12 @@ async function main() {
     for (let i = 0; i < N; i++) {
         const spec = randomSpec(rng);
         const fStop = rng.logf(5e9, 20e9);
+        // The quasi-static reference is the same solver evaluated exactly, so its compare
+        // points sit off the sweep's own sample grid (log-spaced fifths and their
+        // bisections), or the spline would be read at its knots.
         const compareFs = [];
-        for (let k = 0; k < 5; k++) compareFs.push(F_START * Math.pow(fStop / F_START, k / 4));
+        const shift = BACKEND === 'rectilinear' ? 0.37 : 0;
+        for (let k = 0; k < 5; k++) compareFs.push(F_START * Math.pow(fStop / F_START, Math.min(k + shift, 4) / 4));
         const listFs = [];
         for (let k = 0; k < N_LIST; k++) listFs.push(F_START * Math.pow(fStop / F_START, k / (N_LIST - 1)));
         if (ONLY && !ONLY.has(i)) { skipped++; continue; }
@@ -150,7 +166,7 @@ async function main() {
         let typL = null, refL = null, listErr = null;
         try { typ = await solveTypical(spec, fStop, compareFs); } catch (e) { typErr = e.message || String(e); }
         try { ref = await solveReference(spec, fStop, compareFs); } catch (e) { refErr = e.message || String(e); }
-        if (!typErr && !refErr) {
+        if (!typErr && !refErr && BACKEND !== 'rectilinear') {
             try {
                 typL = await solveList(spec, listFs, false);
                 refL = await solveList(spec, listFs, true);
@@ -170,7 +186,7 @@ async function main() {
             continue;
         }
         const worst = worstOf(typ, ref, compareFs, GATES);
-        const worstL = worstOf(typL, refL, listFs, LIST_GATES);
+        const worstL = typL && refL ? worstOf(typL, refL, listFs, LIST_GATES) : null;
         const bad = [];
         if (worst && worst.over > 1) bad.push(`MISMATCH ${fmtMismatch(worst)}`);
         if (worstL && worstL.over > 1) bad.push(`LIST MISMATCH ${fmtMismatch(worstL)}`);

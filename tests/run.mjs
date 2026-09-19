@@ -85,6 +85,7 @@ const TIERS = {
         { file: 'tests/test_thz_mesh.js', cost: 60 },
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['6', '3', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [smoke N=6 seed=3]', cost: 74 },
         { file: 'tests/fuzz_fullwave_interp.js', args: ['3', '1'], label: 'tests/fuzz_fullwave_interp.js [smoke N=3 seed=1]', cost: 176 },
+        { file: 'tests/fuzz_fullwave_interp.js', args: ['4', '1'], env: { MESH_BACKEND: 'rectilinear' }, label: 'tests/fuzz_fullwave_interp.js [rectilinear smoke N=4 seed=1]', cost: 30 },
     ],
     e2e: [
         'src/tri_solver/tests/e2e_responsive.mjs',
@@ -96,6 +97,7 @@ const TIERS = {
     fuzz: [
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['40', '1', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [N=40 seed=1]', cost: 600 },
         { file: 'tests/fuzz_fullwave_interp.js', args: ['12', '1'], label: 'tests/fuzz_fullwave_interp.js [N=12 seed=1]', cost: 700 },
+        { file: 'tests/fuzz_fullwave_interp.js', args: ['20', '1'], env: { MESH_BACKEND: 'rectilinear' }, label: 'tests/fuzz_fullwave_interp.js [rectilinear N=20 seed=1]', cost: 150 },
     ],
 };
 

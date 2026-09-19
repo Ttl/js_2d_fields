@@ -70,6 +70,9 @@ const BAD_Q  = 2000;
 // broadside proximity below the warning threshold).
 const R_THRESH = (parseFloat(process.argv[5]) || 25) / 100;
 const R_RELAX  = 0.60;
+// Shunt-conductance and inductance gates (see the G/L block in main).
+const G_THRESH = 0.15;
+const L_THRESH = 0.10;
 
 // --- Seeded PRNG (deterministic, reproducible) ---
 export function createRng(seed) {
@@ -99,7 +102,11 @@ export function randomSpec(rng) {
     const rollPlating = () => {
         if (!rng.bool(0.2)) return false;
         spec.plating_sigma = rng.logf(1e6, 6e7);
-        spec.plating_t = rng.logf(1e-6, 8e-6);
+        // One draw in five puts the plating at or beyond the trace thickness: solid
+        // plating metal on both backends (see S4 in docs/untested_edge_cases.md).
+        const tAbs = Math.abs(spec.t ?? spec.bs_t);
+        spec.plating_t = rng.bool(0.2) ? tAbs * rng.f(1, 1.5) : rng.logf(1e-6, 8e-6);
+        spec.plating_thick_corners = rng.bool(0.7);
         // Face combo (top/sides/bottom independent, at least one guaranteed) and
         // plated-surface roughness — both were fixed (top+sides, rq 0) before
         // 2026-08-16; the app exposes all of them.
@@ -140,7 +147,11 @@ export function randomSpec(rng) {
 
     // Bulk conductor σ spans 1e6–6e7 S/m (poor alloys up to copper): at fixed
     // frequency this sweeps δ ~8×, walking the skin-transition/thickness ratio.
-    const w = rng.logf(0.05e-3, 3e-3), h = rng.logf(0.05e-3, 1.5e-3), t = rng.logf(10e-6, 70e-6);
+    const w = rng.logf(0.05e-3, 3e-3), h = rng.logf(0.05e-3, 1.5e-3);
+    // Embedded (negative-thickness) traces in ~15% of draws, kept above the
+    // substrate floor (validation requires t > -h).
+    let t = rng.logf(10e-6, 70e-6);
+    if (rng.bool(0.15)) t = -Math.min(t, 0.8 * h);
     Object.assign(spec, {
         w, h, t, er: rng.f(2.2, 10), tand: rng.f(0.001, 0.02), sigma: rng.logf(1e6, 6e7),
         gnd_thickness: rng.logf(10e-6, 35e-6),
@@ -149,14 +160,23 @@ export function randomSpec(rng) {
     if (isDiff) spec.trace_spacing = rng.logf(0.02e-3, 0.6e-3);
     // Top height floor of 2t: a cover thinner than the trace always fails
     // parameter validation (trace_thickness > enclosure_height) on both backends.
-    if (tl.includes('stripline')) { spec.er_top = spec.er; spec.tand_top = spec.tand; spec.stripline_top_h = rng.logf(Math.max(0.05e-3, 2 * t), 1.5e-3); }
+    // The cover material matches the substrate half the time (the classic
+    // homogeneous stripline); otherwise it is air (eps_r 1) or an independent
+    // dielectric, which floats the two grounds against each other in the full-wave
+    // eigenproblem (see TriBackend._eigenAbc).
+    if (tl.includes('stripline')) {
+        if (rng.bool(0.5)) { spec.er_top = spec.er; spec.tand_top = spec.tand; }
+        else if (rng.bool(0.4)) { spec.er_top = 1; spec.tand_top = 0; }
+        else { spec.er_top = rng.f(2.2, 10); spec.tand_top = rng.f(0.001, 0.02); }
+        spec.stripline_top_h = rng.logf(Math.max(0.05e-3, 2 * t), 1.5e-3);
+    }
     if (tl.includes('gcpw')) { spec.gap = rng.logf(0.05e-3, 0.5e-3); spec.via_gap = rng.logf(0.05e-3, 0.5e-3); }
 
     // Advanced features. Solder mask applies to the microstrip AND gcpw families
     // (gcpw takes the coplanar solder mask path in MicrostripSolver); its material
     // and thicknesses are randomized — er well past the usual 3.5 to make the
-    // C/eps shift it causes clearly visible in the comparison. Ground cutout stays
-    // microstrip-family-only, as in the app.
+    // C/eps shift it causes clearly visible in the comparison. Top dielectric and
+    // ground cutout apply to the microstrip AND gcpw families, as in the app.
     if (tl === 'microstrip' || tl === 'diff_microstrip' || tl === 'gcpw' || tl === 'diff_gcpw') {
         spec.use_sm = rng.bool(0.3);
         if (spec.use_sm) {
@@ -173,7 +193,7 @@ export function randomSpec(rng) {
             else if (spec.sm_style === 'trace-only') spec.sm_t_sub = 0;
         }
     }
-    if (tl === 'microstrip' || tl === 'diff_microstrip') {
+    if (tl === 'microstrip' || tl === 'diff_microstrip' || tl === 'gcpw' || tl === 'diff_gcpw') {
         // Top dielectric material drawn from the same range as the substrate.
         if (rng.bool(0.3)) {
             spec.use_top_diel = true; spec.top_diel_h = rng.logf(0.05e-3, 0.5e-3);
@@ -200,17 +220,23 @@ export function randomSpec(rng) {
     // backend bug, so those combos are excluded by construction instead of
     // surfacing as spurious discrepancies. Open boundaries stay covered by the
     // non-enclosure cases, whose auto-sized domains keep the walls far away.
-    if (rng.bool(0.3)) {
+    // Besides the closed box, the app's other enclosure shapes: a lid alone over
+    // the auto-sized (far) open sides, side walls alone under the auto-sized (far)
+    // open top, and side walls on a stripline (its lid is intrinsic). A lid without
+    // side walls leaves the grounds floating in the full-wave eigenproblem.
+    if (rng.bool(0.35)) {
         spec.use_enclosure = true;
         let span = isDiff ? (2 * w + spec.trace_spacing) : w;
         // GCPW: the enclosure must clear the full coplanar active width (trace +
         // gaps + via fences, matching MicrostripSolver's active_width), not just
         // the trace span — otherwise the combo always fails validation.
         if (tl.includes('gcpw')) span += (isDiff ? 0 : w) + 2 * (spec.gap + spec.via_gap);
-        spec.enclosure_width = span * rng.f(2.5, 6) + 2 * spec.gnd_thickness;
-        spec.enclosure_height = (h + t) * rng.f(1.5, 4);
-        spec.use_side_gnd = true;
-        spec.use_top_gnd = true;
+        const style = tl.includes('stripline') ? 'sides' : rng.pick(['box', 'box', 'lid', 'sides']);
+        spec.enclosure_style = style;
+        spec.use_side_gnd = style !== 'lid';
+        spec.use_top_gnd = style !== 'sides';
+        spec.enclosure_width = style === 'lid' ? 'auto' : span * rng.f(2.5, 6) + 2 * spec.gnd_thickness;
+        spec.enclosure_height = style === 'sides' ? 'auto' : (h + t) * rng.f(1.5, 4);
     }
     spec.use_plating = rollPlating();
     return spec;
@@ -234,7 +260,8 @@ function addCommon(o, spec) {
         o.boundaries = [lr, lr, top, bot];
     }
     if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: spec.plating_rq ?? 0,
-        top: spec.plating_top ?? true, sides: spec.plating_sides ?? true, bottom: spec.plating_bottom ?? false, thick_corners: true };
+        top: spec.plating_top ?? true, sides: spec.plating_sides ?? true, bottom: spec.plating_bottom ?? false,
+        thick_corners: spec.plating_thick_corners ?? true };
 }
 
 export function buildSolver(spec, backend) {
@@ -249,7 +276,8 @@ export function buildSolver(spec, backend) {
         };
         if (spec.use_enclosure) { o.enclosure_width = spec.enclosure_width; if (spec.use_side_gnd) o.boundaries = ['gnd', 'gnd', 'gnd', 'gnd']; }
         if (spec.use_plating) o.plating = { sigma: spec.plating_sigma, thickness: spec.plating_t, rq: spec.plating_rq ?? 0,
-        top: spec.plating_top ?? true, sides: spec.plating_sides ?? true, bottom: spec.plating_bottom ?? false, thick_corners: true };
+        top: spec.plating_top ?? true, sides: spec.plating_sides ?? true, bottom: spec.plating_bottom ?? false,
+        thick_corners: spec.plating_thick_corners ?? true };
         const s = new BroadsideStriplineSolver(o);
         s.use_causal_materials = !!spec.use_causal;
         return s;
@@ -297,7 +325,7 @@ async function solveOn(spec, backend) {
         // Compare every mode the backend returns: single-ended → [single]; differential →
         // [odd, even], in that fixed order from the shared FieldSolver2D path on both backends.
         return {
-            modes: r.modes.map(m => ({ Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C, R: m.RLGC.R, mode: m.mode })),
+            modes: r.modes.map(m => ({ Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C, R: m.RLGC.R, G: m.RLGC.G, L: m.RLGC.L, mode: m.mode })),
             // Warning tags for the R-gate relaxation: QS loss-accuracy reasons
             // ('skin-transition' / 'broadside-proximity') and tri fallback types.
             warns: (r.warnings || []).map(w => ({ type: w.type, reason: w.reason || null })),
@@ -324,13 +352,16 @@ function fmtSpec(spec) {
     else s += ` w=${u(spec.w)}mm h=${u(spec.h)}mm t=${u(spec.t, 1e6, 1)}µm er=${spec.er.toFixed(2)}`;
     s += ` sig=${((spec.sigma ?? spec.bs_sigma) / 1e6).toFixed(1)}e6 f=${(spec.freq / 1e9).toFixed(2)}GHz`;
     if (spec.trace_spacing) s += ` gap=${u(spec.trace_spacing)}mm`;
+    if (spec.tl.includes('stripline') && spec.tl !== 'broadside_stripline' && spec.er_top !== spec.er) s += ` er_top=${spec.er_top.toFixed(2)}`;
     const feats = ['use_sm', 'use_top_diel', 'use_gnd_cut', 'use_enclosure', 'use_side_gnd', 'use_top_gnd', 'use_plating', 'use_causal']
         .filter(k => spec[k]).map(k => {
             if (k === 'use_sm' && spec.sm_style && spec.sm_style !== 'full') return `sm:${spec.sm_style}`;
+            if (k === 'use_enclosure' && spec.enclosure_style) return `enclosure:${spec.enclosure_style}`;
             if (k === 'use_plating') {
                 const faces = [spec.plating_top && 't', spec.plating_sides && 's', spec.plating_bottom && 'b']
                     .filter(Boolean).join('');
-                return `plating:${faces || 'ts'}${spec.plating_rq ? '+rq' : ''}`;
+                const tAbs = Math.abs(spec.t ?? spec.bs_t);
+                return `plating:${faces || 'ts'}${spec.plating_rq ? '+rq' : ''}${spec.plating_thick_corners === false ? '+flat' : ''}${spec.plating_t >= tAbs ? '+solid' : ''}`;
             }
             return k.replace('use_', '');
         });
@@ -345,7 +376,7 @@ async function main() {
         `R>${(R_THRESH * 100).toFixed(0)}% (warned ${(R_RELAX * 100).toFixed(0)}%) Qmax>${BAD_Q} ###`);
     console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
     const rng = createRng(SEED);
-    const flagged = { discrepancy: [], loss: [], badMesh: [], crash: [] };
+    const flagged = { discrepancy: [], loss: [], rlgc: [], badMesh: [], crash: [] };
     let ok = 0, skipped = 0, rejected = 0;
     const byType = {};
     for (let i = 0; i < N; i++) {
@@ -403,6 +434,27 @@ async function main() {
             const dMax = Math.max(dZ, dC);
             if (!worst || dMax > worst.dMax) worst = { mode: q.mode, dZ, dE, dC, dMax, q, w };
         }
+        // Shunt conductance and total inductance, each at its own gate. G follows the
+        // same static loss weighting on both backends, so it tracks C up to the mesh
+        // (and the lossless-air-void class Q1 that C cannot see). L carries the
+        // backends' different internal-inductance models on top of the shared vacuum
+        // C0, a few percent of L at these frequencies.
+        let worstGL = null;
+        for (let mi = 0; mi < nModes; mi++) {
+            const q = qs.modes[mi], w = fw.modes[mi];
+            const dG = (q.G > 0 && w.G > 0) ? relDiff(q.G, w.G) : 0;
+            const dL = relDiff(q.L, w.L);
+            const over = Math.max(dG / G_THRESH, dL / L_THRESH);
+            if (!worstGL || over > worstGL.over) worstGL = { mode: q.mode, dG, dL, over, q, w };
+        }
+        if (worstGL && worstGL.over > 1) {
+            flagged.rlgc.push({ i, spec, mode: worstGL.mode, dG: worstGL.dG, dL: worstGL.dL });
+            const tag = nModes > 1 ? ` [${worstGL.mode}]` : '';
+            console.log(`[${i}] ✗ G/L DISCREPANCY${tag} (G ${(worstGL.dG * 100).toFixed(0)}% L ${(worstGL.dL * 100).toFixed(0)}%)\n` +
+                `      ${fmtSpec(spec)}\n` +
+                `      qs: G=${worstGL.q.G.toExponential(3)} L=${(worstGL.q.L * 1e9).toFixed(2)}nH | ` +
+                `fw: G=${worstGL.w.G.toExponential(3)} L=${(worstGL.w.L * 1e9).toFixed(2)}nH`);
+        }
         if (worst && worst.dMax > THRESH) {
             flagged.discrepancy.push({ i, spec, mode: worst.mode, dZ: worst.dZ, dE: worst.dE, dC: worst.dC });
             const tag = nModes > 1 ? ` [${worst.mode}]` : '';
@@ -437,7 +489,8 @@ async function main() {
                 `      ${fmtSpec(spec)}\n` +
                 `      R qs=${worstR.q.R.toFixed(2)} vs fw=${worstR.w.R.toFixed(2)} Ω/m`);
         }
-        if (!badMesh && (!worst || worst.dMax <= THRESH) && (!worstR || worstR.dR <= rGate)) ok++;
+        if (!badMesh && (!worst || worst.dMax <= THRESH) && (!worstR || worstR.dR <= rGate)
+            && (!worstGL || worstGL.over <= 1)) ok++;
     }
 
     console.log(`\n${'='.repeat(72)}`);
@@ -449,7 +502,7 @@ async function main() {
     const lossWarned = flagged.loss.length - lossUnwarned;
     console.log(`SUMMARY: ${ok}/${N} clean | ${flagged.discrepancy.length} discrepancy | ` +
         `${flagged.loss.length} loss-discrepancy (${lossUnwarned} unwarned, ${lossWarned} warned) | ` +
-        `${flagged.badMesh.length} bad-mesh | ` +
+        `${flagged.rlgc.length} G/L-discrepancy | ${flagged.badMesh.length} bad-mesh | ` +
         `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid)`);
     if (lossUnwarned) {
         console.log(`unwarned loss rows (investigate, do not just raise the gate):`);
@@ -457,7 +510,7 @@ async function main() {
             console.log(`  [${f.i}] ${(100 * f.dR).toFixed(0)}%${f.mode ? ` [${f.mode}]` : ''}  ${fmtSpec(f.spec)}`);
     }
     console.log(`${'='.repeat(72)}`);
-    if (flagged.discrepancy.length || flagged.loss.length || flagged.badMesh.length || flagged.crash.length) process.exitCode = 1;
+    if (flagged.discrepancy.length || flagged.loss.length || flagged.rlgc.length || flagged.badMesh.length || flagged.crash.length) process.exitCode = 1;
 }
 
 import { pathToFileURL } from 'url';
