@@ -2898,6 +2898,9 @@ function init() {
         updateInterpVisibility();
     }
 
+    // A reload keeps the form state: the type may come back as custom, with the
+    // geometry text the browser restored or, without one, the first template.
+    if (document.getElementById('tl_type').value === 'custom') activateCustomGeometry();
     updateGeometry();
     draw();
     resizeCanvas();
