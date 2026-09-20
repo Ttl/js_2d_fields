@@ -296,7 +296,6 @@ class CustomGeometrySolver extends FieldSolver2D {
     _build_lists(rects, platingMaterial) {
         this.dielectrics = [];
         this.conductors = [];
-        this._wall_slab = [];   // per conductor: the slab added behind a gnd boundary
         const own = v => v !== null && v !== undefined;
         this._own_finish = rects.some(r => r.kind !== 'diel' && (own(r.sigma) || own(r.rq) || r.platingOwn));
         for (const r of rects) {
@@ -317,7 +316,6 @@ class CustomGeometrySolver extends FieldSolver2D {
             if (own(r.sigma)) c.sigma = r.sigma;   // own conductivity
             if (own(r.rq)) c.rq = r.rq;            // own surface roughness
             this.conductors.push(c);
-            this._wall_slab.push(!!r.wall);
         }
     }
 
@@ -344,10 +342,10 @@ class CustomGeometrySolver extends FieldSolver2D {
         return false;
     }
 
-    // Conductors that reach a domain boundary. An open boundary cuts the conductor off
-    // where the domain ends, which is rarely what was drawn, and a ground boundary
-    // connects it to ground. A ground lying flat along a ground boundary is that
-    // boundary's own metal and is not reported, the symmetry plane is no boundary.
+    // Signal conductors that reach a domain boundary. An open boundary cuts the
+    // conductor off where the domain ends, which is rarely what was drawn, and a
+    // ground boundary connects it to ground. Grounds are not reported: a ground run
+    // to a boundary is a normal way to draw a reference plane.
     boundaryContactWarnings() {
         const out = [];
         const tol = this.domain_width * 1e-9;
@@ -355,25 +353,18 @@ class CustomGeometrySolver extends FieldSolver2D {
         const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;
         const Y0 = this.domain_y_min, Y1 = this.domain_height;
         const names = ['left', 'right', 'top', 'bottom'];
-        this.conductors.forEach((c, i) => {
-            if (this._wall_slab[i]) return;
+        for (const c of this.conductors) {
+            if (!c.is_signal) continue;
             const touches = [c.x_min <= X0 + tol, c.x_max >= X1 - tol, c.y_max >= Y1 - tol, c.y_min <= Y0 + tol];
-            const along = [c.y_max - c.y_min, c.y_max - c.y_min, c.x_max - c.x_min, c.x_max - c.x_min];
-            const wallLen = [Y1 - Y0, Y1 - Y0, X1 - X0, X1 - X0];
-            // Part of a ground boundary: a ground that runs along the whole of it.
-            const isWallMetal = !c.is_signal && names.some((_, k) =>
-                touches[k] && b[k] === 'gnd' && along[k] >= wallLen[k] - 2 * this.wall_t - tol);
-            if (isWallMetal) return;
-            const what = c.is_signal ? 'Signal conductor' : 'Ground conductor';
             const where = c.src_line ? ` (line ${c.src_line})` : '';
             names.forEach((name, k) => {
                 if (!touches[k]) return;
                 out.push(b[k] === 'open'
-                    ? `${what}${where} reaches the open ${name} boundary and is cut off there. ` +
+                    ? `Signal conductor${where} reaches the open ${name} boundary and is cut off there. ` +
                       `Give it a finite size, or enlarge the domain, unless a conductor running to the edge of the solved region is intended.`
-                    : `${what}${where} touches the ${name} ground boundary and is connected to it.`);
+                    : `Signal conductor${where} touches the ${name} ground boundary and is connected to it.`);
             });
-        });
+        }
         return out;
     }
 
