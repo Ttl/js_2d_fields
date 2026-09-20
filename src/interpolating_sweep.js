@@ -1,6 +1,9 @@
 import { Complex } from './complex.js';
 import { buildPhysicalRLGC } from './sparameters.js';
 
+// Per-line loss data carried next to R, L, G, C (see addSample).
+const AUX_KEYS = ['aR', 'aL', 'aRm0', 'aRm1', 'aRm2', 'aLm0', 'aLm1', 'aLm2', 'aGm0', 'aGm1', 'aGm2'];
+
 /**
  * Natural cubic spline interpolation.
  * Given data points (x_i, y_i), builds a C2-continuous piecewise cubic.
@@ -174,10 +177,14 @@ class InterpolatingSweep {
             L: m.RLGC.L,
             G: m.RLGC.G,
             C: m.RLGC.C,
-            // Line asymmetry of a pair with unequal traces (R11 - R22, L11 - L22),
-            // relative to the mode's own R and L so it splines as a smooth ratio.
+            // Per-line loss data of a pair (R11 - R22 and L11 - L22, or the matrices Rm
+            // and Lim), relative to the mode's own R and L so it splines as a smooth ratio.
             aR: (m.RLGC.dR || 0) / m.RLGC.R,
-            aL: (m.RLGC.dL || 0) / m.RLGC.L
+            aL: (m.RLGC.dL || 0) / m.RLGC.L,
+            ...Object.fromEntries([0, 1, 2].flatMap(k => [
+                [`aRm${k}`, m.RLGC.Rm ? m.RLGC.Rm[k] / m.RLGC.R : 0],
+                [`aLm${k}`, m.RLGC.Lim ? m.RLGC.Lim[k] / m.RLGC.L : 0],
+                [`aGm${k}`, (m.RLGC.Gm && m.RLGC.G > 0) ? m.RLGC.Gm[k] / m.RLGC.G : 0]]))
         }));
         this.samplePoints.set(t, modeData);
         return result;
@@ -207,7 +214,7 @@ class InterpolatingSweep {
                     ? new LogSpline(ts, values)
                     : new CubicSpline(ts, values);
             }
-            for (const key of ['aR', 'aL']) {
+            for (const key of AUX_KEYS) {
                 const values = entries.map(e => e[1][mi][key] || 0);
                 modeSplines[key] = values.some(v => v !== 0) ? new CubicSpline(ts, values) : null;
             }
@@ -228,8 +235,7 @@ class InterpolatingSweep {
             L: ms.L.evaluate(t),
             G: ms.G.evaluate(t),
             C: ms.C.evaluate(t),
-            aR: ms.aR ? ms.aR.evaluate(t) : 0,
-            aL: ms.aL ? ms.aL.evaluate(t) : 0
+            ...Object.fromEntries(AUX_KEYS.map(k => [k, ms[k] ? ms[k].evaluate(t) : 0]))
         }));
     }
 
@@ -491,7 +497,10 @@ class InterpolatingSweep {
                     Z0,
                     eps_eff,
                     C, C0: C, // C0 not meaningful for interpolated; use C as placeholder
-                    RLGC: (im.aR || im.aL) ? { R, L, G, C, dR: im.aR * R, dL: im.aL * L } : { R, L, G, C },
+                    RLGC: { R, L, G, C,
+                        ...((im.aR || im.aL) ? { dR: im.aR * R, dL: im.aL * L } : {}),
+                        ...(im.aGm0 ? { Gm: [0, 1, 2].map(k => im[`aGm${k}`] * G) } : {}),
+                        ...(im.aRm0 ? { Rm: [0, 1, 2].map(k => im[`aRm${k}`] * R), Lim: [0, 1, 2].map(k => im[`aLm${k}`] * L) } : {}) },
                     Zc,
                     alpha_c, alpha_d, alpha_total,
                     L_internal,

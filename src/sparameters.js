@@ -277,17 +277,26 @@ function buildPhysicalRLGC(rlgc_odd, rlgc_even, physMatrix) {
         return { R: sym(rlgc_odd.R, rlgc_even.R), L: sym(rlgc_odd.L, rlgc_even.L),
                  G: sym(rlgc_odd.G, rlgc_even.G), C: sym(rlgc_odd.C, rlgc_even.C) };
     }
-    let R, G;
+    // Exact per-line loss data from the solver, each [X11, X12, X22]: Gm from the
+    // dielectric loss of the per-trace solves, Rm and Lim (the internal L, which the
+    // external physMatrix.L lacks) from single-trace conductor-loss evaluations. What is
+    // missing falls back to the modal-eigenvector transform (the symmetric
+    // reconstruction for a velocity-degenerate pair).
+    const m3 = a => [[a[0], a[1]], [a[1], a[2]]];
+    let Tv = null;
     if (physMatrix.Tv) {
         const [vo, ve] = physMatrix.Tv;               // eigenvectors (any norm); use unit-norm columns
         const no = Math.hypot(vo[0], vo[1]) || 1, ne = Math.hypot(ve[0], ve[1]) || 1;
-        const Tv = [[vo[0] / no, ve[0] / ne], [vo[1] / no, ve[1] / ne]];
-        R = _modalToPhys2x2(rlgc_odd.R, rlgc_even.R, Tv, false);    // series
-        G = _modalToPhys2x2(rlgc_odd.G, rlgc_even.G, Tv, true);     // shunt
-    } else {
-        R = sym(rlgc_odd.R, rlgc_even.R);
-        G = sym(rlgc_odd.G, rlgc_even.G);
+        Tv = [[vo[0] / no, ve[0] / ne], [vo[1] / no, ve[1] / ne]];
     }
+    const G = rlgc_odd.Gm ? m3(rlgc_odd.Gm)
+        : Tv ? _modalToPhys2x2(rlgc_odd.G, rlgc_even.G, Tv, true) : sym(rlgc_odd.G, rlgc_even.G);
+    if (rlgc_odd.Rm && rlgc_odd.Lim) {
+        const Li = rlgc_odd.Lim, Le = physMatrix.L;
+        return { R: m3(rlgc_odd.Rm), G, C: physMatrix.C,
+                 L: [[Le[0][0] + Li[0], Le[0][1] + Li[1]], [Le[1][0] + Li[1], Le[1][1] + Li[2]]] };
+    }
+    const R = Tv ? _modalToPhys2x2(rlgc_odd.R, rlgc_even.R, Tv, false) : sym(rlgc_odd.R, rlgc_even.R);
     return { R, L: physMatrix.L, G, C: physMatrix.C };
 }
 

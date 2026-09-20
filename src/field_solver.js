@@ -1144,10 +1144,11 @@ export class FieldSolver2D {
      * @param {boolean} vacuum_fields - Ex/Ey are vacuum-solve fields
      * @returns {{R_ac: number, R_dc: number, R_total: number, L_internal: number}}
      */
-    // line (0 = positive trace, 1 = negative trace): Ex/Ey are the fields of a pair with
-    // unit current in that trace only (see _line_asymmetry). The result is then that
-    // line's R and internal L: no differential power factor, its own DC resistance and
-    // skin depth.
+    // line (0 = positive trace, 1 = negative trace, 2 = both): Ex/Ey are the fields of a
+    // pair with unit current in that trace only, or in both (see _line_asymmetry). The
+    // result is then the quadratic form I^T X I of R and of the internal L for those
+    // currents: no differential power factor, the DC resistance and skin depth of the
+    // driven trace(s).
     calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false, mode = null, line = null) {
         if (!this.solution_valid) throw new Error("Fields invalid");
 
@@ -1165,7 +1166,7 @@ export class FieldSolver2D {
         // per line.
         // Signal metal is the plating metal when the plating is at least as thick
         // as the trace (the whole cross-section is plating).
-        const sigma_sig = this._signal_sigma(line);
+        const sigma_sig = this._signal_sigma(line === 2 ? null : line);
         const ownSigma = this._own_sigma();
         // Per-conductor conductivities: conductances add within the positive traces,
         // the negative traces and the grounds.
@@ -1177,8 +1178,9 @@ export class FieldSolver2D {
         let R_dc_sig, R_dc_gnd;
         if (line !== null) {
             const g = this._dc_conductances();
-            R_dc_sig = 1.0 / (line === 0 ? g.pos : g.neg);
-            R_dc_gnd = R_gnd0;
+            // Both traces driven: the two trace resistances add and the ground returns 2 I.
+            R_dc_sig = line === 2 ? 1.0 / g.pos + 1.0 / g.neg : 1.0 / (line === 0 ? g.pos : g.neg);
+            R_dc_gnd = line === 2 ? 4.0 * R_gnd0 : R_gnd0;
         } else if (this.is_differential && (mode === 'odd' || mode === 'even')) {
             // Both modes put the same current magnitude through each trace, so the
             // per-line value is the mean of the two trace resistances.
@@ -1810,26 +1812,45 @@ export class FieldSolver2D {
         finally { this.freq = f0; }
     }
 
-    // R11 - R22 and L11 - L22 of a pair whose traces differ in metal or finish (line 1 =
-    // the positive trace), null when they do not or the vacuum fields are missing. The
-    // field of unit current in one trace is half the sum (difference) of the even and
-    // odd vacuum fields, each scaled to unit current per trace by its vacuum impedance.
-    // The surface integral of that field is the line's R and internal L; the modes keep
-    // supplying R11 + R22 and R12.
+    // Per-line loss data of a pair (line 1 = the positive trace), null when not needed or
+    // the vacuum fields are missing. The surface integral of the vacuum field of given
+    // trace currents I is I^T R I, and I^T L_int I for the reactance.
+    //   - mirror-symmetric geometry whose traces differ in metal or finish: { dR, dL } =
+    //     R11 - R22 and L11 - L22. The field of unit current in one trace is half the sum
+    //     (difference) of the even and odd vacuum fields, each scaled to unit current per
+    //     trace by its vacuum impedance. The modes supply R11 + R22 and R12.
+    //   - asymmetric geometry (physMatrix): { Rm, Lim } = [X11, X12, X22]. The per-trace
+    //     vacuum solves are combined with the voltages V = Cm0^-1 I / c of the currents
+    //     [1, 0], [0, 1] and [1, 1], the last giving X12.
     _line_asymmetry(odd, even) {
-        if (!this.is_differential || this.sym_half || !this.conductor_id || !this._pair_finish_differs()) return null;
-        if (!odd || !even || !odd.Ex0 || !even.Ex0 || !(odd.C0 > 0) || !(even.C0 > 0)) return null;
-        const zo = 1 / (CONSTANTS.C * odd.C0), ze = 1 / (CONSTANTS.C * even.C0);
-        const comb = (A, B, sb) => A.map((row, i) => {
+        if (!this.is_differential || this.sym_half || !this.conductor_id) return null;
+        const warn = [this._skinTransitionWarn, this._platingTransitionWarn];
+        const mix = (a, A, b, B) => A.map((row, i) => {
             const out = new Float64Array(row.length), rb = B[i];
-            for (let j = 0; j < row.length; j++) out[j] = 0.5 * (ze * row[j] + sb * zo * rb[j]);
+            for (let j = 0; j < row.length; j++) out[j] = a * row[j] + b * rb[j];
             return out;
         });
-        const warn = [this._skinTransitionWarn, this._platingTransitionWarn];
-        const lines = [1, -1].map((sb, line) => this.calculate_conductor_loss(
-            comb(even.Ex0, odd.Ex0, sb), comb(even.Ey0, odd.Ey0, sb), 1, true, null, line));
-        [this._skinTransitionWarn, this._platingTransitionWarn] = warn;
-        return { dR: lines[0].R_total - lines[1].R_total, dL: lines[0].L_internal - lines[1].L_internal };
+        try {
+            const tv = this._modalPhys ? this._traceVac : null;
+            if (tv) {
+                const M = tv.Cm0, det = M[0][0] * M[1][1] - M[0][1] * M[1][0], k = 1 / (CONSTANTS.C * det);
+                const X = [[1, 0], [0, 1], [1, 1]].map((I, line) => {
+                    const va = k * (M[1][1] * I[0] - M[0][1] * I[1]), vb = k * (M[0][0] * I[1] - M[1][0] * I[0]);
+                    return this.calculate_conductor_loss(mix(va, tv.Av.Ex, vb, tv.Bv.Ex), mix(va, tv.Av.Ey, vb, tv.Bv.Ey),
+                        1, true, null, line);
+                });
+                const m3 = key => [X[0][key], (X[2][key] - X[0][key] - X[1][key]) / 2, X[1][key]];
+                return { Rm: m3('R_total'), Lim: m3('L_internal') };
+            }
+            if (this._modalPhys || !this._pair_finish_differs()) return null;
+            if (!odd || !even || !odd.Ex0 || !even.Ex0 || !(odd.C0 > 0) || !(even.C0 > 0)) return null;
+            const zo = 1 / (CONSTANTS.C * odd.C0), ze = 1 / (CONSTANTS.C * even.C0);
+            const lines = [1, -1].map((sb, line) => this.calculate_conductor_loss(
+                mix(0.5 * ze, even.Ex0, 0.5 * sb * zo, odd.Ex0), mix(0.5 * ze, even.Ey0, 0.5 * sb * zo, odd.Ey0), 1, true, null, line));
+            return { dR: lines[0].R_total - lines[1].R_total, dL: lines[0].L_internal - lines[1].L_internal };
+        } finally {
+            [this._skinTransitionWarn, this._platingTransitionWarn] = warn;
+        }
     }
 
     _pair_finish_differs() {
@@ -1859,7 +1880,17 @@ export class FieldSolver2D {
         if (this.freq === 0) {
             return 0;
         }
+        const Pd = this._dielectric_power(V, 2 * Math.PI * this.freq);
 
+        // Power normalization factor
+        const power_factor = this.is_differential ? 0.5 : 1.0;
+        const P_flow = 1.0 / (2 * Z0);
+        return 8.686 * (power_factor * Pd / (2 * P_flow));
+    }
+
+    // Power dissipated in the dielectrics by the potential V at angular frequency omega
+    // (full domain). For a pair, 2 * P of the potential of drive v is v^T G v.
+    _dielectric_power(V, omega) {
         const ny = this.y.length;
         const nx = this.x.length;
         const dx_array = diff(this.x);
@@ -1873,7 +1904,7 @@ export class FieldSolver2D {
         // field that belongs mostly to the other side (a lossy cover over an air layer
         // read G 30% high). Cells inside a conductor have a constant V and drop out.
         let Pd = 0.0;
-        const wPd = 0.5 * (2 * Math.PI * this.freq) * CONSTANTS.EPS0;
+        const wPd = 0.5 * omega * CONSTANTS.EPS0;
         for (let i = 0; i < ny - 1; i++) {
             const V0 = V[i], V1 = V[i + 1];
             const ec = this.epsilon_cell[i], tc = this.tand_cell[i];
@@ -1889,11 +1920,7 @@ export class FieldSolver2D {
         }
         // Half-domain solve: the cells cover x >= 0 of a mirror-symmetric field.
         if (this.sym_half) Pd *= 2;
-
-        // Power normalization: differential has 0.5 factor
-        const power_factor = this.is_differential ? 0.5 : 1.0;
-        const P_flow = 1.0 / (2 * Z0);
-        return 8.686 * (power_factor * Pd / (2 * P_flow));
+        return Pd;
     }
 
     rlgc(R_total, L_internal, alpha_diel, C_mode, Z0_mode) {
@@ -2354,7 +2381,7 @@ export class FieldSolver2D {
     async _solve_modal_differential() {
         // Half-domain pair: symmetric by construction and only one trace is meshed, so
         // the odd/even drives are the modes and the per-trace solves are impossible.
-        if (this.sym_half) { this._modalPhys = null; return null; }
+        if (this.sym_half) { this._modalPhys = null; this._traceVac = null; return null; }
         // Per-trace static fields (dielectric + vacuum). The Laplace solve is linear in the
         // drive, so the field for any drive [vp,vn] is vp·(A field) + vn·(B field).
         const solveDrive = async (vp, vn, vac) => {
@@ -2375,6 +2402,12 @@ export class FieldSolver2D {
                     [m12, this._trace_charge(DB.V, sn, vac)]];
         };
         const Cm = maxwell(A, B, false), Cm0 = maxwell(Av, Bv, true);
+        // Per-trace vacuum fields for the per-line loss matrices (_line_asymmetry), and
+        // the dielectric loss matrix over omega, [G11, G12, G22] / omega: v^T G v is twice
+        // the power of the potential of drive v, so G12 comes from the drive [1, 1].
+        const pA = this._dielectric_power(A.V, 1), pB = this._dielectric_power(B.V, 1);
+        const pAB = this._dielectric_power(A.V.map((row, i) => row.map((v, j) => v + B.V[i][j])), 1);
+        this._traceVac = { Av, Bv, Cm0, Gw: [2 * pA, pAB - pA - pB, 2 * pB] };
         const quad = (M, v) => 0.5 * (v[0] * v[0] * M[0][0] + 2 * v[0] * v[1] * M[0][1] + v[1] * v[1] * M[1][1]);
         // Shared symmetric/degenerate/modal decision (thresholds, ordering — see
         // classifyModalDecomposition; the triangular backend uses the identical guard).
@@ -3219,7 +3252,12 @@ export class FieldSolver2D {
             // Traces of different metal or finish: R11 - R22 and L11 - L22, carried on
             // the mode RLGC (see buildPhysicalRLGC).
             const asym = this._line_asymmetry(odd, even);
-            if (asym) for (const m of [odd, even]) { m.RLGC.dR = asym.dR; m.RLGC.dL = asym.dL; }
+            if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
+            // Asymmetric geometry: the exact dielectric loss matrix of the per-trace solves.
+            if (this._modalPhys && this._traceVac && this._traceVac.Gw) {
+                const w = 2 * Math.PI * this.freq;
+                for (const m of [odd, even]) m.RLGC.Gm = this._traceVac.Gw.map(v => v * w);
+            }
 
             // Add physical 2x2 RLGC matrix
             result.RLGC_matrix = this._modal_to_physical_rlgc(odd, even);

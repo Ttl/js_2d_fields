@@ -1984,6 +1984,13 @@ export class TriBackend {
         const { physMatrix, modalVecs } = classifyModalDecomposition(
             sc2(C, ksc), sc2(C0m, ksc), s.conductors, s.dielectrics);
         this._modalPhys = physMatrix;
+        // Dielectric loss matrix over omega, [G11, G12, G22] / omega, the same energy form
+        // on the loss map (G = omega kC eps0 W_loss per mode).
+        if (physMatrix) {
+            const Wl = X => computeTriEnergy(X, mesh, mesh.lossMap);
+            const laa = Wl(phiA), lbb = Wl(phiB), lab = Wl(combineStatic(1, phiA, 1, phiB));
+            physMatrix.Gw = [2 * laa * ksc, (lab - laa - lbb) * ksc, 2 * lbb * ksc];
+        }
         if (!modalVecs) return false;
         ['odd', 'even'].forEach((label, li) => {
             const v = modalVecs[li];
@@ -2007,30 +2014,37 @@ export class TriBackend {
         return true;
     }
 
-    // R11 - R22 and L11 - L22 (line 1 = the positive trace) of a pair whose two traces
-    // differ in metal or surface finish, null when they do not or when the loss did not
-    // come from the eddy-current solve. Loss and internal inductance are quadratic
-    // forms in the trace currents, and the modes give R11 + R22 and R12, so the
-    // single-trace drives only supply the differences. Anchored and interpolated over
-    // frequency like the mode R and L (the values are positive, the caches log-space).
+    // Per-line loss data of a pair from the eddy-current solve driven per trace (line 1 =
+    // the positive trace), null when not needed or when the loss did not come from that
+    // solve. Loss and internal inductance are quadratic forms in the trace currents.
+    //   - mirror-symmetric geometry whose traces differ in metal or finish:
+    //     { dR, dL } = R11 - R22 and L11 - L22. The modes supply R11 + R22 and R12.
+    //   - asymmetric geometry (physMatrix): { Rm, Lim } = [X11, X12, X22] of R and of the
+    //     internal L, with X12 from a third drive of equal currents.
+    // Anchored and interpolated over frequency like the mode R and L (every cached value
+    // is positive, the caches are log-space).
     _lineAsymmetry(f, modes) {
-        if (!(f > 0) || !this._pairFinishDiffers() || modes.some(m => m.lossVia !== 'mqs')) return null;
+        const full = !!this._modalPhys;
+        if (!(f > 0) || !(full || this._pairFinishDiffers()) || modes.some(m => m.lossVia !== 'mqs')) return null;
         const ev = this._lineEval;
         if (!ev) return null;
+        const drives = full ? [0, 1, 2] : [0, 1];
         const lc = (this._lineCache && this._lineCache.mesh === ev.mesh) ? this._lineCache
-            : (this._lineCache = { mesh: ev.mesh, c: [0, 1, 2, 3].map(() => ({ xs: [], ys: [], log: true })) });
+            : (this._lineCache = { mesh: ev.mesh, c: [0, 1, 2, 3, 4, 5].map(() => ({ xs: [], ys: [], log: true })) });
         const tol = this.opts.mqsInterpTol ?? 2e-3;
-        let v = lc.c.map(c => dispersionInterp(c, f, tol));
+        // v[2k] = R of drive k, v[2k+1] = its internal L.
+        let v = drives.flatMap(k => [dispersionInterp(lc.c[2 * k], f, tol), dispersionInterp(lc.c[2 * k + 1], f, tol)]);
         if (v.some(x => x === null || !(x > 0))) {
             if (ev.f !== f) return null;
             try {
-                const a = ev.run(0), b = ev.run(1);
-                v = [a.R, b.R, a.L_internal, b.L_internal];
+                v = drives.flatMap(k => { const r = ev.run(k); return [r.R, r.L_internal]; });
             } catch { return null; }
             if (v.some(x => !Number.isFinite(x) || !(x > 0))) return null;
             v.forEach((x, i) => dispersionInsert(lc.c[i], f, x));
         }
-        return { dR: v[0] - v[1], dL: v[2] - v[3], R11: v[0], R22: v[1] };
+        if (!full) return { dR: v[0] - v[2], dL: v[1] - v[3] };
+        // Equal currents [1, 1] read (X11 + X22 + 2 X12) / 2.
+        return { Rm: [v[0], v[4] - (v[0] + v[2]) / 2, v[2]], Lim: [v[1], v[5] - (v[1] + v[3]) / 2, v[3]] };
     }
 
     _pairFinishDiffers() {
@@ -2681,7 +2695,8 @@ export class TriBackend {
             // reconstructed from it, which is exactly the R/omega assumption this
             // path must avoid.
             // Per-line evaluation for solveAt (_lineAsymmetry): the same eddy-current
-            // solve driven with current in one trace only. It reuses the unit solutions
+            // solve driven with current in one trace only (line 0, 1) or the same
+            // current in both (line 2). It reuses the unit solutions
             // of the mode solves at this frequency, so it adds no factorization.
             this._lineEval = mqsMulti ? { f, mesh: mqsMesh, run: (line) => {
                 const cache = this._mqsMultiCache || (this._mqsMultiCache = {});
@@ -2689,7 +2704,7 @@ export class TriBackend {
                             wallSigma: solidSig ? bulkSigma : undefined,
                             topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: false,
                             diffPair: true, cache,
-                            modeCurrents: line === 0 ? [Math.SQRT2, 0] : [0, Math.SQRT2] };
+                            modeCurrents: line === 0 ? [Math.SQRT2, 0] : line === 1 ? [0, Math.SQRT2] : [1, 1] };
                 if (rectSigma) o.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
                 if (anyPlating || ownRq || ownSigma) o.surfaceZs = buildFaceZs(s, cr, f);
                 else o.Rq = rq;
@@ -3078,8 +3093,11 @@ export class TriBackend {
             // single-trace drives, carried on the mode RLGC so every consumer of the
             // pair (matrix, S-parameters, interpolating sweep) sees them.
             const asym = this._lineAsymmetry(f, modes);
-            if (asym) for (const m of [odd, even]) { m.RLGC.dR = asym.dR; m.RLGC.dL = asym.dL; }
-            else if (f > 0 && this._pairFinishDiffers() && !this._modeWarnings.some(w => w.type === 'line-asymmetry')) {
+            if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
+            if (this._modalPhys && this._modalPhys.Gw) {
+                for (const m of [odd, even]) m.RLGC.Gm = this._modalPhys.Gw.map(v => v * 2 * Math.PI * f);
+            }
+            else if (f > 0 && !this._modalPhys && this._pairFinishDiffers() && !this._modeWarnings.some(w => w.type === 'line-asymmetry')) {
                 this._modeWarnings.push({ type: 'line-asymmetry', freq: f, message:
                     'The two traces differ in metal or finish, but the per-line R and L need the MQS ' +
                     'conductor-loss solve, which did not run here. The R and L matrices carry the mean of ' +
