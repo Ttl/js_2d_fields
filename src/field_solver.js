@@ -1219,10 +1219,25 @@ export class FieldSolver2D {
         // Now with corner detection and geometric coverage from thick side plating
         // xStart overrides the segment's x origin (half-domain solves evaluate the
         // mirror image of a node's left segment [x[j-1], x[j]]).
+        // Bare-metal surface impedance of conductor ci: its own roughness when it has
+        // one (custom geometry), the solver-wide roughness otherwise.
+        const bareRq = ci => {
+            const c = this.conductors && ci >= 0 ? this.conductors[ci] : null;
+            return (c && c.rq !== undefined && c.rq !== null) ? c.rq : rq;
+        };
+        const bareZ = ci => {
+            const r = bareRq(ci);
+            if (r === rq) return Z_surf_default;
+            const key = `${ci}_bare`;
+            if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, this.sigma_cond, r));
+            return Z_cache.get(key);
+        };
+
         const getZsurf = (ci, direction, i, j, dl, xStart = null) => {
             if (!this.conductors || ci < 0) return Z_surf_default;
+            const Z_bare = bareZ(ci);
             const cond = this.conductors[ci];
-            if (!cond || !cond.plating) return Z_surf_default;
+            if (!cond || !cond.plating) return Z_bare;
 
             // Plating at least as thick as the conductor: the whole cross-section is
             // plating metal and every face sees the solid plating impedance.
@@ -1271,8 +1286,8 @@ export class FieldSolver2D {
 
                     // Weighted average with bulk side impedance for uncovered part
                     return new Complex(
-                        fraction * Z_plating.re + (1 - fraction) * Z_surf_default.re,
-                        fraction * Z_plating.im + (1 - fraction) * Z_surf_default.im
+                        fraction * Z_plating.re + (1 - fraction) * Z_bare.re,
+                        fraction * Z_plating.im + (1 - fraction) * Z_bare.im
                     );
                 }
             }
@@ -1307,8 +1322,8 @@ export class FieldSolver2D {
 
                     // Weighted average: covered part uses plating, rest uses bulk
                     return new Complex(
-                        fraction * Z_plating.re + (1 - fraction) * Z_surf_default.re,
-                        fraction * Z_plating.im + (1 - fraction) * Z_surf_default.im
+                        fraction * Z_plating.re + (1 - fraction) * Z_bare.re,
+                        fraction * Z_plating.im + (1 - fraction) * Z_bare.im
                     );
                 }
             }
@@ -1332,7 +1347,7 @@ export class FieldSolver2D {
                     // - sigma: plating material (extends from sides)
                     // - rq: bulk surface roughness (bottom surface preparation)
                     Z_corner = calculate_Zrough(
-                        this.freq, cond.plating.sigma, rq  // Use bulk rq, not plating.rq
+                        this.freq, cond.plating.sigma, bareRq(ci)  // Use bulk rq, not plating.rq
                     );
                     Z_cache.set(key_corner, Z_corner);
                 }
@@ -1360,7 +1375,7 @@ export class FieldSolver2D {
                         Z_cache.set(key_bottom, Z_bottom);
                     }
                 } else {
-                    Z_bottom = Z_surf_default;
+                    Z_bottom = Z_bare;
                 }
 
                 // Weighted average: corner region uses corner plating impedance, bulk uses bottom impedance
@@ -1370,7 +1385,7 @@ export class FieldSolver2D {
             }
 
             // Standard surface impedance (no corner effects)
-            if (!cond.plating[surface]) return Z_surf_default;
+            if (!cond.plating[surface]) return Z_bare;
 
             const key = `${ci}_${surface}`;
             if (Z_cache.has(key)) return Z_cache.get(key);
@@ -1498,6 +1513,23 @@ export class FieldSolver2D {
                                 : [[0, get_dx(0)]];
                             for (const [js, dseg] of segs) {
                                 const Zs = getZsurf(ci, direction, i, j, dseg, this.x[js]);
+                                const H2 = H_tan * H_tan * dseg / 2;
+                                if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dseg / 2);
+                                else sum_H2_dl_R += Zs.re * H2;
+                                sum_H2_dl_L += Zs.im * reactanceFactor(ci) * H2;
+                            }
+                        } else if (this.centred_loss_quadrature && !this.sym_half) {
+                            // Full-domain solve with different surface finishes: the one-sided
+                            // rule below gives mirrored conductors unequal shares of the
+                            // integral (they only add up right as a pair), so each node
+                            // takes half of the segment on either side instead. The total
+                            // of a mirror-symmetric geometry is the same either way, and on a
+                            // half domain mirrored conductors share their finish by construction.
+                            const horiz = direction === 'u' || direction === 'd';
+                            const k = horiz ? j : i, get = horiz ? get_dx : get_dy;
+                            const segs = k > 0 ? [[k, get(k)], [k - 1, get(k - 1)]] : [[0, get(0)]];
+                            for (const [ks, dseg] of segs) {
+                                const Zs = getZsurf(ci, direction, i, j, dseg, horiz ? this.x[ks] : null);
                                 const H2 = H_tan * H_tan * dseg / 2;
                                 if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dseg / 2);
                                 else sum_H2_dl_R += Zs.re * H2;

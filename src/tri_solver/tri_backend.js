@@ -200,10 +200,16 @@ function makePlatingZs(solver, condRect, freq) {
     // face is 'top' | 'bottom' | 'sides' | 'all'. 'all' is the shaped-conductor case:
     // a circle has ONE continuous surface, so there is nothing to select between and
     // the plating covers the whole boundary (CoaxSolver sets pl.all).
+    // Bare metal of rect ri: its own roughness when it has one, else the base metal.
+    const rqOf = (ri) => {
+        const r = roles[ri] && roles[ri].rq;
+        return (r === null || r === undefined) ? rqBase : r;
+    };
+    const bareOf = (ri) => (rqOf(ri) === rqBase ? Zbare : zSingle(sigmaBase, rqOf(ri)));
     const zForFace = (ri, face) => {
         const pl = roles[ri] && roles[ri].plating;
         if (solidPlated(rects[ri], pl)) return zSingle(pl.sigma, pl.rq ?? 0);
-        if (!(pl && pl[face] && pl.sigma > 0)) return Zbare;
+        if (!(pl && pl[face] && pl.sigma > 0)) return bareOf(ri);
         const key = `${pl.sigma}|${pl.rq}|${pl.thickness}`;
         let z = layeredCache.get(key);
         if (!z) {
@@ -239,7 +245,7 @@ function makePlatingZs(solver, condRect, freq) {
         if (pl && pl.sigma > 0 && r && !r.shape && (pl.thickness ?? 0) > 0 && !solidPlated(r, pl) &&
             face === 'bottom' && pl.sides && !pl.bottom && pl.thick_corners) {
             const d = Math.min(x - r.xmin, r.xmax - x);
-            if (d <= pl.thickness) return zSingle(pl.sigma, rqBase);
+            if (d <= pl.thickness) return zSingle(pl.sigma, rqOf(ri));
         }
         return zForFace(ri, face);
     };
@@ -2247,6 +2253,9 @@ export class TriBackend {
             && cr.rectRoles.some(r => r.is_signal);
         const anyPlating = cr.rectRoles.some(r => r.plating && r.plating.sigma > 0
             && (r.plating.top || r.plating.sides || r.plating.bottom));
+        // A conductor with a surface roughness of its own needs the per-face surface
+        // impedance just like plating does.
+        const ownRq = cr.rectRoles.some(r => r.rq !== null && r.rq !== undefined && r.rq !== (s.rq ?? 0));
         // Refuse a forced 'mqs' override where it cannot apply (with a warning)
         // rather than produce garbage.
         if (lossMethod === 'mqs' && !mqsOk && this._modeWarnings
@@ -2634,7 +2643,7 @@ export class TriBackend {
                               cache: mqsMulti ? (this._mqsMultiCache || (this._mqsMultiCache = {}))
                                               : (st.mqsCache || (st.mqsCache = {})) };
             if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st);
-            if (anyPlating) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
+            if (anyPlating || ownRq) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
             else mqsOpts.Rq = rq;
             let mqs = null;
             try {

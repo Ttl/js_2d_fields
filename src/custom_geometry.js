@@ -83,8 +83,11 @@ class CustomGeometrySolver extends FieldSolver2D {
 
         // Mirror symmetry about x=0 lets the mesher build a symmetric grid, and the
         // half domain is used on top of that when the modes allow it.
-        const mirror = !this._paint_order_breaks_symmetry()
-            && isXSymmetric(this.conductors, this.dielectrics, this.domain_width);
+        const paintOk = !this._paint_order_breaks_symmetry();
+        // The grid mirrors whenever the shapes do. The half domain also needs mirrored
+        // conductors to share their surface finish, or it reports one side's loss for both.
+        const mirrorShape = paintOk && isXSymmetric(this.conductors, this.dielectrics, this.domain_width, { finish: false });
+        const mirror = paintOk && isXSymmetric(this.conductors, this.dielectrics, this.domain_width);
         const symInfo = halfDomainSymmetry(this.conductors, this.dielectrics,
                                            this.domain_width, this.is_differential);
         const symAllowed = options.symmetry !== false && mirror;
@@ -96,12 +99,17 @@ class CustomGeometrySolver extends FieldSolver2D {
         const meetsPlane = signals.some(c => Math.abs(c.x_min) <= planeTol || Math.abs(c.x_max) <= planeTol);
         this._sym_signal_straddles = this.sym_half && (symInfo.straddles || meetsPlane);
         this._proximityWarn = this._broadside_proximity_note(signals);
+        // Per-conductor finishes need the centred loss quadrature (see
+        // calculate_conductor_loss): the default rule only balances over mirrored pairs
+        // of equal finish. Geometries without a finish of their own keep the default
+        // rule, so a converted fixed type solves exactly as before.
+        this.centred_loss_quadrature = this._own_finish || (mirrorShape && !mirror);
 
         this.mesher = new Mesher(
             this.domain_width, this.domain_height,
             this.nx, this.ny,
             this.conductors, this.dielectrics,
-            mirror,
+            mirrorShape,
             -this.domain_width / 2,
             this.domain_width / 2,
             this.domain_y_min,
@@ -124,6 +132,7 @@ class CustomGeometrySolver extends FieldSolver2D {
         const clamp = v => Math.max(-BIG, Math.min(BIG, v));
         const rects = geo.rects.map(r => ({
             kind: r.kind, src: r, line: r.line, er: r.er, tand: r.tand, thin: r.thin, faces: r.plating,
+            rq: r.rq, platingOwn: r.platingMaterial,
             x0: clamp(r.x.min), x1: clamp(r.x.max), y0: clamp(r.y.min), y1: clamp(r.y.max),
             xInf: !Number.isFinite(r.x.min) || !Number.isFinite(r.x.max),
         }));
@@ -273,8 +282,9 @@ class CustomGeometrySolver extends FieldSolver2D {
         }
         for (const r of conds) {
             if (!r.faces) continue;
-            if (!platingMaterial || !(platingMaterial.sigma > 0) || !(platingMaterial.thickness > 0)) {
-                throw new Error(`line ${r.line}: plating= needs a plating statement (or plating options).`);
+            const pm = { ...(platingMaterial || {}), ...(r.platingOwn || {}) };
+            if (!(pm.sigma > 0) || !(pm.thickness > 0)) {
+                throw new Error(`line ${r.line}: plating= needs a plating material: plating_sigma= and plating_t= on the line, a plating statement, or the Surface Plating option.`);
             }
             const joined = conds.some(o => o !== r && o.kind === r.kind && rectDistance(r, o) <= tol);
             if (joined) {
@@ -287,6 +297,7 @@ class CustomGeometrySolver extends FieldSolver2D {
         this.dielectrics = [];
         this.conductors = [];
         this._wall_slab = [];   // per conductor: the slab added behind a gnd boundary
+        this._own_finish = rects.some(r => r.kind !== 'diel' && ((r.rq !== null && r.rq !== undefined) || r.platingOwn));
         for (const r of rects) {
             if (r.kind === 'diel') {
                 const d = new Dielectric(r.x, r.y, r.w, r.h, r.er, r.tand);
@@ -295,10 +306,14 @@ class CustomGeometrySolver extends FieldSolver2D {
                 this.dielectrics.push(d);
                 continue;
             }
-            const plating = r.faces ? { ...platingMaterial, ...r.faces } : null;
+            // Same fields whether the material comes from the statement, the line or the options.
+            const plating = r.faces
+                ? { rq: 0, thick_corners: false, ...platingMaterial, ...(r.platingOwn || {}), ...r.faces } : null;
+            if (plating) { plating.rq = plating.rq ?? 0; plating.thick_corners = !!plating.thick_corners; }
             const polarity = r.kind === 'sig+' ? 1 : (r.kind === 'sig-' ? -1 : 0);
             const c = new Conductor(r.x, r.y, r.w, r.h, polarity !== 0, polarity, plating);
             c.src_line = r.line;   // source line, the editor highlights the rectangle from it
+            if (r.rq !== null && r.rq !== undefined) c.rq = r.rq;   // own surface roughness
             this.conductors.push(c);
             this._wall_slab.push(!!r.wall);
         }

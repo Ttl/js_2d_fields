@@ -890,3 +890,4 @@ input[type=number] {
     font-size: 12px;
     white-space: pre-wrap;
 }
+.custom-plating-material { display: inline-flex; gap: 6px; padding-left: 6px; border-left: 1px solid var(--border-color); }

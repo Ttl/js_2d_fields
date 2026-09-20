@@ -4,7 +4,7 @@
 //   w = 200; s = 150; t = 35; h1 = 100
 //   bounds open open open gnd          # left right top bottom
 //   domain auto                        # or: domain x1 x2 y1 y2, each may be auto
-//   plating sigma=4.1e7 t=5 rq=0.1     # plating material for rects with plating=
+//   plating sigma=4.1e7 t=5 rq=0.1     # default plating material for rects with plating=
 //
 //   diel  x=-inf    y=0   w=inf  h=h1  er=4.3 tand=0.02
 //   sig-  x=-s/2-w  y=h1  w=w    h=t
@@ -18,6 +18,9 @@
 //
 // Lengths are in the declared units (default mm). er, tand and sigma are plain numbers.
 // A number may carry its own unit (35um), which converts it to the declared units.
+// A conductor may carry its own surface roughness (rq=) and its own plating material
+// (plating_sigma=, plating_t=, plating_rq=), which override the solver-wide roughness and
+// the plating statement for that conductor.
 // thin=1 on a dielectric marks a thin sheet (a solder mask) whose faces the FDM mesher
 // brackets with grid lines the way it does conductor faces.
 // Dielectrics are painted in order, a later one overrides an earlier one where they
@@ -36,7 +39,10 @@ const RESERVED = new Set(['inf', 'auto', 'min', 'max', 'abs', 'sqrt']);
 const FUNCTIONS = {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
 };
-const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'x1', 'x2', 'y1', 'y2', 'er', 'tand', 'thin', 'plating']);
+const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'x1', 'x2', 'y1', 'y2', 'er', 'tand', 'thin', 'rq', 'plating',
+    'plating_sigma', 'plating_t', 'plating_rq']);
+const RECT_KEY_ORDER = ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'rq', 'plating',
+    'plating_sigma', 'plating_t', 'plating_rq'];
 const PLATING_KEYS = new Set(['sigma', 't', 'rq', 'thick_corners']);
 const PLATING_FACES = ['top', 'sides', 'bottom'];
 
@@ -240,8 +246,7 @@ export function serializeGeometry(model) {
         } else if (s.type === 'plating') {
             code = `plating ${fieldsToText(s.fields, ['sigma', 't', 'rq', 'thick_corners'])}`;
         } else if (s.type === 'rect') {
-            code = `${s.kind} ${fieldsToText(s.fields,
-                ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'plating'])}`;
+            code = `${s.kind} ${fieldsToText(s.fields, RECT_KEY_ORDER)}`;
         }
         const comment = s.comment !== null && s.comment !== undefined ? `# ${s.comment}` : '';
         out.push([code, comment].filter(p => p.length > 0).join('  '));
@@ -280,8 +285,7 @@ export function setParamInText(text, name, expr) {
 
 // Statement text for a rectangle, the inverse of the parser for one statement.
 export function rectStatementText(kind, fields) {
-    return `${kind}  ${fieldsToText(fields,
-        ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'plating'])}`;
+    return `${kind}  ${fieldsToText(fields, RECT_KEY_ORDER)}`;
 }
 
 // Replaces the statement `st` (from parseGeometryText of the same text) by `code`, or
@@ -392,7 +396,8 @@ function evalAxis(fields, pos, size, lo, hi, ev, allowNegative) {
 // Returns { errors, units, params, bounds, domain, plating, rects }:
 //   domain  - { x_min, x_max, y_min, y_max }, null for auto
 //   plating - { sigma, thickness, rq, thick_corners } or null
-//   rects   - { kind, x: axis, y: axis, er, tand, thin, plating: faces|null, line }
+//   rects   - { kind, x: axis, y: axis, er, tand, thin, plating: faces|null, rq: m|null,
+//               platingMaterial: { sigma?, thickness?, rq? }|null, line }
 export function evaluateGeometry(model, overrides = {}) {
     const errors = [...model.errors];
     const unitsSt = model.statements.find(s => s.type === 'units');
@@ -466,11 +471,13 @@ export function evaluateGeometry(model, overrides = {}) {
                 kind: s.kind, line: s.line,
                 x: evalAxis(f, 'x', 'w', 'x1', 'x2', len, false),
                 y: evalAxis(f, 'y', 'h', 'y1', 'y2', len, true),
-                er: 1, tand: 0, thin: false, plating: null,
+                er: 1, tand: 0, thin: false, plating: null, rq: null, platingMaterial: null,
             };
             if (s.kind === 'diel') {
                 if (f.er === undefined) throw new Error('diel needs er');
-                if (f.plating !== undefined) throw new Error('plating applies to conductors only');
+                if (['plating', 'rq', 'plating_sigma', 'plating_t', 'plating_rq'].some(k => f[k] !== undefined)) {
+                    throw new Error('plating and rq apply to conductors only');
+                }
                 r.er = num(f.er);
                 r.tand = f.tand !== undefined ? num(f.tand) : 0;
                 r.thin = f.thin !== undefined ? num(f.thin) !== 0 : false;
@@ -488,6 +495,21 @@ export function evaluateGeometry(model, overrides = {}) {
                         }
                     }
                     r.plating = { top: faces.includes('top'), sides: faces.includes('sides'), bottom: faces.includes('bottom') };
+                }
+                if (f.rq !== undefined) {
+                    r.rq = len(f.rq);
+                    if (!(r.rq >= 0) || !Number.isFinite(r.rq)) throw new Error('rq must be non-negative');
+                }
+                const pm = {};
+                if (f.plating_sigma !== undefined) pm.sigma = num(f.plating_sigma);
+                if (f.plating_t !== undefined) pm.thickness = len(f.plating_t);
+                if (f.plating_rq !== undefined) pm.rq = len(f.plating_rq);
+                if (Object.keys(pm).length) {
+                    if ((pm.sigma !== undefined && !(pm.sigma > 0)) || (pm.thickness !== undefined && !(pm.thickness > 0))
+                        || (pm.rq !== undefined && !(pm.rq >= 0))) {
+                        throw new Error('plating_sigma and plating_t must be positive, plating_rq non-negative');
+                    }
+                    r.platingMaterial = pm;
                 }
             }
             rects.push(r);
@@ -537,6 +559,8 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
 
     const lines = [`units ${units}`, `bounds ${(solver.boundaries || ['open', 'open', 'open', 'gnd']).join(' ')}`,
         `domain ${fmt(X0)} ${fmt(X1)} ${fmt(Y0)} ${fmt(Y1)}`];
+    // The first plating becomes the plating statement, a conductor plated with another
+    // material carries its own keys.
     const pl = (solver.conductors || []).map(c => c.plating).find(p => p && p.sigma > 0 && p.thickness > 0);
     if (pl) {
         lines.push(`plating sigma=${pl.sigma} t=${fmt(pl.thickness)} rq=${fmt(pl.rq ?? 0)}` +
@@ -549,7 +573,14 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     for (const c of (solver.conductors || [])) {
         const kind = c.is_signal ? (c.polarity < 0 ? 'sig-' : 'sig+') : 'gnd';
         const faces = c.plating ? PLATING_FACES.filter(f => c.plating[f]) : [];
-        lines.push(`${kind} ${rectText(c)}` + (faces.length ? ` plating=${faces.join(',')}` : ''));
+        let extra = (c.rq !== undefined && c.rq !== null) ? ` rq=${fmt(c.rq)}` : '';
+        if (faces.length) {
+            extra += ` plating=${faces.join(',')}`;
+            if (c.plating.sigma !== pl.sigma) extra += ` plating_sigma=${c.plating.sigma}`;
+            if (c.plating.thickness !== pl.thickness) extra += ` plating_t=${fmt(c.plating.thickness)}`;
+            if ((c.plating.rq ?? 0) !== (pl.rq ?? 0)) extra += ` plating_rq=${fmt(c.plating.rq ?? 0)}`;
+        }
+        lines.push(`${kind} ${rectText(c)}` + extra);
     }
     return lines.join('\n') + '\n';
 }

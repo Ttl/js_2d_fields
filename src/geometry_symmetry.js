@@ -98,7 +98,10 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
 const symTol = (domainW) => domainW * 1e-6;
 
 // Is the geometry mirror-symmetric about x=0? (Mesh only the right half)
-export function isXSymmetric(conductors, dielectrics, domainW) {
+// finish = false compares the shapes only (what a symmetric mesh needs), the default also
+// requires mirrored conductors to share their surface finish (what a half-domain loss
+// calculation needs).
+export function isXSymmetric(conductors, dielectrics, domainW, { finish: withFinish = true } = {}) {
     const tol = symTol(domainW);
     // Shaped geometry can't be compared by rect spans, so a shape declares its own mirror
     // symmetry instead (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
@@ -129,7 +132,17 @@ export function isXSymmetric(conductors, dielectrics, domainW) {
         }
         return true;
     };
-    const condOk = mirrorOf(conductors, c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g'));
+    // The surface finish is part of the conductor: a pair whose traces are plated or
+    // roughened differently has the same fields on both sides but not the same loss, and
+    // the half domain would report the loss of the meshed side for both.
+    const finish = c => {
+        const p = c.plating;
+        const plated = p && p.sigma > 0 && (p.top || p.sides || p.bottom || p.all);
+        return (plated ? `${p.sigma}:${p.thickness}:${p.rq ?? 0}:${!!p.top}${!!p.sides}${!!p.bottom}${!!p.all}${!!p.thick_corners}` : '-')
+            + '|' + (c.rq ?? '');
+    };
+    const condOk = mirrorOf(conductors, c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g')
+        + (withFinish ? '|' + finish(c) : ''));
     const dielOk = mirrorOf(dielectrics, d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}`);
     return condOk && dielOk;
 }
