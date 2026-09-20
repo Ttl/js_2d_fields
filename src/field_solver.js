@@ -1236,8 +1236,56 @@ export class FieldSolver2D {
             const c = this.conductors && ci >= 0 ? this.conductors[ci] : null;
             return (c && c.rq !== undefined && c.rq !== null) ? c.rq : rq;
         };
-        const bareZ = ci => {
+        // A conductor drawn as touching blocks of different metals: a block thinner than
+        // a few skin depths does not hide the block behind it, so its outer face takes
+        // the layered impedance (the block as a plating on the metal behind). Returns
+        // the conductor touching the face opposite to `direction`, or null.
+        const backingOf = (ci, direction) => {
+            const c = this.conductors[ci];
+            const tol = 1e-9 * this.domain_width;
+            const covers = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0) > 0.5 * (a1 - a0);
+            for (let k = 0; k < this.conductors.length; k++) {
+                const o = this.conductors[k];
+                if (k === ci || o.is_signal !== c.is_signal || (o.polarity || 0) !== (c.polarity || 0)) continue;
+                const behind = direction === 'd' ? Math.abs(o.y_max - c.y_min) < tol
+                    : direction === 'u' ? Math.abs(o.y_min - c.y_max) < tol
+                    : direction === 'r' ? Math.abs(o.x_min - c.x_max) < tol
+                    : Math.abs(o.x_max - c.x_min) < tol;
+                if (!behind) continue;
+                const horiz = direction === 'd' || direction === 'u';
+                if (horiz ? covers(c.x_min, c.x_max, o.x_min, o.x_max) : covers(c.y_min, c.y_max, o.y_min, o.y_max)) return k;
+            }
+            return -1;
+        };
+        const bareZ = (ci, direction = null) => {
             const r = bareRq(ci), sg = sigmaOf(ci);
+            if (ownSigma && direction && !this.conductors[ci].plating) {
+                const key = `${ci}_bare_${direction}`;
+                if (!Z_cache.has(key)) {
+                    const k = backingOf(ci, direction);
+                    const c = this.conductors[ci];
+                    const d = (direction === 'd' || direction === 'u') ? Math.abs(c.height) : Math.abs(c.width);
+                    let z = (k >= 0 && sigmaOf(k) !== sg)
+                        ? calculate_Zrough_layered(this.freq, sigmaOf(k), r, sg, d) : null;
+                    if (!z) {
+                        // End face of a thin layer (a face shorter than two skin depths,
+                        // with the other metal along one of its ends): the current there
+                        // spreads into that metal, blend towards its impedance.
+                        const ends = (direction === 'd' || direction === 'u') ? ['r', 'l'] : ['d', 'u'];
+                        const len = (direction === 'd' || direction === 'u') ? Math.abs(c.width) : Math.abs(c.height);
+                        const dlt = Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * sg));
+                        const w = Math.min(1, len / (2 * dlt));
+                        const ke = ends.map(e => backingOf(ci, e)).find(v => v >= 0 && sigmaOf(v) !== sg);
+                        if (w < 1 && ke !== undefined) {
+                            const zb = calculate_Zrough(this.freq, sg, r), zo = calculate_Zrough(this.freq, sigmaOf(ke), r);
+                            z = new Complex(w * zb.re + (1 - w) * zo.re, w * zb.im + (1 - w) * zo.im);
+                        }
+                    }
+                    Z_cache.set(key, z);
+                }
+                const z = Z_cache.get(key);
+                if (z) return z;
+            }
             if (r === rq && sg === this.sigma_cond) return Z_surf_default;
             const key = `${ci}_bare`;
             if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, sg, r));
@@ -1246,7 +1294,7 @@ export class FieldSolver2D {
 
         const getZsurf = (ci, direction, i, j, dl, xStart = null) => {
             if (!this.conductors || ci < 0) return Z_surf_default;
-            const Z_bare = bareZ(ci);
+            const Z_bare = bareZ(ci, direction);
             const cond = this.conductors[ci];
             if (!cond || !cond.plating) return Z_bare;
 
@@ -1441,8 +1489,17 @@ export class FieldSolver2D {
             const den = Math.cosh(2 * x) - Math.cos(2 * x);
             return (Math.sinh(2 * x) - Math.sin(2 * x)) / den;
         };
-        const kX = (this.conductors || []).map(c => slabReactanceFactor(
-            c.is_signal ? Math.abs(c.height) / 2 : Math.abs(c.height), deltaCond(c)));
+        // A block stacked on another metal of the same conductor is as thick as the stack.
+        const stackH = (c, ci) => {
+            let h = Math.abs(c.height);
+            if (ownSigma) for (const dir of ['d', 'u']) {
+                const k = backingOf(ci, dir);
+                if (k >= 0) h += Math.abs(this.conductors[k].height);
+            }
+            return h;
+        };
+        const kX = (this.conductors || []).map((c, ci) => slabReactanceFactor(
+            c.is_signal ? stackH(c, ci) / 2 : stackH(c, ci), deltaCond(c)));
         const kXDefault = slabReactanceFactor(Math.abs(this.t) / 2);
         const reactanceFactor = ci => (ci >= 0 && ci < kX.length) ? kX[ci] : kXDefault;
         // Ground conductors take the resistance twin of that factor,
@@ -1458,8 +1515,8 @@ export class FieldSolver2D {
             if (!(x > 0) || x > 20) return 1;
             return (Math.sinh(2 * x) + Math.sin(2 * x)) / (Math.cosh(2 * x) - Math.cos(2 * x));
         };
-        const kR = (this.conductors || []).map(c => (c.is_signal || !vacuum_fields) ? 1 : slabResistanceFactor(
-            Math.min(Math.abs(c.width), Math.abs(c.height)), deltaCond(c)));
+        const kR = (this.conductors || []).map((c, ci) => (c.is_signal || !vacuum_fields) ? 1 : slabResistanceFactor(
+            Math.min(Math.abs(c.width), stackH(c, ci)), deltaCond(c)));
         const isGroundCond = ci => ci >= 0 && ci < kR.length && !this.conductors[ci].is_signal;
         // Per ground conductor: Re(Zs)-weighted |H|^2 and the plain |H|, |H|^2 moments
         // that give the width of its return current.
