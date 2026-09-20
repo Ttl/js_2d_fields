@@ -44,7 +44,7 @@ const TIERS = {
         { file: 'tests/test_layered_roughness.js', cost: 1 },
         { file: 'tests/test_interpolating_sweep.js', cost: 2 },
         { file: 'tests/test_mtl_sparams.js', cost: 1 },
-        { file: 'tests/test_open_boundary_warning.js', cost: 1 },
+        { file: 'tests/test_open_boundary_warning.js', cost: 25 },
         { file: 'tests/test_broadside_proximity_warning.js', cost: 15 },
         { file: 'tests/test_gcpw_qs_continuity.js', cost: 9 },
         { file: 'tests/test_gcpw_gnd_width.js', cost: 25 },

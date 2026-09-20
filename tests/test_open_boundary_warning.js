@@ -4,9 +4,13 @@
 //  - a cramped enclosure warns for the walls that are actually close,
 //  - grounded walls never warn (the check only applies to 'open'),
 //  - conductors touching a wall (coplanar ground pours, full-width ground planes)
-//    don't trip the check for that wall.
+//    don't trip the check for that wall,
+//  - a dielectric fill that runs into an open wall is not a substrate.
+// Then openBoundaryFieldWarning(), the measured check a solve attaches to its result:
+// the truncation estimate tracks the true Z0 shift, on both backends.
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
 
 let pass = 0, fail = 0;
 function check(name, cond, detail = '') {
@@ -111,6 +115,55 @@ const bsNarrow = bs({ enclosure_width: 1.5e-3 });   // ~0.65 mm ≈ 0.7 stack he
 const wb = bsNarrow.openBoundaryWarnings();
 check('narrow broadside: one merged "sides" warning',
     wb.length === 1 && /on the sides/.test(wb[0]), wb.join(' | '));
+
+// Microstrip embedded in an er = 2 fill that reaches the open top: the fill is not a
+// substrate, the decay scale stays the 0.21 mm laminate.
+const filledText = `units mm
+bounds open open open gnd
+domain -3.15 3.15 -0.035 3.885
+diel x=-inf w=inf y=0 h=0.21 er=4.4 tand=0.02
+diel x=-inf w=inf y=0.21 h=inf er=2 tand=0
+gnd x=-inf w=inf y1=-inf y2=0
+sig+ x=-0.175 w=0.35 y=0.21 h=0.035
+`;
+const filled = (backend) => new CustomGeometrySolver({ text: filledText, nx: 30, ny: 30, freq: 1e9, mesh_backend: backend });
+check('dielectric fill to the open top: no geometric warning', filled('rectilinear').openBoundaryWarnings().length === 0);
+
+// Measured check.
+const quiet = async (fn) => {
+    const log = console.log, warn = console.warn;
+    console.log = () => {}; console.warn = () => {};
+    try { return await fn(); } finally { console.log = log; console.warn = warn; }
+};
+const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+async function solved(s) {
+    if (s.mesh_backend === 'triangular') s.tri_opts = { lossMethod: 'auto' };
+    const r = await quiet(() => s.solve_adaptive({ ...APP }));
+    return { Z0: r.modes[0].Z0.re ?? r.modes[0].Z0, w: (r.warnings || []).find(v => v.type === 'open-boundary') };
+}
+const MSF = { substrate_height: 0.21e-3, trace_width: 0.35e-3, trace_thickness: 35e-6, gnd_thickness: 35e-6,
+    epsilon_r: 4.4, freq: 1e9, boundaries: ["open", "open", "open", "gnd"] };
+for (const backend of ['rectilinear', 'triangular']) {
+    const auto = await solved(new MicrostripSolver({ ...MSF, mesh_backend: backend }));
+    check(`${backend}: auto-sized microstrip solves without a field warning`, !auto.w);
+    const tight = await solved(new MicrostripSolver({ ...MSF, mesh_backend: backend,
+        enclosure_width: 1.575e-3, enclosure_height: 0.97e-3 }));
+    const shift = tight.Z0 / auto.Z0 - 1;
+    check(`${backend}: quarter-size enclosure warns for the sides`,
+        !!tight.w && tight.w.walls.includes('sides'), tight.w ? tight.w.message : 'no warning');
+    check(`${backend}: estimate within a factor 1.5 of the true Z0 shift`,
+        !!tight.w && tight.w.estimate > shift / 1.5 && tight.w.estimate < shift * 1.5,
+        `estimate ${(100 * (tight.w ? tight.w.estimate : 0)).toFixed(2)}%, true ${(100 * shift).toFixed(2)}%`);
+    const f = await solved(filled(backend));
+    check(`${backend}: dielectric fill to the open top solves without a field warning`, !f.w);
+}
+// GCPW air channel: the potential at the open top stays at ~0.2 of the trace
+// potential however tall the box is, yet carries no energy. No top warning.
+{
+    const g = await solved(new MicrostripSolver({ ...MSF, use_coplanar_gnd: true, gap: 0.15e-3,
+        via_gap: 0.1e-3, use_vias: true, enclosure_width: 8e-3 }));
+    check('gcpw: floating channel potential at the open top does not warn', !g.w, g.w ? g.w.message : '');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

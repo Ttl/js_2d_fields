@@ -2,6 +2,11 @@ import { FieldSolver2D } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
 import { halfDomainSymmetry } from './geometry_symmetry.js';
 
+// Auto domain width of a full-pour GCPW in slot apertures (trace span + both gaps).
+// Above the pours the field is that of the aperture over a ground plane, and the open
+// side walls truncate it: the Z0 error falls as (aperture / width)^2.
+const GCPW_APERTURE_WIDTHS = 7;
+
 class MicrostripSolver extends FieldSolver2D {
     constructor(options) {
         super();
@@ -321,7 +326,7 @@ class MicrostripSolver extends FieldSolver2D {
     _coplanar_auto_domain_width(trace_span) {
         if (this.coplanar_gnd_width === null) {
             const active_width = trace_span + 2 * (this.gap + this.via_gap + this.w / 2);
-            return Math.max(active_width * 1.5, this.h * 10);
+            return Math.max(active_width * 1.5, this.h * 10, GCPW_APERTURE_WIDTHS * (trace_span + 2 * this.gap));
         }
         const active_width = trace_span + 2 * (this.gap + this.coplanar_gnd_width);
         return Math.max(active_width * 1.5, active_width + 2 * Math.max(8 * this.w, 15 * this.h));

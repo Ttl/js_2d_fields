@@ -379,8 +379,8 @@ class CustomGeometrySolver extends FieldSolver2D {
 
     // A signal conductor that runs into an open wall (a slotline half plane) has no
     // quasi-static limit: its capacitance grows with the logarithm of the domain size.
-    openBoundaryWarnings() {
-        const out = [...super.openBoundaryWarnings(), ...this.boundaryContactWarnings()];
+    openBoundaryWarnings(opts) {
+        const out = [...super.openBoundaryWarnings(opts), ...this.boundaryContactWarnings()];
         const tol = this.domain_width * 1e-9;
         const b = this.boundaries;
         const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;

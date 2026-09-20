@@ -3117,6 +3117,13 @@ export class TriBackend {
         this.solver.Ey = modes.map(m => m.Ey);
         this.solver.triMesh = { nodes: this.mesh.nodes, tris: this.mesh.tris, nTris: this.mesh.nTris };
         this.solver.solution_valid = true;
+        // Open walls are natural boundaries in the static solve too: same field check
+        // as the FDM backend, on the resampled potential.
+        const openWarn = this.solver.openBoundaryFieldWarning(this.solver.V);
+        if (openWarn && !this._modeWarnings.some(w => w.type === 'open-boundary')) {
+            this._modeWarnings.push(openWarn);
+            result.warnings = this._modeWarnings;
+        }
         // The resampled grid (solver.x/y/Ex/Ey) is now valid — mark the mesh ready so
         // plotting paths gated on mesh_generated (e.g. the geometry-view E-field contour
         // overlay) render. ensure_mesh() is a no-op for the triangular backend, so this

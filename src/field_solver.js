@@ -425,18 +425,24 @@ export class FieldSolver2D {
     // interface). Conductors touching a wall (coplanar ground pours, full-width
     // ground planes) are part of the boundary structure and are ignored.
     // Returns an array of human-readable warning strings (empty when fine).
-    openBoundaryWarnings() {
+    // clearance: false drops this geometric rule, for callers that go on to solve and
+    // get the measured check (openBoundaryFieldWarning) instead.
+    openBoundaryWarnings({ clearance = true } = {}) {
         const out = [];
         const b = this.boundaries;
-        if (!b || !this.conductors || !this.conductors.length) return out;
+        if (!clearance || !b || !this.conductors || !this.conductors.length) return out;
         const xMin = -this.domain_width / 2, xMax = this.domain_width / 2;
         const yMin = this.domain_y_min, yMax = this.domain_height;
         if (!(xMax > xMin) || !(yMax > yMin)) return out;
         // Decay scale: substrate stack thickness (non-air dielectrics); if there is
         // none (all-air line), fall back to the conductor stack height.
+        // A dielectric that runs into an open top or bottom wall is exterior fill, not
+        // a substrate, and sets no decay scale.
         let lo = Infinity, hi = -Infinity;
+        const yTol = (yMax - yMin) * 1e-9;
         for (const d of (this.dielectrics || [])) {
             if ((d.epsilon_r || 1) <= 1.001) continue;
+            if ((b[2] === 'open' && d.y_max >= yMax - yTol) || (b[3] === 'open' && d.y_min <= yMin + yTol)) continue;
             lo = Math.min(lo, d.y_min); hi = Math.max(hi, d.y_max);
         }
         if (!(hi > lo)) {
@@ -494,6 +500,101 @@ export class FieldSolver2D {
             `The open-boundary approximation may be inaccurate this close to the fields; enlarge the ` +
             `enclosure or use grounded walls there.`);
         return out;
+    }
+
+    // Post-solve check of the open walls from the solved potential. An open wall is a
+    // natural (zero normal flux) boundary, exact only where the field has decayed. The
+    // field left on it is tangential, and the energy it would carry beyond the wall
+    // is about eps * int(E_t^2) ds * d, with d the distance from the wall to the
+    // signal conductors (the lateral scale of the wall field). Relative to the stored
+    // energy this tracks the truncation error: Z0 reads about twice that fraction
+    // high on microstrip, coupled microstrip (both modes) and GCPW, over 0.1..7 %.
+    // The wall potential is not usable for this: an air channel between grounded
+    // pours holds a constant potential that carries no energy.
+    // Vmodes is one potential grid V[iy][ix] per mode on this.x, this.y. Returns a
+    // warning object when the estimated Z0 error exceeds OPEN_WALL_TOL, else null.
+    openBoundaryFieldWarning(Vmodes) {
+        const b = this.boundaries, x = this.x, y = this.y;
+        if (!b || !x || !y || !Vmodes || !b.includes('open')) return null;
+        const OPEN_WALL_TOL = 0.02;
+        const nx = x.length, ny = y.length;
+        let sx0 = Infinity, sx1 = -Infinity, sy0 = Infinity, sy1 = -Infinity;
+        for (const c of (this.conductors || [])) {
+            if (!c.is_signal) continue;
+            sx0 = Math.min(sx0, c.x_min); sx1 = Math.max(sx1, c.x_max);
+            sy0 = Math.min(sy0, c.y_min); sy1 = Math.max(sy1, c.y_max);
+        }
+        if (!(sx1 > sx0)) return null;
+        const diels = this.dielectrics || [];
+        const epsAt = (px, py) => {
+            let e = 1;
+            for (const d of diels) {
+                if (px >= d.x_min && px <= d.x_max && py >= d.y_min && py <= d.y_max) e = d.epsilon_r || 1;
+            }
+            return e;
+        };
+        if (!this._openWallCache) this._openWallCache = new WeakMap();
+        // On a half-domain grid the first column is the symmetry plane and the right
+        // wall stands for both sides.
+        const half = x[0] > -this.domain_width / 4;
+        const nudge = 1e-9 * Math.max(x[nx - 1] - x[0], y[ny - 1] - y[0]);
+        let worst = null;
+        for (const V of Vmodes) {
+            if (!V || V.length !== ny || !V[0] || V[0].length !== nx) continue;
+            let walls = this._openWallCache.get(V);
+            if (!walls) {
+                let W = 0;
+                for (let i = 0; i + 1 < ny; i++) for (let j = 0; j + 1 < nx; j++) {
+                    const dx = x[j + 1] - x[j], dy = y[i + 1] - y[i];
+                    const ex = 0.5 * ((V[i][j + 1] - V[i][j]) + (V[i + 1][j + 1] - V[i + 1][j])) / dx;
+                    const ey = 0.5 * ((V[i + 1][j] - V[i][j]) + (V[i + 1][j + 1] - V[i][j + 1])) / dy;
+                    const e2 = ex * ex + ey * ey;
+                    if (isFinite(e2)) W += epsAt(0.5 * (x[j] + x[j + 1]), 0.5 * (y[i] + y[i + 1])) * e2 * dx * dy;
+                }
+                walls = {};
+                const column = (j, px, d, name) => {
+                    if (!(d > 0) || !(W > 0)) return;
+                    let t = 0;
+                    for (let i = 0; i + 1 < ny; i++) {
+                        const dy = y[i + 1] - y[i], e = (V[i + 1][j] - V[i][j]) / dy;
+                        if (isFinite(e)) t += epsAt(px, 0.5 * (y[i] + y[i + 1])) * e * e * dy;
+                    }
+                    walls[name] = 2 * t * d / W;
+                };
+                const row = (i, py, d, name) => {
+                    if (!(d > 0) || !(W > 0)) return;
+                    let t = 0;
+                    for (let j = 0; j + 1 < nx; j++) {
+                        const dx = x[j + 1] - x[j], e = (V[i][j + 1] - V[i][j]) / dx;
+                        if (isFinite(e)) t += epsAt(0.5 * (x[j] + x[j + 1]), py) * e * e * dx;
+                    }
+                    walls[name] = 2 * t * d / W;
+                };
+                if (b[0] === 'open' && !half) column(0, x[0] + nudge, sx0 - x[0], 'left');
+                if (b[1] === 'open') column(nx - 1, x[nx - 1] - nudge, x[nx - 1] - sx1,
+                    half && b[0] === 'open' ? 'sides' : 'right');
+                if (b[2] === 'open') row(ny - 1, y[ny - 1] - nudge, y[ny - 1] - sy1, 'top');
+                if (b[3] === 'open') row(0, y[0] + nudge, sy0 - y[0], 'bottom');
+                this._openWallCache.set(V, walls);
+            }
+            const total = Object.values(walls).reduce((a, v) => a + v, 0);
+            if (!worst || total > worst.total) worst = { total, walls };
+        }
+        if (!worst || !(worst.total > OPEN_WALL_TOL)) return null;
+        // Name the walls that matter; left + right read as "sides".
+        const w = { ...worst.walls };
+        if (w.left !== undefined && w.right !== undefined) {
+            w.sides = w.left + w.right;
+            delete w.left; delete w.right;
+        }
+        const parts = ['sides', 'left', 'right', 'top', 'bottom'].filter(n => w[n] >= 0.2 * worst.total);
+        const list = parts.length > 1
+            ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1]
+            : parts[0];
+        return { type: 'open-boundary', mode: 'all', estimate: worst.total, walls: parts, message:
+            `The field has not decayed at the open boundary on the ${list}: truncating it there is ` +
+            `estimated to raise Z0 by about ${(100 * worst.total).toPrecision(2)}%. Enlarge the enclosure ` +
+            `or use grounded walls there.` };
     }
 
     // modesOpts (truthy = guarding a Modes-tab solve, which ALWAYS runs the triangular
@@ -3238,6 +3339,8 @@ export class FieldSolver2D {
         // _build_results and models these regimes accurately (MQS).
         if (this._proximityWarn) warns.push(this._proximityWarn);
         if (this._causalWarn) warns.push(this._causalWarn);
+        const openWarn = this.openBoundaryFieldWarning(modeResults.map(m => m.V));
+        if (openWarn) warns.push(openWarn);
         if (warns.length) {
             result.warnings = warns;
             this.modeWarnings = result.warnings;

@@ -1720,7 +1720,8 @@ async function runSimulation() {
     if (ptext) ptext.textContent = '';
     heartbeatStart(ptext);
     log("Starting simulation...");
-    for (const w of solver.openBoundaryWarnings()) log(`⚠ Warning: ${w}`);
+    // The open-wall clearance is measured from the solved field (result warnings).
+    for (const w of solver.openBoundaryWarnings({ clearance: false })) log(`⚠ Warning: ${w}`);
     if (solver.mode_type === 'waveguide') {
         // State the single-mode limitation and the usable band up front, every solve.
         log(`Rectangular waveguide: fundamental mode only ` +
@@ -2166,7 +2167,7 @@ async function runParameterSweep() {
                 // certificate and a loss-accuracy note (skin-transition,
                 // broadside-proximity) at once.
                 for (const aw of m.warnings || []) {
-                    if (aw.type !== 'accuracy') continue;
+                    if (aw.type !== 'accuracy' && aw.type !== 'open-boundary') continue;
                     log(`\u26a0 First point: ${aw.message} Later sweep points are not re-verified.`);
                 }
             },
