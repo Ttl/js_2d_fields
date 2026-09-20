@@ -466,13 +466,12 @@ button.stop-mode:hover {
 .section-header.collapsed::after {
     transform: rotate(-90deg);
 }
+/* An open section takes the height of its content, however many options are enabled. */
 .section-content {
-    overflow: hidden;
-    transition: max-height 0.3s ease-out;
-    max-height: 1000px;
     padding-top: 10px;
 }
 .section-content.collapsed {
+    overflow: hidden;
     max-height: 0;
     padding-top: 0;
 }
@@ -895,3 +894,7 @@ input[type=number] {
 .custom-plating-toggle.active { border-color: rgba(255, 215, 0, 0.7); color: #ffd700; }
 .custom-plating-panel { flex-basis: 100%; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0 2px 24px; }
 .custom-plating-material { display: inline-flex; gap: 6px; padding-left: 6px; border-left: 1px solid var(--border-color); }
+
+/* Custom geometry: plating is set per conductor in the editor */
+body.tl-custom #plating-params,
+body.tl-custom .control-group:has(#chk_plating) { display: none !important; }

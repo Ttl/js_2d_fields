@@ -284,7 +284,7 @@ class CustomGeometrySolver extends FieldSolver2D {
             if (!r.faces) continue;
             const pm = { ...(platingMaterial || {}), ...(r.platingOwn || {}) };
             if (!(pm.sigma > 0) || !(pm.thickness > 0)) {
-                throw new Error(`line ${r.line}: plating= needs a plating material: plating_sigma= and plating_t= on the line, a plating statement, or the Surface Plating option.`);
+                throw new Error(`line ${r.line}: plating= needs a plating material: plating_sigma= and plating_t= on the line, or a plating statement.`);
             }
             const joined = conds.some(o => o !== r && o.kind === r.kind && rectDistance(r, o) <= tol);
             if (joined) {

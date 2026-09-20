@@ -206,8 +206,8 @@ export function buildSolverFromParams(p, onError = null) {
             solver = new MicrostripSolver(options);
         } else if (p.tl_type === 'custom') {
             // Geometry text plus parameter overrides (what a parameter sweep varies).
-            // The board-stackup options have no meaning here, only the plating material
-            // is passed on for rectangles that ask for plating.
+            // The board-stackup and plating options have no meaning here: the text
+            // carries them, plating per conductor.
             solver = new CustomGeometrySolver({
                 text: p.custom_geom,
                 overrides: p.custom_overrides,
@@ -216,7 +216,6 @@ export function buildSolverFromParams(p, onError = null) {
                 nx: p.nx,
                 ny: p.ny,
                 rq: p.rq,
-                plating: platingOptions(p),
             });
         } else if (p.tl_type === 'coax') {
             // Full-wave only. CoaxSolver throws on any other backend. addCommonOptions is

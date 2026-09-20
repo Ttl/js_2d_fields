@@ -433,7 +433,8 @@ const EXCLUDED_BY_TYPE = {
     coax: COAX_EXCLUDED_KEYS,
     rect_waveguide: WAVEGUIDE_EXCLUDED_KEYS,
     // The text carries the whole stackup, the boundaries and the plated faces.
-    custom: new Set([...COAX_EXCLUDED_KEYS, 'plating_top', 'plating_sides', 'plating_bottom']),
+    custom: new Set([...COAX_EXCLUDED_KEYS, 'use_plating', 'plating_sigma', 'plating_t', 'plating_rq',
+        'plating_top', 'plating_sides', 'plating_bottom', 'plating_thick_corners']),
 };
 
 function settingsToURL(settings) {
@@ -1986,7 +1987,7 @@ function updateSweepParamList() {
         top_diel: useTopDiel && !isSelfBounded,
         gnd_cut: useGndCut && !isSelfBounded,
         enclosure: useEnclosure && !isSelfBounded,
-        plating: usePlating,
+        plating: usePlating && !isCustom,
     };
 
     const sel = document.getElementById('sweep-x-selector');
