@@ -166,6 +166,11 @@ const s4 = build(`units mm\nbounds open open open open\ndomain -5 5 -3 3\n` +
 check('slotline: half planes pinned to the walls', close(s4.conductors[0].x_min, -5e-3) && close(s4.conductors[1].x_max, 5e-3)
     && s4.w === undefined && s4.is_differential === false);
 
+const sEnc = build(`units mm\nbounds gnd gnd gnd gnd\ndiel x=-2 w=4 y=-0.2 h=0.2 er=4.4\n` +
+    `sig+ x=-1.15 w=1 y=0 h=0.05\ngnd x=0.15 w=1 y=0 h=0.05`);
+check('auto gnd wall clears a conductor on the stack edge', sEnc.user_domain.y_max > 1e-3
+    && close(sEnc.user_domain.y_min, -0.2e-3));
+
 const RECT = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.5 er=4\n';
 rejects('no signal', RECT + 'gnd x=0 y=1 w=1 h=0.1', 'signal');
 rejects('no ground', 'units mm\nsig+ x=0 y=0 w=1 h=0.1', 'ground');

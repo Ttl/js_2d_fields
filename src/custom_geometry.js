@@ -159,8 +159,15 @@ class CustomGeometrySolver extends FieldSolver2D {
         // Reference length of the fringing field: distance from the signals to the
         // nearest ground rectangle or ground wall.
         const wallRects = [];
-        const yBot = d.y_min ?? (b[3] === 'gnd' ? yLo : null);
-        const yTop = d.y_max ?? (b[2] === 'gnd' ? yHi : null);
+        // An auto gnd wall sits on the edge of the stack when a dielectric ends there,
+        // as the ground plane of a substrate. Past a conductor it is an enclosure wall
+        // at the open-boundary distance.
+        const eps = (yHi - yLo) * 1e-9;
+        const diels = rects.filter(r => r.kind === 'diel');
+        const snapBot = b[3] === 'gnd' && diels.some(r => r.y0 <= yLo + eps);
+        const snapTop = b[2] === 'gnd' && diels.some(r => r.y1 >= yHi - eps);
+        const yBot = d.y_min ?? (snapBot ? yLo : null);
+        const yTop = d.y_max ?? (snapTop ? yHi : null);
         if (b[3] === 'gnd' && yBot !== null) wallRects.push({ x0: -BIG, x1: BIG, y0: -BIG, y1: yBot });
         if (b[2] === 'gnd' && yTop !== null) wallRects.push({ x0: -BIG, x1: BIG, y0: yTop, y1: BIG });
         if (b[0] === 'gnd' && d.x_min !== null) wallRects.push({ x0: -BIG, x1: d.x_min, y0: -BIG, y1: BIG });
@@ -179,8 +186,8 @@ class CustomGeometrySolver extends FieldSolver2D {
         if (!(margin > 0)) throw new Error('Cannot size the domain: a signal touches a ground.');
 
         const X0 = d.x_min ?? cLo - margin, X1 = d.x_max ?? cHi + margin;
-        const Y0 = d.y_min ?? (b[3] === 'gnd' ? yLo : yLo - margin);
-        const Y1 = d.y_max ?? (b[2] === 'gnd' ? yHi : yHi + margin);
+        const Y0 = d.y_min ?? (snapBot ? yLo : yLo - margin);
+        const Y1 = d.y_max ?? (snapTop ? yHi : yHi + margin);
         if (!(X1 > X0) || !(Y1 > Y0)) throw new Error('The domain is empty.');
         // A user-sized domain is a physical boundary, like an enclosure.
         this.enclosure_width = (d.x_min !== null && d.x_max !== null) ? X1 - X0 : null;
