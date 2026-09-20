@@ -18,9 +18,9 @@
 //
 // Lengths are in the declared units (default mm). er, tand and sigma are plain numbers.
 // A number may carry its own unit (35um), which converts it to the declared units.
-// A conductor may carry its own surface roughness (rq=) and its own plating material
-// (plating_sigma=, plating_t=, plating_rq=), which override the solver-wide roughness and
-// the plating statement for that conductor.
+// A conductor may carry its own conductivity (sigma=, S/m), surface roughness (rq=) and
+// plating material (plating_sigma=, plating_t=, plating_rq=), which override the
+// solver-wide values and the plating statement for that conductor.
 // thin=1 on a dielectric marks a thin sheet (a solder mask) whose faces the FDM mesher
 // brackets with grid lines the way it does conductor faces.
 // Dielectrics are painted in order, a later one overrides an earlier one where they
@@ -39,9 +39,9 @@ const RESERVED = new Set(['inf', 'auto', 'min', 'max', 'abs', 'sqrt']);
 const FUNCTIONS = {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
 };
-const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'x1', 'x2', 'y1', 'y2', 'er', 'tand', 'thin', 'rq', 'plating',
+const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'x1', 'x2', 'y1', 'y2', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
     'plating_sigma', 'plating_t', 'plating_rq']);
-const RECT_KEY_ORDER = ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'rq', 'plating',
+const RECT_KEY_ORDER = ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
     'plating_sigma', 'plating_t', 'plating_rq'];
 const PLATING_KEYS = new Set(['sigma', 't', 'rq', 'thick_corners']);
 const PLATING_FACES = ['top', 'sides', 'bottom'];
@@ -396,7 +396,7 @@ function evalAxis(fields, pos, size, lo, hi, ev, allowNegative) {
 // Returns { errors, units, params, bounds, domain, plating, rects }:
 //   domain  - { x_min, x_max, y_min, y_max }, null for auto
 //   plating - { sigma, thickness, rq, thick_corners } or null
-//   rects   - { kind, x: axis, y: axis, er, tand, thin, plating: faces|null, rq: m|null,
+//   rects   - { kind, x: axis, y: axis, er, tand, thin, plating: faces|null, sigma: S/m|null, rq: m|null,
 //               platingMaterial: { sigma?, thickness?, rq? }|null, line }
 export function evaluateGeometry(model, overrides = {}) {
     const errors = [...model.errors];
@@ -471,12 +471,12 @@ export function evaluateGeometry(model, overrides = {}) {
                 kind: s.kind, line: s.line,
                 x: evalAxis(f, 'x', 'w', 'x1', 'x2', len, false),
                 y: evalAxis(f, 'y', 'h', 'y1', 'y2', len, true),
-                er: 1, tand: 0, thin: false, plating: null, rq: null, platingMaterial: null,
+                er: 1, tand: 0, thin: false, plating: null, sigma: null, rq: null, platingMaterial: null,
             };
             if (s.kind === 'diel') {
                 if (f.er === undefined) throw new Error('diel needs er');
-                if (['plating', 'rq', 'plating_sigma', 'plating_t', 'plating_rq'].some(k => f[k] !== undefined)) {
-                    throw new Error('plating and rq apply to conductors only');
+                if (['plating', 'sigma', 'rq', 'plating_sigma', 'plating_t', 'plating_rq'].some(k => f[k] !== undefined)) {
+                    throw new Error('sigma, rq and plating apply to conductors only');
                 }
                 r.er = num(f.er);
                 r.tand = f.tand !== undefined ? num(f.tand) : 0;
@@ -495,6 +495,10 @@ export function evaluateGeometry(model, overrides = {}) {
                         }
                     }
                     r.plating = { top: faces.includes('top'), sides: faces.includes('sides'), bottom: faces.includes('bottom') };
+                }
+                if (f.sigma !== undefined) {
+                    r.sigma = num(f.sigma);
+                    if (!(r.sigma > 0) || !Number.isFinite(r.sigma)) throw new Error('sigma must be positive');
                 }
                 if (f.rq !== undefined) {
                     r.rq = len(f.rq);
@@ -573,7 +577,8 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     for (const c of (solver.conductors || [])) {
         const kind = c.is_signal ? (c.polarity < 0 ? 'sig-' : 'sig+') : 'gnd';
         const faces = c.plating ? PLATING_FACES.filter(f => c.plating[f]) : [];
-        let extra = (c.rq !== undefined && c.rq !== null) ? ` rq=${fmt(c.rq)}` : '';
+        let extra = (c.sigma !== undefined && c.sigma !== null) ? ` sigma=${c.sigma}` : '';
+        if (c.rq !== undefined && c.rq !== null) extra += ` rq=${fmt(c.rq)}`;
         if (faces.length) {
             extra += ` plating=${faces.join(',')}`;
             if (c.plating.sigma !== pl.sigma) extra += ` plating_sigma=${c.plating.sigma}`;

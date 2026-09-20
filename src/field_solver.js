@@ -1162,15 +1162,22 @@ export class FieldSolver2D {
         // Signal metal is the plating metal when the plating is at least as thick
         // as the trace (the whole cross-section is plating).
         const sigma_sig = this._signal_sigma();
-        const R_gnd0 = ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
+        const ownSigma = this._own_sigma();
+        // Per-conductor conductivities: conductances add within the positive traces,
+        // the negative traces and the grounds.
+        const dcG = ownSigma ? this._dc_conductances() : null;
+        const R_gnd0 = dcG ? (dcG.gnd > 0 ? 1.0 / dcG.gnd : 0)
+            : ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
         // Signal and ground are separate conductors in series, so each keeps its own
         // DC term and the two resistances add.
         let R_dc_sig, R_dc_gnd;
         if (this.is_differential && (mode === 'odd' || mode === 'even')) {
-            R_dc_sig = 2.0 / (sigma_sig * signal_area);
+            // Both modes put the same current magnitude through each trace, so the
+            // per-line value is the mean of the two trace resistances.
+            R_dc_sig = dcG ? 0.5 * (1.0 / dcG.pos + 1.0 / dcG.neg) : 2.0 / (sigma_sig * signal_area);
             R_dc_gnd = mode === 'odd' ? 0 : 2.0 * R_gnd0;
         } else {
-            R_dc_sig = 1.0 / (sigma_sig * signal_area);
+            R_dc_sig = dcG ? 1.0 / (dcG.pos + dcG.neg) : 1.0 / (sigma_sig * signal_area);
             R_dc_gnd = R_gnd0;
         }
         const R_dc = R_dc_sig + R_dc_gnd;
@@ -1219,17 +1226,21 @@ export class FieldSolver2D {
         // Now with corner detection and geometric coverage from thick side plating
         // xStart overrides the segment's x origin (half-domain solves evaluate the
         // mirror image of a node's left segment [x[j-1], x[j]]).
-        // Bare-metal surface impedance of conductor ci: its own roughness when it has
-        // one (custom geometry), the solver-wide roughness otherwise.
+        // Bare-metal surface impedance of conductor ci: its own conductivity and
+        // roughness when it has them (custom geometry), the solver-wide ones otherwise.
+        const sigmaOf = ci => {
+            const c = this.conductors && ci >= 0 ? this.conductors[ci] : null;
+            return (c && c.sigma > 0) ? c.sigma : this.sigma_cond;
+        };
         const bareRq = ci => {
             const c = this.conductors && ci >= 0 ? this.conductors[ci] : null;
             return (c && c.rq !== undefined && c.rq !== null) ? c.rq : rq;
         };
         const bareZ = ci => {
-            const r = bareRq(ci);
-            if (r === rq) return Z_surf_default;
+            const r = bareRq(ci), sg = sigmaOf(ci);
+            if (r === rq && sg === this.sigma_cond) return Z_surf_default;
             const key = `${ci}_bare`;
-            if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, this.sigma_cond, r));
+            if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, sg, r));
             return Z_cache.get(key);
         };
 
@@ -1369,7 +1380,7 @@ export class FieldSolver2D {
                         Z_bottom = Z_cache.get(key_bottom);
                     } else {
                         Z_bottom = calculate_Zrough_layered(
-                            this.freq, this.sigma_cond,
+                            this.freq, sigmaOf(ci),
                             cond.plating.rq, cond.plating.sigma, cond.plating.thickness
                         );
                         Z_cache.set(key_bottom, Z_bottom);
@@ -1391,7 +1402,7 @@ export class FieldSolver2D {
             if (Z_cache.has(key)) return Z_cache.get(key);
 
             const Z = calculate_Zrough_layered(
-                this.freq, this.sigma_cond,
+                this.freq, sigmaOf(ci),
                 cond.plating.rq, cond.plating.sigma, cond.plating.thickness
             );
             Z_cache.set(key, Z);
@@ -1419,7 +1430,10 @@ export class FieldSolver2D {
         // both faces, so each face sees half the thickness; ground planes and
         // pours are treated as one-sided slabs of their full thickness.
         const deltaOf = (sigma) => Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * sigma));
-        const delta = deltaOf(this.sigma_cond);
+        // delta is the skin depth of the signal metal (transition calibration and
+        // warning below), deltaCond the one of each conductor.
+        const delta = deltaOf(ownSigma ? sigma_sig : this.sigma_cond);
+        const deltaCond = c => deltaOf(this._solid_plating(c) ? c.plating.sigma : (c.sigma > 0 ? c.sigma : this.sigma_cond));
         const slabReactanceFactor = (d, dlt = delta) => {
             const x = d / dlt;
             if (!(x > 0)) return 1;
@@ -1428,8 +1442,7 @@ export class FieldSolver2D {
             return (Math.sinh(2 * x) - Math.sin(2 * x)) / den;
         };
         const kX = (this.conductors || []).map(c => slabReactanceFactor(
-            c.is_signal ? Math.abs(c.height) / 2 : Math.abs(c.height),
-            this._solid_plating(c) ? deltaOf(c.plating.sigma) : delta));
+            c.is_signal ? Math.abs(c.height) / 2 : Math.abs(c.height), deltaCond(c)));
         const kXDefault = slabReactanceFactor(Math.abs(this.t) / 2);
         const reactanceFactor = ci => (ci >= 0 && ci < kX.length) ? kX[ci] : kXDefault;
         // Ground conductors take the resistance twin of that factor,
@@ -1446,8 +1459,7 @@ export class FieldSolver2D {
             return (Math.sinh(2 * x) + Math.sin(2 * x)) / (Math.cosh(2 * x) - Math.cos(2 * x));
         };
         const kR = (this.conductors || []).map(c => (c.is_signal || !vacuum_fields) ? 1 : slabResistanceFactor(
-            Math.min(Math.abs(c.width), Math.abs(c.height)),
-            this._solid_plating(c) ? deltaOf(c.plating.sigma) : delta));
+            Math.min(Math.abs(c.width), Math.abs(c.height)), deltaCond(c)));
         const isGroundCond = ci => ci >= 0 && ci < kR.length && !this.conductors[ci].is_signal;
         // Per ground conductor: Re(Zs)-weighted |H|^2 and the plain |H|, |H|^2 moments
         // that give the width of its return current.
@@ -1585,7 +1597,7 @@ export class FieldSolver2D {
             const x0 = Math.min(cond.x, cond.x + cond.width), x1 = Math.max(cond.x, cond.x + cond.width);
             const straddles = this.sym_half && x0 < 0 && x1 > 0;
             const Wk = (straddles ? 2 : 1) * gndS1[c] * gndS1[c] / gndS2[c];
-            const dlt = this._solid_plating(cond) ? deltaOf(cond.plating.sigma) : delta;
+            const dlt = deltaCond(cond);
             const g = vacuum_fields ? Math.max(wallSpreadFactor(2 * Math.PI * (dlt * dlt / d) / Wk), Math.min(1, Wk / wMax)) : 1;
             sum_H2_dl_Rgnd += gndR[c] * g;
         }
@@ -1659,7 +1671,6 @@ export class FieldSolver2D {
     // bulk skin depths under its plating (solid plating is exact by convention).
     _plating_transition_note(f) {
         if (!(f > 0) || !this.conductors) return null;
-        const delta = Math.sqrt(2 / (2 * Math.PI * f * 4e-7 * Math.PI * this.sigma_cond));
         let worst = null;
         for (const c of this.conductors) {
             const pl = c.plating;
@@ -1667,9 +1678,11 @@ export class FieldSolver2D {
             const tp = pl.thickness ?? 0, t = Math.abs(c.height);
             if (tp >= t) continue;
             const bulk = t - tp;
-            if (bulk < 2 * delta && (!worst || bulk < worst.bulk)) worst = { bulk, t, tp };
+            const delta = Math.sqrt(2 / (2 * Math.PI * f * 4e-7 * Math.PI * (c.sigma > 0 ? c.sigma : this.sigma_cond)));
+            if (bulk < 2 * delta && (!worst || bulk < worst.bulk)) worst = { bulk, t, tp, delta };
         }
         if (!worst) return null;
+        const delta = worst.delta;
         return { type: 'accuracy', reason: 'plating-transition', mode: 'all', message:
             `Plating accuracy is reduced: the ${(worst.tp * 1e6).toFixed(2)} µm plating on a ` +
             `${(worst.t * 1e6).toFixed(2)} µm conductor leaves ${(worst.bulk * 1e6).toFixed(2)} µm of bulk metal ` +
@@ -1683,7 +1696,36 @@ export class FieldSolver2D {
     _signal_sigma() {
         const sig = (this.conductors || []).filter(c => c.is_signal);
         if (sig.length && sig.every(c => this._solid_plating(c))) return sig[0].plating.sigma;
-        return this.sigma_cond;
+        if (!this._own_sigma()) return this.sigma_cond;
+        // Signal conductors of different metals: the area-weighted mean.
+        let a = 0, ga = 0;
+        for (const c of sig) {
+            const area = Math.abs(c.width * c.height);
+            a += area; ga += this._bulk_sigma(c) * area;
+        }
+        return a > 0 ? ga / a : this.sigma_cond;
+    }
+
+    // True when a conductor carries a conductivity of its own (custom geometry).
+    _own_sigma() {
+        return (this.conductors || []).some(c => c.sigma > 0);
+    }
+
+    // Conductivity of a conductor's cross-section.
+    _bulk_sigma(c) {
+        if (this._solid_plating(c)) return c.plating.sigma;
+        return c.sigma > 0 ? c.sigma : this.sigma_cond;
+    }
+
+    // Per-unit-length DC conductance of the positive traces, the negative traces and
+    // the grounds.
+    _dc_conductances() {
+        const g = { pos: 0, neg: 0, gnd: 0 };
+        for (const c of this.conductors || []) {
+            const v = this._bulk_sigma(c) * Math.abs(c.width * c.height);
+            if (!c.is_signal) g.gnd += v; else if (c.polarity < 0) g.neg += v; else g.pos += v;
+        }
+        return g;
     }
 
     // Internal inductance at DC: the surface integral evaluated where the skin depth
@@ -1693,7 +1735,9 @@ export class FieldSolver2D {
         for (const c of this.conductors || []) tMax = Math.max(tMax, Math.abs(c.height));
         if (!(tMax > 0)) return 0;
         const delta = 100 * tMax;
-        const fDc = 2 / (2 * Math.PI * 4e-7 * Math.PI * this.sigma_cond * delta * delta);
+        let sigma = this.sigma_cond;
+        for (const c of this.conductors || []) if (c.sigma > sigma) sigma = c.sigma;
+        const fDc = 2 / (2 * Math.PI * 4e-7 * Math.PI * sigma * delta * delta);
         const f0 = this.freq;
         this.freq = fDc;
         try { return this.calculate_conductor_loss(...args).L_internal; }

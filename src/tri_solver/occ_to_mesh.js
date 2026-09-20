@@ -171,9 +171,11 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
 // condRect view of a geometry without meshing it.
 export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) {
     const rects = [], roles = [];
-    // rq: the conductor's own surface roughness (custom geometry), null for the solver-wide one.
+    // sigma, rq: the conductor's own conductivity and surface roughness (custom geometry),
+    // null for the solver-wide ones.
     const roleOf = (c) => ({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
-                             slab_thickness: c.slab_thickness ?? null, rq: c.rq ?? null });
+                             slab_thickness: c.slab_thickness ?? null, rq: c.rq ?? null,
+                             sigma: c.sigma > 0 ? c.sigma : null });
     for (const c of conductors) {
         if (c.shape) {
             // Bounds come from the shape's positive body. For a complement that is the

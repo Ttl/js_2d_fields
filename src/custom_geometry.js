@@ -4,7 +4,7 @@
 // the lists.
 import { FieldSolver2D } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
-import { halfDomainSymmetry, isXSymmetric } from './geometry_symmetry.js';
+import { halfDomainSymmetry, isXSymmetric, conductorFinishKey } from './geometry_symmetry.js';
 import { parseAndEvaluate, formatErrors } from './custom_geometry_text.js';
 
 const BIG = 1e30;
@@ -132,7 +132,7 @@ class CustomGeometrySolver extends FieldSolver2D {
         const clamp = v => Math.max(-BIG, Math.min(BIG, v));
         const rects = geo.rects.map(r => ({
             kind: r.kind, src: r, line: r.line, er: r.er, tand: r.tand, thin: r.thin, faces: r.plating,
-            rq: r.rq, platingOwn: r.platingMaterial,
+            sigma: r.sigma, rq: r.rq, platingOwn: r.platingMaterial,
             x0: clamp(r.x.min), x1: clamp(r.x.max), y0: clamp(r.y.min), y1: clamp(r.y.max),
             xInf: !Number.isFinite(r.x.min) || !Number.isFinite(r.x.max),
         }));
@@ -297,7 +297,8 @@ class CustomGeometrySolver extends FieldSolver2D {
         this.dielectrics = [];
         this.conductors = [];
         this._wall_slab = [];   // per conductor: the slab added behind a gnd boundary
-        this._own_finish = rects.some(r => r.kind !== 'diel' && ((r.rq !== null && r.rq !== undefined) || r.platingOwn));
+        const own = v => v !== null && v !== undefined;
+        this._own_finish = rects.some(r => r.kind !== 'diel' && (own(r.sigma) || own(r.rq) || r.platingOwn));
         for (const r of rects) {
             if (r.kind === 'diel') {
                 const d = new Dielectric(r.x, r.y, r.w, r.h, r.er, r.tand);
@@ -313,7 +314,8 @@ class CustomGeometrySolver extends FieldSolver2D {
             const polarity = r.kind === 'sig+' ? 1 : (r.kind === 'sig-' ? -1 : 0);
             const c = new Conductor(r.x, r.y, r.w, r.h, polarity !== 0, polarity, plating);
             c.src_line = r.line;   // source line, the editor highlights the rectangle from it
-            if (r.rq !== null && r.rq !== undefined) c.rq = r.rq;   // own surface roughness
+            if (own(r.sigma)) c.sigma = r.sigma;   // own conductivity
+            if (own(r.rq)) c.rq = r.rq;            // own surface roughness
             this.conductors.push(c);
             this._wall_slab.push(!!r.wall);
         }
@@ -391,6 +393,19 @@ class CustomGeometrySolver extends FieldSolver2D {
                 'quasi-static limit: the characteristic impedance depends on the domain size on both ' +
                 'solvers, and the quasi-static effective permittivity does too. Use the full-wave ' +
                 'solver for the effective permittivity.');
+        }
+        // The two traces of a pair made or finished differently: unequal R and internal
+        // inductance per line, which the odd/even results cannot carry.
+        if (this.is_differential) {
+            const keys = pol => [...new Set(this.conductors
+                .filter(c => c.is_signal && (c.polarity < 0) === pol).map(conductorFinishKey))].sort().join(';');
+            if (keys(true) !== keys(false)) {
+                out.push('The two traces of the pair differ in conductivity, roughness or plating. ' +
+                    'The odd and even mode results (impedance, effective permittivity, loss) account for it, ' +
+                    'but the mode conversion it causes is not modelled: the R and L matrices carry the mean ' +
+                    'of the two traces and the S-parameters have no differential to common mode conversion. ' +
+                    'Unequal roughness matters most, through the internal inductance.');
+            }
         }
         return out;
     }

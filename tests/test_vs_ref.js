@@ -1300,6 +1300,55 @@ gnd  x=-0.25  w=0.5  y=-0.035 h=0.035
         reference, "Finite-ground microstrip");
 }
 
+// Differential microstrip with traces of two metals (Ansys 2D Extractor, 2 GHz, causal
+// substrate). Geometry of solve_differential_microstrip_500mm_s4p with tand 0.02, left
+// trace 5.8e7 S/m, right trace 3.8e7 S/m.
+// Ansys reports R11 = 27.429 and R22 = 32.306 ohm/m. The odd/even solve has one R per
+// mode, so the matrix it rebuilds has the mean 29.8675 on both diagonal entries; the
+// modal references R_odd = mean - R12 and R_even = mean + R12 are what the solve is
+// checked on through the mode losses. Im(Z0) is left out: the reported -0.49j / -0.50j
+// does not follow from the reported RLGC (+0.20j / +0.25j).
+async function solve_differential_microstrip_unequal_sigma() {
+    const s = new CustomGeometrySolver({
+        text: `units mm
+bounds gnd gnd gnd gnd
+domain -1.5 1.5 0 1.2604
+diel x=-inf w=inf y=0 h=0.2104 er=4.4 tand=0.02
+sig- x=-0.6  w=0.35 y=0.2104 h=0.05
+sig+ x=0.25  w=0.35 y=0.2104 h=0.05 sigma=3.8e7
+`,
+        sigma_cond: 5.8e7, freq: 2e9, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
+    });
+    s.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
+    s.use_causal_materials = true;
+    const results = await s.solve_adaptive({ energy_tol: 0.001 });
+    const odd = results.modes.find(m => m.mode === 'odd');
+    const even = results.modes.find(m => m.mode === 'even');
+    const m = results.RLGC_matrix;
+    const flat = a => [a[0][0], a[0][1], a[1][0], a[1][1]];
+    const solver_results = {
+        'Z_odd': odd.Z0, 'Z_even': even.Z0,
+        'eps_eff_odd': odd.eps_eff, 'eps_eff_even': even.eps_eff,
+        'alpha_total_odd': odd.alpha_total, 'alpha_total_even': even.alpha_total,
+        'R_odd': odd.RLGC.R, 'R_even': even.RLGC.R,
+        'R': flat(m.R), 'L': flat(m.L), 'G': flat(m.G), 'C': flat(m.C),
+    };
+    const reference = {
+        'Z_odd': 47.867, 'Z_even': 52.408,
+        'eps_eff_odd': 2.9032, 'eps_eff_even': 3.175,
+        'alpha_total_odd': 7.7975, 'alpha_total_even': 8.2774,
+        'R_odd': 29.8675 - 1.4922, 'R_even': 29.8675 + 1.4922,
+        'R': [29.8675, 1.4922, 1.4922, 29.8675],
+        'L': [291.58e-9, 19.723e-9, 19.723e-9, 291.96e-9],
+        'G': [25.039e-3, -0.10192e-3, -0.10192e-3, 25.038e-3],
+        'C': [116.07e-12, -2.6636e-12, -2.6636e-12, 116.07e-12],
+    };
+    // Observed R_odd / R_even: rectilinear -3.7% / -2.8% (surface integral converging
+    // from below), triangular +0.1% / +0.1%.
+    test_differential_solution(solver_results, reference, "Differential microstrip, unequal sigma",
+        { 'R_odd': 6.0, 'R_even': 6.0 });
+}
+
 async function runTests() {
     const cases = [
         solve_microstrip, solve_microstrip_1khz, solve_microstrip_embed,
@@ -1309,10 +1358,13 @@ async function runTests() {
         solve_differential_stripline_rlgc, solve_differential_microstrip,
         solve_broadside_stripline, solve_broadside_stripline_offset,
         solve_coplanar_strips_vacuum, solve_coplanar_strips_fr4, solve_finite_ground_microstrip,
-        solve_differential_microstrip_500mm_s4p,
+        solve_differential_microstrip_500mm_s4p, solve_differential_microstrip_unequal_sigma,
         test_s2p_generation2, test_s2p_generation,
         test_s4p_generation_lossless, test_s4p_generation,
     ];
+    // ONLY=<substring> runs the cases whose function name contains it.
+    const only = process.env.ONLY;
+    if (only) cases.splice(0, cases.length, ...cases.filter(c => c.name.includes(only)));
     let passed = 0;
     const failed = [];
     for (const c of cases) {

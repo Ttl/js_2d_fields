@@ -200,20 +200,23 @@ function makePlatingZs(solver, condRect, freq) {
     // face is 'top' | 'bottom' | 'sides' | 'all'. 'all' is the shaped-conductor case:
     // a circle has ONE continuous surface, so there is nothing to select between and
     // the plating covers the whole boundary (CoaxSolver sets pl.all).
-    // Bare metal of rect ri: its own roughness when it has one, else the base metal.
+    // Bare metal of rect ri: its own conductivity and roughness when it has them, else
+    // the base metal.
     const rqOf = (ri) => {
         const r = roles[ri] && roles[ri].rq;
         return (r === null || r === undefined) ? rqBase : r;
     };
-    const bareOf = (ri) => (rqOf(ri) === rqBase ? Zbare : zSingle(sigmaBase, rqOf(ri)));
+    const sigmaOf = (ri) => (roles[ri] && roles[ri].sigma) || sigmaBase;
+    const bareOf = (ri) => ((rqOf(ri) === rqBase && sigmaOf(ri) === sigmaBase)
+        ? Zbare : zSingle(sigmaOf(ri), rqOf(ri)));
     const zForFace = (ri, face) => {
         const pl = roles[ri] && roles[ri].plating;
         if (solidPlated(rects[ri], pl)) return zSingle(pl.sigma, pl.rq ?? 0);
         if (!(pl && pl[face] && pl.sigma > 0)) return bareOf(ri);
-        const key = `${pl.sigma}|${pl.rq}|${pl.thickness}`;
+        const key = `${pl.sigma}|${pl.rq}|${pl.thickness}|${sigmaOf(ri)}`;
         let z = layeredCache.get(key);
         if (!z) {
-            z = calculate_Zrough_layered(freq, sigmaBase, pl.rq ?? 0, pl.sigma, pl.thickness ?? 0);
+            z = calculate_Zrough_layered(freq, sigmaOf(ri), pl.rq ?? 0, pl.sigma, pl.thickness ?? 0);
             layeredCache.set(key, z);
         }
         return z;
@@ -380,10 +383,12 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
     // reactance saturates on (per conductor), so the internal inductance can take
     // its finite-thickness factor per group. Bare wall edges (fid < 0) belong to
     // the PEC walls, semi-infinite here.
+    // A conductor of its own metal also keys on its bulk sigma: the loss routines are
+    // evaluated at the sigma of the group they integrate.
     const roles = condRect.rectRoles || [];
-    const keyOf = (z, d) => `${z.re.toExponential(6)}|${z.im.toExponential(6)}|${d}`;
+    const keyOf = (z, d, sg) => `${z.re.toExponential(6)}|${z.im.toExponential(6)}|${d}|${sg}`;
     const groupIdx = new Map();
-    const groupZ = [], groupD = [];
+    const groupZ = [], groupD = [], groupSigma = [];
     const edgeGroup = new Int32Array(nEdges).fill(-1);
     for (let e = 0; e < nEdges; e++) {
         if (!baseMask[e]) continue;
@@ -397,15 +402,16 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
             : zAt(ri, FACES[fid % NFACE],
                   (nodes[2 * n0] + nodes[2 * n1]) / 2, (nodes[2 * n0 + 1] + nodes[2 * n1 + 1]) / 2);
         const d = ri < 0 ? Infinity : slabThickness(rects[ri], roles[ri]);
-        const k = keyOf(z, d);
+        const sg = (ri >= 0 && roles[ri] && roles[ri].sigma) || null;
+        const k = keyOf(z, d, sg);
         let gi = groupIdx.get(k);
-        if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); groupD.push(d); }
+        if (gi === undefined) { gi = groupZ.length; groupIdx.set(k, gi); groupZ.push(z); groupD.push(d); groupSigma.push(sg); }
         edgeGroup[e] = gi;
     }
     const groups = groupZ.map((z, gi) => {
         const mask = new Uint8Array(nEdges);
         for (let e = 0; e < nEdges; e++) if (edgeGroup[e] === gi) mask[e] = 1;
-        return { Zs: z, mask, slab: groupD[gi] };
+        return { Zs: z, mask, slab: groupD[gi], sigma: groupSigma[gi] };
     });
     return { uniform: groups.length <= 1, groups };
 }
@@ -2256,6 +2262,8 @@ export class TriBackend {
         // A conductor with a surface roughness of its own needs the per-face surface
         // impedance just like plating does.
         const ownRq = cr.rectRoles.some(r => r.rq !== null && r.rq !== undefined && r.rq !== (s.rq ?? 0));
+        // A conductor of another metal: the eddy solve takes a conductivity per rect.
+        const ownSigma = cr.rectRoles.some(r => r.sigma && r.sigma !== (s.sigma_cond ?? 5.8e7));
         // Refuse a forced 'mqs' override where it cannot apply (with a warning)
         // rather than produce garbage.
         if (lossMethod === 'mqs' && !mqsOk && this._modeWarnings
@@ -2459,6 +2467,11 @@ export class TriBackend {
             const mqsSigma = solidSig ? cr.rectRoles[sigIdx[0]].plating.sigma
                 : anyPlating ? bulkSigma : sigma;
             const mqsDelta = anyPlating ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
+            // Conductivity of each meshed rect when any conductor has its own.
+            const rectSigma = ownSigma ? cr.rects.map((r, i) => {
+                const role = cr.rectRoles[i];
+                return solidPlated(r, role.plating) ? role.plating.sigma : (role.sigma || bulkSigma);
+            }) : null;
             // Skin-band element size at the conductor surface (xδ) and band width (xδ).
             // Resolve the skin layer to bandDelta*δ within mqsBand*δ of each surface,
             // with the target relaxing away from the surface (mqsBandDepthSlope, see
@@ -2522,17 +2535,35 @@ export class TriBackend {
             // (or the triangle cap trips), so an unused pass costs nothing. The
             // triangle cap is the real bound on runaway growth.
             const bandPasses = this.opts.mqsBandPasses ?? 20;
+            // Rects sharing a skin depth refine together: [{ k: delta / dlt, rects }],
+            // one entry unless conductors have their own conductivity.
+            const byDelta = (isSig) => {
+                const out = new Map();
+                cr.rects.forEach((r, i) => {
+                    if (cr.rectRoles[i].is_signal !== isSig) return;
+                    const k = rectSigma ? Math.sqrt(mqsSigma / rectSigma[i]) : 1;
+                    if (!out.has(k)) out.set(k, []);
+                    out.get(k).push(r);
+                });
+                return [...out].map(([k, rects]) => ({ k, rects }));
+            };
+            const sigBands = byDelta(true), gndBands = byDelta(false);
             const buildSkin = (base, dlt) => {
-                let m = refineSkinBand(base, { rects: sigRects }, dlt, bandPasses, mqsBand, bandDelta * dlt,
-                    base.nTris + mqsMaxTris, null, depthSlope);
                 // Each refineSkinBand stamps its own bandTrunc on the mesh it returns,
-                // so collect the signal band's before the ground pass overwrites it,
-                // and leave the merged list (or null) on the mesh that gets cached.
+                // so collect them as they come and leave the merged list (or null) on
+                // the mesh that gets cached.
                 const trunc = [];
-                if (m.bandTrunc) trunc.push({ band: 'signal', ...m.bandTrunc });
-                if (gndRects.length) {
-                    m = refineSkinBand(m, { rects: gndRects }, dlt, bandPasses, mqsBand,
-                        bandDelta * dlt, m.nTris + gndBudget, gndGrading, depthSlope);
+                let m = base;
+                const sigCap = base.nTris + mqsMaxTris;
+                for (const { k, rects } of sigBands) {
+                    m = refineSkinBand(m, { rects }, k * dlt, bandPasses, mqsBand, bandDelta * k * dlt,
+                        sigCap, null, depthSlope);
+                    if (m.bandTrunc) trunc.push({ band: 'signal', ...m.bandTrunc });
+                }
+                const gndCap = m.nTris + gndBudget;
+                for (const { k, rects } of gndBands) {
+                    m = refineSkinBand(m, { rects }, k * dlt, bandPasses, mqsBand,
+                        bandDelta * k * dlt, gndCap, gndGrading, depthSlope);
                     if (m.bandTrunc) trunc.push({ band: 'ground', ...m.bandTrunc });
                 }
                 m.bandTrunc = trunc.length ? trunc : null;
@@ -2643,7 +2674,8 @@ export class TriBackend {
                               cache: mqsMulti ? (this._mqsMultiCache || (this._mqsMultiCache = {}))
                                               : (st.mqsCache || (st.mqsCache = {})) };
             if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st);
-            if (anyPlating || ownRq) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
+            if (rectSigma) mqsOpts.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
+            if (anyPlating || ownRq || ownSigma) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
             else mqsOpts.Rq = rq;
             let mqs = null;
             try {
@@ -2712,15 +2744,18 @@ export class TriBackend {
         // plating (plating at least as thick as the conductor) conducts at the
         // plating sigma.
         const sigmaDC = s.sigma_cond ?? 5.8e7;
-        let sigArea = 0, gndArea = 0, sigCond = 0, gndCond = 0;
+        let sigArea = 0, gndArea = 0, sigCond = 0, gndCond = 0, posCond = 0, negCond = 0;
         for (const c of s.conductors) {
             // shapeArea is the bbox product for a plain rect (unchanged) but
             // the true cross-section for a shaped one. A complement shell
             // returns 0: the coax shield is modelled as infinitely thick, so it
             // carries no DC resistance.
             const a = shapeArea(c);
-            const sg = solidPlated(c, c.plating) ? c.plating.sigma : sigmaDC;
-            if (c.is_signal) { sigArea += a; sigCond += sg * a; } else { gndArea += a; gndCond += sg * a; }
+            const sg = solidPlated(c, c.plating) ? c.plating.sigma : (c.sigma > 0 ? c.sigma : sigmaDC);
+            if (c.is_signal) {
+                sigArea += a; sigCond += sg * a;
+                if (c.polarity < 0) negCond += sg * a; else posCond += sg * a;
+            } else { gndArea += a; gndCond += sg * a; }
         }
         // Mode-aware per-line convention for a differential pair (mirrors
         // field_solver.calculate_conductor_loss): sigArea sums both traces, the odd
@@ -2728,7 +2763,9 @@ export class TriBackend {
         // mode returns 2I through the ground.
         let R_dc;
         if (s.is_differential && (mode === 'odd' || mode === 'even')) {
-            const R_trace = sigArea > 0 ? 2 / sigCond : 0;
+            // Traces of different metals: the per-line value is the mean of the two.
+            const R_trace = !(sigArea > 0) ? 0
+                : (ownSigma && posCond > 0 && negCond > 0) ? 0.5 * (1 / posCond + 1 / negCond) : 2 / sigCond;
             R_dc = mode === 'odd' ? R_trace
                  : R_trace + (gndArea > 0 ? 2 / gndCond : 0);
         } else {
@@ -2797,20 +2834,26 @@ export class TriBackend {
             // from R_ac afterwards (see L_internal below).
             let R_ac = 0, X_ac = 0;
             for (const g of groups) {
-                const lossS = staticConductorLoss(cr.rects, f, sigmaRef, mesh, fm, phiEps,
+                // Group of a conductor with its own metal: integral, reference Rs and
+                // blend weight at that sigma.
+                const sigmaG = g.sigma || sigmaRef;
+                const deltaG = g.sigma ? Math.sqrt(2 / (omu * sigmaG)) : deltaRef;
+                const RsG = g.sigma ? 1 / (sigmaG * Math.min(deltaG, 1e30)) : RsRef;
+                const wG = (g.sigma && haveFW) ? Math.max(0, Math.min(1, (0.15 - deltaG / minDim) / (0.15 - 0.08))) : wFW;
+                const lossS = staticConductorLoss(cr.rects, f, sigmaG, mesh, fm, phiEps,
                     Z0, eps_eff_static, eps_d, g.mask);
                 let baseg = lossS.R_ac * driveScale;   // driveScale: static estimator only
-                if (haveFW && wFW > 0) {
-                    const lossW = solveConductorLoss(cr.rects, f, sigmaRef, mesh, fm, fw.vRe, fw.vIm,
+                if (haveFW && wG > 0) {
+                    const lossW = solveConductorLoss(cr.rects, f, sigmaG, mesh, fm, fw.vRe, fw.vIm,
                         fw.g2Re, fw.g2Im, Pfw, Z0, mesh.epsMap, g.mask, projH, this.ctx.wasmSolver);
-                    baseg = (1 - wFW) * baseg + wFW * lossW.R_ac;
+                    baseg = (1 - wG) * baseg + wG * lossW.R_ac;
                 }
-                R_ac += baseg * (RsRef > 0 ? g.Zs.re / RsRef : 1);
+                R_ac += baseg * (RsG > 0 ? g.Zs.re / RsG : 1);
                 // The surface reactance of a finite-thickness conductor saturates at
                 // omega mu0 d/3 once delta exceeds d (slabReactanceFactor), so
                 // Im(Zs)/omega stays a bounded internal inductance down to DC.
-                X_ac += baseg * (RsRef > 0 ? g.Zs.im / RsRef : 1)
-                    * slabReactanceFactor(g.slab ?? Infinity, deltaRef);
+                X_ac += baseg * (RsG > 0 ? g.Zs.im / RsG : 1)
+                    * slabReactanceFactor(g.slab ?? Infinity, deltaG);
             }
             R_total = Math.sqrt(R_dc * R_dc + R_ac * R_ac);
             // Internal (skin) inductance is the surface reactance over ω.

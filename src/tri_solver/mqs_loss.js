@@ -218,6 +218,10 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   from the MQS smooth current distribution (corner-regularized, unlike a
 //   perturbation surface integral). Reduces exactly to the uniform factor when
 //   every face shares one Zs. Takes precedence over Rq when provided.
+//   opts.rectSigmaRel — OPTIONAL sigma_rect / sigma per rect (condRect.rects order) for
+//   conductors of different metals. `sigma` stays the reference: the mass matrix, the
+//   drive, the net current and the dissipation carry the ratio per triangle, and the
+//   surface scaling above is then taken per rect against that rect's own Rs.
 // Returns { R_trace, R_gnd, R_total, X_total, L_loop, alpha_c, alpha_c_dBm, delta, nDofs }
 // L_loop is the series inductance from Im(Z_pul) = ωL — includes trace internal
 // inductance and ground-current spreading (ground itself is PEC here).
@@ -246,11 +250,14 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     // (passive, C = 0). Without rectRoles every rect is driven.
     // Signal wins where rects overlap; ground rects may overlap each other (GCPW
     // via slab under the coplanar ground), same class either way.
-    const sigRects = [], sigPol = [];
+    const sigRects = [], sigPol = [], sigIdx = [], gndIdx = [];
     rects.forEach((r, i) => {
-        if (!roles || roles[i].is_signal) { sigRects.push(r); sigPol.push(roles ? (roles[i].polarity || 0) : 0); }
+        if (!roles || roles[i].is_signal) { sigRects.push(r); sigIdx.push(i); sigPol.push(roles ? (roles[i].polarity || 0) : 0); }
+        else gndIdx.push(i);
     });
-    const gndRects = roles ? rects.filter((_, i) => !roles[i].is_signal) : [];
+    const gndRects = gndIdx.map(i => rects[i]);
+    // Conductivity of each rect over the reference sigma of the solve.
+    const sRelRect = opts.rectSigmaRel || null;
     // Drive groups: one per distinct signal polarity (positive first). A
     // single-ended line has one group; a differential pair two (+/-). Used by
     // the per-conductor-drive path (opts.modeCurrents), the single-drive path
@@ -259,6 +266,8 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     const groupOfSig = sigPol.map(p => groups.indexOf(p));
     const isCondTri = new Uint8Array(nTris);
     const triGroup = new Int32Array(nTris).fill(-1);
+    // Rect (index into rects) each conductor triangle belongs to.
+    const triRect = new Int32Array(nTris).fill(-1);
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const xc = (nodes[2*v0]+nodes[2*v1]+nodes[2*v2])/3;
@@ -271,8 +280,15 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
             const r = sigRects[i];
             if (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL) { si = i; break; }
         }
-        if (si >= 0) { isCondTri[t] = 1; triGroup[t] = groupOfSig[si]; }
-        else if (gndRects.length && inAnyRect(gndRects, xc, yc, TOL)) isCondTri[t] = 2;
+        if (si >= 0) { isCondTri[t] = 1; triGroup[t] = groupOfSig[si]; triRect[t] = sigIdx[si]; }
+        else {
+            for (let i = 0; i < gndRects.length; i++) {
+                const r = gndRects[i];
+                if (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL) {
+                    isCondTri[t] = 2; triRect[t] = gndIdx[i]; break;
+                }
+            }
+        }
     }
 
     // DOFs: vertices + edge midpoints, Dirichlet at ground/outer walls.
@@ -338,18 +354,21 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*t+k]];
         const cond = isCondTri[t];
         const driven = cond === 1;
-        if (driven) { condArea += Area; areaG[triGroup[t]] += Area; }
+        // Area weighted by the relative conductivity: the mass, the drive and the net
+        // current all carry sigma per triangle.
+        const AreaS = (cond && sRelRect) ? Area * sRelRect[triRect[t]] : Area;
+        if (driven) { condArea += AreaS; areaG[triGroup[t]] += AreaS; }
         const FcGt = driven ? FcG[triGroup[t]] : null;
         for (let i = 0; i < 6; i++) {
             const gi = lg[i]; if (gi < 0) continue;
-            if (driven) { const f = Area * P2_LOAD[i]; Fc[gi] += f; FcGt[gi] += f; }
+            if (driven) { const f = AreaS * P2_LOAD[i]; Fc[gi] += f; FcGt[gi] += f; }
             for (let j = 0; j < 6; j++) {
                 const gj = lg[j]; if (gj < 0) continue;
                 // K = S + jβM with β = ωμ₀σ the only frequency-dependent factor:
                 // the stiffness and the (metal-only) mass go into separate value
                 // templates on one shared index stream.
                 const sv = Sl[6*i+j];
-                const mv = cond ? Area * P2_MASS[6*i+j] : 0;
+                const mv = cond ? AreaS * P2_MASS[6*i+j] : 0;
                 if (sv === 0 && mv === 0) continue;
                 R[nCoo] = gi; Cc[nCoo] = gj; VS[nCoo] = sv; VM[nCoo] = mv; nCoo++;
             }
@@ -370,7 +389,7 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
 
     return {
         isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri,
-        groups, triGroup, FcG, areaG,
+        groups, triGroup, triRect, sRelRect, FcG, areaG,
         rowPtr: csr2.rowPtr, colIdx: csr2.colIdx,
         valS: csr2.vals[0], valM: csr2.vals[1],
     };
@@ -631,6 +650,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // return current). Signal and ground-rect dissipation accumulate separately
     // so the ground share reports (and plating-scales) with R_gnd, not R_trace.
     let Psig = 0, PgndRect = 0;
+    const sRel = pre.sRelRect;
+    const Prect = new Float64Array(rects.length);
     for (let t = 0; t < nTris; t++) {
         const cls = isCondTri[t];
         if (!cls) continue;
@@ -659,6 +680,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             const eR = Cr * uR - Ci * uI, eI = Cr * uI + Ci * uR;
             Ptri += 0.5 * sigma * (eR*eR + eI*eI) * w;
         }
+        if (sRel) Ptri *= sRel[pre.triRect[t]];
+        Prect[pre.triRect[t]] += Ptri;
         if (cls === 1) Psig += Ptri; else PgndRect += Ptri;
     }
 
@@ -778,6 +801,9 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
 
     let trS = 0, trZreS = 0, trZimS = 0;
     let grS = 0, grZreS = 0, grZimS = 0;
+    // The same weights per rect, for conductors of different metals.
+    const rS = new Float64Array(rects.length), rZreS = new Float64Array(rects.length),
+        rZimS = new Float64Array(rects.length);
     if (opts.surfaceZs) {
         const eA = new Int32Array(2 * nEdges).fill(-1);
         for (let t = 0; t < nTris; t++) for (let k = 0; k < 3; k++) {
@@ -830,6 +856,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             }
             if (isCondTri[cnd] === 1) { trS += Sseg; trZreS += Zs.re * Sseg; trZimS += Zs.im * Sseg; }
             else { grS += Sseg; grZreS += Zs.re * Sseg; grZimS += Zs.im * Sseg; }
+            const ri = pre.triRect[cnd];
+            rS[ri] += Sseg; rZreS[ri] += Zs.re * Sseg; rZimS[ri] += Zs.im * Sseg;
         }
     }
 
@@ -893,7 +921,40 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     const kTrace = 1 / slabR(dSig), kGr = 1 / slabR(dGr);
     let X_trace = R_trace, X_gr = R_gr, X_gw = X_gw_smooth;
     const X_smooth_total = R_trace + R_gr + X_gw_smooth;   // before psi rewrites any part
-    if (opts.surfaceZs) {
+    if (sRel) {
+        // Per rect: its own volume loss, scaled by its faces' impedance over its own
+        // smooth Rs = Rs / sqrt(sigma_rect / sigma), with its own slab factor.
+        R_trace = 0; R_gr = 0; X_trace = 0; X_gr = 0;
+        let sigS = 0, sigPsi = 0;
+        rects.forEach((r, i) => {
+            const Ri = 2 * sym * Prect[i];
+            const RsI = Rs / Math.sqrt(sRel[i]), deltaI = delta / Math.sqrt(sRel[i]);
+            const isSig = !rolesX || rolesX[i].is_signal;
+            let psiR = 1, psiX = 1;
+            if (opts.surfaceZs && rS[i] > 0) {
+                psiR = rZreS[i] / (RsI * rS[i]); psiX = rZimS[i] / (RsI * rS[i]);
+            } else if (!opts.surfaceZs && Rq > 0) {
+                const Zs = calculate_Zrough(freq, sigma * sRel[i], Rq);
+                psiR = Zs.re / RsI; psiX = Zs.im / RsI;
+            }
+            const d = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+            const x = (isSig ? d / 2 : d) / deltaI;
+            const k = (!(x > 0) || x > 20) ? 1
+                : (Math.cosh(2*x) - Math.cos(2*x)) / (Math.sinh(2*x) + Math.sin(2*x));
+            const Xi = Ri * (1 + k * (psiX - 1));
+            if (isSig) { R_trace += Ri * psiR; X_trace += Xi; sigS += Ri; sigPsi += Ri * psiR; }
+            else { R_gr += Ri * psiR; X_gr += Xi; }
+        });
+        if (sigS > 0) PsiR = sigPsi / sigS;
+        if (gndS > 0) {
+            X_gw = X_gw_smooth * gndZimS / (RsW * gndS);
+            R_gw *= gndZreS / (RsW * gndS);
+        } else if (!opts.surfaceZs && Rq > 0) {
+            const Zs = calculate_Zrough(freq, sigmaW, Rq);
+            X_gw = X_gw_smooth * Zs.im / RsW;
+            R_gw *= Zs.re / RsW;
+        }
+    } else if (opts.surfaceZs) {
         if (trS > 0) {
             const psiR = trZreS / (Rs * trS), psiX = trZimS / (Rs * trS);
             X_trace = R_trace * (1 + kTrace * (psiX - 1));
