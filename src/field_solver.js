@@ -2,7 +2,7 @@ import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
 import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
-import { classifyModalDecomposition } from './geometry_symmetry.js';
+import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
 
 export const CONSTANTS = {
@@ -1144,7 +1144,11 @@ export class FieldSolver2D {
      * @param {boolean} vacuum_fields - Ex/Ey are vacuum-solve fields
      * @returns {{R_ac: number, R_dc: number, R_total: number, L_internal: number}}
      */
-    calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false, mode = null) {
+    // line (0 = positive trace, 1 = negative trace): Ex/Ey are the fields of a pair with
+    // unit current in that trace only (see _line_asymmetry). The result is then that
+    // line's R and internal L: no differential power factor, its own DC resistance and
+    // skin depth.
+    calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false, mode = null, line = null) {
         if (!this.solution_valid) throw new Error("Fields invalid");
 
         const { signal_area, ground_area } = this._calculate_conductor_area();
@@ -1161,7 +1165,7 @@ export class FieldSolver2D {
         // per line.
         // Signal metal is the plating metal when the plating is at least as thick
         // as the trace (the whole cross-section is plating).
-        const sigma_sig = this._signal_sigma();
+        const sigma_sig = this._signal_sigma(line);
         const ownSigma = this._own_sigma();
         // Per-conductor conductivities: conductances add within the positive traces,
         // the negative traces and the grounds.
@@ -1171,7 +1175,11 @@ export class FieldSolver2D {
         // Signal and ground are separate conductors in series, so each keeps its own
         // DC term and the two resistances add.
         let R_dc_sig, R_dc_gnd;
-        if (this.is_differential && (mode === 'odd' || mode === 'even')) {
+        if (line !== null) {
+            const g = this._dc_conductances();
+            R_dc_sig = 1.0 / (line === 0 ? g.pos : g.neg);
+            R_dc_gnd = R_gnd0;
+        } else if (this.is_differential && (mode === 'odd' || mode === 'even')) {
             // Both modes put the same current magnitude through each trace, so the
             // per-line value is the mean of the two trace resistances.
             R_dc_sig = dcG ? 0.5 * (1.0 / dcG.pos + 1.0 / dcG.neg) : 2.0 / (sigma_sig * signal_area);
@@ -1187,7 +1195,7 @@ export class FieldSolver2D {
             // is the low-frequency plateau of the surface integral below (slab
             // reactance mu0 d/3 per face once delta >> d). Returning before the
             // skin-transition block, so its warning is cleared explicitly.
-            const L_internal = this._dc_internal_inductance(Ex, Ey, Z0, vacuum_fields, mode);
+            const L_internal = this._dc_internal_inductance(Ex, Ey, Z0, vacuum_fields, mode, line);
             this._skinTransitionWarn = null;
             this._platingTransitionWarn = null;
             return { R_ac: 0, R_dc, R_total: R_dc, L_internal };
@@ -1480,7 +1488,7 @@ export class FieldSolver2D {
         const deltaOf = (sigma) => Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * sigma));
         // delta is the skin depth of the signal metal (transition calibration and
         // warning below), deltaCond the one of each conductor.
-        const delta = deltaOf(ownSigma ? sigma_sig : this.sigma_cond);
+        const delta = deltaOf((ownSigma || line !== null) ? sigma_sig : this.sigma_cond);
         const deltaCond = c => deltaOf(this._solid_plating(c) ? c.plating.sigma : (c.sigma > 0 ? c.sigma : this.sigma_cond));
         const slabReactanceFactor = (d, dlt = delta) => {
             const x = d / dlt;
@@ -1630,7 +1638,7 @@ export class FieldSolver2D {
 
         // Power normalization factor: differential has 0.5 factor
         // This is because we integrate over both traces but report normalized loss
-        const power_factor = this.is_differential ? 0.5 : 1.0;
+        const power_factor = (this.is_differential && line === null) ? 0.5 : 1.0;
 
         // Vacuum variant: |H|^2 per unit current is |H_vac per 1V|^2*Z0_vac^2, since the
         // vacuum drive at 1V carries I_vac = 1/Z0_vac (legacy: same algebra with the
@@ -1750,8 +1758,9 @@ export class FieldSolver2D {
 
     // DC conductivity of the signal metal: the plating's when every signal
     // conductor is solid plating, else the bulk.
-    _signal_sigma() {
-        const sig = (this.conductors || []).filter(c => c.is_signal);
+    _signal_sigma(line = null) {
+        const sig = (this.conductors || []).filter(c => c.is_signal
+            && (line === null || (c.polarity < 0) === (line === 1)));
         if (sig.length && sig.every(c => this._solid_plating(c))) return sig[0].plating.sigma;
         if (!this._own_sigma()) return this.sigma_cond;
         // Signal conductors of different metals: the area-weighted mean.
@@ -1799,6 +1808,37 @@ export class FieldSolver2D {
         this.freq = fDc;
         try { return this.calculate_conductor_loss(...args).L_internal; }
         finally { this.freq = f0; }
+    }
+
+    // R11 - R22 and L11 - L22 of a pair whose traces differ in metal or finish (line 1 =
+    // the positive trace), null when they do not or the vacuum fields are missing. The
+    // field of unit current in one trace is half the sum (difference) of the even and
+    // odd vacuum fields, each scaled to unit current per trace by its vacuum impedance.
+    // The surface integral of that field is the line's R and internal L; the modes keep
+    // supplying R11 + R22 and R12.
+    _line_asymmetry(odd, even) {
+        if (!this.is_differential || this.sym_half || !this.conductor_id || !this._pair_finish_differs()) return null;
+        if (!odd || !even || !odd.Ex0 || !even.Ex0 || !(odd.C0 > 0) || !(even.C0 > 0)) return null;
+        const zo = 1 / (CONSTANTS.C * odd.C0), ze = 1 / (CONSTANTS.C * even.C0);
+        const comb = (A, B, sb) => A.map((row, i) => {
+            const out = new Float64Array(row.length), rb = B[i];
+            for (let j = 0; j < row.length; j++) out[j] = 0.5 * (ze * row[j] + sb * zo * rb[j]);
+            return out;
+        });
+        const warn = [this._skinTransitionWarn, this._platingTransitionWarn];
+        const lines = [1, -1].map((sb, line) => this.calculate_conductor_loss(
+            comb(even.Ex0, odd.Ex0, sb), comb(even.Ey0, odd.Ey0, sb), 1, true, null, line));
+        [this._skinTransitionWarn, this._platingTransitionWarn] = warn;
+        return { dR: lines[0].R_total - lines[1].R_total, dL: lines[0].L_internal - lines[1].L_internal };
+    }
+
+    _pair_finish_differs() {
+        if (this._finish_differs === undefined) {
+            const keys = neg => [...new Set((this.conductors || []).filter(c => c.is_signal && (c.polarity < 0) === neg)
+                .map(conductorFinishKey))].sort().join(';');
+            this._finish_differs = keys(true) !== keys(false);
+        }
+        return this._finish_differs;
     }
 
     _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode = null) {
@@ -3175,6 +3215,11 @@ export class FieldSolver2D {
             const even = modeResults.find(m => m.mode === 'even');
             result.Z_diff = 2 * odd.Z0;
             result.Z_common = even.Z0 / 2;
+
+            // Traces of different metal or finish: R11 - R22 and L11 - L22, carried on
+            // the mode RLGC (see buildPhysicalRLGC).
+            const asym = this._line_asymmetry(odd, even);
+            if (asym) for (const m of [odd, even]) { m.RLGC.dR = asym.dR; m.RLGC.dL = asym.dL; }
 
             // Add physical 2x2 RLGC matrix
             result.RLGC_matrix = this._modal_to_physical_rlgc(odd, even);

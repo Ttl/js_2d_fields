@@ -1831,7 +1831,7 @@ async function runSimulation() {
                   `  Self-C:  C11 = ${(mC[0][0] * 1e12).toFixed(2)} pF/m,  C22 = ${(mC[1][1] * 1e12).toFixed(2)} pF/m\n` +
                   `  Self-L:  L11 = ${(mL[0][0] * 1e9).toFixed(2)} nH/m,  L22 = ${(mL[1][1] * 1e9).toFixed(2)} nH/m`
                 : '';
-            // Traces of different metal or finish: per-line R and L from the full-wave solve.
+            // Traces of different metal or finish: per-line R and L.
             const mR = results.RLGC_matrix?.R;
             const lineStr = (odd.RLGC.dR !== undefined && mR && mL)
                 ? `\n\nUnequal traces (line 1 = positive trace, mode conversion included in the S-parameters):\n` +

@@ -1303,10 +1303,9 @@ gnd  x=-0.25  w=0.5  y=-0.035 h=0.035
 // Differential microstrip with traces of two metals (Ansys 2D Extractor, 2 GHz, causal
 // substrate). Geometry of solve_differential_microstrip_500mm_s4p with tand 0.02, left
 // trace 5.8e7 S/m, right trace 3.8e7 S/m.
-// Ansys reports R11 = 27.429 and R22 = 32.306 ohm/m. The full-wave backend resolves the
-// two (single-trace eddy-current drives, line 1 = the positive trace). The quasi-static
-// solve has one R per mode, so its matrix has the mean 29.8675 on both diagonal entries.
-// The modal references are R_odd = mean - R12 and R_even = mean + R12. Im(Z0) is left out: the reported -0.49j / -0.50j
+// Ansys reports R11 = 27.429 and R22 = 32.306 ohm/m, which both backends resolve from the
+// loss of current in one trace only (line 1 = the positive trace). The modal references
+// are R_odd = mean - R12 and R_even = mean + R12 with the mean 29.8675. Im(Z0) is left out: the reported -0.49j / -0.50j
 // does not follow from the reported RLGC (+0.20j / +0.25j).
 async function solve_differential_microstrip_unequal_sigma() {
     const s = new CustomGeometrySolver({
@@ -1338,7 +1337,7 @@ sig- x=0.25  w=0.35 y=0.2104 h=0.05 sigma=3.8e7
         'eps_eff_odd': 2.9032, 'eps_eff_even': 3.175,
         'alpha_total_odd': 7.7975, 'alpha_total_even': 8.2774,
         'R_odd': 29.8675 - 1.4922, 'R_even': 29.8675 + 1.4922,
-        'R': MESH_BACKEND === 'triangular' ? [27.429, 1.4922, 1.4922, 32.306] : [29.8675, 1.4922, 1.4922, 29.8675],
+        'R': [27.429, 1.4922, 1.4922, 32.306],
         'L': [291.58e-9, 19.723e-9, 19.723e-9, 291.96e-9],
         'G': [25.039e-3, -0.10192e-3, -0.10192e-3, 25.038e-3],
         'C': [116.07e-12, -2.6636e-12, -2.6636e-12, 116.07e-12],

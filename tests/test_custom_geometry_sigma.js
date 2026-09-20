@@ -121,11 +121,6 @@ for (const [name, extra, tolSame] of [['QS', {}, 1e-9], ['full-wave', TRI, 0.01]
     const mixed = build(pair(`sigma=${LOW}`, ''));
     check('traces of different metals solve on the full domain', mixed.sym_half === false
         && build(pair(`sigma=${LOW}`, `sigma=${LOW}`)).sym_half === true);
-    const warns = t => build(t).openBoundaryWarnings().filter(w => /mode conversion/.test(w)).length;
-    check('a pair of different metals or finishes warns that mode conversion is not modelled',
-        warns(pair(`sigma=${LOW}`, '')) === 1 && warns(pair('rq=0.001', '')) === 1
-        && warns(pair(`sigma=${LOW}`, `sigma=${LOW}`)) === 0 && warns(pair('', '')) === 0
-        && warns(line(`sigma=${LOW}`, '')) === 0);
 }
 
 console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY SIGMA TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
