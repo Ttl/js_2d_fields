@@ -3093,10 +3093,10 @@ export class TriBackend {
             // single-trace drives, carried on the mode RLGC so every consumer of the
             // pair (matrix, S-parameters, interpolating sweep) sees them.
             const asym = this._lineAsymmetry(f, modes);
-            if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
             if (this._modalPhys && this._modalPhys.Gw) {
                 for (const m of [odd, even]) m.RLGC.Gm = this._modalPhys.Gw.map(v => v * 2 * Math.PI * f);
             }
+            if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
             else if (f > 0 && !this._modalPhys && this._pairFinishDiffers() && !this._modeWarnings.some(w => w.type === 'line-asymmetry')) {
                 this._modeWarnings.push({ type: 'line-asymmetry', freq: f, message:
                     'The two traces differ in metal or finish, but the per-line R and L need the MQS ' +

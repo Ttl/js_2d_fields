@@ -17,7 +17,7 @@
 // whitespace. A parameter definition takes the rest of the statement.
 //
 // Lengths are in the declared units (default mm). er, tand and sigma are plain numbers.
-// A number may carry its own unit (35um), which converts it to the declared units.
+// A number may carry its own unit (35um or 35 um), which converts it to the declared units.
 // A conductor may carry its own conductivity (sigma=, S/m), surface roughness (rq=) and
 // plating material (plating_sigma=, plating_t=, plating_rq=), which override the
 // solver-wide values and the plating statement for that conductor.
@@ -58,7 +58,13 @@ function tokenize(src) {
         const m = re.exec(src);
         if (!m) throw new Error(`unexpected character '${src.slice(pos).trim()[0]}'`);
         if (m[1] !== undefined) tokens.push({ type: 'num', value: parseFloat(m[1]), unit: m[2] });
-        else if (m[3] !== undefined) tokens.push({ type: 'id', value: m[3] });
+        else if (m[3] !== undefined) {
+            // A unit after a space belongs to the number before it ("1 um"). Units are
+            // reserved names, so this cannot be a parameter.
+            const prev = tokens[tokens.length - 1];
+            if (prev && prev.type === 'num' && prev.unit === undefined && LENGTH_UNITS[m[3]] !== undefined) prev.unit = m[3];
+            else tokens.push({ type: 'id', value: m[3] });
+        }
         else tokens.push({ type: 'op', value: m[4] });
         pos = re.lastIndex;
     }
@@ -141,7 +147,14 @@ export function evaluateExpression(src, vars = {}, unitScale = 1) {
 
 function parseFields(words, allowed, what) {
     const fields = {};
+    // A bare unit after a value that ends in a number belongs to it ("rq=1 um").
+    const merged = [];
     for (const word of words) {
+        if (merged.length && LENGTH_UNITS[word] !== undefined && /=.*[\d.]$/.test(merged[merged.length - 1])) {
+            merged[merged.length - 1] += word;
+        } else merged.push(word);
+    }
+    for (const word of merged) {
         const m = /^([A-Za-z_][A-Za-z_0-9]*)=(.+)$/.exec(word);
         if (!m) throw new Error(`expected key=value, got '${word}'`);
         if (!allowed.has(m[1])) throw new Error(`unknown ${what} key '${m[1]}'`);

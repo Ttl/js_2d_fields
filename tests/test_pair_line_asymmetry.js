@@ -92,11 +92,22 @@ for (const [label, backend] of [['full-wave', 'triangular'], ['QS', 'rectilinear
             `dL ${((M.L[0][0] - M.L[1][1]) * 1e9).toFixed(3)} vs ${(dLref * 1e9).toFixed(3)} nH/m`);
         check(`${label}, ${ref.name}: the diagonal mean is still the mode mean`,
             rel(M.R[0][0] + M.R[1][1], odd.RLGC.R + even.RLGC.R) < 1e-12);
+        check(`${label}, ${ref.name}: no warning about missing mode conversion`,
+            !(res.warnings || []).some(w => w.type === 'line-asymmetry'));
         const refS = computeSParamsDifferentialMTL(F, ref.R, ref.L, G_REF, C_REF, LEN, 50);
         const ourS = computeSParamsDiffAuto(F, odd.RLGC, even.RLGC, res.physMatrix, LEN, 50);
         check(`${label}, ${ref.name}: mode conversion over 100 mm matches the reference matrices`,
             Math.abs(dB(scd21(ourS)) - dB(scd21(refS))) < T.scd,
             `Scd21 ${dB(scd21(ourS)).toFixed(2)} vs ${dB(scd21(refS)).toFixed(2)} dB`);
+    }
+
+    // --- The perturbation loss has no per-line data and says so ---
+    if (backend === 'triangular') {
+        const s = build('', 'sigma=3.8e7');
+        s.tri_opts = { lossMethod: 'perturbation' };
+        const r = await quiet(() => s.solve_adaptive(SOLVE));
+        check(`${label}: the perturbation loss method warns that mode conversion is missing`,
+            (r.warnings || []).some(w => w.type === 'line-asymmetry') && modesOf(r)[0].RLGC.dR === undefined);
     }
 
     // --- Interpolating sweep carries the asymmetry ---

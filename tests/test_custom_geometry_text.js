@@ -206,5 +206,16 @@ check('mirrored rectangles painted asymmetrically use the full domain', sBad.sym
     check('factory reports geometry errors', bad === null && /line 1/.test(msg ?? ''), msg ?? '');
 }
 
+// --- A space between a number and its unit ---
+{
+    const g = parseAndEvaluate('units mm\nr = 1 um\nsig+ x=0 y=0 w=1 h=35 um rq=r plating=top plating_sigma=1e7 plating_t=2 um');
+    const c = g.rects[0];
+    check('a unit may follow its number after a space', g.errors.length === 0 && Math.abs(c.rq - 1e-6) < 1e-18
+        && Math.abs(c.y.size - 35e-6) < 1e-15 && Math.abs(c.platingMaterial.thickness - 2e-6) < 1e-18,
+        JSON.stringify(g.errors));
+    check('a stray word is still an error', parseAndEvaluate('sig+ x=0 y=0 w=1 h=1 um2').errors.length === 1
+        && parseAndEvaluate('sig+ x=0 y=0 w=w1 um h=1').errors.length >= 1);
+}
+
 console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY TEXT TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
