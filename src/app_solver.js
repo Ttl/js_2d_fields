@@ -1831,6 +1831,13 @@ async function runSimulation() {
                   `  Self-C:  C11 = ${(mC[0][0] * 1e12).toFixed(2)} pF/m,  C22 = ${(mC[1][1] * 1e12).toFixed(2)} pF/m\n` +
                   `  Self-L:  L11 = ${(mL[0][0] * 1e9).toFixed(2)} nH/m,  L22 = ${(mL[1][1] * 1e9).toFixed(2)} nH/m`
                 : '';
+            // Traces of different metal or finish: per-line R and L from the full-wave solve.
+            const mR = results.RLGC_matrix?.R;
+            const lineStr = (odd.RLGC.dR !== undefined && mR && mL)
+                ? `\n\nUnequal traces (line 1 = positive trace, mode conversion included in the S-parameters):\n` +
+                  `  R11 = ${mR[0][0].toFixed(2)} Ohm/m,  R22 = ${mR[1][1].toFixed(2)} Ohm/m\n` +
+                  `  L11 = ${(mL[0][0] * 1e9).toFixed(2)} nH/m,  L22 = ${(mL[1][1] * 1e9).toFixed(2)} nH/m`
+                : '';
             log(`\nDIFFERENTIAL RESULTS:\n` +
                      `======================\n` +
                      `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ohm  (2 x Z_odd)\n` +
@@ -1838,7 +1845,7 @@ async function runSimulation() {
                      `\nModal Impedances:\n` +
                      `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ohm  (eps_eff = ${odd.eps_eff.toFixed(3)})\n` +
                      `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ohm  (eps_eff = ${even.eps_eff.toFixed(3)})` +
-                     `${asymStr}\n` +
+                     `${asymStr}${lineStr}\n` +
                      `\n${lossStr}`);
         } else {
             let lossStr;

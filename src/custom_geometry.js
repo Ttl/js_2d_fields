@@ -396,7 +396,9 @@ class CustomGeometrySolver extends FieldSolver2D {
         }
         // The two traces of a pair made or finished differently: unequal R and internal
         // inductance per line, which the odd/even results cannot carry.
-        if (this.is_differential) {
+        // The full-wave eddy-current solve supplies the per-line values (tri_backend
+        // _lineAsymmetry), the quasi-static one does not yet.
+        if (this.is_differential && this.mesh_backend !== 'triangular') {
             const keys = pol => [...new Set(this.conductors
                 .filter(c => c.is_signal && (c.polarity < 0) === pol).map(conductorFinishKey))].sort().join(';');
             if (keys(true) !== keys(false)) {

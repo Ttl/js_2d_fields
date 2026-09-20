@@ -44,7 +44,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
 import { Complex } from '../complex.js';
-import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
+import { classifyModalDecomposition, halfDomainSymmetry, conductorFinishKey } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar, causalModelWarning } from '../djordjevic_sarkar.js';
 
@@ -2007,6 +2007,42 @@ export class TriBackend {
         return true;
     }
 
+    // R11 - R22 and L11 - L22 (line 1 = the positive trace) of a pair whose two traces
+    // differ in metal or surface finish, null when they do not or when the loss did not
+    // come from the eddy-current solve. Loss and internal inductance are quadratic
+    // forms in the trace currents, and the modes give R11 + R22 and R12, so the
+    // single-trace drives only supply the differences. Anchored and interpolated over
+    // frequency like the mode R and L (the values are positive, the caches log-space).
+    _lineAsymmetry(f, modes) {
+        if (!(f > 0) || !this._pairFinishDiffers() || modes.some(m => m.lossVia !== 'mqs')) return null;
+        const ev = this._lineEval;
+        if (!ev) return null;
+        const lc = (this._lineCache && this._lineCache.mesh === ev.mesh) ? this._lineCache
+            : (this._lineCache = { mesh: ev.mesh, c: [0, 1, 2, 3].map(() => ({ xs: [], ys: [], log: true })) });
+        const tol = this.opts.mqsInterpTol ?? 2e-3;
+        let v = lc.c.map(c => dispersionInterp(c, f, tol));
+        if (v.some(x => x === null || !(x > 0))) {
+            if (ev.f !== f) return null;
+            try {
+                const a = ev.run(0), b = ev.run(1);
+                v = [a.R, b.R, a.L_internal, b.L_internal];
+            } catch { return null; }
+            if (v.some(x => !Number.isFinite(x) || !(x > 0))) return null;
+            v.forEach((x, i) => dispersionInsert(lc.c[i], f, x));
+        }
+        return { dR: v[0] - v[1], dL: v[2] - v[3], R11: v[0], R22: v[1] };
+    }
+
+    _pairFinishDiffers() {
+        if (this._finishDiffers === undefined) {
+            const s = this.solver;
+            const keys = neg => [...new Set(s.conductors.filter(c => c.is_signal && (c.polarity < 0) === neg)
+                .map(conductorFinishKey))].sort().join(';');
+            this._finishDiffers = !!s.is_differential && keys(true) !== keys(false);
+        }
+        return this._finishDiffers;
+    }
+
     // Target net currents for the full-domain (per-conductor-drive) MQS solve,
     // ordered [positive-polarity group, negative-polarity group] to match
     // mqsPrecompute's group order. Symmetric pair: the odd/even unit vectors.
@@ -2644,6 +2680,25 @@ export class TriBackend {
             // pass: a hit on R alone would otherwise force L_internal to be
             // reconstructed from it, which is exactly the R/omega assumption this
             // path must avoid.
+            // Per-line evaluation for solveAt (_lineAsymmetry): the same eddy-current
+            // solve driven with current in one trace only. It reuses the unit solutions
+            // of the mode solves at this frequency, so it adds no factorization.
+            this._lineEval = mqsMulti ? { f, mesh: mqsMesh, run: (line) => {
+                const cache = this._mqsMultiCache || (this._mqsMultiCache = {});
+                const o = { wallPEC: cr.wallPEC || null, wallThick: cr.wallThick || null,
+                            wallSigma: solidSig ? bulkSigma : undefined,
+                            topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: false,
+                            diffPair: true, cache,
+                            modeCurrents: line === 0 ? [Math.SQRT2, 0] : [0, Math.SQRT2] };
+                if (rectSigma) o.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
+                if (anyPlating || ownRq || ownSigma) o.surfaceZs = buildFaceZs(s, cr, f);
+                else o.Rq = rq;
+                const m = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, o);
+                const pl = (cache.pecLine && cache.pecLine.mesh === mqsMesh) ? cache.pecLine
+                    : (cache.pecLine = { mesh: mqsMesh, L: [] });
+                if (pl.L[line] === undefined) pl.L[line] = mqsPecInductance(mqsMesh, cr, this.ctx.helpers.solveSparseMulti, o);
+                return { R: m.R_total / 2, L_internal: m.L_loop - pl.L[line] + m.L_wall };
+            } } : null;
             const rTol = this.opts.mqsInterpTol ?? 2e-3;
             const rc = (st.mqsR && st.mqsR.mesh === mqsMesh) ? st.mqsR
                 : (st.mqsR = { mesh: mqsMesh, xs: [], ys: [], log: true });
@@ -3019,6 +3074,18 @@ export class TriBackend {
             // Genuine asymmetric [C]/[L] (with Tv-reconstructed [R]/[G]) when an asymmetric
             // physMatrix was computed for this pair, else the symmetric odd/even reconstruction.
             // Shared with the S-parameter path so RLGC_matrix matches what drives the S-params.
+            // Traces of different metal or finish: R11 - R22 and L11 - L22 from the
+            // single-trace drives, carried on the mode RLGC so every consumer of the
+            // pair (matrix, S-parameters, interpolating sweep) sees them.
+            const asym = this._lineAsymmetry(f, modes);
+            if (asym) for (const m of [odd, even]) { m.RLGC.dR = asym.dR; m.RLGC.dL = asym.dL; }
+            else if (f > 0 && this._pairFinishDiffers() && !this._modeWarnings.some(w => w.type === 'line-asymmetry')) {
+                this._modeWarnings.push({ type: 'line-asymmetry', freq: f, message:
+                    'The two traces differ in metal or finish, but the per-line R and L need the MQS ' +
+                    'conductor-loss solve, which did not run here. The R and L matrices carry the mean of ' +
+                    'the two traces and the S-parameters have no mode conversion.' });
+                result.warnings = this._modeWarnings;
+            }
             result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, this._modalPhys);
             // True physical 2×2 [C]/[L] for the asymmetric MTL 4-port S-parameter path.
             if (this._modalPhys) result.physMatrix = this._modalPhys;

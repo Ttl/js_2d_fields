@@ -266,6 +266,14 @@ function _modalToPhys2x2(Xo, Xe, Tv, shunt) {
 function buildPhysicalRLGC(rlgc_odd, rlgc_even, physMatrix) {
     const sym = (o, e) => [[(o + e) / 2, (e - o) / 2], [(e - o) / 2, (o + e) / 2]];
     if (!physMatrix || !physMatrix.C || !physMatrix.L) {
+        // Traces of different metal or finish on a symmetric geometry: the mode RLGC
+        // carries R11 - R22 and L11 - L22 (dR, dL), split around the mean.
+        const dR = rlgc_odd.dR || 0, dL = rlgc_odd.dL || 0;
+        if (dR || dL) {
+            const R = sym(rlgc_odd.R, rlgc_even.R), L = sym(rlgc_odd.L, rlgc_even.L);
+            R[0][0] += dR / 2; R[1][1] -= dR / 2; L[0][0] += dL / 2; L[1][1] -= dL / 2;
+            return { R, L, G: sym(rlgc_odd.G, rlgc_even.G), C: sym(rlgc_odd.C, rlgc_even.C) };
+        }
         return { R: sym(rlgc_odd.R, rlgc_even.R), L: sym(rlgc_odd.L, rlgc_even.L),
                  G: sym(rlgc_odd.G, rlgc_even.G), C: sym(rlgc_odd.C, rlgc_even.C) };
     }
@@ -290,7 +298,7 @@ function buildPhysicalRLGC(rlgc_odd, rlgc_even, physMatrix) {
  * @param {object} physMatrix {C, L, Tv?:[[vo],[ve]]} physical p.u.l. matrices + eigenvectors, or null
  */
 function computeSParamsDiffAuto(freq, rlgc_odd, rlgc_even, physMatrix, length, Z_ref) {
-    if (!physMatrix || !physMatrix.C || !physMatrix.L) {
+    if ((!physMatrix || !physMatrix.C || !physMatrix.L) && !rlgc_odd.dR && !rlgc_odd.dL) {
         return computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref);
     }
     const { R, L, G, C } = buildPhysicalRLGC(rlgc_odd, rlgc_even, physMatrix);

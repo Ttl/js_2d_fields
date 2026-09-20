@@ -62,6 +62,7 @@ const TIERS = {
         { file: 'tests/test_custom_geometry_finish.js', cost: 60 },
         { file: 'tests/test_custom_geometry_sigma.js', cost: 40 },
         { file: 'tests/test_custom_geometry_blocks.js', cost: 35 },
+        { file: 'tests/test_pair_line_asymmetry.js', cost: 45 },
         { file: 'tests/test_gcpw_mqs.js', cost: 82 },
         { file: 'tests/test_symmetry_plane_mask.js', cost: 61 },
         { file: 'tests/test_symmetry_half_full.js', cost: 177 },

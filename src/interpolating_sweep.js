@@ -173,7 +173,11 @@ class InterpolatingSweep {
             R: m.RLGC.R,
             L: m.RLGC.L,
             G: m.RLGC.G,
-            C: m.RLGC.C
+            C: m.RLGC.C,
+            // Line asymmetry of a pair with unequal traces (R11 - R22, L11 - L22),
+            // relative to the mode's own R and L so it splines as a smooth ratio.
+            aR: (m.RLGC.dR || 0) / m.RLGC.R,
+            aL: (m.RLGC.dL || 0) / m.RLGC.L
         }));
         this.samplePoints.set(t, modeData);
         return result;
@@ -203,6 +207,10 @@ class InterpolatingSweep {
                     ? new LogSpline(ts, values)
                     : new CubicSpline(ts, values);
             }
+            for (const key of ['aR', 'aL']) {
+                const values = entries.map(e => e[1][mi][key] || 0);
+                modeSplines[key] = values.some(v => v !== 0) ? new CubicSpline(ts, values) : null;
+            }
             modeSplines.mode = entries[0][1][mi].mode;
             this.splines.push(modeSplines);
         }
@@ -219,7 +227,9 @@ class InterpolatingSweep {
             R: ms.R.evaluate(t),
             L: ms.L.evaluate(t),
             G: ms.G.evaluate(t),
-            C: ms.C.evaluate(t)
+            C: ms.C.evaluate(t),
+            aR: ms.aR ? ms.aR.evaluate(t) : 0,
+            aL: ms.aL ? ms.aL.evaluate(t) : 0
         }));
     }
 
@@ -481,7 +491,7 @@ class InterpolatingSweep {
                     Z0,
                     eps_eff,
                     C, C0: C, // C0 not meaningful for interpolated; use C as placeholder
-                    RLGC: { R, L, G, C },
+                    RLGC: (im.aR || im.aL) ? { R, L, G, C, dR: im.aR * R, dL: im.aL * L } : { R, L, G, C },
                     Zc,
                     alpha_c, alpha_d, alpha_total,
                     L_internal,
