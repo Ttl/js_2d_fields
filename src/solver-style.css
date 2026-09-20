@@ -863,8 +863,8 @@ input[type=number] {
 .custom-rect-row.has-error, .custom-param-form-row.has-error { border-color: #f44336; background: #3d2020; }
 .custom-cell { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: normal; }
 .custom-cell-label { color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; min-width: 14px; text-align: right; }
-#custom-form input.custom-expr { width: 96px; padding: 4px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
-#custom-form input.custom-expr.narrow { width: 64px; }
+#custom-form input.custom-expr { width: 84px; padding: 4px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+#custom-form input.custom-expr.narrow { width: 58px; }
 #custom-form input.custom-param-name { width: 72px; }
 #custom-form select { width: auto; padding: 4px 6px; font-size: 12.5px; }
 #custom-form select.custom-kind { width: 112px; }
@@ -890,4 +890,7 @@ input[type=number] {
     font-size: 12px;
     white-space: pre-wrap;
 }
+.custom-plating-toggle { padding: 3px 6px; font-size: 12px; white-space: nowrap; }
+.custom-plating-toggle.active { border-color: rgba(255, 215, 0, 0.7); color: #ffd700; }
+.custom-plating-panel { flex-basis: 100%; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0 2px 24px; }
 .custom-plating-material { display: inline-flex; gap: 6px; padding-left: 6px; border-left: 1px solid var(--border-color); }
