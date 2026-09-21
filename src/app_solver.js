@@ -3,9 +3,10 @@ import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usab
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop } from './plot.js';
-import { initCustomGeometryEditor, activateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
+import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
          getCustomOverrides, customSweepParams } from './custom_geometry_editor.js';
 import { solverToGeometryText } from './custom_geometry_text.js';
+import { initLayoutPanels, syncLogPanel, setLogStatus, logSolveStarted } from './layout_panels.js';
 import { buildSolverFromParams as _buildSolverFromParams, platingOptions } from './solver_factory.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
@@ -649,6 +650,7 @@ function restoreSettings(settings) {
         // medium that does not support it.
         if (window.enforceBackendForType) window.enforceBackendForType();
         if (window.enforceSweepOptionsForType) window.enforceSweepOptionsForType();
+        syncLogPanel();
 
         return true;
     } catch (e) {
@@ -775,6 +777,8 @@ function _flushLog() {
     const chunk = _logQueue.join('');
     _logQueue = [];
     c.appendChild(document.createTextNode(chunk));
+    const lines = chunk.split('\n').filter(l => l.trim());
+    if (lines.length) setLogStatus(lines[lines.length - 1].trim());
     _logLineCount += chunk.split('\n').length - 1;
     if (_logLineCount > LOG_MAX_LINES) {
         // Drop the oldest nodes wholesale rather than re-splitting text: keeping the
@@ -1622,7 +1626,14 @@ function updateGeometry() {
     pbar.style.width = "0%";
 
     const p = getParams();
-    const built = buildSolverFromParams(p);
+    // The custom geometry editor lists the errors of its own text, so they stay out of
+    // the log. An error the editor did not catch (it validates without the solver
+    // options) is still logged.
+    const isCustom = p.tl_type === 'custom';
+    let buildError = null;
+    const built = isCustom ? _buildSolverFromParams(p, (msg) => { buildError = msg; })
+                           : buildSolverFromParams(p);
+    if (buildError && !validateCustomGeometry().errors.length) log(buildError);
     // While the custom geometry text is being edited it is invalid most of the time.
     // Keep the last valid geometry on screen, the editor lists the errors.
     const keep = !built && p.tl_type === 'custom' && solver && solver.geometry_params;
@@ -1713,6 +1724,7 @@ async function runSimulation() {
     // Change button to "Stop" mode
     btn.textContent = 'Stop';
     btn.classList.add('stop-mode');
+    logSolveStarted();
     isSimulating = true;
     updateResultNotices();
     displayedProgress = 0;
@@ -2912,6 +2924,7 @@ function init() {
     if (document.getElementById('tl_type').value === 'custom') activateCustomGeometry();
     updateGeometry();
     draw();
+    initLayoutPanels();
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     log("Ready. Click 'Solve' to start simulation.");

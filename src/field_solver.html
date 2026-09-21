@@ -600,7 +600,9 @@
                     <span>Loading Plotly library...</span>
                 </div>
             </div>
+            <div id="custom-stale-badge">Geometry has errors: showing the last valid one</div>
         </div>
+        <div id="custom-splitter" class="pane-splitter" style="display: none;" title="Drag to resize"></div>
         <div id="custom-editor" style="display: none;">
             <div class="custom-editor-bar">
                 <span class="custom-view-toggle">
@@ -808,7 +810,14 @@
         </div>
     </div>
 
-    <div class="output-panel" id="console_out"></div>
+    <div id="log-panel">
+        <div id="log-splitter" class="pane-splitter" title="Drag to resize"></div>
+        <div id="log-bar">
+            <button id="btn-log-toggle" class="log-toggle" aria-expanded="true" title="Hide the log">Log</button>
+            <span id="log-last"></span>
+        </div>
+        <div class="output-panel" id="console_out"></div>
+    </div>
 </div>
 
 <div id="scaleDialog" style="
@@ -1260,6 +1269,7 @@
         const isCustom = tlType === 'custom';
         document.getElementById('custom-params').style.display = isCustom ? 'block' : 'none';
         document.getElementById('custom-editor').style.display = isCustom ? 'flex' : 'none';
+        document.getElementById('custom-splitter').style.display = isCustom ? 'block' : 'none';
         // Conversion works from the rectangle lists, which the shaped media do not have.
         document.getElementById('btn-convert-custom').style.display =
             (isCustom || SELF_BOUNDED_PARAM_DIVS[tlType]) ? 'none' : 'block';

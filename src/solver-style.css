@@ -133,10 +133,77 @@ button.stop-mode:hover {
     z-index: 1;
 }
 
+/* Draggable divider between two stacked panes */
+.pane-splitter {
+    flex: 0 0 10px;
+    cursor: row-resize;
+    touch-action: none;
+    position: relative;
+}
+.pane-splitter::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 40px;
+    height: 3px;
+    margin: -1.5px 0 0 -20px;
+    border-radius: 2px;
+    background: var(--border-color);
+}
+.pane-splitter:hover::after, .pane-splitter.dragging::after { background: var(--primary-color); }
+
+/* Log panel: a bar with the last message, the console under it */
+#log-panel {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    margin-top: 5px;
+}
+#log-panel.collapsed .output-panel { display: none; }
+#log-panel.collapsed #log-splitter { visibility: hidden; cursor: default; }
+#log-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 24px;
+    cursor: pointer;
+    font-size: 0.8em;
+}
+.log-toggle {
+    flex: 0 0 auto;
+    width: auto;
+    margin: 0;
+    background: none;
+    border: 0;
+    padding: 2px 4px;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: inherit;
+    cursor: pointer;
+}
+.log-toggle::before { content: '\25BE'; display: inline-block; margin-right: 5px; }
+#log-panel.collapsed .log-toggle::before { transform: rotate(-90deg); }
+.log-toggle:hover { background: none; }
+#log-bar:hover .log-toggle { color: var(--text-color); }
+#log-last {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--text-muted);
+    font-family: 'Consolas', 'Monaco', monospace;
+    visibility: hidden;
+}
+#log-panel.collapsed #log-last { visibility: visible; }
+#log-last.is-error { color: #ff9a92; }
+#log-last.is-warning { color: #fbbf24; }
+
 /* Output Console */
 .output-panel {
-    height: 120px;
-    margin-top: 15px;
+    height: var(--log-height, 146px);
+    box-sizing: border-box;
     background: #1e1e1e;
     color: var(--primary-color);
     font-family: 'Consolas', 'Monaco', monospace;
@@ -373,7 +440,10 @@ button.stop-mode:hover {
 }
 .help-modal-content {
     background-color: var(--panel-color);
-    margin: 10% auto;
+    margin: 5vh auto;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-sizing: border-box;
     padding: 20px;
     border-radius: 8px;
     max-width: 500px;
@@ -647,10 +717,9 @@ button.stop-mode:hover {
 
     /* Adjust output console */
     .output-panel {
-        height: 100px;
+        height: var(--log-height, 126px);
         font-size: 0.7em;
         flex-shrink: 0;
-        margin-top: 10px;
     }
 
     /* Results controls should not overlap */
@@ -797,9 +866,8 @@ input[type=number] {
 .custom-bounds { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
 .custom-bounds label { font-weight: normal; font-size: 0.9em; display: flex; flex-direction: column; gap: 2px; }
 #custom-editor {
-    flex: 0 0 45%;
+    flex: 0 0 var(--editor-share, 60%);
     min-height: 140px;
-    margin-top: 10px;
     flex-direction: column;
     background: var(--panel-color);
     border: 1px solid var(--border-color);
@@ -807,6 +875,22 @@ input[type=number] {
     overflow: hidden;
 }
 #custom-editor.collapsed { flex: 0 0 auto; min-height: 0; }
+#custom-splitter:has(+ #custom-editor.collapsed) { visibility: hidden; cursor: default; }
+#custom-stale-badge {
+    display: none;
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 2;
+    padding: 3px 8px;
+    border: 1px solid #f44336;
+    border-radius: 4px;
+    background: #3d2020;
+    color: #ff9a92;
+    font-size: 12px;
+    pointer-events: none;
+}
+body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 #custom-editor.collapsed textarea, #custom-editor.collapsed #custom-form,
 #custom-editor.collapsed #custom-geom-errors, #custom-editor.collapsed #custom-geom-warnings { display: none !important; }
 .custom-editor-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap; }
