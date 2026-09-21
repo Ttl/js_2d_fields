@@ -146,13 +146,14 @@
             <h3>Custom Geometry <span class="help-icon" onclick="showHelpModal('custom_geometry', event)">?</span></h3>
         </div>
         <div class="section-content">
-            <div class="control-group">
-                <label for="custom-template">Template</label>
-                <select id="custom-template"><option value="">Load a template...</option></select>
+            <div class="control-group custom-inline-group">
+                <label for="custom-units">Length unit</label>
+                <select id="custom-units"></select>
             </div>
             <div class="control-group">
-                <label>Parameters <span id="custom-units-label" class="custom-hint"></span></label>
+                <label>Parameters <span class="custom-hint">number or expression</span></label>
                 <div id="custom-param-list"></div>
+                <button id="btn-custom-add-param" class="secondary-btn" type="button">+ Add parameter</button>
             </div>
             <div class="control-group">
                 <label>Boundaries</label>
@@ -162,6 +163,16 @@
                     <label>Top <select id="custom_bound_top"><option value="open">open</option><option value="gnd">ground</option></select></label>
                     <label>Bottom <select id="custom_bound_bottom"><option value="open">open</option><option value="gnd">ground</option></select></label>
                 </div>
+            </div>
+            <div class="control-group">
+                <label>Solved region <span class="custom-hint">empty = automatic</span></label>
+                <div class="custom-domain">
+                    <label>x1 <input type="text" id="custom_domain_x1" placeholder="auto" spellcheck="false" autocomplete="off"></label>
+                    <label>x2 <input type="text" id="custom_domain_x2" placeholder="auto" spellcheck="false" autocomplete="off"></label>
+                    <label>y1 <input type="text" id="custom_domain_y1" placeholder="auto" spellcheck="false" autocomplete="off"></label>
+                    <label>y2 <input type="text" id="custom_domain_y2" placeholder="auto" spellcheck="false" autocomplete="off"></label>
+                </div>
+                <div id="custom-domain-resolved" class="custom-hint"></div>
             </div>
             <div class="control-group">
                 <label for="inp_custom_sigma">Conductivity (S/m)</label>
@@ -606,10 +617,11 @@
         <div id="custom-editor" style="display: none;">
             <div class="custom-editor-bar">
                 <span class="custom-view-toggle">
-                    <button id="btn-custom-view-form" class="secondary-btn active">Form</button>
+                    <button id="btn-custom-view-form" class="secondary-btn active">Rectangles</button>
                     <button id="btn-custom-view-text" class="secondary-btn">Text</button>
                 </span>
                 <span class="custom-editor-title"></span>
+                <select id="custom-template" title="Replace the geometry with a template"><option value="">Load a template...</option></select>
                 <button id="btn-custom-load" class="secondary-btn">Load file</button>
                 <button id="btn-custom-save" class="secondary-btn">Save file</button>
                 <button id="btn-custom-copy" class="secondary-btn">Copy text</button>
@@ -1170,10 +1182,10 @@
         },
         custom_geometry: {
             title: 'Custom Geometry',
-            body: '<p>A cross-section built from rectangles. The editor below the geometry preview has two views of the same geometry: <b>Form</b>, one row per rectangle, and <b>Text</b>, which is what links and files carry. Everything not covered by a dielectric is air, and the solved region is drawn white in the preview.</p>' +
+            body: '<p>A cross-section built from rectangles. Units, parameters, boundaries and the solved region are set in the sidebar. The editor below the geometry preview has two views of the geometry: <b>Rectangles</b>, one row per rectangle, and <b>Text</b>, the whole geometry as links and files carry it. Everything not covered by a dielectric is air, and the solved region is drawn white in the preview.</p>' +
                 '<p>Text format: one statement per line, <code>#</code> starts a comment.</p>' +
                 '<p><code>units mm</code> sets the length unit (m, cm, mm, um, nm, mil, in). A number may carry its own unit: <code>35um</code>.</p>' +
-                '<p><code>w = 0.3</code> defines a parameter. Parameters appear in the sidebar, can be used in any expression (<code>+ - * / ( )</code>, <code>min max abs sqrt</code>) and can be swept in the Parameter Sweep tab.</p>' +
+                '<p><code>w = 0.3</code> defines a parameter. Parameters are added, renamed (click the name) and removed in the sidebar, can be used in any expression (<code>+ - * / ( )</code>, <code>min max abs sqrt</code>) and can be swept in the Parameter Sweep tab.</p>' +
                 '<p>Rectangles: <code>diel</code>, <code>gnd</code>, <code>sig+</code>, <code>sig-</code>, given per axis as <code>x= w=</code> or <code>x1= x2=</code> (<code>y= h=</code> or <code>y1= y2=</code>). <code>-inf</code> / <code>inf</code> runs an edge to the domain wall. Dielectrics take <code>er=</code> and <code>tand=</code>. Where dielectrics overlap the later line wins. A differential pair is one <code>sig+</code> and one <code>sig-</code>.</p>' +
                 '<p><code>bounds left right top bottom</code>, each <code>open</code> or <code>gnd</code>. <code>domain x1 x2 y1 y2</code> sizes the solved region, each value may be <code>auto</code>.</p>' +
                 '<p>Metal and surface finish per conductor: <code>sigma=</code> is the conductor\'s own conductivity in S/m, <code>rq=</code> its own surface roughness, <code>plating=top,sides,bottom</code> the plated faces, and <code>plating_sigma= plating_t= plating_rq=</code> its own plating material. Conductivity and roughness that are left out come from the Conductivity and Surface Roughness options. A plating material that is left out comes from a <code>plating sigma= t= rq=</code> statement. A pair whose two traces differ in metal or finish is solved on the full cross-section.</p>' +

@@ -1,7 +1,7 @@
 // Custom geometry text: parser, expressions, units, pinned edges, round trip, and the
 // rejection cases of CustomGeometrySolver. No solves, runs in well under a second.
 import { parseGeometryText, evaluateGeometry, parseAndEvaluate, serializeGeometry,
-    evaluateExpression, setParamInText, setStatementInText, replaceStatementInText,
+    evaluateExpression, setParamInText, renameParamInText, setStatementInText, replaceStatementInText,
     insertLineInText, moveRectInText, rectStatementText } from '../src/custom_geometry_text.js';
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 
@@ -220,6 +220,17 @@ check('mirrored rectangles painted asymmetrically use the full domain', sBad.sym
         JSON.stringify(g.errors));
     check('a stray word is still an error', parseAndEvaluate('sig+ x=0 y=0 w=1 h=1 um2').errors.length === 1
         && parseAndEvaluate('sig+ x=0 y=0 w=w1 um h=1').errors.length >= 1);
+}
+
+// --- Renaming a parameter ---
+{
+    const src = 'units mm\nw = 0.3; w2 = 2*w   # w is the width\nsig+ x=-w/2 w=w y=0 h=0.035\ngnd x=-w2 w = w2 y=-1 h=0.5w';
+    const out = renameParamInText(src, 'w', 'wt');
+    check('renameParamInText renames the definition and its uses, not keys, comments or other names',
+        out === 'units mm\nwt = 0.3; w2 = 2*wt   # w is the width\nsig+ x=-wt/2 w=wt y=0 h=0.035\ngnd x=-w2 w = w2 y=-1 h=0.5w', out);
+    const a = parseAndEvaluate(src), b = parseAndEvaluate(out);
+    check('the renamed geometry evaluates the same', b.errors.length === a.errors.length
+        && JSON.stringify(b.rects.map(r => [r.x, r.y])) === JSON.stringify(a.rects.map(r => [r.x, r.y])));
 }
 
 console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY TEXT TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

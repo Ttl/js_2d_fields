@@ -296,6 +296,24 @@ export function setParamInText(text, name, expr) {
     return text;
 }
 
+// Renames parameter `from` to `to`: its definition and every expression that uses it.
+// Field keys (the w of w=...) and comments are left alone.
+export function renameParamInText(text, from, to) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    const ident = new RegExp(`(?<![A-Za-z_0-9.])${from}(?![A-Za-z_0-9])`, 'g');
+    const keyed = new RegExp(`(?<![A-Za-z_0-9.])${from}(?![A-Za-z_0-9])(?!\\s*=)`, 'g');
+    for (let i = 0; i < lines.length; i++) {
+        const [code, comment] = splitComment(lines[i]);
+        const parts = code.split(';').map(part => {
+            // A parameter definition has a bare name left of the first '='.
+            const isParam = /^\s*[A-Za-z_][A-Za-z_0-9]*\s*=/.test(part);
+            return part.replace(isParam ? ident : keyed, to);
+        });
+        lines[i] = parts.join(';') + comment;
+    }
+    return lines.join('\n');
+}
+
 // Statement text for a rectangle, the inverse of the parser for one statement.
 export function rectStatementText(kind, fields) {
     return `${kind}  ${fieldsToText(fields, RECT_KEY_ORDER)}`;
