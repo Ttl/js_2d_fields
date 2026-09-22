@@ -50,7 +50,7 @@ const PLATING_FACES = ['top', 'sides', 'bottom'];
 
 function tokenize(src) {
     const tokens = [];
-    const re = /\s*(?:(\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)([A-Za-zµ]+)?|([A-Za-z_][A-Za-z_0-9]*)|([-+*/(),]))/y;
+    const re = /\s*(?:(\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)([A-Za-zµ]+)?|([A-Za-z_][A-Za-z_0-9]*|µm)|([-+*/(),]))/y;
     let pos = 0;
     while (pos < src.length) {
         if (/^\s*$/.test(src.slice(pos))) break;

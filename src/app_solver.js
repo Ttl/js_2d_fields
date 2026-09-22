@@ -2092,7 +2092,8 @@ function getSweepDisplayUnit(cfg) {
 
 function convertToDisplayUnit(valueSI, unit) {
     const factors = {
-        'mm': 1e3, 'μm': 1e6, 'um': 1e6, 'nm': 1e9,
+        // 'μm' is U+03BC, the second 'µm' is U+00B5.
+        'mm': 1e3, 'μm': 1e6, 'µm': 1e6, 'um': 1e6, 'nm': 1e9,
         'cm': 1e2, 'm': 1,
         'mil': 1 / 25.4e-6, 'mils': 1 / 25.4e-6,
         'in': 1 / 25.4e-3, 'inch': 1 / 25.4e-3, 'inches': 1 / 25.4e-3,

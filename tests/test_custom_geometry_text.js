@@ -19,6 +19,7 @@ check('parameters', evaluateExpression('s/2+w', { s: 3, w: 0.5 }) === 2);
 check('functions', evaluateExpression('max(1,min(5,3))+abs(-2)+sqrt(16)') === 9);
 check('exponent notation', evaluateExpression('2.5e-3*2') === 0.005);
 check('unit suffix converts to the declared unit', close(evaluateExpression('35um+1', {}, 1e-3), 1.035));
+check('spaced micro-sign unit converts', close(evaluateExpression('17.5 µm', {}, 1e-3), 0.0175));
 check('inf', evaluateExpression('-inf') === -Infinity);
 for (const bad of ['1+', '2*(3', 'foo', '1 2', '3$', 'nofn(1)', '5furlong', 'inf-inf']) {
     let threw = false;
