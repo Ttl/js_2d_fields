@@ -907,7 +907,7 @@ input[type=number] {
     pointer-events: none;
 }
 body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
-#custom-editor.collapsed textarea, #custom-editor.collapsed #custom-form,
+#custom-editor.collapsed textarea, #custom-editor.collapsed #custom-form, #custom-editor.collapsed #custom-text-pane,
 #custom-editor.collapsed #custom-geom-errors, #custom-editor.collapsed #custom-geom-warnings { display: none !important; }
 .custom-editor-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap; }
 .custom-editor-title { font-weight: 600; font-size: 0.9em; margin-right: auto; }
@@ -973,6 +973,22 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 .custom-row-btn { padding: 3px 7px; min-width: 26px; }
 .custom-row-btn:disabled { opacity: 0.35; cursor: default; background-color: var(--input-bg); }
 .custom-adders { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+#custom-editor:focus, #custom-params:focus { outline: none; }
+.custom-inline-error { flex-basis: 100%; padding: 2px 4px; color: #ff9a92; font-size: 12px; white-space: pre-wrap; }
+.custom-error-item.clickable { cursor: pointer; }
+.custom-error-item.clickable:hover { text-decoration: underline; }
+.custom-error-count { flex: 0 0 auto; width: auto; padding: 3px 8px; border: 1px solid #f44336; border-radius: 4px; background: #3d2020; color: #ff9a92; font-size: 12px; font-weight: normal; }
+.custom-error-count:hover { background: #5a2a2a; }
+.custom-editor-bar .custom-row-btn:disabled { opacity: 0.35; cursor: default; background-color: var(--input-bg); }
+#btn-custom-format.active { border-color: var(--primary-color); color: var(--primary-color); }
+#custom-text-pane { flex: 1; min-height: 0; }
+#custom-format-ref { flex: 0 0 340px; max-width: 45%; overflow-y: auto; padding: 8px 12px; border-left: 1px solid var(--border-color); font-size: 12.5px; color: var(--text-muted); }
+#custom-format-ref p { margin: 0 0 8px; }
+#custom-format-ref dl { margin: 0; }
+#custom-format-ref dt { margin-top: 8px; color: var(--text-color); }
+#custom-format-ref dd { margin: 2px 0 0; line-height: 1.45; }
+#custom-format-ref code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--text-color); }
+
 #custom-geom-warnings {
     flex-shrink: 0;
     max-height: 5.5em;

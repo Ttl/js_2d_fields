@@ -451,7 +451,7 @@ export function evaluateGeometry(model, overrides = {}) {
                 ? Number(overrides[s.name]) : num(s.expr);
             if (!Number.isFinite(v)) throw new Error(`parameter '${s.name}' is not finite`);
             params[s.name] = v;
-        } catch (e) { fail(s, e); }
+        } catch (e) { fail(s, e); errors[errors.length - 1].param = s.name; }
     }
 
     const boundsSt = model.statements.find(s => s.type === 'bounds');

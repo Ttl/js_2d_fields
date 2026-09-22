@@ -620,7 +620,11 @@
                     <button id="btn-custom-view-form" class="secondary-btn active">Rectangles</button>
                     <button id="btn-custom-view-text" class="secondary-btn">Text</button>
                 </span>
+                <button id="btn-custom-undo" class="secondary-btn custom-row-btn" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
+                <button id="btn-custom-redo" class="secondary-btn custom-row-btn" title="Redo (Ctrl+Shift+Z)" disabled>&#8631;</button>
+                <button id="custom-error-count" class="custom-error-count" title="Show the first error" style="display: none;"></button>
                 <span class="custom-editor-title"></span>
+                <button id="btn-custom-format" class="secondary-btn" style="display: none;" title="Show the text format reference">Format reference</button>
                 <select id="custom-template" title="Replace the geometry with a template"><option value="">Load a template...</option></select>
                 <button id="btn-custom-load" class="secondary-btn">Load file</button>
                 <button id="btn-custom-save" class="secondary-btn">Save file</button>
@@ -629,8 +633,33 @@
                 <input type="file" id="custom-file-input" accept=".txt,text/plain" style="display: none;">
             </div>
             <div id="custom-form"></div>
-            <textarea id="custom_geom_text" spellcheck="false" autocomplete="off" autocapitalize="off"
-                      wrap="off" style="display: none;"></textarea>
+            <div id="custom-text-pane" style="display: none;">
+                <textarea id="custom_geom_text" spellcheck="false" autocomplete="off" autocapitalize="off"
+                          wrap="off" style="display: none;"></textarea>
+                <div id="custom-format-ref" style="display: none;">
+                    <p>One statement per line, or several separated by <code>;</code>. <code>#</code> starts a comment.</p>
+                    <dl>
+                        <dt><code>units mm</code></dt>
+                        <dd>Length unit: m, cm, mm, um, nm, mil, in. A number may carry its own: <code>35um</code>.</dd>
+                        <dt><code>w = 0.3</code></dt>
+                        <dd>Parameter. Expressions take <code>+ - * / ( )</code>, <code>min max abs sqrt</code> and earlier parameters.</dd>
+                        <dt><code>bounds left right top bottom</code></dt>
+                        <dd>Each <code>open</code> or <code>gnd</code>.</dd>
+                        <dt><code>domain x1 x2 y1 y2</code></dt>
+                        <dd>Solved region, each value may be <code>auto</code>. <code>domain auto</code> sizes all four.</dd>
+                        <dt><code>diel</code> <code>gnd</code> <code>sig+</code> <code>sig-</code></dt>
+                        <dd>Rectangle, per axis <code>x= w=</code> or <code>x1= x2=</code>, and <code>y= h=</code> or <code>y1= y2=</code>. <code>-inf</code> / <code>inf</code> runs an edge to the boundary. A pair is one <code>sig+</code> and one <code>sig-</code>. Touching rectangles of one kind are one conductor.</dd>
+                        <dt><code>er= tand=</code></dt>
+                        <dd>Dielectric. Where dielectrics overlap the later line wins. <code>thin=1</code> marks a thin sheet for the mesher.</dd>
+                        <dt><code>sigma= rq=</code></dt>
+                        <dd>Conductor's own conductivity (S/m) and roughness. Left out: the sidebar values.</dd>
+                        <dt><code>plating=top,sides,bottom</code></dt>
+                        <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq=</code> on the line.</dd>
+                        <dt><code>plating sigma= t= rq=</code></dt>
+                        <dd>Statement: plating material of every conductor line that gives none.</dd>
+                    </dl>
+                </div>
+            </div>
             <div id="custom-geom-errors" style="display: none;"></div>
             <div id="custom-geom-warnings" style="display: none;"></div>
         </div>
@@ -1182,14 +1211,9 @@
         },
         custom_geometry: {
             title: 'Custom Geometry',
-            body: '<p>A cross-section built from rectangles. Units, parameters, boundaries and the solved region are set in the sidebar. The editor below the geometry preview has two views of the geometry: <b>Rectangles</b>, one row per rectangle, and <b>Text</b>, the whole geometry as links and files carry it. Everything not covered by a dielectric is air, and the solved region is drawn white in the preview.</p>' +
-                '<p>Text format: one statement per line, <code>#</code> starts a comment.</p>' +
-                '<p><code>units mm</code> sets the length unit (m, cm, mm, um, nm, mil, in). A number may carry its own unit: <code>35um</code>.</p>' +
-                '<p><code>w = 0.3</code> defines a parameter. Parameters are added, renamed (click the name) and removed in the sidebar, can be used in any expression (<code>+ - * / ( )</code>, <code>min max abs sqrt</code>) and can be swept in the Parameter Sweep tab.</p>' +
-                '<p>Rectangles: <code>diel</code>, <code>gnd</code>, <code>sig+</code>, <code>sig-</code>, given per axis as <code>x= w=</code> or <code>x1= x2=</code> (<code>y= h=</code> or <code>y1= y2=</code>). <code>-inf</code> / <code>inf</code> runs an edge to the domain wall. Dielectrics take <code>er=</code> and <code>tand=</code>. Where dielectrics overlap the later line wins. A differential pair is one <code>sig+</code> and one <code>sig-</code>.</p>' +
-                '<p><code>bounds left right top bottom</code>, each <code>open</code> or <code>gnd</code>. <code>domain x1 x2 y1 y2</code> sizes the solved region, each value may be <code>auto</code>.</p>' +
-                '<p>Metal and surface finish per conductor: <code>sigma=</code> is the conductor\'s own conductivity in S/m, <code>rq=</code> its own surface roughness, <code>plating=top,sides,bottom</code> the plated faces, and <code>plating_sigma= plating_t= plating_rq=</code> its own plating material. Conductivity and roughness that are left out come from the Conductivity and Surface Roughness options. A plating material that is left out comes from a <code>plating sigma= t= rq=</code> statement. A pair whose two traces differ in metal or finish is solved on the full cross-section.</p>' +
-                '<p>The rectangle being edited is outlined in the preview. A conductor that reaches a boundary is reported as a warning: an open boundary cuts it off where the solved region ends.</p>'
+            body: '<p>A cross-section built from rectangles: dielectrics, grounds and one signal conductor or a <b>+</b> / <b>&minus;</b> pair. Everything not covered by a dielectric is air, and the solved region is drawn white in the preview.</p>' +
+                '<p>The sidebar holds the length unit, the parameters, the boundaries and the solved region. Parameters take a number or an expression, can be used in every rectangle field (<code>w/2</code>, <code>h1+h2</code>, <code>35um</code>), and those set to a number can be swept in the Parameter Sweep tab. Click a name to rename it.</p>' +
+                '<p>The editor under the preview lists the rectangles, one row each, with the conductor\'s own conductivity, roughness and plating. Its <b>Text</b> view is the whole geometry as links and files carry it, with a format reference. Errors appear on the row they belong to and block Solve; Ctrl+Z undoes any edit.</p>'
         },
         copylink: {
             title: 'Copy link',
