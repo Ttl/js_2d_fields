@@ -165,5 +165,28 @@ for (const backend of ['rectilinear', 'triangular']) {
     check('gcpw: floating channel potential at the open top does not warn', !g.w, g.w ? g.w.message : '');
 }
 
+// Signal half plane running into the open left wall. The full-wave plot grid used to put
+// the conductor face's companion line outside the domain, where the resampled
+// potential reads 0, and the step to the conductor potential read as a 180 % error.
+// Enlarging the top and bottom walls 4x moves Z0 by about 1 % on both backends.
+{
+    const slotText = `units mm
+w = 1; s = 0.3; t = 0.05; h = 0.2104; wsub = 4
+bounds open open open open
+domain auto
+diel  x=-wsub/2  y=-h  w=wsub  h=h  er=4.4  tand=0.02
+sig+  x=-s/2-w w=-inf y=0 h=t
+gnd   x=s/2      y=0   w=w     h=t
+`;
+    const est = {};
+    for (const backend of ['rectilinear', 'triangular']) {
+        const r = await solved(new CustomGeometrySolver({ text: slotText, nx: 30, ny: 30, freq: 1e9, mesh_backend: backend }));
+        est[backend] = r.w ? r.w.estimate : 0;
+    }
+    check('half plane at an open wall: full-wave estimate matches the FDM',
+        est.triangular < 0.1 && Math.abs(est.triangular - est.rectilinear) < 0.01,
+        `FDM ${(100 * est.rectilinear).toFixed(1)} %, full-wave ${(100 * est.triangular).toFixed(1)} %`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

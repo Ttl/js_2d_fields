@@ -63,11 +63,15 @@ export function buildGridFromMesh(mesh, domain, opts = {}) {
 function quantileAxis(vals, lo, hi, n, forced) {
     vals.sort();
     const tol = (hi - lo) / (n * 20);
-    const lines = [];
-    for (const v of [lo, hi, ...forced].sort((a, b) => a - b)) {
-        if (v < lo - tol || v > hi + tol) continue;
-        if (!lines.length || v - lines[lines.length - 1] > tol) lines.push(v);
+    // The domain endpoints are always lines. A forced line outside the domain (the
+    // companion line of a conductor face on a wall) or within tol of an endpoint is
+    // dropped: a sample outside the mesh reads 0.
+    const lines = [lo];
+    for (const v of forced.slice().sort((a, b) => a - b)) {
+        if (v <= lo + tol || v >= hi - tol) continue;
+        if (v - lines[lines.length - 1] > tol) lines.push(v);
     }
+    lines.push(hi);
     const N = vals.length;
     const picks = [];
     for (let i = 0; i < n; i++) picks.push(vals[Math.round(i * (N - 1) / Math.max(n - 1, 1))]);
