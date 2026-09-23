@@ -351,50 +351,37 @@ class CustomGeometrySolver extends FieldSolver2D {
         return false;
     }
 
-    // Signal conductors that reach a domain boundary. An open boundary cuts the
-    // conductor off where the domain ends, which is rarely what was drawn, and a
-    // ground boundary connects it to ground. Grounds are not reported: a ground run
-    // to a boundary is a normal way to draw a reference plane.
+    // Signal conductors that reach a domain boundary. A ground boundary connects the
+    // conductor to ground. An open boundary cuts it off where the domain ends: either a
+    // mistake or a slotline-like half plane, which has no quasi-static limit (its
+    // capacitance grows with the logarithm of the domain size). Grounds are not
+    // reported: a ground run to a boundary is a normal way to draw a reference plane.
     boundaryContactWarnings() {
         const out = [];
         const tol = this.domain_width * 1e-9;
         const b = this.boundaries;
         const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;
         const Y0 = this.domain_y_min, Y1 = this.domain_height;
-        const names = ['left', 'right', 'top', 'bottom'];
         for (const c of this.conductors) {
             if (!c.is_signal) continue;
             const touches = [c.x_min <= X0 + tol, c.x_max >= X1 - tol, c.y_max >= Y1 - tol, c.y_min <= Y0 + tol];
             const where = c.src_line ? ` (line ${c.src_line})` : '';
-            names.forEach((name, k) => {
+            WALLS.forEach((name, k) => {
                 if (!touches[k]) return;
                 out.push(b[k] === 'open'
                     ? `Signal conductor${where} reaches the open ${name} boundary and is cut off there. ` +
-                      `Give it a finite size, or enlarge the domain, unless a conductor running to the edge of the solved region is intended.`
+                      'Give it a finite size or enlarge the domain, unless a slotline-like half plane is intended. ' +
+                      'Such a line has no quasi-static limit: the characteristic impedance depends on the domain ' +
+                      'size on both solvers, and the quasi-static effective permittivity does too. Use the ' +
+                      'full-wave solver for the effective permittivity.'
                     : `Signal conductor${where} touches the ${name} ground boundary and is connected to it.`);
             });
         }
         return out;
     }
 
-    // A signal conductor that runs into an open wall (a slotline half plane) has no
-    // quasi-static limit: its capacitance grows with the logarithm of the domain size.
     openBoundaryWarnings(opts) {
-        const out = [...super.openBoundaryWarnings(opts), ...this.boundaryContactWarnings()];
-        const tol = this.domain_width * 1e-9;
-        const b = this.boundaries;
-        const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;
-        const atOpenWall = this.conductors.some(c => c.is_signal && (
-            (b[0] === 'open' && c.x_min <= X0 + tol) || (b[1] === 'open' && c.x_max >= X1 - tol) ||
-            (b[2] === 'open' && c.y_max >= this.domain_height - tol) ||
-            (b[3] === 'open' && c.y_min <= this.domain_y_min + tol)));
-        if (atOpenWall) {
-            out.push('A signal conductor extends to an open boundary (slotline-like). The line has no ' +
-                'quasi-static limit: the characteristic impedance depends on the domain size on both ' +
-                'solvers, and the quasi-static effective permittivity does too. Use the full-wave ' +
-                'solver for the effective permittivity.');
-        }
-        return out;
+        return [...super.openBoundaryWarnings(opts), ...this.boundaryContactWarnings()];
     }
 
     // Accuracy note for a strongly coupled broadside pair, see BroadsideStriplineSolver.
