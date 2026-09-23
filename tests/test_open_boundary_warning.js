@@ -123,7 +123,7 @@ bounds open open open gnd
 domain -3.15 3.15 -0.035 3.885
 diel x=-inf w=inf y=0 h=0.21 er=4.4 tand=0.02
 diel x=-inf w=inf y=0.21 h=inf er=2 tand=0
-gnd x=-inf w=inf y1=-inf y2=0
+gnd x=-inf w=inf y=0 h=-inf
 sig+ x=-0.175 w=0.35 y=0.21 h=0.035
 `;
 const filled = (backend) => new CustomGeometrySolver({ text: filledText, nx: 30, ny: 30, freq: 1e9, mesh_backend: backend });

@@ -38,7 +38,7 @@ domain auto
 diel  x=-inf    y=0      w=inf  h=h1   er=4.3 tand=0.02
 diel  x=-inf    y=h1     w=inf  h=h2   er=er2   # second layer
 sig-  x=-s/2-w  y=h1+h2  w=w    h=t
-sig+  x1=s/2    x2=s/2+w y1=h1+h2 y2=h1+h2+t
+sig+  x=s/2     y=h1+h2  w=w    h=t
 `;
 const model = parseGeometryText(TEXT);
 check('parses without errors', model.errors.length === 0, JSON.stringify(model.errors));
@@ -48,7 +48,7 @@ check('parameters evaluated in order', geo.params.h2 === 400 && geo.params.er2 =
 check('lengths in metres', close(geo.rects[2].x.pos, -275e-6) && close(geo.rects[2].y.pos, 500e-6)
     && close(geo.rects[2].x.size, 200e-6));
 check('er is not scaled by the unit', geo.rects[1].er === 3);
-check('x1,x2 form', close(geo.rects[3].x.min, 75e-6) && close(geo.rects[3].x.max, 275e-6));
+check('second trace', close(geo.rects[3].x.min, 75e-6) && close(geo.rects[3].x.max, 275e-6));
 check('pinned edges', geo.rects[0].x.min === -Infinity && geo.rects[0].x.max === Infinity);
 check('bounds and auto domain', geo.bounds.join() === 'open,open,open,gnd' && geo.domain.x_min === null);
 
@@ -112,13 +112,12 @@ const ERR = [
     ['w = ', 1, null],
     ['bounds open open gnd', 1, 'bounds'],
     ['sig+ x=0 y=0 w=1', 1, 'h'],
-    ['sig+ x=0 x1=0 w=1 y=0 h=1', 1, 'either'],
-    ['sig+ x=0 y=0 w=-1 h=1', 1, 'positive'],
+    ['sig+ x=0 x1=0 w=1 y=0 h=1', 1, 'unknown rectangle key'],
     ['sig+ x=0 y=0 w=1 h=0', 1, 'nonzero'],
     ['sig+ x=0 y=0 w=1 h=1 er=2', 1, 'diel only'],
     ['diel x=0 y=0 w=1 h=1', 1, 'er'],
     ['diel x=0 y=0 w=1 h=1 er=0.5', 1, 'er'],
-    ['sig+ x=-inf y=0 w=1 h=1', 1, 'x1,x2'],
+    ['sig+ x=-inf y=0 w=1 h=1', 1, 'w=inf'],
     ['sig+ x=0 y=0 w=1 h=1 color=red', 1, 'unknown'],
     ['a = b\nb = 1', 1, 'unknown parameter'],
     ['a = 1\na = 2', 2, 'twice'],
@@ -153,7 +152,7 @@ check('symmetric geometry uses the half domain', s1.sym_half === true);
 check('sizing hints', close(s1.t, 35e-6) && close(s1.w, 200e-6));
 
 // Off-centre input is centred on x=0 and then solves on the half domain.
-const s2 = build(TEXT.replace('x=-s/2-w', 'x=1000-s/2-w').replace('x1=s/2 ', 'x1=1000+s/2 ').replace('x2=s/2+w', 'x2=1000+s/2+w'));
+const s2 = build(TEXT.replace('x=-s/2-w', 'x=1000-s/2-w').replace('x=s/2 ', 'x=1000+s/2 '));
 check('off-centre geometry is recentred', close(s2.x_shift, 1000e-6, 1e-9) && s2.sym_half === true
     && close(s2.conductors.find(c => c.polarity > 0).x_min, 75e-6, 1e-9));
 
@@ -163,7 +162,7 @@ check('all-open box with a finite ground', s3.domain_y_min < -0.035e-3 && s3.con
     && s3.dielectrics[0].y_min === 0);
 
 const s4 = build(`units mm\nbounds open open open open\ndomain -5 5 -3 3\n` +
-    `sig+ x1=-inf x2=-0.1 y=0 h=0.035\ngnd x1=0.1 x2=inf y=0 h=0.035\ndiel x=-inf w=inf y=-0.6 h=0.6 er=9.8`);
+    `sig+ x=-0.1 w=-inf y=0 h=0.035\ngnd x=0.1 w=inf y=0 h=0.035\ndiel x=-inf w=inf y=-0.6 h=0.6 er=9.8`);
 check('slotline: half planes pinned to the walls', close(s4.conductors[0].x_min, -5e-3) && close(s4.conductors[1].x_max, 5e-3)
     && s4.w === undefined && s4.is_differential === false);
 

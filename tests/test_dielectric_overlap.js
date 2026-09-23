@@ -37,9 +37,9 @@ const INSET = {
     overlay: BASE + 'diel x=-4*u w=8*u y=u h=2*u er=9 tand=0.002\n',
     reversed: 'diel x=-4*u w=8*u y=u h=2*u er=9 tand=0.002\n' + BASE,
     tiled: 'diel x=-inf w=inf y=0 h=u er=4 tand=0.02\n' +
-           'diel x1=-inf x2=-4*u y=u h=2*u er=4 tand=0.02\n' +
+           'diel x=-4*u w=-inf y=u h=2*u er=4 tand=0.02\n' +
            'diel x=-4*u w=8*u y=u h=2*u er=9 tand=0.002\n' +
-           'diel x1=4*u x2=inf y=u h=2*u er=4 tand=0.02\n' +
+           'diel x=4*u w=inf y=u h=2*u er=4 tand=0.02\n' +
            'diel x=-inf w=inf y=3*u h=u er=4 tand=0.02\n',
     expect: (x, y) => ((Math.abs(x) < 4 * U && y > U && y < 3 * U) ? [9, 0.002] : PLAIN(x, y)),
     expectReversed: PLAIN,
@@ -52,9 +52,9 @@ const CROSS = {
     overlay: BASE + BLOCKS,
     reversed: BLOCKS + BASE,
     tiled: 'diel x=-inf w=inf y=0 h=2*u er=4 tand=0.02\n' +
-           'diel x1=-inf x2=-8*u y=2*u h=2*u er=4 tand=0.02\n' +
+           'diel x=-8*u w=-inf y=2*u h=2*u er=4 tand=0.02\n' +
            'diel x=-3*u w=6*u y=2*u h=2*u er=4 tand=0.02\n' +
-           'diel x1=8*u x2=inf y=2*u h=2*u er=4 tand=0.02\n' + BLOCKS,
+           'diel x=8*u w=inf y=2*u h=2*u er=4 tand=0.02\n' + BLOCKS,
     expect: (x, y) => (inBlock(x, y) ? [2.5, 0.01] : PLAIN(x, y)),
     // Reversed, the base hides the part of the blocks inside the substrate.
     expectReversed: (x, y) => (y < 4 * U ? [4, 0.02] : inBlock(x, y) ? [2.5, 0.01] : [1, 0]),

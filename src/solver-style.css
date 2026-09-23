@@ -1001,9 +1001,6 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
     white-space: pre-wrap;
 }
 .custom-axis { display: inline-flex; align-items: center; gap: 3px; }
-.custom-row-btn.custom-flip { min-width: 22px; padding: 3px 4px; opacity: 0.55; }
-.custom-row-btn.custom-flip:hover, .custom-row-btn.custom-flip:focus { opacity: 1; }
-.custom-row-btn.custom-flip:disabled { opacity: 0.25; }
 .custom-row-btn.active { border-color: rgba(56, 189, 248, 0.8); color: rgb(125, 211, 252); }
 .custom-mirror { font-size: 12px; white-space: nowrap; }
 .custom-quick-fix { margin-left: 8px; padding: 1px 6px; font-size: 12px; }

@@ -648,7 +648,7 @@
                         <dt><code>domain x1 x2 y1 y2</code></dt>
                         <dd>Solved region, each value may be <code>auto</code>. <code>domain auto</code> sizes all four.</dd>
                         <dt><code>diel</code> <code>gnd</code> <code>sig+</code> <code>sig-</code></dt>
-                        <dd>Rectangle, per axis <code>x= w=</code> or <code>x1= x2=</code>, and <code>y= h=</code> or <code>y1= y2=</code>. <code>-inf</code> / <code>inf</code> runs an edge to the boundary. A pair is one <code>sig+</code> and one <code>sig-</code>. Touching rectangles of one kind are one conductor.</dd>
+                        <dd>Rectangle, position and size per axis: <code>x= w=</code> and <code>y= h=</code>. <code>x=-inf w=inf</code> spans the domain, <code>w=inf</code> runs from <code>x</code> to the right boundary and <code>w=-inf</code> from <code>x</code> to the left one (<code>h</code> the same way). A negative size flips the rectangle to the other side of its position: <code>x</code> is then the right edge, <code>y</code> the top face. A pair is one <code>sig+</code> and one <code>sig-</code>. Touching rectangles of one kind are one conductor.</dd>
                         <dt><code>er= tand=</code></dt>
                         <dd>Dielectric. Where dielectrics overlap the later line wins. <code>thin=1</code> marks a thin sheet for the mesher.</dd>
                         <dt><code>sigma= rq=</code></dt>
@@ -656,7 +656,7 @@
                         <dt><code>plating=top,sides,bottom</code></dt>
                         <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq=</code> on the line.</dd>
                         <dt><code>mirror=1</code></dt>
-                        <dd>Adds the mirror image about <code>x=0</code>, a <code>sig+</code> imaged as <code>sig-</code>. A rectangle touching or crossing <code>x=0</code> becomes one rectangle symmetric about it: <code>diel x1=0 x2=inf ... mirror=1</code> is a full-width layer.</dd>
+                        <dd>Adds the mirror image about <code>x=0</code>, a <code>sig+</code> imaged as <code>sig-</code>. A rectangle touching or crossing <code>x=0</code> becomes one rectangle symmetric about it: <code>diel x=0 w=inf ... mirror=1</code> is a full-width layer.</dd>
                         <dt><code>plating sigma= t= rq=</code></dt>
                         <dd>Statement: plating material of every conductor line that gives none.</dd>
                     </dl>

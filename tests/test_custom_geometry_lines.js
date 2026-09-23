@@ -82,7 +82,7 @@ const finiteGnd = gw => `units mm\nbounds open open open open\ndiel x=-inf w=inf
     const ref = [{ Z0: 30 * Math.PI / Math.sqrt(eps) * Kp(k0) / K(k0), eps }];
     const cpw = (t, gl, gr) => `units mm\nbounds open open open open\ndiel x=-inf w=inf y=${-h} h=${h} er=${er} tand=0.001\n` +
         `gnd ${gl} y=0 h=${t}\ngnd ${gr} y=0 h=${t}\nsig+ x=${-a} w=${w} y=0 h=${t}\n`;
-    const full = [`x1=-inf x2=${-b}`, `x1=${b} x2=inf`], finite = [`x=${-b - 1} w=1`, `x=${b} w=1`];
+    const full = [`x=${-b} w=-inf`, `x=${b} w=inf`], finite = [`x=${-b - 1} w=1`, `x=${b} w=1`];
     // Thin metal against the zero-thickness closed form: the metal thickness lowers Z0 a little.
     agree('CPW over air, QS vs conformal mapping', await solve(cpw(0.002, ...full)), ref, 0.03);
     agree('CPW over air, full-wave vs conformal mapping', await solve(cpw(0.002, ...full), TRI), ref, 0.03);
@@ -97,7 +97,7 @@ const finiteGnd = gw => `units mm\nbounds open open open open\ndiel x=-inf w=inf
 {
     const W = 0.1, h = 0.635, er = 9.8, f = 10e9;
     const slot = dom => `units mm\nbounds open open open open\ndomain ${dom}\n` +
-        `diel x=-inf w=inf y=${-h} h=${h} er=${er} tand=0.001\nsig+ x1=-inf x2=${-W / 2} y=0 h=0.005\ngnd x1=${W / 2} x2=inf y=0 h=0.005\n`;
+        `diel x=-inf w=inf y=${-h} h=${h} er=${er} tand=0.001\nsig+ x=${-W / 2} w=-inf y=0 h=0.005\ngnd x=${W / 2} w=inf y=0 h=0.005\n`;
     // Janaswamy-Schaubert, 9.7 <= er <= 20, 0.02 <= W/h < 0.2 (about 2% accurate).
     const hl = h / (299.792458 / (f / 1e9)), wh = W / h, lg = Math.log10;
     const ratio = 0.923 - 0.448 * lg(er) + 0.2 * wh - (0.29 * wh + 0.047) * lg(hl * 100);

@@ -11,8 +11,10 @@
 //   sig+  x=s/2     y=h1  w=w    h=t   plating=top,sides
 //
 // Statements are separated by newlines or ';'. '#' starts a comment. A rectangle is
-// given per axis as x,w or x1,x2 (y,h or y1,y2). -inf / inf pins an edge to the domain
-// wall. A negative h puts y at the top face (embedded trace convention of Conductor).
+// given per axis as position and size, x,w and y,h. A negative size flips the rectangle
+// to the other side of its position: x is then the right edge, y the top face. x=-inf
+// w=inf spans the domain, w=inf runs from x to the right wall and w=-inf from x to the
+// left wall (h the same way on y).
 // Values in a rectangle, domain or plating statement are expressions without
 // whitespace. A parameter definition takes the rest of the statement.
 //
@@ -42,9 +44,9 @@ const RESERVED = new Set(['inf', 'auto', 'min', 'max', 'abs', 'sqrt']);
 const FUNCTIONS = {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
 };
-const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'x1', 'x2', 'y1', 'y2', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
+const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
     'plating_sigma', 'plating_t', 'plating_rq', 'mirror']);
-const RECT_KEY_ORDER = ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
+const RECT_KEY_ORDER = ['x', 'w', 'y', 'h', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
     'plating_sigma', 'plating_t', 'plating_rq', 'mirror'];
 const MIRROR_KIND = { 'sig+': 'sig-', 'sig-': 'sig+', gnd: 'gnd', diel: 'diel' };
 const PLATING_KEYS = new Set(['sigma', 't', 'rq', 'thick_corners']);
@@ -393,7 +395,7 @@ export function setStatementInText(text, keyword, statement) {
 
 // --- Expression arithmetic for the form's edits --------------------------------------
 // Builds new expressions from the ones written, as short as they reasonably get, so a
-// switch between x,w and x1,x2 keeps the parameters instead of freezing numbers.
+// rectangle placed from another one keeps the parameters instead of freezing numbers.
 
 const PLAIN_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
 const isNeg = e => e.trim() === '-inf';
@@ -419,22 +421,6 @@ function topLevelSigns(e) {
 }
 const hasTopLevelSum = e => topLevelSigns(e).length > 0;
 
-// -e with the sign of every top-level term flipped: -(-s/2-w) is s/2+w.
-export function negateExpr(e) {
-    e = e.trim();
-    if (PLAIN_NUMBER.test(e)) return fmtNumber(-parseFloat(e));
-    const cuts = [0, ...topLevelSigns(e), e.length];
-    let out = '';
-    for (let k = 0; k + 1 < cuts.length; k++) {
-        let term = e.slice(cuts[k], cuts[k + 1]);
-        let sign = '+';
-        if (term.startsWith('-') || term.startsWith('+')) { sign = term[0]; term = term.slice(1); }
-        const flipped = sign === '-' ? '+' : '-';
-        out += (out === '' && flipped === '+') ? term : flipped + term;
-    }
-    return out;
-}
-
 export function addExpr(a, b) {
     a = a.trim(); b = b.trim();
     if (PLAIN_NUMBER.test(a) && PLAIN_NUMBER.test(b)) return fmtNumber(parseFloat(a) + parseFloat(b));
@@ -444,94 +430,38 @@ export function addExpr(a, b) {
     return `${a}+${b}`;
 }
 
-export function subExpr(a, b) {
-    a = a.trim(); b = b.trim();
-    if (a === b) return '0';
-    if (PLAIN_NUMBER.test(a) && PLAIN_NUMBER.test(b)) return fmtNumber(parseFloat(a) - parseFloat(b));
-    if (PLAIN_NUMBER.test(b) && parseFloat(b) === 0) return a;
-    if (PLAIN_NUMBER.test(a) && parseFloat(a) === 0) return negateExpr(b);
-    // (b+c)-b is c.
-    if (a.startsWith(b + '+') && !hasTopLevelSum(b)) return a.slice(b.length + 1);
-    if (hasTopLevelSum(b)) return `${a}-(${b})`;
-    return b.startsWith('-') ? `${a}+${b.slice(1)}` : `${a}-${b}`;
-}
-
-const AXIS_KEYS = { x: ['x', 'w', 'x1', 'x2'], y: ['y', 'h', 'y1', 'y2'] };
-
-// Which form an axis of a rectangle's fields is written in: 'size' (x,w) or 'bounds' (x1,x2).
-export function axisForm(fields, axis) {
-    const [, , lo, hi] = AXIS_KEYS[axis];
-    return fields[lo] !== undefined || fields[hi] !== undefined ? 'bounds' : 'size';
-}
+const AXIS_KEYS = { x: ['x', 'w'], y: ['y', 'h'] };
 
 // Low and high edge of an axis as expressions. `negative` says the size evaluates
-// negative (y,h with h < 0, the top-face convention).
+// negative (the `flipped` flag of the evaluated axis).
 export function axisEdges(fields, axis, negative = false) {
-    const [p, s, lo, hi] = AXIS_KEYS[axis];
-    if (axisForm(fields, axis) === 'bounds') return { lo: fields[lo] ?? '0', hi: fields[hi] ?? '0' };
+    const [p, s] = AXIS_KEYS[axis];
     const pos = fields[p] ?? '0', size = fields[s] ?? '0';
     if (isNeg(pos)) return { lo: '-inf', hi: 'inf' };
     if (isPosInf(size)) return { lo: pos, hi: 'inf' };
+    if (isNeg(size)) return { lo: '-inf', hi: pos };
     return negative ? { lo: addExpr(pos, size), hi: pos } : { lo: pos, hi: addExpr(pos, size) };
-}
-
-// Writes the edges of an axis into `fields` in the given form. Returns false, leaving
-// the fields alone, when the size form cannot hold them (a -inf low edge with a finite
-// high edge).
-function setAxisEdges(fields, axis, edges, form) {
-    const [p, s, lo, hi] = AXIS_KEYS[axis];
-    let out;
-    if (form === 'bounds') out = { [lo]: edges.lo, [hi]: edges.hi };
-    else if (isNeg(edges.lo)) {
-        if (!isPosInf(edges.hi)) return false;
-        out = { [p]: '-inf', [s]: 'inf' };
-    } else if (isPosInf(edges.hi)) out = { [p]: edges.lo, [s]: 'inf' };
-    else out = { [p]: edges.lo, [s]: subExpr(edges.hi, edges.lo) };
-    for (const k of AXIS_KEYS[axis]) delete fields[k];
-    Object.assign(fields, out);
-    return true;
-}
-
-// Switches an axis between x,w and x1,x2. Returns false when it cannot be written in
-// the other form.
-export function toggleAxisForm(fields, axis, negative = false) {
-    const edges = axisEdges(fields, axis, negative);
-    return setAxisEdges(fields, axis, edges, axisForm(fields, axis) === 'bounds' ? 'size' : 'bounds');
 }
 
 // --- Evaluation -------------------------------------------------------------------
 
-// One axis of a rectangle in metres: { pos, size, min, max }. pos and size are the
-// constructor arguments of Conductor / Dielectric, kept as written when the axis is
-// given as position + size so a geometry converted from a solver reproduces its
-// doubles exactly. min / max are the bounds, -Infinity / Infinity for a pinned edge
-// (pos and size are then resolved against the domain by the solver).
-function evalAxis(fields, pos, size, lo, hi, ev, allowNegative) {
-    const hasPS = fields[pos] !== undefined || fields[size] !== undefined;
-    const hasLH = fields[lo] !== undefined || fields[hi] !== undefined;
-    if (hasPS && hasLH) throw new Error(`give either ${pos},${size} or ${lo},${hi}, not both`);
-    if (hasPS) {
-        if (fields[pos] === undefined || fields[size] === undefined) {
-            throw new Error(`${pos} and ${size} must both be given`);
-        }
-        const p = ev(fields[pos]), s = ev(fields[size]);
-        if (p === Infinity) throw new Error(`${pos} cannot be inf`);
-        if (s === -Infinity) throw new Error(`${size} cannot be -inf`);
-        if (p === -Infinity && s !== Infinity) {
-            throw new Error(`${pos}=-inf needs ${size}=inf, use ${lo},${hi} for a wall-pinned edge`);
-        }
-        if (s === 0) throw new Error(`${size} must be nonzero`);
-        if (s < 0 && !allowNegative) throw new Error(`${size} must be positive`);
-        if (s < 0 && p === -Infinity) throw new Error(`negative ${size} cannot be combined with inf`);
-        if (s < 0) return { pos: p, size: s, min: p + s, max: p };
-        return { pos: p, size: s, min: p, max: s === Infinity ? Infinity : p + s };
+// One axis of a rectangle in metres: { pos, size, min, max, flipped }. pos and size are
+// the constructor arguments of Conductor / Dielectric, kept as written so a geometry
+// converted from a solver reproduces its doubles exactly. Those take a negative height
+// but not a negative width, so a negative w is turned around to x+w, -w. min / max are
+// the bounds, -Infinity / Infinity for a pinned edge (pos and size are then resolved
+// against the domain by the solver). flipped says the size was written negative.
+function evalAxis(fields, pos, size, ev, keepNegative) {
+    if (fields[pos] === undefined || fields[size] === undefined) {
+        throw new Error(`${pos} and ${size} must both be given`);
     }
-    if (fields[lo] === undefined || fields[hi] === undefined) {
-        throw new Error(`missing ${pos},${size} or ${lo},${hi}`);
-    }
-    const a = ev(fields[lo]), b = ev(fields[hi]);
-    if (a === Infinity || b === -Infinity || !(b > a)) throw new Error(`${hi} must be greater than ${lo}`);
-    return { pos: a, size: b - a, min: a, max: b };
+    const p = ev(fields[pos]), s = ev(fields[size]);
+    if (p === Infinity) throw new Error(`${pos} cannot be inf`);
+    if (p === -Infinity && s !== Infinity) throw new Error(`${pos}=-inf needs ${size}=inf`);
+    if (s === 0) throw new Error(`${size} must be nonzero`);
+    if (s === -Infinity) return { pos: -Infinity, size: Infinity, min: -Infinity, max: p, flipped: true };
+    if (s < 0) return { pos: keepNegative ? p : p + s, size: keepNegative ? s : -s, min: p + s, max: p, flipped: true };
+    return { pos: p, size: s, min: p, max: s === Infinity ? Infinity : p + s, flipped: false };
 }
 
 // Mirror image of an x axis about x=0.
@@ -619,8 +549,8 @@ export function evaluateGeometry(model, overrides = {}) {
             const f = s.fields;
             const r = {
                 kind: s.kind, line: s.line,
-                x: evalAxis(f, 'x', 'w', 'x1', 'x2', len, false),
-                y: evalAxis(f, 'y', 'h', 'y1', 'y2', len, true),
+                x: evalAxis(f, 'x', 'w', len, false),
+                y: evalAxis(f, 'y', 'h', len, true),
                 er: 1, tand: 0, thin: false, plating: null, sigma: null, rq: null, platingMaterial: null,
             };
             if (s.kind === 'diel') {
@@ -711,17 +641,17 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     const Y0 = solver.domain_y_min, Y1 = solver.domain_height;
     const tol = Math.max(X1 - X0, Y1 - Y0) * 1e-9;
 
-    const axisText = (pos, size, lo, hi, p, s, d0, d1) => {
+    const axisText = (pos, size, p, s, d0, d1) => {
         const a = s >= 0 ? p : p + s, b = s >= 0 ? p + s : p;
         const loWall = pinWalls && s > 0 && Math.abs(a - d0) <= tol;
         const hiWall = pinWalls && s > 0 && Math.abs(b - d1) <= tol;
         if (!loWall && !hiWall) return `${pos}=${fmt(p)} ${size}=${fmt(s)}`;
         if (loWall && hiWall) return `${pos}=-inf ${size}=inf`;
         if (hiWall) return `${pos}=${fmt(p)} ${size}=inf`;
-        return `${lo}=-inf ${hi}=${fmt(b)}`;
+        return `${pos}=${fmt(b)} ${size}=-inf`;
     };
-    const rectText = o => `${axisText('x', 'w', 'x1', 'x2', o.x, o.width, X0, X1)} ` +
-        `${axisText('y', 'h', 'y1', 'y2', o.y, o.height, Y0, Y1)}`;
+    const rectText = o => `${axisText('x', 'w', o.x, o.width, X0, X1)} ` +
+        `${axisText('y', 'h', o.y, o.height, Y0, Y1)}`;
 
     const lines = [`units ${units}`, `bounds ${(solver.boundaries || ['open', 'open', 'open', 'gnd']).join(' ')}`,
         `domain ${fmt(X0)} ${fmt(X1)} ${fmt(Y0)} ${fmt(Y1)}`];
