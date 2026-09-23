@@ -624,6 +624,52 @@ export function evaluateGeometry(model, overrides = {}) {
     return { errors, units, params, bounds, domain, plating, rects };
 }
 
+// A length in metres with a unit that suits its size: 35 µm, 1.2 mm, 50 nm.
+export function formatLength(v) {
+    if (!Number.isFinite(v)) return v > 0 ? 'inf' : '-inf';
+    const a = Math.abs(v);
+    const [unit, k] = a >= 1 ? ['m', 1] : a >= 1e-3 ? ['mm', 1e-3] : a >= 1e-6 || a === 0 ? ['µm', 1e-6] : ['nm', 1e-9];
+    return `${parseFloat((v / k).toPrecision(4))} ${unit}`;
+}
+
+// Material values far outside their usual range, most likely a bare number read in the
+// declared unit (rq=1 under units mm is 1 mm). Returns { line, message } notes.
+export function plausibilityWarnings(geo, model = null) {
+    const out = [];
+    const bare = ` A bare number is in the declared unit (${geo.units}): write 1um for micrometres.`;
+    const check = (line, what, v, max, thickness) => {
+        if (v === null || v === undefined || !Number.isFinite(v)) return;
+        if (v > max) out.push({ line, message: `${what} = ${formatLength(v)} is unusually large.${bare}` });
+        else if (thickness > 0 && v >= thickness) {
+            out.push({ line, message: `${what} = ${formatLength(v)} is not smaller than the conductor thickness ${formatLength(thickness)}.${bare}` });
+        }
+    };
+    const sigma = (line, what, v) => {
+        if (v === null || v === undefined || (v >= 1e5 && v <= 1e9)) return;
+        out.push({ line, message: `${what} = ${v.toPrecision(3)} S/m is outside the usual range of metals (1e5 to 1e9 S/m).` });
+    };
+    const RQ_MAX = 20e-6, PLATING_T_MAX = 100e-6;
+    const st = model && model.statements.find(o => o.type === 'plating');
+    if (geo.plating) {
+        const line = st ? st.line : 0;
+        sigma(line, 'plating sigma', geo.plating.sigma);
+        check(line, 'plating t', geo.plating.thickness, PLATING_T_MAX, 0);
+        check(line, 'plating rq', geo.plating.rq, RQ_MAX, 0);
+    }
+    for (const r of geo.rects) {
+        if (r.image || r.kind === 'diel') continue;
+        const sizes = [r.x.size, r.y.size].map(Math.abs).filter(Number.isFinite);
+        const thickness = sizes.length ? Math.min(...sizes) : 0;
+        sigma(r.line, 'sigma', r.sigma);
+        check(r.line, 'rq', r.rq, RQ_MAX, thickness);
+        const pm = r.platingMaterial || {};
+        sigma(r.line, 'plating_sigma', pm.sigma);
+        check(r.line, 'plating_t', pm.thickness, PLATING_T_MAX, 0);
+        check(r.line, 'plating_rq', pm.rq, RQ_MAX, 0);
+    }
+    return out;
+}
+
 export function parseAndEvaluate(text, overrides = {}) {
     return evaluateGeometry(parseGeometryText(text), overrides);
 }
@@ -645,6 +691,9 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     const all = [...(solver.dielectrics || []), ...(solver.conductors || [])];
     if (all.some(o => o.shape)) throw new Error('Only rectangular geometries can be converted.');
     const fmt = v => (units === 'm' ? String(v) : String(Number((v / scale).toPrecision(12))));
+    // Roughness and plating thickness in micrometres, their usual unit, whatever the
+    // declared one. Metres stay exact.
+    const fmtSmall = v => (units === 'm' ? String(v) : `${Number((v / 1e-6).toPrecision(12))}um`);
     const X0 = -solver.domain_width / 2, X1 = solver.domain_width / 2;
     const Y0 = solver.domain_y_min, Y1 = solver.domain_height;
     const tol = Math.max(X1 - X0, Y1 - Y0) * 1e-9;
@@ -667,7 +716,7 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     // material carries its own keys.
     const pl = (solver.conductors || []).map(c => c.plating).find(p => p && p.sigma > 0 && p.thickness > 0);
     if (pl) {
-        lines.push(`plating sigma=${pl.sigma} t=${fmt(pl.thickness)} rq=${fmt(pl.rq ?? 0)}` +
+        lines.push(`plating sigma=${pl.sigma} t=${fmtSmall(pl.thickness)} rq=${fmtSmall(pl.rq ?? 0)}` +
             (pl.thick_corners ? ' thick_corners=1' : ''));
     }
     lines.push('');
@@ -678,12 +727,12 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
         const kind = c.is_signal ? (c.polarity < 0 ? 'sig-' : 'sig+') : 'gnd';
         const faces = c.plating ? PLATING_FACES.filter(f => c.plating[f]) : [];
         let extra = (c.sigma !== undefined && c.sigma !== null) ? ` sigma=${c.sigma}` : '';
-        if (c.rq !== undefined && c.rq !== null) extra += ` rq=${fmt(c.rq)}`;
+        if (c.rq !== undefined && c.rq !== null) extra += ` rq=${fmtSmall(c.rq)}`;
         if (faces.length) {
             extra += ` plating=${faces.join(',')}`;
             if (c.plating.sigma !== pl.sigma) extra += ` plating_sigma=${c.plating.sigma}`;
-            if (c.plating.thickness !== pl.thickness) extra += ` plating_t=${fmt(c.plating.thickness)}`;
-            if ((c.plating.rq ?? 0) !== (pl.rq ?? 0)) extra += ` plating_rq=${fmt(c.plating.rq ?? 0)}`;
+            if (c.plating.thickness !== pl.thickness) extra += ` plating_t=${fmtSmall(c.plating.thickness)}`;
+            if ((c.plating.rq ?? 0) !== (pl.rq ?? 0)) extra += ` plating_rq=${fmtSmall(c.plating.rq ?? 0)}`;
         }
         lines.push(`${kind} ${rectText(c)}` + extra);
     }

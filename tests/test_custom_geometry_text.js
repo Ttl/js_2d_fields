@@ -2,7 +2,8 @@
 // rejection cases of CustomGeometrySolver. No solves, runs in well under a second.
 import { parseGeometryText, evaluateGeometry, parseAndEvaluate, serializeGeometry,
     evaluateExpression, setParamInText, renameParamInText, setStatementInText, replaceStatementInText,
-    insertLineInText, moveRectInText, rectStatementText } from '../src/custom_geometry_text.js';
+    insertLineInText, moveRectInText, rectStatementText, plausibilityWarnings, formatLength,
+    solverToGeometryText } from '../src/custom_geometry_text.js';
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 
 let failures = 0;
@@ -141,6 +142,25 @@ for (const [text, line, word] of ERR) {
         !!e && e.line === line && (word === null || e.message.includes(word)), e ? `line ${e.line}: ${e.message}` : 'no error');
 }
 
+// --- Plausibility of material values ---
+{
+    const text = `units mm
+plating sigma=4e7 t=5 rq=0
+sig+ x=0 y=0 w=0.3 h=0.035 rq=1 sigma=5.8e4
+sig- x=1 y=0 w=0.3 h=0.035 rq=1um plating=top plating_t=0.05
+gnd x=-1 y=-1 w=3 h=0.5 rq=0.0005 plating=top plating_sigma=5.8e7
+`;
+    const model = parseGeometryText(text);
+    const w = plausibilityWarnings(evaluateGeometry(model), model);
+    const on = line => w.filter(o => o.line === line).map(o => o.message);
+    check('plausibility: plating statement t=5 under mm is flagged', on(2).length === 1 && on(2)[0].includes('plating t = 5 mm'), JSON.stringify(on(2)));
+    check('plausibility: bare rq=1 under mm and a low sigma are flagged', on(3).length === 2
+        && on(3).some(m => m.includes('rq = 1 mm')) && on(3).some(m => m.includes('S/m')), JSON.stringify(on(3)));
+    check('plausibility: rq=1um and plating thicker than the trace are fine', on(4).length === 0, JSON.stringify(on(4)));
+    check('plausibility: typical values are fine', on(5).length === 0, JSON.stringify(on(5)));
+    check('formatLength picks a unit', [1, 1e-3, 35e-6, 5e-8].map(formatLength).join() === '1 m,1 mm,35 µm,50 nm');
+}
+
 // --- Solver construction and validation ---
 const build = (text, extra = {}) => new CustomGeometrySolver({ text, nx: 20, ny: 20, ...extra });
 const rejects = (name, text, word, extra) => {
@@ -239,6 +259,23 @@ check('mirrored rectangles painted asymmetrically use the full domain', sBad.sym
     const a = parseAndEvaluate(src), b = parseAndEvaluate(out);
     check('the renamed geometry evaluates the same', b.errors.length === a.errors.length
         && JSON.stringify(b.rects.map(r => [r.x, r.y])) === JSON.stringify(a.rects.map(r => [r.x, r.y])));
+}
+
+// Conversion writes roughness and plating thickness in micrometres under any declared
+// unit, and the text rebuilds the same values.
+{
+    const src = new CustomGeometrySolver({ nx: 20, ny: 20, text: `units mm
+plating sigma=4.1e7 t=0.005 rq=0.0002
+bounds open open open gnd
+diel x=-inf w=inf y=0 h=0.2 er=4
+sig+ x=-0.15 w=0.3 y=0.2 h=0.035 rq=0.0015 plating=top,sides
+` });
+    const text = solverToGeometryText(src, { units: 'mm', pinWalls: true });
+    const back = new CustomGeometrySolver({ nx: 20, ny: 20, text });
+    const sig = c => c.find(o => o.is_signal);
+    check('conversion writes rq and plating t in um', /\brq=1\.5um\b/.test(text) && /\bt=5um\b/.test(text) && /\brq=0\.2um\b/.test(text), text);
+    check('conversion in um rebuilds the same rq and plating', close(sig(back.conductors).rq, 1.5e-6, 1e-9)
+        && close(back.plating.thickness, 5e-6, 1e-9) && close(back.plating.rq, 0.2e-6, 1e-9));
 }
 
 console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY TEXT TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

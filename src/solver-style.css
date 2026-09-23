@@ -964,6 +964,14 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 .custom-cell-label { color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; min-width: 14px; text-align: right; }
 #custom-form input.custom-expr { width: 84px; padding: 4px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 #custom-form input.custom-expr.narrow { width: 58px; }
+/* Evaluated value under a field. It hangs below the input so the row keeps its line,
+   and a row that shows one gets the room for it. */
+.custom-cell-field { position: relative; display: inline-flex; }
+.custom-cell-value { position: absolute; top: 100%; left: 2px; right: -40px; margin-top: 1px; color: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.custom-rect-row:has(> .custom-cell .custom-cell-value:not(:empty), > .custom-axis .custom-cell-value:not(:empty)) { padding-bottom: 15px; }
+.custom-plating-panel:has(.custom-cell-value:not(:empty)) { padding-bottom: 13px; }
 #custom-form select { width: auto; padding: 4px 6px; font-size: 12.5px; }
 #custom-form select.custom-kind { width: 112px; }
 .custom-faces { display: inline-flex; gap: 8px; }
