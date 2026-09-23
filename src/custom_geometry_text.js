@@ -484,7 +484,15 @@ export function evaluateGeometry(model, overrides = {}) {
     const units = unitsSt ? unitsSt.value : 'mm';
     const scale = LENGTH_UNITS[units];
     const params = {};
-    const fail = (s, e) => errors.push({ line: s.line, message: e.message ?? String(e) });
+    const defined = new Set(model.statements.filter(s => s.type === 'param').map(s => s.name));
+    // A name that is defined but has no value yet is not unknown: say why it has none.
+    const explain = (s, message) => message.replace(/unknown parameter '([A-Za-z_][A-Za-z_0-9]*)'/, (m, name) => {
+        if (!defined.has(name)) return m;
+        if (s.type === 'param' && s.name === name) return `parameter '${name}' refers to itself`;
+        if (errors.some(e => e.param === name)) return `parameter '${name}' has an error`;
+        return `parameter '${name}' is defined below this line`;
+    });
+    const fail = (s, e) => errors.push({ line: s.line, message: explain(s, e.message ?? String(e)) });
     const num = src => evaluateExpression(src, params, scale);
     const len = src => num(src) * scale;
 

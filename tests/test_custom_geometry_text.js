@@ -119,13 +119,21 @@ const ERR = [
     ['diel x=0 y=0 w=1 h=1 er=0.5', 1, 'er'],
     ['sig+ x=-inf y=0 w=1 h=1', 1, 'w=inf'],
     ['sig+ x=0 y=0 w=1 h=1 color=red', 1, 'unknown'],
-    ['a = b\nb = 1', 1, 'unknown parameter'],
+    ['a = b\nb = 1', 1, 'defined below'],
+    ['a = zz', 1, "unknown parameter 'zz'"],
+    ['w = w + 1', 1, 'refers to itself'],
     ['a = 1\na = 2', 2, 'twice'],
     ['inf = 3', 1, 'reserved'],
     ['units mm\nunits um', 2, 'more than one'],
     ['\n\nwibble 3', 3, 'unknown statement'],
     ['sig+ x=0 y=0 w=1 h=1 plating=left', 1, 'faces'],
 ];
+// A rectangle using a parameter that failed names that parameter, not an unknown one.
+{
+    const e = parseAndEvaluate('q = 1/0\nsig+ x=0 y=0 w=q h=1').errors;
+    check('error: rectangle using a failed parameter', e.length === 2 && e[1].line === 2
+        && e[1].message.includes("parameter 'q' has an error"), JSON.stringify(e));
+}
 for (const [text, line, word] of ERR) {
     const g = parseAndEvaluate(text);
     const e = g.errors[0];
