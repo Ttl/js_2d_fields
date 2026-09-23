@@ -765,6 +765,8 @@ async function loadSettingsFromFragment() {
 // pinned to the bottom, and the buffer is capped so scrollback stays cheap.
 const LOG_MAX_LINES = 5000;
 let _logQueue = [], _logFlushScheduled = false, _logLineCount = 0;
+// Line for the collapsed log bar in place of the last logged line (a result summary).
+let _logStatus = null;
 
 function _flushLog() {
     _logFlushScheduled = false;
@@ -778,7 +780,9 @@ function _flushLog() {
     _logQueue = [];
     c.appendChild(document.createTextNode(chunk));
     const lines = chunk.split('\n').filter(l => l.trim());
-    if (lines.length) setLogStatus(lines[lines.length - 1].trim());
+    if (_logStatus !== null) setLogStatus(_logStatus);
+    else if (lines.length) setLogStatus(lines[lines.length - 1].trim());
+    _logStatus = null;
     _logLineCount += chunk.split('\n').length - 1;
     if (_logLineCount > LOG_MAX_LINES) {
         // Drop the oldest nodes wholesale rather than re-splitting text: keeping the
@@ -792,8 +796,10 @@ function _flushLog() {
     if (atBottom) c.scrollTop = c.scrollHeight;
 }
 
-function log(msg) {
+// `status` replaces the last line of `msg` in the collapsed log bar.
+function log(msg, status = null) {
     _logQueue.push(msg + '\n');
+    _logStatus = status;
     if (_logFlushScheduled) return;
     _logFlushScheduled = true;
     // rAF coalesces a burst into one layout. It does not fire in a background tab, so
@@ -1823,6 +1829,12 @@ async function runSimulation() {
         const mode0 = frequencySweepResults[0].result.modes[0];
         const loss0 = mode0.alpha_total;
         const isSingleFreq = frequencies.length === 1;
+        // Loss for the collapsed log bar: the first point, or the range of a sweep.
+        const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
+        const fN = frequencies[frequencies.length - 1] / 1e9;
+        const lossShort = isSingleFreq
+            ? `${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz`
+            : `${loss0.toFixed(3)}–${lossN.toFixed(3)} dB/m @ ${f0.toFixed(2)}–${fN.toFixed(2)} GHz`;
 
         // Check if differential results
         if (results.modes.length === 2) {
@@ -1860,7 +1872,9 @@ async function runSimulation() {
                      `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ohm  (eps_eff = ${odd.eps_eff.toFixed(3)})\n` +
                      `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ohm  (eps_eff = ${even.eps_eff.toFixed(3)})` +
                      `${asymStr}${lineStr}\n` +
-                     `\n${lossStr}`);
+                     `\n${lossStr}`,
+                `Zdiff ${results.Z_diff.toFixed(2)} Ω · Zcm ${results.Z_common.toFixed(2)} Ω · ` +
+                `εeff odd ${odd.eps_eff.toFixed(3)} / even ${even.eps_eff.toFixed(3)} · ${lossShort}`);
         } else {
             let lossStr;
             if (isSingleFreq) {
@@ -1888,7 +1902,9 @@ async function runSimulation() {
                         ? `Below cutoff across the whole sweep — attenuation only.\n`
                         : `Z0: ${sumMode.Z0.toFixed(2)} Ohm${cutoffNote}\n` +
                           `eps_eff: ${sumMode.eps_eff.toFixed(3)}\n`) +
-                     `${lossStr}`);
+                     `${lossStr}`,
+                (Number.isNaN(sumMode.Z0) ? 'Below cutoff'
+                    : `Z0 ${sumMode.Z0.toFixed(2)} Ω · εeff ${sumMode.eps_eff.toFixed(3)}`) + ` · ${lossShort}`);
         }
 
         // Update plots
