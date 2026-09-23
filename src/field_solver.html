@@ -657,8 +657,8 @@
                         <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq=</code> on the line.</dd>
                         <dt><code>mirror=1</code></dt>
                         <dd>Adds the mirror image about <code>x=0</code>, a <code>sig+</code> imaged as <code>sig-</code>. A rectangle touching or crossing <code>x=0</code> becomes one rectangle symmetric about it: <code>diel x=0 w=inf ... mirror=1</code> is a full-width layer.</dd>
-                        <dt><code>plating sigma= t= rq=</code></dt>
-                        <dd>Statement: plating material of every conductor line that gives none.</dd>
+                        <dt><code>plating sigma= t= rq= thick_corners=1</code></dt>
+                        <dd>Statement: plating material of every conductor line that gives none. <code>thick_corners=1</code>: side plating wraps onto the bottom corners (Model Thick Plating; only with sides plated and bottom not).</dd>
                     </dl>
                 </div>
             </div>

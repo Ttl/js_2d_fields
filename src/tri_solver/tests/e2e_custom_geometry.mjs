@@ -149,10 +149,14 @@ check('the automatic solved region is shown and drawn as air', /x -[\d.]+ … [\
     await page.waitForTimeout(600);
     check('clearing it returns to domain auto', /^domain auto(\s|$)/m.test(await text()));
     const before = await text();
+    // A unit change asks whether to convert the numbers; converting keeps the size.
     await page.selectOption('#custom-units', 'um');
+    await page.click('dialog.custom-choice button:has-text("Convert to um")');
     await page.waitForTimeout(600);
-    check('the unit select rewrites the units statement', /^units um$/m.test(await text()));
+    check('the unit select converts the numbers to the new unit', /^units um$/m.test(await text())
+        && await page.inputValue('#inp_cgp_w') === '350', await page.inputValue('#inp_cgp_w'));
     await page.selectOption('#custom-units', 'mm');
+    await page.click('dialog.custom-choice button:has-text("Convert to mm")');
     await page.waitForTimeout(600);
     check('the sidebar edits leave the text as it was', (await text()) === before);
 }
@@ -161,7 +165,7 @@ check('the automatic solved region is shown and drawn as air', /x -[\d.]+ … [\
 {
     const text = () => page.evaluate(() => document.getElementById('custom_geom_text').value);
     const start = await text();
-    const hCell = page.locator('#custom-form .custom-rect-row.kind-sigp .custom-cell', { hasText: /^h$/ }).locator('input');
+    const hCell = page.locator('#custom-form .custom-rect-row.kind-sigp .custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^h$/ }) }).locator('input');
     await hCell.fill('tt');
     await page.waitForTimeout(600);
     const inline = await page.evaluate(() => ({
@@ -207,7 +211,7 @@ check('the automatic solved region is shown and drawn as air', /x -[\d.]+ … [\
 }
 
 // Edit the trace width expression in its row, the text follows and the preview highlights the row.
-const wCell = page.locator('#custom-form .custom-rect-row.kind-sigp .custom-cell', { hasText: /^w$/ }).locator('input');
+const wCell = page.locator('#custom-form .custom-rect-row.kind-sigp .custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^w$/ }) }).locator('input');
 await wCell.fill('2*w');
 await page.waitForTimeout(600);
 const afterCell = await page.evaluate(() => ({
@@ -232,14 +236,14 @@ check('clicking a row outside its fields outlines its rectangle', await page.eva
 // Per-conductor metal and finish: own conductivity, roughness and plating material on
 // the trace row.
 const sigRow = page.locator('#custom-form .custom-rect-row.kind-sigp');
-await sigRow.locator('.custom-cell', { hasText: /^σ$/ }).first().locator('input').fill('4.1e7');
+await sigRow.locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^σ$/ }) }).first().locator('input').fill('4.1e7');
 // A unit typed with a space goes into the text without it.
-await sigRow.locator('.custom-cell', { hasText: /^rq$/ }).first().locator('input').fill('1 um');
+await sigRow.locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^rq$/ }) }).first().locator('input').fill('1 um');
 await page.waitForTimeout(500);
 check('a field value with a space before the unit parses', await page.evaluate(() =>
     /rq=1um/.test(document.getElementById('custom_geom_text').value)
     && document.getElementById('custom-geom-errors').textContent === ''));
-await sigRow.locator('.custom-cell', { hasText: /^rq$/ }).first().locator('input').fill('0.001');
+await sigRow.locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^rq$/ }) }).first().locator('input').fill('0.001');
 check('the sidebar has no surface plating block in the custom type', await page.evaluate(() =>
     getComputedStyle(document.querySelector('.control-group:has(#chk_plating)')).display === 'none'
     && getComputedStyle(document.getElementById('plating-params')).display === 'none'));
@@ -252,8 +256,8 @@ await page.waitForTimeout(500);
 check('the first plated face starts from a typical plating material', await page.evaluate(() =>
     /plating=top plating_sigma=1e7 plating_t=4um/.test(document.getElementById('custom_geom_text').value)
     && document.getElementById('custom-geom-errors').textContent === ''));
-await sigRow.locator('.custom-plating-material .custom-cell', { hasText: /^σ$/ }).locator('input').fill('1e7');
-await sigRow.locator('.custom-plating-material .custom-cell', { hasText: /^t$/ }).locator('input').fill('4um');
+await sigRow.locator('.custom-plating-material .custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^σ$/ }) }).locator('input').fill('1e7');
+await sigRow.locator('.custom-plating-material .custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^t$/ }) }).locator('input').fill('4um');
 await page.waitForTimeout(600);
 const finish = await page.evaluate(() => ({
     line: document.getElementById('custom_geom_text').value.split('\n').find(l => l.startsWith('sig+')),
@@ -266,10 +270,10 @@ check('the collapsed plating button names the plated faces',
 await platingToggle.click();
 check('conductivity, roughness and plating fields of a row write their keys', /sigma=4\.1e7 rq=0\.001 plating=top plating_sigma=1e7 plating_t=4um/.test(finish.line)
     && finish.errors === '' && finish.gold === 1, finish.line + ' | ' + finish.errors);
-for (const label of [/^σ$/, /^t$/]) await sigRow.locator('.custom-plating-material .custom-cell', { hasText: label }).locator('input').fill('');
+for (const label of [/^σ$/, /^t$/]) await sigRow.locator('.custom-plating-material .custom-cell', { has: page.locator('.custom-cell-label', { hasText: label }) }).locator('input').fill('');
 await sigRow.locator('.custom-face', { hasText: 'top' }).locator('input').uncheck();
-await sigRow.locator('.custom-cell', { hasText: /^rq$/ }).first().locator('input').fill('');
-await sigRow.locator('.custom-cell', { hasText: /^σ$/ }).first().locator('input').fill('');
+await sigRow.locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^rq$/ }) }).first().locator('input').fill('');
+await sigRow.locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^σ$/ }) }).first().locator('input').fill('');
 await page.waitForTimeout(600);
 check('clearing the fields removes the keys', await page.evaluate(() =>
     /^sig\+\s+x=-w\/2 w=w y=h h=t$/m.test(document.getElementById('custom_geom_text').value)));
@@ -278,8 +282,8 @@ check('clearing the fields removes the keys', await page.evaluate(() =>
 await page.click('#custom-form .custom-adders button:has-text("+ Dielectric")');
 await page.waitForTimeout(400);
 const added = await page.evaluate(() => [...document.querySelectorAll('#custom-form .custom-rect-row')].length);
-await page.locator('#custom-form .custom-rect-row').last().locator('.custom-cell', { hasText: /^y$/ }).locator('input').fill('h');
-await page.locator('#custom-form .custom-rect-row').last().locator('.custom-cell', { hasText: /^h$/ }).locator('input').fill('0.1');
+await page.locator('#custom-form .custom-rect-row').last().locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^y$/ }) }).locator('input').fill('h');
+await page.locator('#custom-form .custom-rect-row').last().locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^h$/ }) }).locator('input').fill('0.1');
 await page.waitForTimeout(600);
 const cover = await page.evaluate(() => document.getElementById('custom_geom_text').value);
 check('a rectangle added in the form appears in the text', added === 4 && /diel\s+x=-inf w=inf y=h h=0\.1 er=4\.4 tand=0\.02/.test(cover));
@@ -289,7 +293,7 @@ check('deleting the row removes its line', await page.evaluate(() =>
     document.querySelectorAll('#custom-form .custom-rect-row').length === 3 && !/y=h h=0\.1/.test(document.getElementById('custom_geom_text').value)));
 
 // A ground run to an open boundary is a normal reference plane and says nothing.
-const gndX = page.locator('#custom-form .custom-rect-row.kind-gnd .custom-cell', { hasText: /^w$/ }).locator('input');
+const gndX = page.locator('#custom-form .custom-rect-row.kind-gnd .custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^w$/ }) }).locator('input');
 await gndX.fill('inf');
 await page.waitForTimeout(600);
 check('a ground reaching an open boundary does not warn',
@@ -298,7 +302,7 @@ await gndX.fill('wgnd');
 await page.waitForTimeout(600);
 
 // A signal run to an open boundary is reported as a warning.
-const sigW = sigRow.locator('.custom-cell', { hasText: /^w$/ }).first().locator('input');
+const sigW = sigRow.locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^w$/ }) }).first().locator('input');
 await sigW.fill('inf');
 await page.waitForTimeout(600);
 const warn = await page.evaluate(() => ({ text: document.getElementById('custom-geom-warnings').textContent,

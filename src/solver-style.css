@@ -1020,3 +1020,12 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 /* Custom geometry: plating is set per conductor in the editor */
 body.tl-custom #plating-params,
 body.tl-custom .control-group:has(#chk_plating) { display: none !important; }
+
+/* Question dialog of the custom geometry editor, styled like the help modal. */
+dialog.custom-choice { padding: 0; border: none; background: transparent; max-width: min(500px, calc(100vw - 32px)); }
+dialog.custom-choice::backdrop { background: rgba(0, 0, 0, 0.7); }
+dialog.custom-choice .help-modal-content { margin: 0; }
+dialog.custom-choice h3 { margin-top: 0; color: var(--text-color); }
+dialog.custom-choice p { line-height: 1.5; color: var(--text-muted); }
+.custom-choice-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.custom-choice-buttons button { width: auto; font-size: 13px; padding: 7px 14px; }

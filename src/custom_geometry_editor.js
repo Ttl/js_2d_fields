@@ -5,7 +5,8 @@
 // of truth. Every control rewrites one statement in it and leaves the rest as typed.
 import { parseGeometryText, evaluateGeometry, setParamInText, renameParamInText, setStatementInText, replaceStatementInText,
          insertLineInText, moveRectInText, rectStatementText, formatErrors, evaluateExpression, LENGTH_UNITS,
-         axisEdges, addExpr, formatLength, plausibilityWarnings } from './custom_geometry_text.js';
+         axisEdges, addExpr, formatLength, plausibilityWarnings, isPlainNumber, isLengthLiteral, isReservedName,
+         changeUnitsInText } from './custom_geometry_text.js';
 import { CustomGeometrySolver } from './custom_geometry.js';
 
 export const CUSTOM_TEMPLATES = {
@@ -87,15 +88,10 @@ const KIND_LABELS = { 'sig+': 'Signal (+)', 'sig-': 'Signal (−)', 'gnd': 'Grou
 const FACES = ['top', 'sides', 'bottom'];
 const $ = id => document.getElementById(id);
 const paramInputId = name => `inp_cgp_${name}`;
-const isPlainNumber = expr => /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(expr.trim());
-// A number with an optional length unit ("0.2", "35um", "35 um"): the parameters a sweep can vary.
-const isLiteral = expr => {
-    const m = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\s*([A-Za-zµ]*)$/.exec(expr.trim());
-    return !!m && (!m[1] || LENGTH_UNITS[m[1]] !== undefined);
-};
-// Value of a literal in the declared units, NaN when it is not one.
+// Value of a number with an optional unit in the declared units, NaN when it is not one.
+// Parameters defined this way are the ones a sweep can vary.
 const literalValue = (expr, unitScale) => {
-    if (!isLiteral(expr)) return NaN;
+    if (!isLengthLiteral(expr)) return NaN;
     try { return evaluateExpression(expr, {}, unitScale); } catch { return NaN; }
 };
 const fmt = v => (Number.isFinite(v) ? String(parseFloat(v.toPrecision(6))) : (v > 0 ? 'inf' : '-inf'));
@@ -121,6 +117,30 @@ function el(tag, props = {}, ...children) {
     }
     e.append(...children);
     return e;
+}
+
+// A modal question with a button per choice. Resolves to the chosen value, null when
+// the dialog is dismissed (Escape).
+function askChoice(title, message, choices) {
+    return new Promise(resolve => {
+        const dialog = el('dialog', { class: 'custom-choice' });
+        const done = value => { dialog.close(); dialog.remove(); resolve(value); };
+        dialog.append(el('div', { class: 'help-modal-content' },
+            el('h3', { text: title }),
+            ...message.split('\n').map(p => el('p', { text: p })),
+            el('div', { class: 'custom-choice-buttons' }, ...choices.map(c =>
+                el('button', { type: 'button', class: c.primary ? '' : 'secondary-btn', text: c.label,
+                    onclick: () => done(c.value) })))));
+        dialog.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+        document.body.append(dialog);
+        dialog.showModal();
+    });
+}
+
+// Replacing the text loses nothing when it is empty or an untouched template.
+function replaceable() {
+    const t = $('custom_geom_text');
+    return !t.value.trim() || t.value === t.dataset.loaded;
 }
 
 export function getCustomGeometryText() {
@@ -149,7 +169,7 @@ export function getCustomOverrides() {
     const unitsSt = model.statements.find(s => s.type === 'units');
     const unitScale = LENGTH_UNITS[unitsSt ? unitsSt.value : 'mm'];
     for (const s of model.statements) {
-        if (s.type !== 'param' || !isLiteral(s.expr)) continue;
+        if (s.type !== 'param' || !isLengthLiteral(s.expr)) continue;
         const input = $(paramInputId(s.name));
         if (!input) continue;
         const v = literalValue(input.value, unitScale);
@@ -160,7 +180,7 @@ export function getCustomOverrides() {
 
 // Sweepable geometry parameters: those defined as a number, with or without a unit.
 export function customSweepParams() {
-    return analyse().model.statements.filter(s => s.type === 'param' && isLiteral(s.expr))
+    return analyse().model.statements.filter(s => s.type === 'param' && isLengthLiteral(s.expr))
         .map(s => ({ key: `cgp_${s.name}`, label: `${s.name} (geometry parameter)`, inputId: paramInputId(s.name) }));
 }
 
@@ -194,7 +214,8 @@ function validate(geo) {
 // A button per parameter that `message` reports as unknown, which defines it. A
 // parameter used by the parameter on line `beforeLine` is defined above that line.
 function unknownParamFixes(message, beforeLine = 0) {
-    const names = [...new Set([...message.matchAll(/unknown parameter '([A-Za-z_][A-Za-z_0-9]*)'/g)].map(m => m[1]))];
+    const names = [...new Set([...message.matchAll(/unknown parameter '([A-Za-z_][A-Za-z_0-9]*)'/g)].map(m => m[1]))]
+        .filter(name => !isReservedName(name));
     return names.map(name => el('button', { type: 'button', class: 'secondary-btn custom-quick-fix',
         text: `+ parameter ${name}`, title: `Define ${name} in the parameters`,
         onclick: (e) => { e.stopPropagation(); addParameter(name, beforeLine); } }));
@@ -324,10 +345,16 @@ function paramNameCell(name, names) {
             if (done) return;
             done = true;
             const to = input.value.trim();
-            if (commit && to !== name && PARAM_NAME.test(to) && !names.includes(to)) {
+            const problem = !commit || to === name ? null
+                : !PARAM_NAME.test(to) ? `'${to}' is not a name: letters, digits and _, not starting with a digit.`
+                : isReservedName(to) ? `'${to}' is reserved (a function, a unit, inf or auto).`
+                : names.includes(to) ? `'${to}' is already a parameter.` : null;
+            if (commit && to !== name && !problem) {
                 setText(renameParamInText(getCustomGeometryText(), name, to));
             } else {
                 input.replaceWith(label);
+                const row = label.closest('.custom-param-row');
+                if (row && problem) setInlineError(row, `Not renamed: ${problem}`);
             }
         };
         input.addEventListener('keydown', (e) => {
@@ -347,6 +374,11 @@ function sidebarParamRow(st, names) {
     input.addEventListener('input', () => {
         const expr = input.value.trim();
         if (!expr) return;
+        // ';' and '#' would end the statement in the text.
+        if (/[;#]/.test(expr)) {
+            setInlineError(input.parentElement, 'A value cannot contain ; or #.');
+            return;
+        }
         const t = $('custom_geom_text');
         t.value = setParamInText(t.value, st.name, expr);
         scheduleChange('sidebar');
@@ -896,6 +928,39 @@ export function activateCustomGeometry() {
     refresh('load', false);
 }
 
+// Changes the declared unit. Without any length written in the text there is nothing
+// to decide. Otherwise the numbers are either converted, so the geometry keeps its
+// size, or kept and read in the new unit.
+async function changeUnits(to) {
+    const text = getCustomGeometryText();
+    const { model, geo } = analyse(text);
+    const from = geo.units;
+    if (to === from) return;
+    const reinterpret = () => setText(setStatementInText(text, 'units', `units ${to}`));
+    const hasLengths = model.statements.some(s => s.type === 'param' || s.type === 'rect' || s.type === 'plating'
+        || (s.type === 'domain' && s.values.some(v => v !== 'auto')));
+    if (!hasLengths) { reinterpret(); return; }
+    const choice = await askChoice('Change the length unit',
+        `Bare numbers in the geometry are in ${from}. They can be converted to ${to}, so the geometry keeps ` +
+        `its size, or kept as they are and read in ${to}, which scales the geometry.\n` +
+        'Numbers with their own unit (35um) stay as written.',
+        [{ label: `Convert to ${to}`, value: 'convert', primary: true },
+         { label: `Keep the numbers`, value: 'reinterpret' },
+         { label: 'Cancel', value: null }]);
+    // The text may have changed while the dialog was open.
+    if (choice === null || getCustomGeometryText() !== text) { $('custom-units').value = analyse().geo.units; return; }
+    if (choice === 'reinterpret') { reinterpret(); return; }
+    const converted = changeUnitsInText(text, to);
+    if (converted === null) {
+        window.alert(geo.errors.length
+            ? 'The geometry has errors. Fix them before converting the unit.'
+            : 'Some expressions could not be converted consistently. The unit was not changed.');
+        $('custom-units').value = from;
+        return;
+    }
+    setText(converted);
+}
+
 export function initCustomGeometryEditor({ onGeometryChange, log }) {
     onChange = onGeometryChange;
     const text = $('custom_geom_text');
@@ -955,15 +1020,14 @@ export function initCustomGeometryEditor({ onGeometryChange, log }) {
     for (const name of Object.keys(CUSTOM_TEMPLATES)) sel.append(el('option', { value: name, text: name }));
     sel.addEventListener('change', () => {
         if (!sel.value) return;
-        const replace = !text.value.trim() || text.value === text.dataset.loaded
-            || window.confirm('Replace the current geometry with the template?');
+        const replace = replaceable() || window.confirm('Replace the current geometry with the template?');
         if (replace) { setCustomGeometryText(CUSTOM_TEMPLATES[sel.value], true); text.dataset.loaded = text.value; }
         sel.value = '';
     });
 
     const unitSel = $('custom-units');
     for (const u of Object.keys(LENGTH_UNITS).filter(u => u !== 'µm')) unitSel.append(el('option', { value: u, text: u }));
-    unitSel.addEventListener('change', () => setText(setStatementInText(text.value, 'units', `units ${unitSel.value}`)));
+    unitSel.addEventListener('change', () => changeUnits(unitSel.value));
     $('btn-custom-add-param').addEventListener('click', () => addParameter());
     DOMAIN_KEYS.forEach(key => {
         $(`custom_domain_${key}`).addEventListener('input', () => {
@@ -1000,6 +1064,7 @@ export function initCustomGeometryEditor({ onGeometryChange, log }) {
     $('custom-file-input').addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) return;
+        if (!replaceable() && !window.confirm(`Replace the current geometry with ${file.name}?`)) return;
         file.text().then(t => { setCustomGeometryText(t, true); log(`Loaded geometry from ${file.name}`); });
         e.target.value = '';
     });

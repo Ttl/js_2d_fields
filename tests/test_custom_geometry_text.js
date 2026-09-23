@@ -3,7 +3,7 @@
 import { parseGeometryText, evaluateGeometry, parseAndEvaluate, serializeGeometry,
     evaluateExpression, setParamInText, renameParamInText, setStatementInText, replaceStatementInText,
     insertLineInText, moveRectInText, rectStatementText, plausibilityWarnings, formatLength,
-    solverToGeometryText } from '../src/custom_geometry_text.js';
+    solverToGeometryText, changeUnitsInText, isReservedName, isPlainNumber, isLengthLiteral } from '../src/custom_geometry_text.js';
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 
 let failures = 0;
@@ -276,6 +276,54 @@ sig+ x=-0.15 w=0.3 y=0.2 h=0.035 rq=0.0015 plating=top,sides
     check('conversion writes rq and plating t in um', /\brq=1\.5um\b/.test(text) && /\bt=5um\b/.test(text) && /\brq=0\.2um\b/.test(text), text);
     check('conversion in um rebuilds the same rq and plating', close(sig(back.conductors).rq, 1.5e-6, 1e-9)
         && close(back.plating.thickness, 5e-6, 1e-9) && close(back.plating.rq, 0.2e-6, 1e-9));
+}
+
+// --- Change of units ---
+{
+    const text = `units mm
+w = 0.3; s = 0.2; t = 35 um   # widths
+n = 2; h1 = 0.1; h2 = h1*n + 0.05
+plating sigma=4e7 t=0.005 rq=0.0002
+bounds open open open gnd
+domain -3 3 auto 2
+diel  x=-inf    y=0      w=inf  h=h1  er=4.3  tand=0.02
+diel  x=-inf    y=h1     w=inf  h=h2  er=2.2  tand=0.001
+sig-  x=-s/2-w  y=h1+h2  w=w    h=t  rq=1 um
+sig+  x=s/2     y=h1+h2  w=w    h=t  rq=0.001; gnd x=-1 w=max(2*w,0.5)+0.1 y=-0.2 h=0.1
+`;
+    const um = changeUnitsInText(text, 'um');
+    const a = parseAndEvaluate(text), b = um && parseAndEvaluate(um);
+    const same = (p, q) => p.rects.length === q.rects.length && p.rects.every((r, i) =>
+        ['min', 'max'].every(k => [[r.x[k], q.rects[i].x[k]], [r.y[k], q.rects[i].y[k]]].every(([u, v]) => u === v || close(u, v, 1e-9)))
+        && (r.rq === null ? q.rects[i].rq === null : close(r.rq, q.rects[i].rq, 1e-9)));
+    check('unit change mm -> um keeps the geometry', !!um && b.units === 'um' && same(a, b), um ?? 'null');
+    check('unit change scales lengths, not factors or suffixed numbers',
+        !!um && /^w = 300; s = 200; t = 35 um {3}# widths$/m.test(um) && /^n = 2; h1 = 100; h2 = h1\*n \+ 50$/m.test(um)
+        && /x=-s\/2-w/.test(um) && /rq=1 um/.test(um) && /w=max\(2\*w,500\)\+100/.test(um)
+        && /^domain -3000 3000 auto 2000$/m.test(um) && /^plating sigma=4e7 t=5 rq=0\.2$/m.test(um), um ?? 'null');
+    const mil = changeUnitsInText(text, 'mil');
+    check('unit change mm -> mil keeps the geometry', !!mil && same(a, parseAndEvaluate(mil)));
+    check('unit change without a units line adds one', /^units um$/m.test(changeUnitsInText('w = 0.3\nsig+ x=0 w=w y=0 h=0.035', 'um') ?? ''));
+    check('unit change of a text with errors gives null', changeUnitsInText('units mm\nw = oops', 'um') === null);
+}
+
+// --- Names and literals ---
+check('reserved names', isReservedName('mm') && isReservedName('inf') && isReservedName('sqrt') && !isReservedName('w'));
+check('plain numbers and length literals', isPlainNumber('-1.5e-3') && !isPlainNumber('35um')
+    && isLengthLiteral('35um') && isLengthLiteral('35 um') && isLengthLiteral('0.2') && !isLengthLiteral('2*w') && !isLengthLiteral('3 kg'));
+
+// --- Signal drawn as separate bodies ---
+{
+    const sep = new CustomGeometrySolver({ nx: 10, ny: 10, text: `units mm
+bounds open open open gnd
+diel x=-inf w=inf y=0 h=0.2 er=4
+sig+ x=-1 w=0.3 y=0.2 h=0.035
+sig+ x=1 w=0.3 y=0.2 h=0.035
+sig+ x=1.3 w=0.3 y=0.2 h=0.035
+sig- x=0 w=0.2 y=0.2 h=0.035
+` }).openBoundaryWarnings();
+    check('separate sig+ bodies are reported once, sig- alone is not', sep.length === 1
+        && sep[0].includes('sig+ conductor is 2 separate bodies'), JSON.stringify(sep));
 }
 
 console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY TEXT TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

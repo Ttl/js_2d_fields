@@ -2219,7 +2219,8 @@ async function runParameterSweep() {
         updateGeometry();
         runBtn.style.display = '';
         stopBtn.style.display = 'none';
-        solveBtn.disabled = false;
+        // The custom geometry editor keeps Solve off while its text has errors.
+        solveBtn.disabled = solveBtn.dataset.customInvalid === '1';
         isSweeping = false;
         heartbeatStop('');
     }

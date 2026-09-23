@@ -63,7 +63,11 @@ function tokenize(src) {
         re.lastIndex = pos;
         const m = re.exec(src);
         if (!m) throw new Error(`unexpected character '${src.slice(pos).trim()[0]}'`);
-        if (m[1] !== undefined) tokens.push({ type: 'num', value: parseFloat(m[1]), unit: m[2] });
+        if (m[1] !== undefined) {
+            // start / end: the digits in src, for rewriting the number in place.
+            const start = pos + m[0].length - m[0].trimStart().length;
+            tokens.push({ type: 'num', value: parseFloat(m[1]), unit: m[2], start, end: start + m[1].length });
+        }
         else if (m[3] !== undefined) {
             // A unit after a space belongs to the number before it ("1 um"). Units are
             // reserved names, so this cannot be a parameter.
@@ -149,6 +153,18 @@ export function evaluateExpression(src, vars = {}, unitScale = 1) {
     return v;
 }
 
+// A name that cannot be a parameter: functions, inf, auto and the length units.
+export const isReservedName = name => RESERVED.has(name) || LENGTH_UNITS[name] !== undefined;
+
+// A plain number, no unit: "0.2", "-1e-3".
+export const isPlainNumber = expr => PLAIN_NUMBER.test(String(expr).trim());
+
+// A number with an optional length unit: "0.2", "35um", "35 um".
+export function isLengthLiteral(expr) {
+    const m = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\s*([A-Za-zµ]*)$/.exec(String(expr).trim());
+    return !!m && (!m[1] || LENGTH_UNITS[m[1]] !== undefined);
+}
+
 // --- Parsing ----------------------------------------------------------------------
 
 function parseFields(words, allowed, what) {
@@ -174,7 +190,7 @@ function parseStatement(src) {
     // A parameter statement has nothing but the name before '='.
     const param = /^([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.+)$/.exec(src);
     if (param) {
-        if (RESERVED.has(param[1]) || LENGTH_UNITS[param[1]] !== undefined) {
+        if (isReservedName(param[1])) {
             throw new Error(`'${param[1]}' is a reserved name`);
         }
         return { type: 'param', name: param[1], expr: param[2].trim() };
@@ -737,4 +753,212 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
         lines.push(`${kind} ${rectText(c)}` + extra);
     }
     return lines.join('\n') + '\n';
+}
+
+// --- Change of units ----------------------------------------------------------------
+// Rewrites the text for another declared unit so that the geometry keeps its size. A
+// bare number that is a length is scaled, one that is a factor (the 2 of s/2) is not.
+// Which is which follows from the expression: in a sum every term is a length, in a
+// product the numbers carry what the parameters leave over. Parameters are taken as
+// lengths first, then with growing sets of them as plain factors, until the rewritten
+// text evaluates to the same geometry. Numbers with their own unit stay as written.
+
+// Expression tree: num (with its token), id, neg, sum, prod (factors with op), fn.
+function expressionTree(src) {
+    const tokens = tokenize(src);
+    let i = 0;
+    const isOp = v => tokens[i] && tokens[i].type === 'op' && tokens[i].value === v;
+    function primary() {
+        const tk = tokens[i++];
+        if (!tk) throw new Error('unexpected end of expression');
+        if (tk.type === 'num') return { type: 'num', tk };
+        if (tk.type === 'id') {
+            if (!isOp('(')) return { type: 'id', name: tk.value };
+            i++;
+            const args = [sum()];
+            while (isOp(',')) { i++; args.push(sum()); }
+            if (!isOp(')')) throw new Error("expected ')'");
+            i++;
+            return { type: 'fn', name: tk.value, args };
+        }
+        if (tk.value === '(') {
+            const v = sum();
+            if (!isOp(')')) throw new Error("expected ')'");
+            i++;
+            return v;
+        }
+        throw new Error(`unexpected '${tk.value}'`);
+    }
+    function unary() {
+        if (isOp('-') || isOp('+')) { i++; return { type: 'neg', node: unary() }; }
+        return primary();
+    }
+    function product() {
+        const factors = [{ op: '*', node: unary() }];
+        while (isOp('*') || isOp('/')) { const op = tokens[i++].value; factors.push({ op, node: unary() }); }
+        return factors.length === 1 ? factors[0].node : { type: 'prod', factors };
+    }
+    function sum() {
+        const items = [product()];
+        while (isOp('+') || isOp('-')) { i++; items.push(product()); }
+        return items.length === 1 ? items[0] : { type: 'sum', items };
+    }
+    const tree = sum();
+    if (i < tokens.length) throw new Error(`unexpected '${tokens[i].value}'`);
+    return tree;
+}
+
+// Length degree of a node from its parameters, null when only its numbers could say.
+function naturalDegree(node, degreeOf) {
+    switch (node.type) {
+    case 'num': return null;
+    case 'id': return node.name === 'inf' ? null : degreeOf(node.name);
+    case 'neg': return naturalDegree(node.node, degreeOf);
+    case 'sum': case 'fn': {
+        const args = node.type === 'sum' ? node.items : node.args;
+        for (const a of args) {
+            const d = naturalDegree(a, degreeOf);
+            if (d !== null) return node.type === 'fn' && node.name === 'sqrt' ? d / 2 : d;
+        }
+        return null;
+    }
+    case 'prod': {
+        let d = 0;
+        for (const f of node.factors) {
+            const fd = naturalDegree(f.node, degreeOf);
+            if (fd === null) return null;
+            d += f.op === '/' ? -fd : fd;
+        }
+        return d;
+    }
+    }
+    return null;
+}
+
+// Collects the numbers of `node` to scale for it to have length degree d.
+function collectScaled(node, d, degreeOf, out) {
+    switch (node.type) {
+    case 'num': if (node.tk.unit === undefined && d !== 0) out.push({ tk: node.tk, d }); return;
+    case 'id': return;
+    case 'neg': collectScaled(node.node, d, degreeOf, out); return;
+    case 'sum': node.items.forEach(n => collectScaled(n, d, degreeOf, out)); return;
+    case 'fn': node.args.forEach(n => collectScaled(n, node.name === 'sqrt' ? 2 * d : d, degreeOf, out)); return;
+    case 'prod': {
+        const known = node.factors.map(f => naturalDegree(f.node, degreeOf));
+        let rest = d;
+        node.factors.forEach((f, k) => { if (known[k] !== null) rest -= f.op === '/' ? -known[k] : known[k]; });
+        let first = true;
+        node.factors.forEach((f, k) => {
+            let fd = known[k];
+            if (fd === null) { fd = first ? (f.op === '/' ? -rest : rest) : 0; first = false; }
+            collectScaled(f.node, fd, degreeOf, out);
+        });
+    }
+    }
+}
+
+// `src` rewritten for length degree d with lengths scaled by f.
+function scaleExpression(src, d, f, degreeOf) {
+    const edits = [];
+    collectScaled(expressionTree(src), d, degreeOf, edits);
+    let out = src;
+    for (const { tk, d: nd } of edits.sort((a, b) => b.tk.start - a.tk.start)) {
+        out = out.slice(0, tk.start) + fmtNumber(tk.value * f ** nd) + out.slice(tk.end);
+    }
+    return out;
+}
+
+const RECT_LENGTH_KEYS = ['x', 'y', 'w', 'h', 'rq', 'plating_t', 'plating_rq'];
+const PLATING_LENGTH_KEYS = ['t', 'rq'];
+
+// One statement's source rewritten.
+function scaleStatement(src, st, f, to, degreeOf) {
+    const lead = /^\s*/.exec(src)[0], trail = /\s*$/.exec(src)[0];
+    const scaled = e => scaleExpression(e, 1, f, degreeOf);
+    // key=value in place, keeping the spacing. A value followed by a separate unit
+    // word ("rq=1 um") already has its unit.
+    const keys = (code, list) => code.replace(/(^|\s)([A-Za-z_][A-Za-z_0-9]*)=(\S+)(\s+[A-Za-zµ]+(?=\s|$))?/g,
+        (m, pre, key, value, unit) => (list.includes(key) && !(unit && LENGTH_UNITS[unit.trim()] !== undefined)
+            ? `${pre}${key}=${scaled(value)}${unit ?? ''}` : m));
+    switch (st.type) {
+    case 'units': return `${lead}units ${to}${trail}`;
+    case 'param': {
+        const m = /^(\s*[A-Za-z_][A-Za-z_0-9]*\s*=\s*)(.*?)(\s*)$/.exec(src);
+        return m[1] + scaleExpression(m[2], degreeOf(st.name), f, degreeOf) + m[3];
+    }
+    case 'domain':
+        if (st.values.every(v => v === 'auto')) return src;
+        return `${lead}domain ${st.values.map(v => (v === 'auto' ? v : scaled(v))).join(' ')}${trail}`;
+    case 'plating': return keys(src, PLATING_LENGTH_KEYS);
+    case 'rect': return keys(src, RECT_LENGTH_KEYS);
+    }
+    return src;
+}
+
+function rewriteUnits(text, model, f, to, degreeOf) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    let hasUnits = false;
+    for (let li = 0; li < lines.length; li++) {
+        const sts = model.statements.filter(s => s.line === li + 1 && s.part !== undefined);
+        if (!sts.length) continue;
+        const [code, comment] = splitComment(lines[li]);
+        const parts = code.split(';');
+        let seen = -1;
+        for (let k = 0; k < parts.length; k++) {
+            if (!parts[k].trim()) continue;
+            seen++;
+            const st = sts.find(s => s.part === seen);
+            if (!st) continue;
+            if (st.type === 'units') hasUnits = true;
+            parts[k] = scaleStatement(parts[k], st, f, to, degreeOf);
+        }
+        lines[li] = parts.join(';') + comment;
+    }
+    const out = lines.join('\n');
+    return hasUnits ? out : setStatementInText(out, 'units', `units ${to}`);
+}
+
+// Same geometry in metres, to a relative 1e-9. Source lines may differ.
+function sameGeometry(a, b) {
+    const eq = (x, y) => {
+        if (typeof x === 'number' && typeof y === 'number') {
+            return x === y || Math.abs(x - y) <= 1e-9 * Math.max(Math.abs(x), Math.abs(y));
+        }
+        if (x && y && typeof x === 'object' && typeof y === 'object') {
+            const keys = new Set([...Object.keys(x), ...Object.keys(y)].filter(k => k !== 'line'));
+            return [...keys].every(k => eq(x[k], y[k]));
+        }
+        return x === y;
+    };
+    return eq(a.rects, b.rects) && eq(a.domain, b.domain) && eq(a.plating, b.plating);
+}
+
+// The text with its declared unit changed to `to` and every length rewritten so the
+// geometry keeps its size, or null when the text has errors or no consistent rewrite
+// exists (then the user has to convert by hand).
+export function changeUnitsInText(text, to) {
+    if (LENGTH_UNITS[to] === undefined) throw new Error(`unknown unit '${to}'`);
+    const model = parseGeometryText(text);
+    const before = evaluateGeometry(model);
+    if (before.errors.length) return null;
+    const f = LENGTH_UNITS[before.units] / LENGTH_UNITS[to];
+    const names = model.statements.filter(s => s.type === 'param').map(s => s.name);
+    // Sets of plain-factor parameters, smallest first, at most a few thousand tries.
+    const MAX_TRIES = 4096;
+    let tries = 0;
+    const subsets = function* (start, size, chosen) {
+        if (chosen.length === size) { yield new Set(chosen); return; }
+        for (let k = start; k < names.length; k++) yield* subsets(k + 1, size, [...chosen, names[k]]);
+    };
+    for (let size = 0; size <= names.length; size++) {
+        for (const factors of subsets(0, size, [])) {
+            if (++tries > MAX_TRIES) return null;
+            const degreeOf = name => (names.includes(name) ? (factors.has(name) ? 0 : 1) : null);
+            let out;
+            try { out = rewriteUnits(text, model, f, to, degreeOf); } catch { continue; }
+            const after = evaluateGeometry(parseGeometryText(out));
+            if (!after.errors.length && after.units === to && sameGeometry(before, after)) return out;
+        }
+    }
+    return null;
 }

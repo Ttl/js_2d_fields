@@ -380,8 +380,34 @@ class CustomGeometrySolver extends FieldSolver2D {
         return out;
     }
 
+    // A signal drawn as rectangles that do not touch is still one net: every sig+
+    // rectangle is at the same potential, as if connected outside the cross-section.
+    signalBodyWarnings() {
+        const out = [];
+        const tol = this.domain_width * 1e-9;
+        const box = c => ({ x0: c.x_min, x1: c.x_max, y0: c.y_min, y1: c.y_max });
+        for (const [polarity, kind] of [[1, 'sig+'], [-1, 'sig-']]) {
+            const list = this.conductors.filter(c => c.is_signal && c.polarity === polarity);
+            // Union of touching rectangles into bodies.
+            const body = list.map((_, i) => i);
+            const find = i => (body[i] === i ? i : (body[i] = find(body[i])));
+            for (let i = 0; i < list.length; i++) {
+                for (let j = i + 1; j < list.length; j++) {
+                    if (rectDistance(box(list[i]), box(list[j])) <= tol) body[find(i)] = find(j);
+                }
+            }
+            const bodies = new Set(list.map((_, i) => find(i))).size;
+            if (bodies < 2) continue;
+            const lines = [...new Set(list.map(c => c.src_line).filter(l => l > 0))];
+            out.push(`The ${kind} conductor is ${bodies} separate bodies` +
+                (lines.length ? ` (lines ${lines.join(', ')})` : '') + '. They are solved as one net at the same ' +
+                'potential, as if connected outside the cross-section. Make them touch to draw one conductor.');
+        }
+        return out;
+    }
+
     openBoundaryWarnings(opts) {
-        return [...super.openBoundaryWarnings(opts), ...this.boundaryContactWarnings()];
+        return [...super.openBoundaryWarnings(opts), ...this.boundaryContactWarnings(), ...this.signalBodyWarnings()];
     }
 
     // Accuracy note for a strongly coupled broadside pair, see BroadsideStriplineSolver.
