@@ -245,6 +245,25 @@ function selectTextLine(line) {
     redrawSoon();
 }
 
+// Line numbers of the text view, error lines marked. Rebuilt only when the line count
+// or the error lines change.
+let gutterKey = '';
+let errorLines = new Set();
+function renderLineNumbers() {
+    const gutter = $('custom-line-numbers'), t = $('custom_geom_text');
+    if (!gutter || !t) return;
+    const count = t.value.split('\n').length;
+    const key = `${count}|${[...errorLines].join(',')}`;
+    if (key !== gutterKey) {
+        gutterKey = key;
+        gutter.replaceChildren(...Array.from({ length: count }, (_, i) => {
+            const n = i + 1;
+            return errorLines.has(n) ? el('span', { class: 'err', text: `${n}\n` }) : `${n}\n`;
+        }));
+    }
+    gutter.scrollTop = t.scrollTop;
+}
+
 // Errors are shown where they are made: under the sidebar parameter or the form row of
 // their line. The box under the editor lists the rest, and in the text view all of them,
 // where a click selects the line.
@@ -285,6 +304,8 @@ function renderMessages({ errors, warnings }) {
         box.style.display = listed.length ? 'block' : 'none';
     }
     // Error count in the editor bar: the row with the error may be scrolled out of view.
+    errorLines = new Set(errors.map(e => e.line).filter(l => l > 0));
+    renderLineNumbers();
     const count = $('custom-error-count');
     if (count) {
         count.textContent = errors.length ? `${errors.length} error${errors.length > 1 ? 's' : ''}` : '';
@@ -899,6 +920,7 @@ function showView(view) {
     $('custom-form').style.display = form ? 'block' : 'none';
     $('custom_geom_text').style.display = form ? 'none' : 'block';
     $('custom-text-pane').style.display = form ? 'none' : 'flex';
+    if (!form) renderLineNumbers();
     $('btn-custom-format').style.display = form ? 'none' : '';
     $('btn-custom-view-form').classList.toggle('active', form);
     $('btn-custom-view-text').classList.toggle('active', !form);
@@ -966,7 +988,8 @@ export function initCustomGeometryEditor({ onGeometryChange, log }) {
     const text = $('custom_geom_text');
     if (!text) return;
 
-    text.addEventListener('input', () => scheduleChange('text'));
+    text.addEventListener('input', () => { renderLineNumbers(); scheduleChange('text'); });
+    text.addEventListener('scroll', () => { $('custom-line-numbers').scrollTop = text.scrollTop; });
     // Tab inserts spaces instead of leaving the editor.
     text.addEventListener('keydown', (e) => {
         if (e.key !== 'Tab' || e.shiftKey) return;

@@ -990,6 +990,14 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 .custom-editor-bar .custom-row-btn:disabled { opacity: 0.35; cursor: default; background-color: var(--input-bg); }
 #btn-custom-format.active { border-color: var(--primary-color); color: var(--primary-color); }
 #custom-text-pane { flex: 1; min-height: 0; }
+/* Line numbers beside the text. One text line is one row (no wrapping), so the gutter
+   only has to follow the vertical scroll. */
+#custom-text-wrap { flex: 1; min-width: 0; min-height: 0; display: flex; background: #1e1e1e; }
+#custom-line-numbers { flex: 0 0 auto; min-width: 2ch; overflow: hidden; padding: 8px 6px 40px 8px; box-sizing: border-box;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.45;
+    white-space: pre; text-align: right; color: #6b6b6b; background: #191919; border-right: 1px solid var(--border-color);
+    user-select: none; }
+#custom-line-numbers .err { color: #ff8a80; font-weight: 600; }
 #custom-format-ref { flex: 0 0 340px; max-width: 45%; overflow-y: auto; padding: 8px 12px; border-left: 1px solid var(--border-color); font-size: 12.5px; color: var(--text-muted); }
 #custom-format-ref p { margin: 0 0 8px; }
 #custom-format-ref dl { margin: 0; }

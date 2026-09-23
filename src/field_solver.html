@@ -634,8 +634,11 @@
             </div>
             <div id="custom-form"></div>
             <div id="custom-text-pane" style="display: none;">
-                <textarea id="custom_geom_text" spellcheck="false" autocomplete="off" autocapitalize="off"
-                          wrap="off" style="display: none;"></textarea>
+                <div id="custom-text-wrap">
+                    <div id="custom-line-numbers" aria-hidden="true"></div>
+                    <textarea id="custom_geom_text" spellcheck="false" autocomplete="off" autocapitalize="off"
+                              wrap="off" style="display: none;"></textarea>
+                </div>
                 <div id="custom-format-ref" style="display: none;">
                     <p>One statement per line, or several separated by <code>;</code>. <code>#</code> starts a comment.</p>
                     <dl>
