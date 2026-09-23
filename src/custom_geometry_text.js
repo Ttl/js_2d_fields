@@ -23,6 +23,9 @@
 // solver-wide values and the plating statement for that conductor.
 // thin=1 on a dielectric marks a thin sheet (a solder mask) whose faces the FDM mesher
 // brackets with grid lines the way it does conductor faces.
+// mirror=1 adds the mirror image about x=0 right after the rectangle, sig+ imaged as sig-
+// and sig- as sig+. A rectangle that touches or crosses x=0 becomes one rectangle
+// symmetric about x=0 instead.
 // Dielectrics are painted in order, a later one overrides an earlier one where they
 // overlap. Conductors override dielectrics.
 //
@@ -40,9 +43,10 @@ const FUNCTIONS = {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
 };
 const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'x1', 'x2', 'y1', 'y2', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
-    'plating_sigma', 'plating_t', 'plating_rq']);
+    'plating_sigma', 'plating_t', 'plating_rq', 'mirror']);
 const RECT_KEY_ORDER = ['x', 'x1', 'x2', 'w', 'y', 'y1', 'y2', 'h', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
-    'plating_sigma', 'plating_t', 'plating_rq'];
+    'plating_sigma', 'plating_t', 'plating_rq', 'mirror'];
+const MIRROR_KIND = { 'sig+': 'sig-', 'sig-': 'sig+', gnd: 'gnd', diel: 'diel' };
 const PLATING_KEYS = new Set(['sigma', 't', 'rq', 'thick_corners']);
 const PLATING_FACES = ['top', 'sides', 'bottom'];
 
@@ -387,6 +391,114 @@ export function setStatementInText(text, keyword, statement) {
     return lines.join('\n');
 }
 
+// --- Expression arithmetic for the form's edits --------------------------------------
+// Builds new expressions from the ones written, as short as they reasonably get, so a
+// switch between x,w and x1,x2 keeps the parameters instead of freezing numbers.
+
+const PLAIN_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+const isNeg = e => e.trim() === '-inf';
+const isPosInf = e => /^\+?inf$/.test(e.trim());
+const fmtNumber = v => String(parseFloat(v.toPrecision(12)));
+
+// Positions of the + and - signs at the top level of `e` that join terms (not a
+// leading sign, not an exponent sign).
+function topLevelSigns(e) {
+    const out = [];
+    let depth = 0;
+    for (let i = 0; i < e.length; i++) {
+        const c = e[i];
+        if (c === '(') depth++;
+        else if (c === ')') depth--;
+        else if ((c === '+' || c === '-') && depth === 0 && i > 0) {
+            if (/[eE]/.test(e[i - 1]) && /[\d.]/.test(e[i - 2] ?? '')) continue;
+            if (/[-+*/(]/.test(e[i - 1])) continue;   // unary sign after an operator
+            out.push(i);
+        }
+    }
+    return out;
+}
+const hasTopLevelSum = e => topLevelSigns(e).length > 0;
+
+// -e with the sign of every top-level term flipped: -(-s/2-w) is s/2+w.
+export function negateExpr(e) {
+    e = e.trim();
+    if (PLAIN_NUMBER.test(e)) return fmtNumber(-parseFloat(e));
+    const cuts = [0, ...topLevelSigns(e), e.length];
+    let out = '';
+    for (let k = 0; k + 1 < cuts.length; k++) {
+        let term = e.slice(cuts[k], cuts[k + 1]);
+        let sign = '+';
+        if (term.startsWith('-') || term.startsWith('+')) { sign = term[0]; term = term.slice(1); }
+        const flipped = sign === '-' ? '+' : '-';
+        out += (out === '' && flipped === '+') ? term : flipped + term;
+    }
+    return out;
+}
+
+export function addExpr(a, b) {
+    a = a.trim(); b = b.trim();
+    if (PLAIN_NUMBER.test(a) && PLAIN_NUMBER.test(b)) return fmtNumber(parseFloat(a) + parseFloat(b));
+    if (PLAIN_NUMBER.test(a) && parseFloat(a) === 0) return b;
+    if (PLAIN_NUMBER.test(b) && parseFloat(b) === 0) return a;
+    if (b.startsWith('-') && !hasTopLevelSum(b)) return `${a}-${b.slice(1)}`;
+    return `${a}+${b}`;
+}
+
+export function subExpr(a, b) {
+    a = a.trim(); b = b.trim();
+    if (a === b) return '0';
+    if (PLAIN_NUMBER.test(a) && PLAIN_NUMBER.test(b)) return fmtNumber(parseFloat(a) - parseFloat(b));
+    if (PLAIN_NUMBER.test(b) && parseFloat(b) === 0) return a;
+    if (PLAIN_NUMBER.test(a) && parseFloat(a) === 0) return negateExpr(b);
+    // (b+c)-b is c.
+    if (a.startsWith(b + '+') && !hasTopLevelSum(b)) return a.slice(b.length + 1);
+    if (hasTopLevelSum(b)) return `${a}-(${b})`;
+    return b.startsWith('-') ? `${a}+${b.slice(1)}` : `${a}-${b}`;
+}
+
+const AXIS_KEYS = { x: ['x', 'w', 'x1', 'x2'], y: ['y', 'h', 'y1', 'y2'] };
+
+// Which form an axis of a rectangle's fields is written in: 'size' (x,w) or 'bounds' (x1,x2).
+export function axisForm(fields, axis) {
+    const [, , lo, hi] = AXIS_KEYS[axis];
+    return fields[lo] !== undefined || fields[hi] !== undefined ? 'bounds' : 'size';
+}
+
+// Low and high edge of an axis as expressions. `negative` says the size evaluates
+// negative (y,h with h < 0, the top-face convention).
+export function axisEdges(fields, axis, negative = false) {
+    const [p, s, lo, hi] = AXIS_KEYS[axis];
+    if (axisForm(fields, axis) === 'bounds') return { lo: fields[lo] ?? '0', hi: fields[hi] ?? '0' };
+    const pos = fields[p] ?? '0', size = fields[s] ?? '0';
+    if (isNeg(pos)) return { lo: '-inf', hi: 'inf' };
+    if (isPosInf(size)) return { lo: pos, hi: 'inf' };
+    return negative ? { lo: addExpr(pos, size), hi: pos } : { lo: pos, hi: addExpr(pos, size) };
+}
+
+// Writes the edges of an axis into `fields` in the given form. Returns false, leaving
+// the fields alone, when the size form cannot hold them (a -inf low edge with a finite
+// high edge).
+function setAxisEdges(fields, axis, edges, form) {
+    const [p, s, lo, hi] = AXIS_KEYS[axis];
+    let out;
+    if (form === 'bounds') out = { [lo]: edges.lo, [hi]: edges.hi };
+    else if (isNeg(edges.lo)) {
+        if (!isPosInf(edges.hi)) return false;
+        out = { [p]: '-inf', [s]: 'inf' };
+    } else if (isPosInf(edges.hi)) out = { [p]: edges.lo, [s]: 'inf' };
+    else out = { [p]: edges.lo, [s]: subExpr(edges.hi, edges.lo) };
+    for (const k of AXIS_KEYS[axis]) delete fields[k];
+    Object.assign(fields, out);
+    return true;
+}
+
+// Switches an axis between x,w and x1,x2. Returns false when it cannot be written in
+// the other form.
+export function toggleAxisForm(fields, axis, negative = false) {
+    const edges = axisEdges(fields, axis, negative);
+    return setAxisEdges(fields, axis, edges, axisForm(fields, axis) === 'bounds' ? 'size' : 'bounds');
+}
+
 // --- Evaluation -------------------------------------------------------------------
 
 // One axis of a rectangle in metres: { pos, size, min, max }. pos and size are the
@@ -422,13 +534,20 @@ function evalAxis(fields, pos, size, lo, hi, ev, allowNegative) {
     return { pos: a, size: b - a, min: a, max: b };
 }
 
+// Mirror image of an x axis about x=0.
+function mirrorAxis(ax) {
+    if (ax.max === Infinity) return { pos: -Infinity, size: Infinity, min: -Infinity, max: -ax.min };
+    return { pos: -ax.max, size: ax.min === -Infinity ? Infinity : ax.size, min: -ax.max, max: -ax.min };
+}
+
 // Evaluates a parsed model to numbers in metres.
 //   overrides - { name: value } replaces parameter values (in the declared units)
 // Returns { errors, units, params, bounds, domain, plating, rects }:
 //   domain  - { x_min, x_max, y_min, y_max }, null for auto
 //   plating - { sigma, thickness, rq, thick_corners } or null
 //   rects   - { kind, x: axis, y: axis, er, tand, thin, plating: faces|null, sigma: S/m|null, rq: m|null,
-//               platingMaterial: { sigma?, thickness?, rq? }|null, line }
+//               platingMaterial: { sigma?, thickness?, rq? }|null, line, image }
+//             image is true on a rectangle generated by mirror=1
 export function evaluateGeometry(model, overrides = {}) {
     const errors = [...model.errors];
     const unitsSt = model.statements.find(s => s.type === 'units');
@@ -546,6 +665,18 @@ export function evaluateGeometry(model, overrides = {}) {
                     }
                     r.platingMaterial = pm;
                 }
+            }
+            r.image = false;
+            if (f.mirror !== undefined && num(f.mirror) !== 0) {
+                if (r.x.min <= 0 && r.x.max >= 0) {
+                    const m = Math.max(-r.x.min, r.x.max);
+                    r.x = m === Infinity ? { pos: -Infinity, size: Infinity, min: -Infinity, max: Infinity }
+                        : { pos: -m, size: 2 * m, min: -m, max: m };
+                    rects.push(r);
+                } else {
+                    rects.push(r, { ...r, kind: MIRROR_KIND[r.kind], x: mirrorAxis(r.x), image: true });
+                }
+                continue;
             }
             rects.push(r);
         } catch (e) { fail(s, e); }

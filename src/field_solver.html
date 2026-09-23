@@ -655,6 +655,8 @@
                         <dd>Conductor's own conductivity (S/m) and roughness. Left out: the sidebar values.</dd>
                         <dt><code>plating=top,sides,bottom</code></dt>
                         <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq=</code> on the line.</dd>
+                        <dt><code>mirror=1</code></dt>
+                        <dd>Adds the mirror image about <code>x=0</code>, a <code>sig+</code> imaged as <code>sig-</code>. A rectangle touching or crossing <code>x=0</code> becomes one rectangle symmetric about it: <code>diel x1=0 x2=inf ... mirror=1</code> is a full-width layer.</dd>
                         <dt><code>plating sigma= t= rq=</code></dt>
                         <dd>Statement: plating material of every conductor line that gives none.</dd>
                     </dl>

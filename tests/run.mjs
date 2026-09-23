@@ -53,6 +53,7 @@ const TIERS = {
         { file: 'tests/test_fullwave_edge_cases.js', cost: 13 },
         { file: 'tests/test_robustness_extremes.js', cost: 30 },
         { file: 'tests/test_custom_geometry_text.js', cost: 1 },
+        { file: 'tests/test_custom_geometry_mirror.js', cost: 1 },
         { file: 'tests/test_custom_geometry_equivalence.js', cost: 25 },
     ],
     slow: [
