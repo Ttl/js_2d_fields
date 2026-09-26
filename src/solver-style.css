@@ -962,7 +962,7 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 .custom-rect-row.has-error { border-color: #f44336; background: #3d2020; }
 .custom-cell { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: normal; }
 .custom-cell-label { color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; min-width: 14px; text-align: right; }
-#custom-form input.custom-expr { width: 84px; padding: 4px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+#custom-form input.custom-expr { width: 72px; padding: 4px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 #custom-form input.custom-expr.narrow { width: 58px; }
 /* Evaluated value under a field. It hangs below the input so the row keeps its line,
    and a row that shows one gets the room for it. */
@@ -973,7 +973,8 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 .custom-rect-row:has(> .custom-cell .custom-cell-value:not(:empty), > .custom-axis .custom-cell-value:not(:empty)) { padding-bottom: 15px; }
 .custom-plating-panel:has(.custom-cell-value:not(:empty)) { padding-bottom: 13px; }
 #custom-form select { width: auto; padding: 4px 6px; font-size: 12.5px; }
-#custom-form select.custom-kind { width: 112px; }
+#custom-form select.custom-kind { width: 98px; }
+#custom-form select.custom-shape { width: 90px; }
 .custom-faces { display: inline-flex; gap: 8px; }
 .custom-face { display: inline-flex; align-items: center; gap: 3px; margin: 0; font-weight: normal; font-size: 12px; }
 .custom-face input { width: auto; margin: 0; }

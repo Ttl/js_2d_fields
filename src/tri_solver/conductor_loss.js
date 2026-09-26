@@ -4,6 +4,7 @@
 // Loss integral: α_c = Rs · ∮(|Ht|² + |Hz|²) dl / (4P)
 
 import { csqrt, tripletsToCSR, GL3p, GL3w } from './fem_core.js';
+import { shapeContains } from '../shapes.js';
 import { ne1, ne2, nf1, nf2,
          lv, le, lvGrad, leGrad, triCoefficients,
          ne1Curl, ne2Curl, nf1Curl, nf2Curl,
@@ -732,8 +733,14 @@ export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, fr
         const yc = (nodes[2*v0+1]+nodes[2*v1+1]+nodes[2*v2+1])/3;
 
         let inCond = false;
-        if (condRects) for (const cr of condRects)
+        if (condRects) for (const cr of condRects) {
+            // A polygon's bounding box holds dielectric too (a ring's hole).
+            if (cr.shape && (cr.shape.type === 'polygon' || cr.shape.type === 'ring')) {
+                if (shapeContains(cr, xc, yc, TOL)) { inCond = true; break; }
+                continue;
+            }
             if (xc>=cr.xmin-TOL && xc<=cr.xmax+TOL && yc>=cr.ymin-TOL && yc<=cr.ymax+TOL) { inCond=true; break; }
+        }
         if (inCond) continue;
 
         const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);

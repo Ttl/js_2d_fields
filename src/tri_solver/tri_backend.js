@@ -25,7 +25,7 @@ import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
          groundBodyCount } from './occ_to_mesh.js';
-import { shapeArea, shapeBBox, shapeSignedDist, isComplement } from '../shapes.js';
+import { shapeArea, shapeBBox, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
@@ -255,6 +255,9 @@ function makePlatingZs(solver, condRect, freq) {
     return { Zbare, zForFace, zAt };
 }
 
+// Polygon and ring shapes (custom geometry primitives), meshed like rects.
+const isPolyShape = (shape) => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
+
 // Plating at least as thick as a rectangular conductor makes the whole cross-section
 // plating metal: every face is solid plating and the layered model has no bulk.
 function solidPlated(r, pl) {
@@ -273,9 +276,16 @@ function solidPlated(r, pl) {
 // thickness and takes the solver's declared wall thickness.
 function slabThickness(r, role) {
     if (r.shape && isComplement(r.shape)) return (role && role.slab_thickness) || Infinity;
-    const dim = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
-    if (r.shape) return 0.75 * dim / 2;
+    const dim = condThinDim(r);
+    if (r.shape && (r.shape.round || !r.shape.thickness)) return 0.75 * dim / 2;
     return role && role.is_signal ? dim / 2 : dim;
+}
+
+// Thin dimension of a conductor entry: the smaller side of a rect, the thickness a
+// shape declares (a ring's wall), else the smaller side of its bounding box.
+function condThinDim(r) {
+    if (r.shape && r.shape.thickness > 0) return r.shape.thickness;
+    return Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
 }
 
 // Im part of (1+j) coth((1+j) x) relative to the semi-infinite value 1.
@@ -313,9 +323,9 @@ function buildFaceZs(solver, condRect, freq) {
             const r = rects[ri];
             if (r.shape) {
                 // Curved surface: orientation carries no face information. A point on
-                // the boundary is on THE surface.
+                // the boundary is on THE surface. A polygon names its faces per edge.
                 if (Math.abs(shapeSignedDist(r.shape, x, y)) > tol) continue;
-                return zForFace(ri, 'all');
+                return r.shape.faces ? zAt(ri, shapeFaceAt(r.shape, x, y).face, x, y) : zForFace(ri, 'all');
             }
             if (x < r.xmin - tol || x > r.xmax + tol || y < r.ymin - tol || y > r.ymax + tol) continue;
             let face = null;
@@ -358,10 +368,12 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
                 const r = rects[ri];
                 if (r.shape) {
                     // Both endpoints on the curved boundary => a surface edge. There is
-                    // only one face, so no orientation test.
+                    // only one face, so no orientation test. A polygon names its faces
+                    // per edge.
                     if (Math.abs(shapeSignedDist(r.shape, x0, y0)) > tol) continue;
                     if (Math.abs(shapeSignedDist(r.shape, x1, y1)) > tol) continue;
-                    edgeFace[e] = ri * NFACE + 3;                                        // all
+                    const face = r.shape.faces ? FACES.indexOf(shapeFaceAt(r.shape, (x0 + x1) / 2, (y0 + y1) / 2).face) : 3;
+                    edgeFace[e] = ri * NFACE + (face >= 0 ? face : 3);
                     break;
                 }
                 if (x0 < r.xmin - tol || x0 > r.xmax + tol || x1 < r.xmin - tol || x1 > r.xmax + tol) continue;
@@ -1049,7 +1061,8 @@ export class TriBackend {
         // MQS handles explicit ground rects as passive (C = 0) return
         // conductors, only shaped conductors do (coax), and
         // a surviving signal rect must exist to drive.
-        const shapedPre = s.conductors.some(c => c.shape);
+        // Polygon shapes (custom trapezoids, n-gons, rings) are meshed bodies like rects.
+        const shapedPre = s.conductors.some(c => c.shape && !isPolyShape(c.shape));
         const sigCondPre = s.conductors.some(c => c.is_signal && survives(c));
         // A differential pair without the symmetry-plane mode walls runs the
         // per-conductor-drive MQS (modeCurrents) when both polarity groups
@@ -1071,14 +1084,14 @@ export class TriBackend {
         // became does. A touching pair is one conductor as far as sizing goes
         // and does not count as a gap.
         let gapRef = Infinity;
-        const rectsPre = s.conductors.filter(c => !c.shape && survives(c));
+        const rectsPre = s.conductors.filter(c => (!c.shape || isPolyShape(c.shape)) && survives(c));
         for (const a of rectsPre) {
             if (!a.is_signal) continue;
             for (const b of rectsPre) {
                 if (b === a) continue;
                 const dx = Math.max(0, Math.max(a.x_min, b.x_min) - Math.min(a.x_max, b.x_max));
                 const dy = Math.max(0, Math.max(a.y_min, b.y_min) - Math.min(a.y_max, b.y_max));
-                const dAB = Math.hypot(dx, dy);
+                const dAB = (a.shape || b.shape) ? bodyDistance(a, b) : Math.hypot(dx, dy);
                 if (dAB > 0) gapRef = Math.min(gapRef, dAB);
             }
             if (clip.wallPEC.left) gapRef = Math.min(gapRef, a.x_min - clip.X0);
@@ -1483,13 +1496,14 @@ export class TriBackend {
         // only rects are tested.
         try {
             const skip = new Uint8Array(mesh.nTris);
-            const rects = (this.condRect.rects || []).filter(r => !r.shape);
+            const rects = (this.condRect.rects || []).filter(r => !r.shape || isPolyShape(r.shape));
             if (rects.length) for (let t = 0; t < mesh.nTris; t++) {
                 const v0 = mesh.tris[3 * t], v1 = mesh.tris[3 * t + 1], v2 = mesh.tris[3 * t + 2];
                 const xc = (mesh.nodes[2 * v0] + mesh.nodes[2 * v1] + mesh.nodes[2 * v2]) / 3;
                 const yc = (mesh.nodes[2 * v0 + 1] + mesh.nodes[2 * v1 + 1] + mesh.nodes[2 * v2 + 1]) / 3;
                 for (const r of rects) {
-                    if (xc > r.xmin && xc < r.xmax && yc > r.ymin && yc < r.ymax) { skip[t] = 1; break; }
+                    if (r.shape ? shapeContains(r, xc, yc, 0)
+                        : (xc > r.xmin && xc < r.xmax && yc > r.ymin && yc < r.ymax)) { skip[t] = 1; break; }
                 }
             }
             const mq = checkMeshQuality(mesh, [], [], { skip });
@@ -2265,7 +2279,7 @@ export class TriBackend {
         let tMax = 0;
         for (const c of cr.rects) {
             if (c.shape && isComplement(c.shape)) continue;
-            tMax = Math.max(tMax, Math.min(c.xmax - c.xmin, c.ymax - c.ymin));
+            tMax = Math.max(tMax, condThinDim(c));
         }
         if (!(tMax > 0)) return 0;
         const sigma = this.solver.sigma_cond ?? 5.8e7;
@@ -2305,7 +2319,7 @@ export class TriBackend {
         // classification support, so they fall back to the H-field perturbation.
         // Per-face plating is handled inside MQS (surfaceZs weights each face's smooth
         // current by its own impedance), so plating doesn't force perturbation.
-        const mqsOk = cr.rects.length > 0 && !cr.rects.some(r => r.shape)
+        const mqsOk = cr.rects.length > 0 && !cr.rects.some(r => r.shape && !isPolyShape(r.shape))
             && cr.rectRoles.some(r => r.is_signal);
         const anyPlating = cr.rectRoles.some(r => r.plating && r.plating.sigma > 0
             && (r.plating.top || r.plating.sides || r.plating.bottom));
@@ -2359,6 +2373,14 @@ export class TriBackend {
                     message: 'MQS conductor loss needs the conductor interiors meshed, but this ' +
                              'mesh was built without it. Using the perturbation method instead.' });
             }
+        }
+        // The perturbation integral has a corner model for rectangles only.
+        if (!useMQS && f > 0 && cr.rects.some(r => isPolyShape(r.shape)) && this._modeWarnings
+            && !this._modeWarnings.some(w => w.type === 'pert-shape')) {
+            this._modeWarnings.push({ type: 'pert-shape', mode, freq: f, message:
+                'Conductor loss of the trapezoids and n-gons comes from the perturbation method, which has ' +
+                'no model of their corners: R can be off by 20%. The MQS loss method, the default, solves them ' +
+                'accurately.' });
         }
         let eps_d = eps_eff_static, fw = null, eigen_bias = 1;
         if (f >= F_STATIC_MAX) {
@@ -2499,7 +2521,7 @@ export class TriBackend {
             // A complement conductor (coax shield) is a zero-thickness PEC shell whose
             // bbox is the whole cavity, it has no cross-section to gate anything on.
             if (c.shape && isComplement(c.shape)) continue;
-            minDim = Math.min(minDim, c.xmax - c.xmin, c.ymax - c.ymin);
+            minDim = Math.min(minDim, c.shape ? condThinDim(c) : Math.min(c.xmax - c.xmin, c.ymax - c.ymin));
         }
         if (f > 0 && useMQS) {
             // The volume eddy solve runs the conductor BODY at the bulk metal σ;
@@ -2569,14 +2591,19 @@ export class TriBackend {
                 for (const gr of gndRects) for (const sr of sigRects) {
                     const dx = Math.max(0, Math.max(gr.xmin, sr.xmin) - Math.min(gr.xmax, sr.xmax));
                     const dy = Math.max(0, Math.max(gr.ymin, sr.ymin) - Math.min(gr.ymax, sr.ymax));
-                    gapMin = Math.min(gapMin, Math.hypot(dx, dy));
+                    gapMin = Math.min(gapMin, (gr.shape || sr.shape) ? bodyDistance(gr, sr) : Math.hypot(dx, dy));
                 }
                 if (!isFinite(gapMin)) gapMin = 0;
                 gndGrading = { sigRects,
                     Dfine: (this.opts.mqsGndFine ?? 1.5) * gapMin,
                     slope: this.opts.mqsGndSlope ?? 0.5 };
             }
-            const gndBudget = this.opts.mqsGndMaxTris ?? Math.floor(mqsMaxTris / 2);
+            // A shield ring (around every signal) carries the whole return current and
+            // gets the signal budget.
+            const shieldRing = gndRects.some(r => r.shape && r.shape.type === 'ring' && sigRects.every(sr =>
+                [[sr.xmin, sr.ymin], [sr.xmax, sr.ymin], [sr.xmax, sr.ymax], [sr.xmin, sr.ymax]]
+                    .every(([x, y]) => shapeContains({ shape: { type: 'polygon', poly: r.shape.hole } }, x, y, 0))));
+            const gndBudget = this.opts.mqsGndMaxTris ?? Math.floor(shieldRing ? mqsMaxTris : mqsMaxTris / 2);
             // Depth grading across the band (see refineSkinBand). The target size
             // relaxes with distance from the metal surface.
             const depthSlope = this.opts.mqsBandDepthSlope ?? 3;

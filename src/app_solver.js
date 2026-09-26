@@ -1658,7 +1658,7 @@ function convertToCustomGeometry() {
     } catch (e) { log('ERROR: ' + e.message); return; }
     const names = { microstrip: 'Microstrip', diff_microstrip: 'Differential microstrip', stripline: 'Stripline',
         diff_stripline: 'Differential stripline', gcpw: 'GCPW', diff_gcpw: 'Differential GCPW',
-        broadside_stripline: 'Broadside coupled stripline' };
+        broadside_stripline: 'Broadside coupled stripline', coax: 'Coaxial line' };
     document.getElementById('inp_custom_sigma').value = native.sigma_cond;
     setCustomGeometryText(`# Converted from: ${names[p.tl_type] || p.tl_type}\n` + text);
     const sel = document.getElementById('tl_type');

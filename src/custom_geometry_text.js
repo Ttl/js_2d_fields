@@ -31,8 +31,22 @@
 // Dielectrics are painted in order, a later one overrides an earlier one where they
 // overlap. Conductors override dielectrics.
 //
+// A shape word after the kind draws something other than a rectangle. These need the
+// full-wave solver.
+//   sig+  trap  x=-w/2 y=h w=w h=t angle=30 angle2=20
+//     trapezoid on the base x..x+w at y (a PCB trace with an etch angle). The sides lean
+//     in by angle (left side) and angle2 (right side, default angle) degrees from the
+//     vertical, so a positive angle makes the face at y+h narrower and a negative one
+//     wider. A negative h puts that face below y. Zero angles give a plain rectangle.
+//   gnd   ngon  x=0 y=0 r=1.5 n=64 r_in=1.2 rot=0
+//     regular n-gon centred on (x, y) with vertex radius r, one vertex on top (rotated
+//     by rot degrees counterclockwise). r_in cuts a concentric n-gon hole: a ring, such
+//     as a coax shield.
+//
 // parseGeometryText keeps the expressions, evaluateGeometry turns them into metres.
 // Parameter overrides go to evaluateGeometry, which is what parameter sweeps use.
+
+import { isMirrorShape, mirrorShapeX } from './shapes.js';
 
 export const LENGTH_UNITS = {
     m: 1, cm: 1e-2, mm: 1e-3, um: 1e-6, 'µm': 1e-6, nm: 1e-9, mil: 25.4e-6, in: 25.4e-3,
@@ -44,10 +58,20 @@ const RESERVED = new Set(['inf', 'auto', 'min', 'max', 'abs', 'sqrt']);
 const FUNCTIONS = {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
 };
-const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
-    'plating_sigma', 'plating_t', 'plating_rq', 'mirror']);
-const RECT_KEY_ORDER = ['x', 'w', 'y', 'h', 'er', 'tand', 'thin', 'sigma', 'rq', 'plating',
-    'plating_sigma', 'plating_t', 'plating_rq', 'mirror'];
+// Shape words after the kind. A rectangle has none ('rect' may be written).
+export const SHAPES = ['rect', 'trap', 'ngon'];
+const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'r', 'r_in', 'n', 'rot', 'angle', 'angle2', 'er', 'tand', 'thin',
+    'sigma', 'rq', 'plating', 'plating_sigma', 'plating_t', 'plating_rq', 'mirror']);
+const RECT_KEY_ORDER = ['x', 'w', 'y', 'h', 'r', 'r_in', 'n', 'rot', 'angle', 'angle2', 'er', 'tand', 'thin',
+    'sigma', 'rq', 'plating', 'plating_sigma', 'plating_t', 'plating_rq', 'mirror'];
+// Geometry keys each shape takes.
+const SHAPE_KEYS = {
+    rect: ['x', 'y', 'w', 'h'],
+    trap: ['x', 'y', 'w', 'h', 'angle', 'angle2'],
+    ngon: ['x', 'y', 'r', 'r_in', 'n', 'rot'],
+};
+const GEOMETRY_KEYS = new Set(Object.values(SHAPE_KEYS).flat());
+const SHAPE_NAMES = { trap: 'trapezoid', ngon: 'n-gon' };
 const MIRROR_KIND = { 'sig+': 'sig-', 'sig-': 'sig+', gnd: 'gnd', diel: 'diel' };
 const PLATING_KEYS = new Set(['sigma', 't', 'rq', 'thick_corners']);
 const PLATING_FACES = ['top', 'sides', 'bottom'];
@@ -220,7 +244,19 @@ function parseStatement(src) {
         return { type: 'plating', fields: parseFields(words.slice(1), PLATING_KEYS, 'plating') };
     }
     if (RECT_KINDS.includes(head)) {
-        return { type: 'rect', kind: head, fields: parseFields(words.slice(1), RECT_KEYS, 'rectangle') };
+        let shape;
+        let rest = words.slice(1);
+        if (rest.length && SHAPES.includes(rest[0])) {
+            if (rest[0] !== 'rect') shape = rest[0];
+            rest = rest.slice(1);
+        }
+        const fields = parseFields(rest, RECT_KEYS, shape ? SHAPE_NAMES[shape] : 'rectangle');
+        for (const k of Object.keys(fields)) {
+            if (GEOMETRY_KEYS.has(k) && !SHAPE_KEYS[shape ?? 'rect'].includes(k)) {
+                throw new Error(`${k}= does not apply to a ${shape ? SHAPE_NAMES[shape] : 'rectangle'}`);
+            }
+        }
+        return shape ? { type: 'rect', kind: head, shape, fields } : { type: 'rect', kind: head, fields };
     }
     throw new Error(`unknown statement '${head}'`);
 }
@@ -281,7 +317,7 @@ export function serializeGeometry(model) {
         } else if (s.type === 'plating') {
             code = `plating ${fieldsToText(s.fields, ['sigma', 't', 'rq', 'thick_corners'])}`;
         } else if (s.type === 'rect') {
-            code = `${s.kind} ${fieldsToText(s.fields, RECT_KEY_ORDER)}`;
+            code = `${s.kind}${s.shape ? ' ' + s.shape : ''} ${fieldsToText(s.fields, RECT_KEY_ORDER)}`;
         }
         const comment = s.comment !== null && s.comment !== undefined ? `# ${s.comment}` : '';
         out.push([code, comment].filter(p => p.length > 0).join('  '));
@@ -336,9 +372,9 @@ export function renameParamInText(text, from, to) {
     return lines.join('\n');
 }
 
-// Statement text for a rectangle, the inverse of the parser for one statement.
-export function rectStatementText(kind, fields) {
-    return `${kind}  ${fieldsToText(fields, RECT_KEY_ORDER)}`;
+// Statement text for a rectangle or shape, the inverse of the parser for one statement.
+export function rectStatementText(kind, fields, shape = null) {
+    return `${kind}${shape && shape !== 'rect' ? '  ' + shape : ''}  ${fieldsToText(fields, RECT_KEY_ORDER)}`;
 }
 
 // Replaces the statement `st` (from parseGeometryText of the same text) by `code`, or
@@ -480,6 +516,94 @@ function evalAxis(fields, pos, size, ev, keepNegative) {
     return { pos: p, size: s, min: p, max: s === Infinity ? Infinity : p + s, flipped: false };
 }
 
+// Trapezoid on the base [x0, x1] at y = yb, height h (negative: the other face is
+// below), side angles aL, aR in degrees from the vertical. Returns the convex CCW
+// polygon and the face name of each edge, or null for zero angles (a rectangle).
+function trapezoidPolygon(x0, x1, yb, h, aL, aR) {
+    if (aL === 0 && aR === 0) return null;
+    for (const a of [aL, aR]) {
+        if (!(Math.abs(a) < 89)) throw new Error('angle must be between -89 and 89 degrees');
+    }
+    const H = Math.abs(h), yt = yb + h;
+    const iL = H * Math.tan(aL * Math.PI / 180), iR = H * Math.tan(aR * Math.PI / 180);
+    const tl = x0 + iL, tr = x1 - iR;
+    if (!(tr - tl > (x1 - x0) * 1e-6)) throw new Error('the side angles leave the trapezoid no face opposite its base');
+    const poly = h > 0
+        ? [x0, yb, x1, yb, tr, yt, tl, yt]
+        : [tl, yt, tr, yt, x1, yb, x0, yb];
+    return { poly: new Float64Array(poly), faces: ['bottom', 'sides', 'top', 'sides'] };
+}
+
+// Vertices of a regular n-gon of vertex radius r centred on (cx, cy), vertex 0 at the
+// top turned by rot degrees counterclockwise, CCW. Without rotation the vertices come
+// in exact mirror pairs about x = cx, so a centred n-gon is mirror symmetric to the bit.
+export function ngonPolygon(cx, cy, r, n, rot = 0) {
+    const poly = new Float64Array(2 * n);
+    for (let k = 0; k < n; k++) {
+        if (rot === 0 && k > n / 2) {
+            poly[2 * k] = cx - (poly[2 * (n - k)] - cx);
+            poly[2 * k + 1] = poly[2 * (n - k) + 1];
+            continue;
+        }
+        const th = Math.PI / 2 + (rot * Math.PI / 180) + 2 * Math.PI * k / n;
+        const onAxis = rot === 0 && (k === 0 || 2 * k === n);
+        poly[2 * k] = onAxis ? cx : cx + r * Math.cos(th);
+        poly[2 * k + 1] = cy + r * Math.sin(th);
+    }
+    return poly;
+}
+
+// Shape of a trap or ngon statement in metres: { rect: axis pair, shape } where shape
+// is null for a trapezoid with zero angles. The shape is a convex CCW polygon, or a
+// ring { poly, hole }, with the fields shapes.js describes.
+function evalShape(st, f, len, num) {
+    if (st.shape === 'trap') {
+        const x = evalAxis(f, 'x', 'w', len, false);
+        const y = evalAxis(f, 'y', 'h', len, true);
+        if (![x.min, x.max, y.min, y.max].every(Number.isFinite)) {
+            throw new Error('a trapezoid needs finite x, w, y and h');
+        }
+        const aL = f.angle !== undefined ? num(f.angle) : (f.angle2 !== undefined ? num(f.angle2) : 0);
+        const aR = f.angle2 !== undefined ? num(f.angle2) : aL;
+        // The base is the face at y, the other face is y + h.
+        const yb = y.flipped ? y.max : y.min;
+        const tp = trapezoidPolygon(x.min, x.max, yb, y.flipped ? -(y.max - y.min) : y.max - y.min, aL, aR);
+        if (!tp) return { x, y, shape: null };
+        const xs = [tp.poly[0], tp.poly[2], tp.poly[4], tp.poly[6]];
+        const xmin = Math.min(...xs), xmax = Math.max(...xs);
+        return {
+            x: { pos: xmin, size: xmax - xmin, min: xmin, max: xmax, flipped: x.flipped },
+            y,
+            shape: { type: 'polygon', prim: 'trap', poly: tp.poly, faces: tp.faces,
+                     thickness: Math.min(y.max - y.min, xmax - xmin) },
+        };
+    }
+    for (const k of ['x', 'y', 'r', 'n']) if (f[k] === undefined) throw new Error('an n-gon needs x, y, r and n');
+    const cx = len(f.x), cy = len(f.y), r = len(f.r);
+    const n = num(f.n), rot = f.rot !== undefined ? num(f.rot) : 0;
+    if (![cx, cy].every(Number.isFinite)) throw new Error('n-gon x and y must be finite');
+    if (!(r > 0) || !Number.isFinite(r)) throw new Error('r must be positive');
+    if (!Number.isInteger(n) || n < 3 || n > 1024) throw new Error('n must be a whole number from 3 to 1024');
+    if (!Number.isFinite(rot)) throw new Error('rot must be a number');
+    const poly = ngonPolygon(cx, cy, r, n, rot);
+    let shape = { type: 'polygon', prim: 'ngon', poly, round: true, thickness: 2 * r * Math.cos(Math.PI / n) };
+    if (f.r_in !== undefined) {
+        const ri = len(f.r_in);
+        if (!(ri > 0) || !(ri < r)) throw new Error('r_in must be positive and smaller than r');
+        shape = { type: 'ring', prim: 'ngon', poly, hole: ngonPolygon(cx, cy, ri, n, rot), thickness: (r - ri) * Math.cos(Math.PI / n) };
+    }
+    let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+    for (let i = 0; i < poly.length; i += 2) {
+        xmin = Math.min(xmin, poly[i]); xmax = Math.max(xmax, poly[i]);
+        ymin = Math.min(ymin, poly[i + 1]); ymax = Math.max(ymax, poly[i + 1]);
+    }
+    return {
+        x: { pos: xmin, size: xmax - xmin, min: xmin, max: xmax, flipped: false },
+        y: { pos: ymin, size: ymax - ymin, min: ymin, max: ymax, flipped: false },
+        shape,
+    };
+}
+
 // Mirror image of an x axis about x=0.
 function mirrorAxis(ax) {
     if (ax.max === Infinity) return { pos: -Infinity, size: Infinity, min: -Infinity, max: -ax.min };
@@ -571,12 +695,10 @@ export function evaluateGeometry(model, overrides = {}) {
         if (s.type !== 'rect') continue;
         try {
             const f = s.fields;
-            const r = {
-                kind: s.kind, line: s.line,
-                x: evalAxis(f, 'x', 'w', len, false),
-                y: evalAxis(f, 'y', 'h', len, true),
-                er: 1, tand: 0, thin: false, plating: null, sigma: null, rq: null, platingMaterial: null,
-            };
+            const r = { kind: s.kind, line: s.line, shape: null,
+                er: 1, tand: 0, thin: false, plating: null, sigma: null, rq: null, platingMaterial: null };
+            if (s.shape) Object.assign(r, evalShape(s, f, len, num));
+            else { r.x = evalAxis(f, 'x', 'w', len, false); r.y = evalAxis(f, 'y', 'h', len, true); }
             if (s.kind === 'diel') {
                 if (f.er === undefined) throw new Error('diel needs er');
                 if (['plating', 'sigma', 'rq', 'plating_sigma', 'plating_t', 'plating_rq'].some(k => f[k] !== undefined)) {
@@ -599,6 +721,13 @@ export function evaluateGeometry(model, overrides = {}) {
                         }
                     }
                     r.plating = { top: faces.includes('top'), sides: faces.includes('sides'), bottom: faces.includes('bottom') };
+                    // A round shape has one surface and no faces to choose from.
+                    if (r.shape && r.shape.prim === 'ngon') {
+                        if (!(r.plating.top && r.plating.sides && r.plating.bottom)) {
+                            throw new Error('plating on an n-gon covers its whole surface: plating=all');
+                        }
+                        r.plating.all = true;
+                    }
                 }
                 if (f.sigma !== undefined) {
                     r.sigma = num(f.sigma);
@@ -621,6 +750,19 @@ export function evaluateGeometry(model, overrides = {}) {
                 }
             }
             r.image = false;
+            if (f.mirror !== undefined && num(f.mirror) !== 0 && r.shape) {
+                if (r.x.min <= 0 && r.x.max >= 0) {
+                    // A shape on x=0 has to be its own image.
+                    const tol = (r.x.max - r.x.min) * 1e-9;
+                    if (!isMirrorShape(r.shape, r.shape, tol)) {
+                        throw new Error(`mirror=1 needs the ${SHAPE_NAMES[s.shape]} on one side of x=0 or symmetric about it`);
+                    }
+                    rects.push(r);
+                } else {
+                    rects.push(r, { ...r, kind: MIRROR_KIND[r.kind], x: mirrorAxis(r.x), shape: mirrorShapeX(r.shape), image: true });
+                }
+                continue;
+            }
             if (f.mirror !== undefined && num(f.mirror) !== 0) {
                 if (r.x.min <= 0 && r.x.max >= 0) {
                     const m = Math.max(-r.x.min, r.x.max);
@@ -705,6 +847,7 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     const scale = LENGTH_UNITS[units];
     if (scale === undefined) throw new Error(`unknown unit '${units}'`);
     const all = [...(solver.dielectrics || []), ...(solver.conductors || [])];
+    if (solver.domain_shape && solver.a > 0 && solver.b > 0) return coaxToGeometryText(solver, units);
     if (all.some(o => o.shape)) throw new Error('Only rectangular geometries can be converted.');
     const fmt = v => (units === 'm' ? String(v) : String(Number((v / scale).toPrecision(12))));
     // Roughness and plating thickness in micrometres, their usual unit, whatever the
@@ -752,6 +895,38 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
         }
         lines.push(`${kind} ${rectText(c)}` + extra);
     }
+    return lines.join('\n') + '\n';
+}
+
+// A coaxial line (CoaxSolver) as n-gons: the dielectric disk, the centre conductor and
+// the shield as a ring of the model's wall thickness. Each n-gon has the vertex count
+// of the coax model and the area of its circle, so the text solves to the same line.
+// The domain is open around the shield.
+function coaxToGeometryText(solver, units) {
+    const scale = LENGTH_UNITS[units];
+    const fmt = v => String(Number((v / scale).toPrecision(12)));
+    // Vertex radius of the n-gon with the area of a circle of radius r.
+    const R = (r, n) => r * Math.sqrt((2 * Math.PI / n) / Math.sin(2 * Math.PI / n));
+    const { a, b, n_inner: ni, n_outer: no } = solver;
+    const c = b + solver.shield_thickness;
+    // Six digits keep the area within 1e-6 of the circle's.
+    const r6 = v => String(Number((v / scale).toPrecision(6)));
+    const pl = solver.plating;
+    const plated = which => (pl && pl[which] ? ' plating=all' : '');
+    const lines = [
+        `# Inner diameter ${fmt(2 * a)}, dielectric diameter ${fmt(2 * b)}, shield thickness ${fmt(c - b)} ${units}.`,
+        '# Each circle is an n-gon of the same area: r1, r2 and r3 are the vertex radii of the',
+        '# centre conductor, the dielectric and the outside of the shield.',
+        `units ${units}`,
+        `r1 = ${r6(R(a, ni))}; r2 = ${r6(R(b, no))}; r3 = ${r6(R(c, no))}`,
+        'bounds open open open open',
+        'domain -1.1*r3 1.1*r3 -1.1*r3 1.1*r3',
+    ];
+    if (pl) lines.push(`plating sigma=${pl.sigma} t=${Number((pl.thickness / 1e-6).toPrecision(12))}um rq=${Number(((pl.rq ?? 0) / 1e-6).toPrecision(12))}um`);
+    lines.push('',
+        `diel  ngon  x=0  y=0  r=r2  n=${no}  er=${solver.epsilon_r}  tand=${solver.tan_delta ?? 0}`,
+        `sig+  ngon  x=0  y=0  r=r1  n=${ni}${plated('inner')}`,
+        `gnd   ngon  x=0  y=0  r=r3  r_in=r2  n=${no}${plated('outer')}`);
     return lines.join('\n') + '\n';
 }
 
@@ -868,7 +1043,7 @@ function scaleExpression(src, d, f, degreeOf) {
     return out;
 }
 
-const RECT_LENGTH_KEYS = ['x', 'y', 'w', 'h', 'rq', 'plating_t', 'plating_rq'];
+const RECT_LENGTH_KEYS = ['x', 'y', 'w', 'h', 'r', 'r_in', 'rq', 'plating_t', 'plating_rq'];
 const PLATING_LENGTH_KEYS = ['t', 'rq'];
 
 // One statement's source rewritten.

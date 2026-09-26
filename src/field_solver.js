@@ -4,6 +4,7 @@ import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor } from './
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
+import { shapeContains } from './shapes.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -450,6 +451,13 @@ export class FieldSolver2D {
         }
         const h = hi - lo;
         if (!(h > 0)) return out;
+        // A ground ring around every signal conductor (a coax shield) keeps the field
+        // off all four walls.
+        const signals = this.conductors.filter(c => c.is_signal);
+        const inHole = (ring, c) => [[c.x_min, c.y_min], [c.x_max, c.y_min], [c.x_max, c.y_max], [c.x_min, c.y_max]]
+            .every(([x, y]) => shapeContains({ shape: { type: 'polygon', poly: ring.shape.hole } }, x, y, 0));
+        if (this.conductors.some(g => !g.is_signal && g.shape && g.shape.type === 'ring'
+            && signals.every(c => inHole(g, c)))) return out;
         const OPEN_CLEARANCE = 3;
         const tol = Math.max(xMax - xMin, yMax - yMin) * 1e-9;
         // Each wall: [name, bc, distance-to-wall, "g lies strictly between c and

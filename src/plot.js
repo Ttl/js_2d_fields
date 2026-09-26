@@ -1,7 +1,28 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB,
          isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
-import { isComplement, svgRingPath } from './shapes.js';
+import { isComplement, svgRingPath, svgShapePath, shapePoly } from './shapes.js';
+
+const isPolyShape = (shape) => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
+
+// Plated faces of a polygon shape as gold lines (every edge when it names none).
+function platedEdgeLines(shape, plating, line) {
+    const poly = shapePoly(shape);
+    const n = poly.length >> 1;
+    const out = [];
+    const loops = shape.type === 'ring' ? [shape.poly, shape.hole] : [poly];
+    loops.forEach((p, li) => {
+        const m = p.length >> 1;
+        for (let i = 0; i < m; i++) {
+            const face = (li === 0 && shape.faces && m === n) ? shape.faces[i] : 'all';
+            if (face !== 'all' && !plating[face]) continue;
+            const j = (i + 1) % m;
+            out.push({ type: 'line', x0: p[2 * i] * 1000, y0: p[2 * i + 1] * 1000, x1: p[2 * j] * 1000, y1: p[2 * j + 1] * 1000,
+                line, layer: 'above' });
+        }
+    });
+    return out;
+}
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -97,6 +118,11 @@ function conductorFillShapes(solver, maxY) {
     }
     for (const cond of (solver.conductors || [])) {
         const sh = cond.shape;
+        if (isPolyShape(sh)) {
+            out.push({ type: 'path', path: svgShapePath(sh), fillrule: 'evenodd', fillcolor: FILL, line: EDGE, layer: 'above' });
+            if (cond.plating) out.push(...platedEdgeLines(sh, cond.plating, GOLD));
+            continue;
+        }
         if (sh) {
             // A round conductor is drawn with Plotly's ellipse shape. The enclosing
             // shield is an annulus, which needs an SVG path because Plotly's shape path
@@ -168,6 +194,11 @@ function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, lay
             fillcolor = `rgba(100, ${intensity}, 100, ${alpha})`;
         }
         const sh = diel.shape;
+        if (isPolyShape(sh)) {
+            out.push({ type: 'path', path: svgShapePath(sh), fillrule: 'evenodd', fillcolor,
+                line: { color: lineColor, width: 0.5 }, layer });
+            continue;
+        }
         if (sh && !isComplement(sh)) {
             const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
             out.push({
@@ -202,12 +233,13 @@ function displayTop(solver) {
 function sourceLineHighlightShapes(solver, maxY) {
     const line = window.customHighlightLine;
     if (!line) return [];
+    const style = { fillcolor: 'rgba(56, 189, 248, 0.25)', line: { color: 'rgba(56, 189, 248, 1)', width: 2 }, layer: 'above' };
     return [...(solver.dielectrics || []), ...(solver.conductors || [])]
         .filter(o => o.src_line === line && o.y_min <= maxY)
-        .map(o => ({
+        .map(o => (isPolyShape(o.shape) ? { type: 'path', path: svgShapePath(o.shape), fillrule: 'evenodd', ...style } : {
             type: 'rect',
             x0: o.x_min * 1000, y0: o.y_min * 1000, x1: o.x_max * 1000, y1: Math.min(o.y_max, maxY) * 1000,
-            fillcolor: 'rgba(56, 189, 248, 0.25)', line: { color: 'rgba(56, 189, 248, 1)', width: 2 }, layer: 'above',
+            ...style,
         }));
 }
 
@@ -220,12 +252,13 @@ function mirrorImageShapes(solver, maxY) {
     const u = solver.user_domain;
     const x0 = -(solver.x_shift || 0) * 1000;
     return [
-        ...images.map(o => ({
-            type: 'rect',
-            x0: o.x_min * 1000, y0: o.y_min * 1000, x1: o.x_max * 1000, y1: Math.min(o.y_max, maxY) * 1000,
-            fillcolor: 'rgba(255, 255, 255, 0.22)', line: { color: 'rgba(60, 60, 60, 0.7)', width: 1, dash: 'dash' },
-            layer: 'above',
-        })),
+        ...images.map(o => {
+            const style = { fillcolor: 'rgba(255, 255, 255, 0.22)', line: { color: 'rgba(60, 60, 60, 0.7)', width: 1, dash: 'dash' },
+                layer: 'above' };
+            if (isPolyShape(o.shape)) return { type: 'path', path: svgShapePath(o.shape), fillrule: 'evenodd', ...style };
+            return { type: 'rect', x0: o.x_min * 1000, y0: o.y_min * 1000, x1: o.x_max * 1000, y1: Math.min(o.y_max, maxY) * 1000,
+                ...style };
+        }),
         { type: 'line', x0, x1: x0, y0: (u ? u.y_min : solver.domain_y_min) * 1000, y1: maxY * 1000,
           line: { color: 'rgba(56, 189, 248, 0.7)', width: 1, dash: 'dashdot' }, layer: 'above' },
     ];

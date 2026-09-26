@@ -20,6 +20,7 @@
 //           the caller should fall back to the numeric capacitance test.
 
 import { eig2x2, mat2Mul, mat2Inv } from './matrix.js';
+import { isMirrorShape, translateShapeX } from './shapes.js';
 
 // All conductors/dielectrics are axis-aligned rectangles exposing x_min/x_max/y_min/y_max.
 // A swap symmetry must be a mirror across an axis-aligned plane (vertical for an edge-coupled
@@ -90,6 +91,16 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
 
     const condKey = c => (c.is_signal ? 's' : 'g');   // signals are interchangeable; grounds map to grounds
     const dielKey = d => `${(d.epsilon_r ?? 0).toFixed(6)}:${(d.tan_delta ?? 0).toFixed(6)}`;
+    // Polygon shapes must mirror onto a shape of their kind too (the bounding boxes above
+    // cannot tell a trapezoid from its mirror image). Only a vertical mirror is tested.
+    const shaped = [...conductors, ...dielectrics].filter(o => o.shape);
+    if (shaped.length) {
+        if (axis !== 'x' || shaped.some(o => o.shape.type !== 'polygon' && o.shape.type !== 'ring')) return false;
+        const centred = o => translateShapeX(o.shape, -coord);
+        const ok = (list, key) => list.filter(o => o.shape).every(o => list.some(p => p.shape && key(p) === key(o)
+            && isMirrorShape(centred(o), centred(p), tol)));
+        if (!ok(conductors, condKey) || !ok(dielectrics, dielKey)) return false;
+    }
     return mirrorInvariant(conductors, condKey, axis, coord, tol)
         && mirrorInvariant(dielectrics, dielKey, axis, coord, tol);
 }
@@ -118,9 +129,14 @@ export function isXSymmetric(conductors, dielectrics, domainW, { finish: withFin
     // half). Every shape must qualify and the rectangular remainder still has to pass
     // the span test below, so a shaped conductor can never wave through asymmetric rects
     // sitting next to it.
+    // Polygon and ring shapes (custom geometry) need a mirror partner of the same role
+    // and finish, or material, which may be the shape itself.
     const shaped = (o) => !!o.shape;
-    if (![...conductors, ...dielectrics].filter(shaped).every(o => o.shape.xSymmetric === true))
-        return false;
+    const condKey = c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g') + (withFinish ? '|' + conductorFinishKey(c) : '');
+    const dielKey = d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}`;
+    const partnered = (list, key) => list.filter(shaped).every(o => o.shape.xSymmetric === true
+        || list.some(p => p.shape && key(p) === key(o) && isMirrorShape(o.shape, p.shape, tol)));
+    if (!partnered(conductors, condKey) || !partnered(dielectrics, dielKey)) return false;
     conductors = conductors.filter(o => !shaped(o));
     dielectrics = dielectrics.filter(o => !shaped(o));
     const mirrorOf = (list, extra) => {
@@ -144,9 +160,8 @@ export function isXSymmetric(conductors, dielectrics, domainW, { finish: withFin
     // The surface finish is part of the conductor: a pair whose traces are plated or
     // roughened differently has the same fields on both sides but not the same loss, and
     // the half domain would report the loss of the meshed side for both.
-    const condOk = mirrorOf(conductors, c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g')
-        + (withFinish ? '|' + conductorFinishKey(c) : ''));
-    const dielOk = mirrorOf(dielectrics, d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}`);
+    const condOk = mirrorOf(conductors, condKey);
+    const dielOk = mirrorOf(dielectrics, dielKey);
     return condOk && dielOk;
 }
 

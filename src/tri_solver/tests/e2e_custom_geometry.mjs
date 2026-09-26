@@ -596,6 +596,64 @@ check('leaving the custom type restores the fixed sidebar', await page.evaluate(
     await p4.close();
 }
 
+// ---- trapezoids and n-gons: form, preview, the quasi-static refusal, coax conversion ----
+// Own page: the refused solve reports its error on the console.
+{
+    const p5 = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    p5.on('dialog', d => d.accept());
+    await p5.goto(URL, { waitUntil: 'networkidle' });
+    await p5.selectOption('#tl_type', 'custom');
+    await p5.waitForTimeout(400);
+    await p5.selectOption('#custom-template', 'Differential microstrip with etched traces');
+    await p5.waitForTimeout(600);
+    const row = p5.locator('#custom-form .custom-rect-row.kind-sigp');
+    const form = await p5.evaluate(() => {
+        const r = document.querySelector('#custom-form .custom-rect-row.kind-sigp');
+        return { shape: r.querySelector('select.custom-shape').value,
+                 labels: [...r.querySelectorAll('.custom-cell-label')].map(l => l.textContent),
+                 paths: (document.getElementById('sim_canvas').layout.shapes || []).filter(s => s.type === 'path').length };
+    });
+    check('a trapezoid row has the angle fields and draws as a polygon', form.shape === 'trap'
+        && form.labels.includes('∠L') && form.labels.includes('∠R') && form.paths >= 2, JSON.stringify(form));
+    await row.locator('.custom-cell', { has: p5.locator('.custom-cell-label', { hasText: /^∠R$/ }) }).locator('input').fill('10');
+    await p5.waitForTimeout(500);
+    check('the right angle field writes angle2', /angle=etch angle2=10/.test(await p5.inputValue('#custom_geom_text')));
+
+    await p5.selectOption('#mesh_backend', 'rectilinear');
+    await p5.click('#btn_solve');
+    await p5.waitForFunction(() => /does not support/.test(document.getElementById('console_out').textContent), null, { timeout: 30000 });
+    const refused = await p5.evaluate(() => document.getElementById('console_out').textContent);
+    check('the quasi-static solver refuses the trapezoids', /non-rectangular shapes .*line 8.*quasi-static solver does not support/.test(refused));
+
+    await row.locator('select.custom-shape').selectOption('ngon');
+    await p5.waitForTimeout(500);
+    const ngonText = await p5.inputValue('#custom_geom_text');
+    check('switching the shape to n-gon rewrites the line', /sig\+ {2}ngon {2}x=\S+ y=\S+ r=\S+ n=32 mirror=1/.test(ngonText),
+        ngonText.split('\n').find(l => l.startsWith('sig+')));
+    await p5.locator('#custom-form .custom-rect-row.kind-sigp select.custom-shape').selectOption('rect');
+    await p5.waitForTimeout(500);
+    check('and back to a rectangle', /sig\+ {2}x=\S+ w=\S+ y=\S+ h=\S+ mirror=1/.test(await p5.inputValue('#custom_geom_text')));
+
+    // Coax: converts to n-gons and solves on the full-wave solver.
+    await p5.selectOption('#tl_type', 'coax');
+    await p5.waitForTimeout(500);
+    await p5.click('#btn-convert-custom');
+    await p5.waitForTimeout(800);
+    const coax = await p5.evaluate(() => ({ type: document.getElementById('tl_type').value,
+        text: document.getElementById('custom_geom_text').value,
+        rows: [...document.querySelectorAll('#custom-form select.custom-shape')].map(s => s.value).join(),
+        warnings: document.getElementById('custom-geom-warnings').textContent }));
+    check('a coax converts to n-gons', coax.type === 'custom' && coax.rows === 'ngon,ngon,ngon' && /r_in=r2/.test(coax.text), coax.rows);
+    check('the shielded coax has no open-boundary warning', !/open boundary/.test(coax.warnings), coax.warnings.slice(0, 80));
+    await p5.click('#btn_solve');
+    await p5.waitForFunction(() => document.getElementById('btn_solve').textContent === 'Solve'
+        && !document.getElementById('btn_solve').disabled, null, { timeout: 300000 });
+    const z = z0FromLog(await p5.evaluate(() => document.getElementById('console_out').textContent));
+    const zRef = 376.730313668 / Math.sqrt(2.1) / (2 * Math.PI) * Math.log(2.95 / 0.92);
+    check('the converted coax solves to the closed-form impedance', Math.abs(z - zRef) < 0.05, `Z0 ${z} vs ${zRef.toFixed(2)}`);
+    await p5.close();
+}
+
 check('no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 await browser.close();
 console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY E2E TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

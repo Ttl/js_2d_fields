@@ -22,8 +22,12 @@
 // boundary is the domain outline, but still gets a condRects entry so the freedom map
 // makes that outline PEC and the loss integral finds its surface edges.
 
-import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist,
+import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, shapeLoops,
          isComplement, REL_SHAPE_TOL } from '../shapes.js';
+
+// Polygon and ring shapes (custom geometry primitives), as opposed to the circles of
+// the coax model, which keep their own meshing path.
+const isPolyShape = (shape) => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
 
 // Domain-diagonal-relative geometric tolerance. Shared with the freedom map and the
 // refinement smoother (see REL_SHAPE_TOL) so all three agree on where a boundary is.
@@ -177,6 +181,8 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
                              slab_thickness: c.slab_thickness ?? null, rq: c.rq ?? null,
                              sigma: c.sigma > 0 ? c.sigma : null });
     for (const c of conductors) {
+        // A polygon entirely left of the plane is not in a half domain.
+        if (isPolyShape(c.shape) && meshOpts.half && !shapeLoops(c.shape, meshOpts).length) continue;
         if (c.shape) {
             // Bounds come from the shape's positive body. For a complement that is the
             // hole it surrounds, which is exactly the extent of its boundary in the mesh
@@ -346,6 +352,65 @@ export function buildOccMeshFromGeometry(G, opts) {
         const face = G._gmshModelOccAddPlaneSurface(wb, 1, -1, ierr); check('AddPlaneSurface');
         return face;
     };
+    // Polygon or ring shape as one OCC plane surface: its first loop is the outline,
+    // a second one a hole. Parts outside the meshed box are cut off (a polygon reaching
+    // into an absorbed ground slab, or across the symmetry plane).
+    const addShapeLoops = (shape) => {
+        let loops = shapeLoops(shape, meshOpts);
+        if (shape.type === 'polygon') {
+            loops = loops.map(clipPolyToBox).filter(l => l.length);
+        } else if (loops.some(l => { for (let i = 0; i < l.length; i += 2) {
+            if (l[i] < X0 - tol || l[i] > X1 + tol || l[i + 1] < Y0 - tol || l[i + 1] > Y1 + tol) return true;
+        } return false; })) {
+            throw new Error('An n-gon ring must lie inside the solved region.');
+        }
+        if (!loops.length) return null;
+        const wires = loops.map(poly => {
+            const n = poly.length >> 1;
+            const pts = new Array(n), lines = new Array(n);
+            for (let i = 0; i < n; i++) {
+                pts[i] = G._gmshModelOccAddPoint(poly[2 * i] * OCC_SCALE, poly[2 * i + 1] * OCC_SCALE, 0, 0, -1, ierr);
+                check('AddPoint');
+            }
+            for (let i = 0; i < n; i++) {
+                lines[i] = G._gmshModelOccAddLine(pts[i], pts[(i + 1) % n], -1, ierr);
+                check('AddLine');
+            }
+            const lb = G.stackAlloc(n * 4);
+            for (let i = 0; i < n; i++) G.setValue(lb + i * 4, lines[i], 'i32');
+            const loop = G._gmshModelOccAddCurveLoop(lb, n, -1, ierr); check('AddCurveLoop');
+            return loop;
+        });
+        const wb = G.stackAlloc(4 * wires.length);
+        wires.forEach((w, i) => G.setValue(wb + 4 * i, w, 'i32'));
+        const face = G._gmshModelOccAddPlaneSurface(wb, wires.length, -1, ierr); check('AddPlaneSurface');
+        return face;
+    };
+    // Convex polygon cut to the meshed box.
+    const clipPolyToBox = (poly) => {
+        let q = Array.from(poly);
+        const clip = (inside, cross) => {
+            const out = [];
+            const n = q.length >> 1;
+            for (let i = 0; i < n; i++) {
+                const j = (i + 1) % n;
+                const a = [q[2 * i], q[2 * i + 1]], b = [q[2 * j], q[2 * j + 1]];
+                const aIn = inside(a), bIn = inside(b);
+                if (aIn) out.push(a[0], a[1]);
+                if (aIn !== bIn) out.push(...cross(a, b));
+            }
+            q = out;
+        };
+        const atX = (x) => (a, b) => [x, a[1] + (b[1] - a[1]) * (x - a[0]) / (b[0] - a[0])];
+        const atY = (y) => (a, b) => [a[0] + (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]), y];
+        if (q.some((v, i) => i % 2 === 0 && v < X0)) clip(p => p[0] >= X0, atX(X0));
+        if (q.some((v, i) => i % 2 === 0 && v > X1)) clip(p => p[0] <= X1, atX(X1));
+        if (q.some((v, i) => i % 2 === 1 && v < Y0)) clip(p => p[1] >= Y0, atY(Y0));
+        if (q.some((v, i) => i % 2 === 1 && v > Y1)) clip(p => p[1] <= Y1, atY(Y1));
+        // Degenerate remnants (a polygon touching the box from outside) are dropped.
+        if ((q.length >> 1) < 3 || shapeArea({ shape: { type: 'polygon', poly: new Float64Array(q) } }) <= tol * tol) return [];
+        return new Float64Array(q);
+    };
     const clipToDomain = (r) => ({
         xmin: Math.max(r.xmin, X0), xmax: Math.min(r.xmax, X1),
         ymin: Math.max(r.ymin, Y0), ymax: Math.min(r.ymax, Y1),
@@ -356,23 +421,36 @@ export function buildOccMeshFromGeometry(G, opts) {
         ? addPolygon(shapePoly(domainShape, meshOpts))
         : addRect({ xmin: X0, xmax: X1, ymin: Y0, ymax: Y1 });
     const toolTags = [];
+    // Index into condRects of the polygon-shaped conductor behind each tool, -1 for the
+    // others. The fragment map then names the faces of those conductors.
+    const toolCond = [];
     for (const d of dielectrics) {
+        if (isPolyShape(d.shape)) {
+            const t = addShapeLoops(d.shape);
+            if (t !== null) { toolTags.push(t); toolCond.push(-1); }
+            continue;
+        }
         if (d.shape) {
             // A dielectric that IS the domain needs no tool — the background face
             // already covers it, and fragmenting a face against itself is degenerate.
             if (domainShape && d.shape === domainShape) continue;
-            toolTags.push(addPolygon(shapePoly(d.shape, meshOpts)));
+            toolTags.push(addPolygon(shapePoly(d.shape, meshOpts))); toolCond.push(-1);
             continue;
         }
         const r = clipToDomain(_rectOf(d));
-        if (r.xmax - r.xmin > tol && r.ymax - r.ymin > tol) toolTags.push(addRect(r));
+        if (r.xmax - r.xmin > tol && r.ymax - r.ymin > tol) { toolTags.push(addRect(r)); toolCond.push(-1); }
     }
-    for (const c of condRects) {
+    condRects.forEach((c, ci) => {
         // A complement conductor is a zero-area PEC shell whose boundary is already the
         // domain outline: it contributes no OCC geometry, only a condRects entry.
-        if (c.shape && isComplement(c.shape)) continue;
-        toolTags.push(c.shape ? addPolygon(shapePoly(c.shape, meshOpts)) : addRect(c));
-    }
+        if (c.shape && isComplement(c.shape)) return;
+        if (isPolyShape(c.shape)) {
+            const t = addShapeLoops(c.shape);
+            if (t !== null) { toolTags.push(t); toolCond.push(ci); }
+            return;
+        }
+        toolTags.push(c.shape ? addPolygon(shapePoly(c.shape, meshOpts)) : addRect(c)); toolCond.push(-1);
+    });
 
     // fragment([(2,domTag)], [(2,tool)...]) → conforming arrangement (remove originals).
     const obj = G.stackAlloc(8); G.setValue(obj, 2, 'i32'); G.setValue(obj + 4, domTag, 'i32');
@@ -382,10 +460,22 @@ export function buildOccMeshFromGeometry(G, opts) {
     // NB: the *_n args are the array length in INTS (2 per (dim,tag) pair), not pair count.
     G._gmshModelOccFragment(obj, 2, toolBuf, toolTags.length * 2, oDT, oDTn, oMap, oMapN, oMapNN, -1, 1, 1, ierr);
     check('Fragment');
-    // free fragment outputs (outDimTags + the nested map)
+    // free fragment outputs (outDimTags + the nested map). Entry 1 + k of the map lists
+    // the faces tool k became, which is how the faces of a polygon-shaped conductor are
+    // found (its bounding box also holds faces that are not metal, a ring's hole).
+    const polyCondFaces = new Set();
     { const p = G.getValue(oDT, 'i32'); if (p) G._gmshFree(p); }
     { const mapPtr = G.getValue(oMap, 'i32'); const mapNPtr = G.getValue(oMapN, 'i32'); const nn = G.getValue(oMapNN, 'i32');
-      for (let i = 0; i < nn; i++) { const sub = G.getValue(mapPtr + i * 4, 'i32'); if (sub) G._gmshFree(sub); }
+      for (let i = 0; i < nn; i++) {
+          const sub = G.getValue(mapPtr + i * 4, 'i32');
+          if (i >= 1 && toolCond[i - 1] >= 0 && sub) {
+              const len = G.getValue(mapNPtr + i * 4, 'i32');
+              for (let k = 0; k + 1 < len; k += 2) {
+                  if (G.getValue(sub + k * 4, 'i32') === 2) polyCondFaces.add(G.getValue(sub + (k + 1) * 4, 'i32'));
+              }
+          }
+          if (sub) G._gmshFree(sub);
+      }
       if (mapPtr) G._gmshFree(mapPtr); if (mapNPtr) G._gmshFree(mapNPtr); }
 
     G._gmshModelOccSynchronize(ierr); check('Synchronize');
@@ -534,8 +624,8 @@ export function buildOccMeshFromGeometry(G, opts) {
             for (let i = 0; i < faces.length; i += 2) {
                 const ftag = faces[i + 1];
                 const b = readBB(2, ftag, 'GetBoundingBox');
-                const hit = condRects.some(c =>
-                    !(c.shape && isComplement(c.shape)) && bboxInRect(c, b.x0, b.y0, b.x1, b.y1));
+                const hit = polyCondFaces.has(ftag) || condRects.some(c =>
+                    !(c.shape && isComplement(c.shape)) && !isPolyShape(c.shape) && bboxInRect(c, b.x0, b.y0, b.x1, b.y1));
                 if (hit) holes.push(ftag);
             }
             let dangling = 0;
@@ -808,6 +898,8 @@ export function buildOccMeshFromGeometry(G, opts) {
     // threshold.
     const minDielT = opts.minDielThickness ?? 2 * hFine;
     for (const d of (opts.constrainDielectrics === false ? [] : dielectrics)) {
+        // A polygon's sides are held like a conductor's, whatever its thickness.
+        if (isPolyShape(d.shape)) { constraintSegments.push(...shapeSegments(d, meshOpts)); continue; }
         if (d.shape) continue;
         const r = clipToDomain(_rectOf(d));
         if (r.xmax - r.xmin <= tol || r.ymax - r.ymin <= tol) continue;

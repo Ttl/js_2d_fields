@@ -6,6 +6,7 @@ import { FieldSolver2D } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
 import { halfDomainSymmetry, isXSymmetric } from './geometry_symmetry.js';
 import { parseAndEvaluate, formatErrors } from './custom_geometry_text.js';
+import { bodyDistance, translateShapeX } from './shapes.js';
 
 const BIG = 1e30;
 const WALLS = ['left', 'right', 'top', 'bottom'];
@@ -15,6 +16,14 @@ function rectDistance(a, b) {
     const dx = Math.max(0, a.x0 - b.x1, b.x0 - a.x1);
     const dy = Math.max(0, a.y0 - b.y1, b.y0 - a.y1);
     return Math.hypot(dx, dy);
+}
+
+// Gap between two resolved rectangles or shapes ({x0, x1, y0, y1, shape}). Shapes are
+// measured on their polygons, plain rectangles as before.
+function bodyGap(a, b) {
+    if (!a.shape && !b.shape) return rectDistance(a, b);
+    const body = o => ({ xmin: o.x0, xmax: o.x1, ymin: o.y0, ymax: o.y1, shape: o.shape || null });
+    return bodyDistance(body(a), body(b));
 }
 
 function overlapArea(a, b) {
@@ -70,6 +79,8 @@ class CustomGeometrySolver extends FieldSolver2D {
         const rects = this._resolve_rects(geo);
         this._validate_rects(rects, platingMaterial);
         this._build_lists(rects, platingMaterial);
+        // Source lines of the trapezoids and n-gons, which only the full-wave solver takes.
+        this.shaped_lines = [...new Set(rects.filter(r => r.shape && !r.image).map(r => r.line))];
 
         const signals = this.conductors.filter(c => c.is_signal);
         const grounds = this.conductors.filter(c => !c.is_signal);
@@ -132,7 +143,7 @@ class CustomGeometrySolver extends FieldSolver2D {
         const clamp = v => Math.max(-BIG, Math.min(BIG, v));
         const rects = geo.rects.map(r => ({
             kind: r.kind, src: r, line: r.line, er: r.er, tand: r.tand, thin: r.thin, faces: r.plating,
-            sigma: r.sigma, rq: r.rq, platingOwn: r.platingMaterial, image: r.image,
+            sigma: r.sigma, rq: r.rq, platingOwn: r.platingMaterial, image: r.image, shape: r.shape || null,
             x0: clamp(r.x.min), x1: clamp(r.x.max), y0: clamp(r.y.min), y1: clamp(r.y.max),
             xInf: !Number.isFinite(r.x.min) || !Number.isFinite(r.x.max),
         }));
@@ -177,7 +188,7 @@ class CustomGeometrySolver extends FieldSolver2D {
             throw new Error('The geometry needs a ground: a gnd rectangle or a gnd boundary.');
         }
         let href = Infinity;
-        for (const s of signals) for (const g of gnds) href = Math.min(href, rectDistance(s, g));
+        for (const s of signals) for (const g of gnds) href = Math.min(href, bodyGap(s, g));
         const sx = finite(signals, 'x0', 'x1');
         const span = (sx.length ? Math.max(...sx) - Math.min(...sx) : 0) + 2 * href;
         const sub = finite(rects.filter(r => r.kind === 'diel' && r.er > 1.001), 'y0', 'y1');
@@ -214,6 +225,9 @@ class CustomGeometrySolver extends FieldSolver2D {
             o.x0 = o.x; o.x1 = o.x + o.w;
             o.y0 = o.h >= 0 ? o.y : o.y + o.h;
             o.y1 = o.h >= 0 ? o.y + o.h : o.y;
+            if (o.shape && (o.x0 < X0 - tol || o.x1 > X1 + tol || o.y0 < Y0 - tol || o.y1 > Y1 + tol)) {
+                throw new Error(`line ${o.line}: the ${o.shape.prim === 'trap' ? 'trapezoid' : 'n-gon'} lies outside the domain.`);
+            }
             if (o.kind === 'diel') {
                 // Dielectrics are clipped to the domain, conductors must fit.
                 if (o.x0 < X0 - tol || o.x1 > X1 + tol || o.y0 < Y0 - tol || o.y1 > Y1 + tol) {
@@ -256,7 +270,12 @@ class CustomGeometrySolver extends FieldSolver2D {
         const shift = (TX0 + TX1) / 2;
         const half = (TX1 - TX0) / 2;
         if (Math.abs(shift) > tol) {
-            for (const r of out) { r.x -= shift; r.x0 = r.x; r.x1 = r.x + r.w; }
+            for (const r of out) {
+                r.x -= shift;
+                // A shape's bounds are its polygon's, which may start left of x.
+                if (r.shape) { r.shape = translateShapeX(r.shape, -shift); r.x0 -= shift; r.x1 -= shift; }
+                else { r.x0 = r.x; r.x1 = r.x + r.w; }
+            }
         }
         this.x_shift = Math.abs(shift) > tol ? shift : 0;
         this.domain_width = 2 * half;
@@ -282,7 +301,7 @@ class CustomGeometrySolver extends FieldSolver2D {
                 if (a.kind === c.kind) continue;
                 // Touching counts as a short too: the grid puts both on the same nodes.
                 const dx = Math.max(a.x0 - c.x1, c.x0 - a.x1), dy = Math.max(a.y0 - c.y1, c.y0 - a.y1);
-                if (dx <= tol && dy <= tol) {
+                if (dx <= tol && dy <= tol && (!(a.shape || c.shape) || bodyGap(a, c) <= tol)) {
                     throw new Error(`${where(a)} (${a.kind}) and ${where(c)} (${c.kind}) touch or overlap: the conductors are shorted.`);
                 }
             }
@@ -293,7 +312,7 @@ class CustomGeometrySolver extends FieldSolver2D {
             if (!(pm.sigma > 0) || !(pm.thickness > 0)) {
                 throw new Error(`line ${r.line}: plating= needs a plating material: plating_sigma= and plating_t= on the line, or a plating statement.`);
             }
-            const joined = conds.some(o => o !== r && o.kind === r.kind && rectDistance(r, o) <= tol);
+            const joined = conds.some(o => o !== r && o.kind === r.kind && bodyGap(r, o) <= tol);
             if (joined) {
                 throw new Error(`line ${r.line}: plating is not supported on a conductor that touches another ${r.kind} rectangle.`);
             }
@@ -306,8 +325,10 @@ class CustomGeometrySolver extends FieldSolver2D {
         const own = v => v !== null && v !== undefined;
         this._own_finish = rects.some(r => r.kind !== 'diel' && (own(r.sigma) || own(r.rq) || r.platingOwn));
         for (const r of rects) {
+            // A shape's rectangle is its bounding box.
+            const [bx, by, bw, bh] = r.shape ? [r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0] : [r.x, r.y, r.w, r.h];
             if (r.kind === 'diel') {
-                const d = new Dielectric(r.x, r.y, r.w, r.h, r.er, r.tand);
+                const d = new Dielectric(bx, by, bw, bh, r.er, r.tand, r.shape);
                 if (r.thin) d.thin_sheet = true;
                 d.src_line = r.line;
                 if (r.image) d.src_image = true;
@@ -319,13 +340,24 @@ class CustomGeometrySolver extends FieldSolver2D {
                 ? { rq: 0, thick_corners: false, ...platingMaterial, ...(r.platingOwn || {}), ...r.faces } : null;
             if (plating) { plating.rq = plating.rq ?? 0; plating.thick_corners = !!plating.thick_corners; }
             const polarity = r.kind === 'sig+' ? 1 : (r.kind === 'sig-' ? -1 : 0);
-            const c = new Conductor(r.x, r.y, r.w, r.h, polarity !== 0, polarity, plating);
+            const c = new Conductor(bx, by, bw, bh, polarity !== 0, polarity, plating, r.shape);
             c.src_line = r.line;   // source line, the editor highlights the rectangle from it
             if (r.image) c.src_image = true;   // generated by mirror=1
             if (own(r.sigma)) c.sigma = r.sigma;   // own conductivity
             if (own(r.rq)) c.rq = r.rq;            // own surface roughness
             this.conductors.push(c);
         }
+    }
+
+    // The quasi-static solver meshes rectangles only.
+    ensure_mesh() {
+        if (this.mesh_backend !== 'triangular' && this.shaped_lines.length) {
+            const n = this.shaped_lines.length;
+            throw new Error(`The geometry has non-rectangular shapes (trapezoid or n-gon, line${n > 1 ? 's' : ''} ` +
+                `${this.shaped_lines.join(', ')}), which the quasi-static solver does not support. ` +
+                'Use the full-wave solver.');
+        }
+        return super.ensure_mesh();
     }
 
     // The mirror test compares rectangle sets and cannot see paint order. Where two
@@ -385,7 +417,7 @@ class CustomGeometrySolver extends FieldSolver2D {
     signalBodyWarnings() {
         const out = [];
         const tol = this.domain_width * 1e-9;
-        const box = c => ({ x0: c.x_min, x1: c.x_max, y0: c.y_min, y1: c.y_max });
+        const box = c => ({ x0: c.x_min, x1: c.x_max, y0: c.y_min, y1: c.y_max, shape: c.shape });
         for (const [polarity, kind] of [[1, 'sig+'], [-1, 'sig-']]) {
             const list = this.conductors.filter(c => c.is_signal && c.polarity === polarity);
             // Union of touching rectangles into bodies.
@@ -393,7 +425,7 @@ class CustomGeometrySolver extends FieldSolver2D {
             const find = i => (body[i] === i ? i : (body[i] = find(body[i])));
             for (let i = 0; i < list.length; i++) {
                 for (let j = i + 1; j < list.length; j++) {
-                    if (rectDistance(box(list[i]), box(list[j])) <= tol) body[find(i)] = find(j);
+                    if (bodyGap(box(list[i]), box(list[j])) <= tol) body[find(i)] = find(j);
                 }
             }
             const bodies = new Set(list.map((_, i) => find(i))).size;

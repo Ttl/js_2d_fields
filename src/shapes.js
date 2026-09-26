@@ -105,6 +105,15 @@ export function halfCirclePolygon(cx, cy, r, n, phase = 0) {
 //   { type: 'outside_circle',  cx, cy, r, n, phase, xSymmetric }
 //   { type: 'polygon',         poly: Float64Array }     CONVEX, CCW
 //   { type: 'outside_polygon', poly: Float64Array }     CONVEX, CCW
+//   { type: 'ring',            poly, hole }             convex outer and hole loops, CCW
+//
+// Custom geometry primitives (trapezoid, n-gon, n-gon ring) are 'polygon' and 'ring'
+// shapes with a few optional fields:
+//   faces     - face name per polygon edge (edge i runs from vertex i to i + 1): 'top',
+//               'sides' or 'bottom' on a trapezoid, for per-face plating. Without it
+//               every edge is 'all'.
+//   thickness - the conductor's thin dimension (slab reactance, skin band gating)
+//   round     - a round wire (n-gon), whose internal inductance follows the wire rule
 //
 // An `outside_*` shape is the COMPLEMENT of its body: the coax shield is "everything at
 // radius >= b", which has zero meshed area (the meshed domain stops at the boundary)
@@ -132,8 +141,12 @@ export function shapePoly(shape, { half = false } = {}) {
         poly = half
             ? halfCirclePolygon(shape.cx, shape.cy, shape.r, shape.n, shape.phase || 0)
             : circlePolygon(shape.cx, shape.cy, shape.r, shape.n, shape.phase || 0);
+    } else if (half) {
+        // The part at x >= 0 of any other convex polygon, empty when it lies left of
+        // the plane. A ring's poly is its outer loop.
+        if (shape.type === 'outside_polygon') throw new Error('shapePoly: {half} is not supported for outside_polygon');
+        poly = clipPolyX(shape.poly, 0);
     } else {
-        if (half) throw new Error('shapePoly: {half} is only supported for circle shapes');
         poly = shape.poly;
     }
     // Non-enumerable so a shape object still serializes/spreads cleanly.
@@ -176,7 +189,13 @@ export function shapeSignedDist(shape, x, y) {
         if (d >= rad.R) return d - rad.R;                           // strictly outside
         // In the annulus between them: fall through to the exact half-plane test.
     }
-    const poly = shapePoly(shape);
+    // A ring is the outer body minus the hole: outside the ring is outside the outer
+    // loop or inside the hole.
+    if (shape.type === 'ring') return Math.max(convexSignedDist(shape.poly, x, y), -convexSignedDist(shape.hole, x, y));
+    return convexSignedDist(shapePoly(shape), x, y);
+}
+
+function convexSignedDist(poly, x, y) {
     const n = poly.length >> 1;
     let best = -Infinity;
     for (let i = 0; i < n; i++) {
@@ -234,7 +253,14 @@ export function shapeArea(o, opts) {
         return Math.abs(w * h);
     }
     if (isComplement(shape)) return 0;
-    const poly = shapePoly(shape, opts);
+    if (shape.type === 'ring') {
+        const hole = (opts && opts.half) ? clipPolyX(shape.hole, 0) : shape.hole;
+        return polyArea(shapePoly(shape, opts)) - polyArea(hole);
+    }
+    return polyArea(shapePoly(shape, opts));
+}
+
+function polyArea(poly) {
     const n = poly.length >> 1;
     let a2 = 0;
     for (let i = 0; i < n; i++) {
@@ -263,6 +289,27 @@ export function shapeArea(o, opts) {
 export function shapeSegments(o, opts) {
     const shape = o.shape;
     if (!shape) return [];
+    if (!isCircular(shape)) {
+        // Polygon and ring loops. On a half domain the edges lying on the plane are
+        // the cut, not a surface, and are left out like the circle's chord.
+        const half = !!(opts && opts.half);
+        const segs = [];
+        const add = (poly, reverse) => {
+            const n = poly.length >> 1;
+            for (let i = 0; i < n; i++) {
+                const j = (i + 1) % n;
+                const [a, b] = reverse ? [j, i] : [i, j];
+                const seg = { x0: poly[2 * a], y0: poly[2 * a + 1], x1: poly[2 * b], y1: poly[2 * b + 1] };
+                if (half && seg.x0 === 0 && seg.x1 === 0) continue;
+                segs.push(seg);
+            }
+        };
+        add(shapePoly(shape, opts), false);
+        // The hole runs clockwise so the outward normal of every segment points away
+        // from the metal.
+        if (shape.type === 'ring') add(half ? clipPolyX(shape.hole, 0) : shape.hole, true);
+        return segs;
+    }
     const poly = shapePoly(shape, opts);
     const n = poly.length >> 1;
     const last = (opts && opts.half) ? n - 1 : n;   // skip the closing chord on a half
@@ -356,4 +403,220 @@ export function svgRingPath(cx, cy, rIn, rOut, n = 180) {
     // Opposite winding for the hole is not required by evenodd, but keeps the path
     // valid under nonzero filling too.
     return loop(rOut, 1) + loop(rIn, -1);
+}
+
+// --- Polygon primitives (custom geometry) -----------------------------------------
+
+// Part of the convex CCW polygon `poly` at x >= x0 (one Sutherland-Hodgman stage),
+// still CCW, empty when nothing is right of x0. Vertices on the plane stay exact, and
+// a crossing edge gets its new vertex at exactly x = x0.
+export function clipPolyX(poly, x0) {
+    const n = poly.length >> 1;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const ax = poly[2 * i], ay = poly[2 * i + 1], bx = poly[2 * j], by = poly[2 * j + 1];
+        const aIn = ax >= x0, bIn = bx >= x0;
+        if (aIn) out.push(ax, ay);
+        if (aIn !== bIn && ax !== x0 && bx !== x0) {
+            out.push(x0, ay + (by - ay) * (x0 - ax) / (bx - ax));
+        }
+    }
+    // A polygon touching the plane from the left leaves a point or a segment.
+    let right = false;
+    for (let i = 0; i < out.length; i += 2) if (out[i] > x0) { right = true; break; }
+    return right ? new Float64Array(out) : new Float64Array(0);
+}
+
+// Closed loops of a shape for the mesher: [outer, hole] for a ring, [polygon] for the
+// others. On a half domain (x >= 0) a ring cut by the plane is one C-shaped loop:
+// the outer arc up, down the plane to the hole, the hole arc back down, and the plane
+// again to the start.
+export function shapeLoops(shape, { half = false } = {}) {
+    if (shape.type !== 'ring') {
+        const poly = shapePoly(shape, { half });
+        return poly.length ? [poly] : [];
+    }
+    if (!half) return [shape.poly, shape.hole];
+    const outer = clipPolyX(shape.poly, 0);
+    if (!outer.length) return [];
+    if (outer.length === shape.poly.length && !outer.some((v, i) => v !== shape.poly[i])) return [shape.poly, shape.hole];
+    const hole = clipPolyX(shape.hole, 0);
+    if (!hole.length) return [outer];
+    // Arc of a clipped CCW loop from its lower plane vertex to its upper one.
+    const arc = (poly) => {
+        const n = poly.length >> 1;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            // The cut runs down the plane, from the upper plane vertex i to the lower j.
+            if (poly[2 * i] === 0 && poly[2 * j] === 0 && poly[2 * i + 1] > poly[2 * j + 1]) {
+                const pts = [];
+                for (let k = 0; k < n; k++) { const m = (j + k) % n; pts.push(poly[2 * m], poly[2 * m + 1]); }
+                return pts;
+            }
+        }
+        return null;
+    };
+    const a = arc(outer), b = arc(hole);
+    if (!a || !b) throw new Error('shapeLoops: a ring cut by the symmetry plane must be centred on it');
+    const loop = [...a];
+    for (let k = (b.length >> 1) - 1; k >= 0; k--) loop.push(b[2 * k], b[2 * k + 1]);
+    return [new Float64Array(loop)];
+}
+
+// Distance from (x, y) to the segment (ax, ay)-(bx, by).
+function pointSegDist(x, y, ax, ay, bx, by) {
+    const ex = bx - ax, ey = by - ay;
+    const l2 = ex * ex + ey * ey;
+    let t = l2 > 0 ? ((x - ax) * ex + (y - ay) * ey) / l2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(x - ax - t * ex, y - ay - t * ey);
+}
+
+// Face name and nearest boundary point of a shape at (x, y): the edge closest to the
+// point decides. Polygons name their edges through shape.faces, anything else is 'all'.
+export function shapeFaceAt(shape, x, y) {
+    const loops = shape.type === 'ring' ? [shape.poly, shape.hole] : [shapePoly(shape)];
+    let best = Infinity, face = 'all', px = x, py = y;
+    loops.forEach((poly, li) => {
+        const n = poly.length >> 1;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            const ax = poly[2 * i], ay = poly[2 * i + 1], bx = poly[2 * j], by = poly[2 * j + 1];
+            const d = pointSegDist(x, y, ax, ay, bx, by);
+            if (d < best) {
+                best = d;
+                face = (li === 0 && shape.faces) ? shape.faces[i] : 'all';
+                const ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+                const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * ex + (y - ay) * ey) / l2)) : 0;
+                px = ax + t * ex; py = ay + t * ey;
+            }
+        }
+    });
+    return { face, x: px, y: py, dist: best };
+}
+
+// Boundary loops of a conductor or dielectric: its rectangle, or the loops of its
+// shape. null for a complement shape, which has no finite body.
+function bodyLoops(o) {
+    if (o.shape) {
+        if (isComplement(o.shape)) return null;
+        return o.shape.type === 'ring' ? [o.shape.poly, o.shape.hole] : [shapePoly(o.shape)];
+    }
+    const x0 = o.xmin ?? o.x_min, x1 = o.xmax ?? o.x_max, y0 = o.ymin ?? o.y_min, y1 = o.ymax ?? o.y_max;
+    return [new Float64Array([x0, y0, x1, y0, x1, y1, x0, y1])];
+}
+
+function segmentsCross(ax, ay, bx, by, cx, cy, dx, dy) {
+    const o = (px, py, qx, qy, rx, ry) => Math.sign((qx - px) * (ry - py) - (qy - py) * (rx - px));
+    const o1 = o(ax, ay, bx, by, cx, cy), o2 = o(ax, ay, bx, by, dx, dy);
+    const o3 = o(cx, cy, dx, dy, ax, ay), o4 = o(cx, cy, dx, dy, bx, by);
+    return o1 * o2 < 0 && o3 * o4 < 0;
+}
+
+// Shortest distance between two bodies (rectangles or shaped objects), 0 when they
+// overlap or one contains the other. Between two separate bodies the closest pair of
+// points always includes a vertex, so vertex-to-edge distances are exact.
+export function bodyDistance(a, b) {
+    const la = bodyLoops(a), lb = bodyLoops(b);
+    if (!la || !lb) return Infinity;
+    const inside = (o, x, y) => shapeContains(o, x, y, 0);
+    let best = Infinity;
+    const scan = (loops, other, otherLoops) => {
+        for (const p of loops) {
+            const n = p.length >> 1;
+            for (let i = 0; i < n; i++) {
+                const x = p[2 * i], y = p[2 * i + 1];
+                if (inside(other, x, y)) { best = 0; return; }
+                for (const q of otherLoops) {
+                    const m = q.length >> 1;
+                    for (let k = 0; k < m; k++) {
+                        const l = (k + 1) % m;
+                        best = Math.min(best, pointSegDist(x, y, q[2 * k], q[2 * k + 1], q[2 * l], q[2 * l + 1]));
+                    }
+                }
+            }
+        }
+    };
+    scan(la, b, lb);
+    if (best > 0) scan(lb, a, la);
+    if (best === 0) return 0;
+    // Crossing edges without a vertex inside (two bars forming a cross).
+    for (const p of la) for (const q of lb) {
+        const n = p.length >> 1, m = q.length >> 1;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            for (let k = 0; k < m; k++) {
+                const l = (k + 1) % m;
+                if (segmentsCross(p[2 * i], p[2 * i + 1], p[2 * j], p[2 * j + 1],
+                                  q[2 * k], q[2 * k + 1], q[2 * l], q[2 * l + 1])) return 0;
+            }
+        }
+    }
+    return best;
+}
+
+// Mirror image of a polygon about x = 0, still CCW. Edge j of the image is the image
+// of edge n-2-j of the original, which is where its face name goes.
+function mirrorPoly(poly) {
+    const n = poly.length >> 1;
+    const out = new Float64Array(2 * n);
+    for (let j = 0; j < n; j++) {
+        const k = n - 1 - j;
+        out[2 * j] = -poly[2 * k];
+        out[2 * j + 1] = poly[2 * k + 1];
+    }
+    return out;
+}
+
+// A polygon or ring shape mirrored about x = 0.
+export function mirrorShapeX(shape) {
+    const out = { ...shape, poly: mirrorPoly(shape.poly) };
+    if (shape.hole) out.hole = mirrorPoly(shape.hole);
+    if (shape.faces) {
+        const n = shape.faces.length;
+        out.faces = shape.faces.map((_, j) => shape.faces[((n - 2 - j) % n + n) % n]);
+    }
+    return out;
+}
+
+// A polygon or ring shape moved by dx along x.
+export function translateShapeX(shape, dx) {
+    const move = poly => poly.map((v, i) => (i % 2 === 0 ? v + dx : v));
+    const out = { ...shape, poly: move(shape.poly) };
+    if (shape.hole) out.hole = move(shape.hole);
+    return out;
+}
+
+// Same vertex set within tol, whatever the starting vertex.
+function samePoly(a, b, tol) {
+    if (a.length !== b.length) return false;
+    const n = a.length >> 1;
+    for (let i = 0; i < n; i++) {
+        let found = false;
+        for (let k = 0; k < n && !found; k++) {
+            found = Math.abs(a[2 * i] - b[2 * k]) <= tol && Math.abs(a[2 * i + 1] - b[2 * k + 1]) <= tol;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+// Is shape b the mirror image of shape a about x = 0?
+export function isMirrorShape(a, b, tol) {
+    if (!a || !b || a.type !== b.type || (a.type !== 'polygon' && a.type !== 'ring')) return false;
+    if (!samePoly(mirrorPoly(a.poly), b.poly, tol)) return false;
+    return a.type !== 'ring' || samePoly(mirrorPoly(a.hole), b.hole, tol);
+}
+
+// Closed path of a polygon or ring shape for a Plotly path shape, in mm.
+export function svgShapePath(shape) {
+    const loops = shape.type === 'ring' ? [shape.poly, shape.hole] : [shapePoly(shape)];
+    return loops.map(poly => {
+        let d = '';
+        for (let i = 0; i < poly.length; i += 2) {
+            d += (i === 0 ? 'M' : 'L') + (poly[i] * 1000).toFixed(9) + ',' + (poly[i + 1] * 1000).toFixed(9);
+        }
+        return d + 'Z';
+    }).join(' ');
 }

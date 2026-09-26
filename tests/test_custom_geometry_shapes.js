@@ -1,0 +1,108 @@
+// Trapezoids and n-gons on the full-wave solver, each against a reference:
+//   1. a trapezoid with a vanishing angle solves like the rectangle
+//   2. a square drawn as an n-gon (a polygon path through the mesher and the MQS loss)
+//      solves like the same square drawn as a rectangle
+//   3. the coax converted to n-gons against the closed forms, and the native coax
+//   4. a differential pair of etched traces: half domain against full domain
+//   5. per-face plating on a trapezoid: plating=all equals top,sides,bottom, a bottom
+//      face differs from the top face
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
+import { buildSolverFromParams } from '../src/solver_factory.js';
+import { solverToGeometryText } from '../src/custom_geometry_text.js';
+
+let failures = 0;
+function check(name, ok, detail = '') {
+    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
+    if (!ok) failures++;
+}
+async function quiet(fn) {
+    const log = console.log, warn = console.warn;
+    console.log = () => {}; console.warn = () => {};
+    try { return await fn(); } finally { console.log = log; console.warn = warn; }
+}
+const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b));
+const pct = v => `${(100 * v).toFixed(2)}%`;
+const SOLVE = { max_iters: 8, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+const modes = r => r.modes.map(m => ({ Z0: m.Z0?.re ?? m.Z0, eps: m.eps_eff, R: m.RLGC.R, L: m.RLGC.L, lossVia: m.lossVia }));
+async function solve(text, extra = {}) {
+    const s = new CustomGeometrySolver({ text, freq: 1e9, mesh_backend: 'triangular', ...extra });
+    s.tri_opts = { lossMethod: 'auto' };
+    const r = await quiet(() => s.solve_adaptive(SOLVE));
+    return { m: modes(r), warnings: [...(r.warnings || []), ...(s.modeWarnings || [])] };
+}
+function agree(name, a, b, zTol, rTol) {
+    a.forEach((m, i) => {
+        const n = a.length > 1 ? `${name} mode ${i}` : name;
+        check(`${n}: Z0 and eps_eff`, rel(m.Z0, b[i].Z0) < zTol && rel(m.eps, b[i].eps) < zTol,
+            `Z0 ${m.Z0.toFixed(3)} / ${b[i].Z0.toFixed(3)}, eps ${m.eps.toFixed(4)} / ${b[i].eps.toFixed(4)}`);
+        check(`${n}: R`, rel(m.R, b[i].R) < rTol, `${m.R.toFixed(3)} / ${b[i].R.toFixed(3)} ohm/m, ${pct(rel(m.R, b[i].R))}`);
+    });
+}
+
+const MS = trace => `units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.2 er=4.3 tand=0.02\n${trace}\n`;
+
+// --- 1. Trapezoid with a vanishing angle ---
+const rect = await solve(MS('sig+ x=-0.15 y=0.2 w=0.3 h=0.035'));
+{
+    const trap = await solve(MS('sig+ trap x=-0.15 y=0.2 w=0.3 h=0.035 angle=0.0001'));
+    check('trapezoid solves with the MQS loss', trap.m[0].lossVia === 'mqs', trap.m[0].lossVia);
+    agree('trapezoid at 1e-4 degrees = rectangle', trap.m, rect.m, 1e-3, 0.005);
+    const etched = await solve(MS('sig+ trap x=-0.15 y=0.2 w=0.3 h=0.035 angle=30'));
+    check('etched trace: narrower top raises Z0 and R', etched.m[0].Z0 > rect.m[0].Z0 && etched.m[0].R > rect.m[0].R,
+        `Z0 ${etched.m[0].Z0.toFixed(2)} vs ${rect.m[0].Z0.toFixed(2)}, R ${etched.m[0].R.toFixed(2)} vs ${rect.m[0].R.toFixed(2)}`);
+}
+
+// --- 2. Square as an n-gon ---
+{
+    // n = 4 turned by 45 degrees is an axis-aligned square of side r*sqrt(2).
+    const a = 0.2, r = a / Math.SQRT2;
+    const sq = await solve(MS(`sig+ ngon x=0 y=${0.3 + a / 2} r=${r} n=4 rot=45`));
+    const box = await solve(MS(`sig+ x=${-a / 2} y=0.3 w=${a} h=${a}`));
+    agree('square n-gon = square rectangle', sq.m, box.m, 3e-3, 0.02);
+}
+
+// --- 3. Coax as n-gons ---
+{
+    const p = { tl_type: 'coax', coax_d: 0.92e-3, coax_D: 2.95e-3, coax_er: 2.1, coax_tand: 2e-4, coax_sigma: 5.8e7,
+        rq: 0, freq: 1e9, mesh_backend: 'fullwave_mqs', use_plating: false };
+    const native = buildSolverFromParams(p, () => {});
+    const text = solverToGeometryText(native, { units: 'mm' });
+    const nat = modes(await quiet(() => native.solve_adaptive(SOLVE)));
+    const c = await solve(text, { sigma_cond: 5.8e7 });
+    const eta = 376.730313668 / Math.sqrt(2.1);
+    const a = 0.46e-3, b = 1.475e-3;
+    const Z0 = eta / (2 * Math.PI) * Math.log(b / a);
+    const Rs = Math.sqrt(Math.PI * 1e9 * 4e-7 * Math.PI / 5.8e7);
+    // The centre conductor's curvature adds about delta/(2a) to its share.
+    const R = Rs / (2 * Math.PI) * (1 / a + 1 / b);
+    check('coax n-gons: Z0 = closed form', rel(c.m[0].Z0, Z0) < 1e-3, `${c.m[0].Z0.toFixed(3)} vs ${Z0.toFixed(3)}`);
+    // eps_eff sits above er by the internal inductance, like the native coax.
+    check('coax n-gons: eps_eff = native coax', rel(c.m[0].eps, nat[0].eps) < 1e-4, `${c.m[0].eps.toFixed(5)} vs ${nat[0].eps.toFixed(5)}`);
+    check('coax n-gons: R = closed form (MQS)', c.m[0].lossVia === 'mqs' && rel(c.m[0].R, R) < 0.01,
+        `${c.m[0].R.toFixed(4)} vs ${R.toFixed(4)}, ${pct(rel(c.m[0].R, R))}`);
+    check('coax n-gons: shield band not capped', !c.warnings.some(w => w.type === 'mqs-band-capped'));
+    check('coax n-gons: Z0 = native coax', rel(c.m[0].Z0, nat[0].Z0) < 1e-3, `${c.m[0].Z0.toFixed(3)} vs ${nat[0].Z0.toFixed(3)}`);
+}
+
+// --- 4. Etched pair, half domain against full domain ---
+{
+    const pair = MS('sig+ trap x=0.1 y=0.2 w=0.3 h=0.035 angle=30 mirror=1');
+    const half = await solve(pair), full = await solve(pair, { symmetry: false });
+    agree('etched pair, half vs full domain', half.m, full.m, 5e-3, 0.01);
+}
+
+// --- 5. Per-face plating on a trapezoid ---
+{
+    const plated = faces => MS(`plating sigma=1e7 t=3um\nsig+ trap x=-0.15 y=0.2 w=0.3 h=0.035 angle=30 plating=${faces}`);
+    const all = await solve(plated('all')), each = await solve(plated('top,sides,bottom'));
+    check('plating=all equals every face', rel(all.m[0].R, each.m[0].R) < 1e-9, `${all.m[0].R} / ${each.m[0].R}`);
+    const top = await solve(plated('top')), bottom = await solve(plated('bottom'));
+    const bare = await solve(MS('sig+ trap x=-0.15 y=0.2 w=0.3 h=0.035 angle=30'));
+    // A microstrip carries most of its current on the face towards the ground.
+    check('plating: every face plated > bottom > top > bare', all.m[0].R > bottom.m[0].R && bottom.m[0].R > top.m[0].R
+        && top.m[0].R > bare.m[0].R,
+        `${all.m[0].R.toFixed(2)} > ${bottom.m[0].R.toFixed(2)} > ${top.m[0].R.toFixed(2)} > ${bare.m[0].R.toFixed(2)}`);
+}
+
+console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
+process.exit(failures ? 1 : 0);

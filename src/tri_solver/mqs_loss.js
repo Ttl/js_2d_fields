@@ -43,6 +43,7 @@ import { tripletsToCSRMulti, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
          triP2Stiffness, P2_MASS, P2_LOAD, refineTriMesh } from './tri_fem.js';
 import { calculate_Zrough, wallSpreadFactor } from '../surface_roughness.js';
+import { shapeContains, shapeSignedDist, shapeFaceAt } from '../shapes.js';
 
 const MU0 = 4 * Math.PI * 1e-7;
 const edgeVerts = [[0,1],[1,2],[2,0]];
@@ -72,7 +73,15 @@ function inAnyRect(rects, x, y, tol) {
 export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity, grading = null, depthSlope = 0) {
     const rects = condRect.rects || [condRect];
     const bw = band * delta;
+    // A ground ring around every signal conductor is a shield: its current runs on the
+    // hole side, and its outer surface needs no band.
+    const shields = new Set(grading ? rects.filter(r => r.shape && r.shape.type === 'ring'
+        && grading.sigRects.every(sr => [[sr.xmin, sr.ymin], [sr.xmax, sr.ymin], [sr.xmax, sr.ymax], [sr.xmin, sr.ymax]]
+            .every(([x, y]) => shapeContains({ shape: { type: 'polygon', poly: r.shape.hole } }, x, y, 0)))) : []);
     function distToRectBoundary(r, x, y) {
+        if (shields.has(r)) return -shapeSignedDist({ type: 'polygon', poly: r.shape.hole }, x, y);
+        // A polygon's signed distance is exact inside and never too large outside.
+        if (r.shape) return shapeSignedDist(r.shape, x, y);
         const dx = Math.max(r.xmin - x, 0, x - r.xmax);
         const dy = Math.max(r.ymin - y, 0, y - r.ymax);
         const outside = Math.hypot(dx, dy);
@@ -84,6 +93,7 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
         if (!grading) return targetH;
         let d = Infinity;
         for (const r of grading.sigRects) {
+            if (r.shape) { d = Math.min(d, Math.max(0, shapeSignedDist(r.shape, x, y))); continue; }
             const dx = Math.max(r.xmin - x, 0, x - r.xmax);
             const dy = Math.max(r.ymin - y, 0, y - r.ymax);
             d = Math.min(d, Math.hypot(dx, dy));
@@ -278,13 +288,15 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         let si = -1;
         for (let i = 0; i < sigRects.length; i++) {
             const r = sigRects[i];
-            if (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL) { si = i; break; }
+            if (r.shape ? shapeContains(r, xc, yc, TOL)
+                : (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL)) { si = i; break; }
         }
         if (si >= 0) { isCondTri[t] = 1; triGroup[t] = groupOfSig[si]; triRect[t] = sigIdx[si]; }
         else {
             for (let i = 0; i < gndRects.length; i++) {
                 const r = gndRects[i];
-                if (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL) {
+                if (r.shape ? shapeContains(r, xc, yc, TOL)
+                    : (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL)) {
                     isCondTri[t] = 2; triRect[t] = gndIdx[i]; break;
                 }
             }
@@ -831,6 +843,12 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             const ccx = (nodes[2*tris[3*cnd]] + nodes[2*tris[3*cnd+1]] + nodes[2*tris[3*cnd+2]]) / 3;
             const ccy = (nodes[2*tris[3*cnd]+1] + nodes[2*tris[3*cnd+1]+1] + nodes[2*tris[3*cnd+2]+1]) / 3;
             for (const r of rects) {
+                if (r.shape) {
+                    // A polygon side: snap onto the nearest point of its boundary.
+                    if (!shapeContains(r, ccx, ccy, TOL)) continue;
+                    ({ x: qx, y: qy } = shapeFaceAt(r.shape, qx, qy));
+                    break;
+                }
                 if (ccx <= r.xmin - TOL || ccx >= r.xmax + TOL || ccy <= r.ymin - TOL || ccy >= r.ymax + TOL) continue;
                 if (horiz) qy = Math.abs(qy - r.ymax) < Math.abs(qy - r.ymin) ? r.ymax : r.ymin;
                 else qx = Math.abs(qx - r.xmax) < Math.abs(qx - r.xmin) ? r.xmax : r.xmin;
