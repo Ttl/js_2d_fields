@@ -189,6 +189,17 @@ export function shapeSignedDist(shape, x, y) {
         if (d >= rad.R) return d - rad.R;                           // strictly outside
         // In the annulus between them: fall through to the exact half-plane test.
     }
+    // A regular n-gon (or ring of two): inside the inscribed circle or outside the
+    // circumscribed one the radial distance decides, with the same sign and never more
+    // than the true distance. Only the band between the circles takes the edge loop.
+    const rad = shape.radial;
+    if (rad) {
+        const d = Math.hypot(x - rad.cx, y - rad.cy);
+        const outer = d <= rad.rIn ? d - rad.rIn : d >= rad.rOut ? d - rad.rOut : null;
+        if (shape.type !== 'ring') return outer ?? convexSignedDist(shape.poly, x, y);
+        const hole = d <= rad.holeIn ? d - rad.holeIn : d >= rad.holeOut ? d - rad.holeOut : null;
+        return Math.max(outer ?? convexSignedDist(shape.poly, x, y), -(hole ?? convexSignedDist(shape.hole, x, y)));
+    }
     // A ring is the outer body minus the hole: outside the ring is outside the outer
     // loop or inside the hole.
     if (shape.type === 'ring') return Math.max(convexSignedDist(shape.poly, x, y), -convexSignedDist(shape.hole, x, y));
@@ -412,20 +423,34 @@ export function svgRingPath(cx, cy, rIn, rOut, n = 180) {
 // a crossing edge gets its new vertex at exactly x = x0.
 export function clipPolyX(poly, x0) {
     const n = poly.length >> 1;
+    // A vertex meant to lie on the plane (a rotated n-gon's, an inset core's) can come
+    // out of the arithmetic an ulp off it: it is put on the plane, or the cut would add
+    // a second vertex beside it and leave a zero-length side.
+    let ext = 0;
+    for (let i = 0; i < poly.length; i++) ext = Math.max(ext, Math.abs(poly[i] - (i % 2 === 0 ? x0 : 0)));
+    const tol = ext * 1e-12;
+    const px = i => (Math.abs(poly[2 * i] - x0) <= tol ? x0 : poly[2 * i]);
     const out = [];
     for (let i = 0; i < n; i++) {
         const j = (i + 1) % n;
-        const ax = poly[2 * i], ay = poly[2 * i + 1], bx = poly[2 * j], by = poly[2 * j + 1];
+        const ax = px(i), ay = poly[2 * i + 1], bx = px(j), by = poly[2 * j + 1];
         const aIn = ax >= x0, bIn = bx >= x0;
         if (aIn) out.push(ax, ay);
         if (aIn !== bIn && ax !== x0 && bx !== x0) {
             out.push(x0, ay + (by - ay) * (x0 - ax) / (bx - ax));
         }
     }
+    // Coincident neighbours (a cut through a vertex) leave a zero-length side.
+    const kept = [];
+    const m = out.length >> 1;
+    for (let i = 0; i < m; i++) {
+        const j = (i + 1) % m;
+        if (Math.hypot(out[2 * j] - out[2 * i], out[2 * j + 1] - out[2 * i + 1]) > tol) kept.push(out[2 * i], out[2 * i + 1]);
+    }
     // A polygon touching the plane from the left leaves a point or a segment.
     let right = false;
-    for (let i = 0; i < out.length; i += 2) if (out[i] > x0) { right = true; break; }
-    return right ? new Float64Array(out) : new Float64Array(0);
+    for (let i = 0; i < kept.length; i += 2) if (kept[i] > x0) { right = true; break; }
+    return right && kept.length >= 6 ? new Float64Array(kept) : new Float64Array(0);
 }
 
 // Closed loops of a shape for the mesher: [outer, hole] for a ring, [polygon] for the
@@ -573,6 +598,7 @@ function mirrorPoly(poly) {
 export function mirrorShapeX(shape) {
     const out = { ...shape, poly: mirrorPoly(shape.poly) };
     if (shape.hole) out.hole = mirrorPoly(shape.hole);
+    if (shape.radial) out.radial = { ...shape.radial, cx: -shape.radial.cx };
     if (shape.faces) {
         const n = shape.faces.length;
         out.faces = shape.faces.map((_, j) => shape.faces[((n - 2 - j) % n + n) % n]);
@@ -585,6 +611,7 @@ export function translateShapeX(shape, dx) {
     const move = poly => poly.map((v, i) => (i % 2 === 0 ? v + dx : v));
     const out = { ...shape, poly: move(shape.poly) };
     if (shape.hole) out.hole = move(shape.hole);
+    if (shape.radial) out.radial = { ...shape.radial, cx: shape.radial.cx + dx };
     return out;
 }
 
@@ -718,4 +745,75 @@ export function visibleAreas(conductors) {
         }
     }
     return out;
+}
+
+// --- Plating geometry -------------------------------------------------------------
+// A plating layer lies inside its conductor's outline. These give its cross-section
+// and what is left inside it, for a rect { x_min.. } / { xmin.. } or a shaped object.
+
+const rectOf = o => ({ xmin: o.xmin ?? o.x_min, xmax: o.xmax ?? o.x_max, ymin: o.ymin ?? o.y_min, ymax: o.ymax ?? o.y_max });
+const isPlated = pl => !!(pl && pl.sigma > 0 && (pl.thickness ?? 0) > 0 && (pl.top || pl.sides || pl.bottom || pl.all));
+
+// Whether the edges of a shape carry plating `pl`: per face name, every edge for a
+// round shape or when the plating is all around.
+function platedEdge(shape, pl, i) {
+    return !!(pl.all || !shape.faces || pl[shape.faces[i]]);
+}
+
+// Inside of the plating layer `pl` of object o: its outline with the plated faces moved
+// in by the plating thickness, as { rects: [rect] } or { shape }, null when nothing is
+// left (the conductor is plating metal through), undefined without plating or for a
+// shape the layer cannot be built for (a complement).
+export function platingCoreOf(o, pl = o.plating) {
+    if (!isPlated(pl)) return undefined;
+    const t = pl.thickness;
+    const sh = o.shape;
+    if (sh) {
+        if (sh.type !== 'polygon' && sh.type !== 'ring') return undefined;
+        const n = sh.poly.length >> 1;
+        const poly = offsetConvex(sh.poly, Array.from({ length: n }, (_, i) => (platedEdge(sh, pl, i) ? t : 0)));
+        if (!poly.length) return null;
+        if (sh.type === 'polygon') return { shape: { type: 'polygon', prim: sh.prim, poly, faces: sh.faces && sh.faces.length === n ? sh.faces : undefined } };
+        // A ring is plated on both surfaces: the hole grows by the layer.
+        const hole = offsetConvex(sh.hole, new Array(sh.hole.length >> 1).fill(-t));
+        for (let i = 0; i < hole.length; i += 2) {
+            if (!shapeContains({ shape: { type: 'polygon', poly } }, hole[i], hole[i + 1], -t * 1e-3)) return null;
+        }
+        return { shape: { type: 'ring', prim: sh.prim, poly, hole } };
+    }
+    const r = rectOf(o);
+    const core = { xmin: r.xmin + (pl.sides ? t : 0), xmax: r.xmax - (pl.sides ? t : 0),
+                   ymin: r.ymin + (pl.bottom ? t : 0), ymax: r.ymax - (pl.top ? t : 0) };
+    // A plating at least as thick as the conductor is plating through, whatever faces.
+    if (t >= r.ymax - r.ymin || !(core.xmax > core.xmin && core.ymax > core.ymin)) return null;
+    return { rects: [core] };
+}
+
+// Plating `pl` fills the whole cross-section of o: it is plating metal through.
+export function platedThrough(o, pl = o.plating) {
+    return isPlated(pl) && platingCoreOf(o, pl) === null;
+}
+
+// Cross-section of the plating layer of o (0 without plating, the whole area when it
+// is plated through): the plated faces times the thickness, corners counted once.
+export function platingArea(o, pl = o.plating) {
+    if (!isPlated(pl)) return 0;
+    const core = platingCoreOf(o, pl);
+    const total = shapeArea(o);
+    if (core === null) return total;
+    if (core === undefined) return 0;
+    const inner = core.shape ? shapeArea({ shape: core.shape }) : core.rects.reduce((a, k) => a + (k.xmax - k.xmin) * (k.ymax - k.ymin), 0);
+    return Math.max(0, total - inner);
+}
+
+// Every vertex of object b (its loops, or its rect corners) inside the hole of the
+// ring shape `ring`: b lies in the cavity the ring shields.
+export function insideRingHole(ring, b) {
+    const loops = bodyLoops(b);
+    if (!loops) return false;
+    const hole = { shape: { type: 'polygon', poly: ring.hole } };
+    return loops.every(p => {
+        for (let i = 0; i < p.length; i += 2) if (!shapeContains(hole, p[i], p[i + 1], 0)) return false;
+        return true;
+    });
 }

@@ -23,7 +23,7 @@
 // makes that outline PEC and the loss integral finds its surface edges.
 
 import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, shapeLoops,
-         offsetConvex, isComplement, REL_SHAPE_TOL } from '../shapes.js';
+         platingCoreOf, bodyDistance, isComplement, REL_SHAPE_TOL } from '../shapes.js';
 
 // Polygon and ring shapes (custom geometry primitives), as opposed to the circles of
 // the coax model, which keep their own meshing path.
@@ -170,34 +170,14 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
     return { X0, X1, Y0, Y1, wallPEC, wallThick };
 }
 
-// Inside of a conductor's plating layer: the conductor with its plated faces inset by
-// the plating thickness, as a list of rects { xmin, xmax, ymin, ymax } or a shape. The
-// layer lies inside the outline and covers the corners next to it. Only thick plating
-// (thick_corners) is meshed; thin plating stays a layered surface impedance. null when
-// the conductor has no such plating, or so much that nothing is left (solid plating).
+// Inside of a conductor's plating layer when the plating is thick (thick_corners), the
+// only plating that is meshed: see platingCoreOf. Thin plating stays a layered surface
+// impedance. null without thick plating, and when the plating goes through the whole
+// conductor (it is then solved as solid plating metal).
 export function platingCore(c) {
     const pl = c.plating;
-    const t = pl && pl.sigma > 0 ? (pl.thickness ?? 0) : 0;
-    if (!(t > 0) || !pl.thick_corners || !(pl.top || pl.sides || pl.bottom || pl.all)) return null;
-    if (c.shape) {
-        const sh = c.shape;
-        if (sh.type !== 'polygon' && sh.type !== 'ring') return null;
-        const n = sh.poly.length >> 1;
-        const plated = i => pl.all || !sh.faces || !!pl[sh.faces[i]];
-        const poly = offsetConvex(sh.poly, Array.from({ length: n }, (_, i) => (plated(i) ? t : 0)));
-        if (!poly.length) return null;
-        if (sh.type === 'polygon') return { shape: { type: 'polygon', prim: sh.prim, poly, faces: sh.faces && sh.faces.length === n ? sh.faces : undefined } };
-        // A ring is plated on both surfaces: the hole grows by the layer.
-        const hole = offsetConvex(sh.hole, new Array(sh.hole.length >> 1).fill(-t));
-        const inside = (x, y) => shapeContains({ shape: { type: 'polygon', poly } }, x, y, -t * 1e-3);
-        for (let i = 0; i < hole.length; i += 2) if (!inside(hole[i], hole[i + 1])) return null;
-        return { shape: { type: 'ring', prim: sh.prim, poly, hole } };
-    }
-    const r = _rectOf(c);
-    const core = { xmin: r.xmin + (pl.sides ? t : 0), xmax: r.xmax - (pl.sides ? t : 0),
-                   ymin: r.ymin + (pl.bottom ? t : 0), ymax: r.ymax - (pl.top ? t : 0) };
-    if (!(core.xmax > core.xmin && core.ymax > core.ymin)) return null;
-    return { rects: [core] };
+    if (!(pl && pl.thick_corners)) return null;
+    return platingCoreOf(c, pl) || null;
 }
 
 // Conductor rects clipped to the meshed box (absorbed / outside ones dropped) and
@@ -276,8 +256,11 @@ export function groundBodyCount(rects, roles, wallPEC, bounds, tol) {
     const parent = Array.from({ length: n }, (_, i) => i);
     const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
     const union = (a, b) => { parent[find(a)] = find(b); };
+    // Shaped grounds touch when their polygons do, not their bounding boxes (a rod in a
+    // ring's hole is a body of its own).
     const touches = (a, b) => a.xmin <= b.xmax + tol && b.xmin <= a.xmax + tol
-                           && a.ymin <= b.ymax + tol && b.ymin <= a.ymax + tol;
+                           && a.ymin <= b.ymax + tol && b.ymin <= a.ymax + tol
+                           && (!(a.shape || b.shape) || bodyDistance(a, b) <= tol);
     const onWall = { left: r => r.xmin <= X0 + tol, right: r => r.xmax >= X1 - tol,
                      bottom: r => r.ymin <= Y0 + tol, top: r => r.ymax >= Y1 - tol };
     for (let i = 0; i < gnd.length; i++) {

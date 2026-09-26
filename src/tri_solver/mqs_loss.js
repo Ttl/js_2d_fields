@@ -43,7 +43,7 @@ import { tripletsToCSRMulti, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
          triP2Stiffness, P2_MASS, P2_LOAD, refineTriMesh } from './tri_fem.js';
 import { calculate_Zrough, wallSpreadFactor } from '../surface_roughness.js';
-import { shapeContains, shapeSignedDist, shapeFaceAt } from '../shapes.js';
+import { shapeContains, shapeSignedDist, shapeFaceAt, insideRingHole } from '../shapes.js';
 
 const MU0 = 4 * Math.PI * 1e-7;
 const edgeVerts = [[0,1],[1,2],[2,0]];
@@ -76,8 +76,7 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     // A ground ring around every signal conductor is a shield: its current runs on the
     // hole side, and its outer surface needs no band.
     const shields = new Set(grading ? rects.filter(r => r.shape && r.shape.type === 'ring'
-        && grading.sigRects.every(sr => [[sr.xmin, sr.ymin], [sr.xmax, sr.ymin], [sr.xmax, sr.ymax], [sr.xmin, sr.ymax]]
-            .every(([x, y]) => shapeContains({ shape: { type: 'polygon', poly: r.shape.hole } }, x, y, 0)))) : []);
+        && grading.sigRects.every(sr => insideRingHole(r.shape, sr))) : []);
     function distToRectBoundary(r, x, y) {
         if (shields.has(r)) return -shapeSignedDist({ type: 'polygon', poly: r.shape.hole }, x, y);
         // A polygon's signed distance is exact inside and never too large outside.

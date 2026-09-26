@@ -6,7 +6,7 @@ import { parseAndEvaluate, parseGeometryText, serializeGeometry, changeUnitsInTe
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { buildSolverFromParams } from '../src/solver_factory.js';
 import { isXSymmetric, conductorSwapSymmetric } from '../src/geometry_symmetry.js';
-import { bodyDistance, shapeLoops, shapeArea, shapeSegments, shapeContains, shapeFaceAt } from '../src/shapes.js';
+import { bodyDistance, shapeLoops, shapeArea, shapeSegments, shapeContains, shapeFaceAt, platingArea, platedThrough, insideRingHole } from '../src/shapes.js';
 
 let failures = 0;
 function check(name, ok, detail = '') {
@@ -67,10 +67,11 @@ const U = 'units mm\n';
 // --- Ellipse ---
 {
     const e = polyOf(U + 'diel ellipse x=0 y=0 rx=2 ry=1 n=64 er=2');
-    const sides = [];
-    for (let i = 0; i < 64; i++) { const j = (i + 1) % 64; sides.push(Math.hypot(e.poly[2 * j] - e.poly[2 * i], e.poly[2 * j + 1] - e.poly[2 * i + 1])); }
-    check('ellipse: vertices spaced evenly along the outline', Math.max(...sides) / Math.min(...sides) < 1.02,
-        `${(Math.max(...sides) / Math.min(...sides)).toFixed(4)}`);
+    // A long ellipse keeps its ends: vertices on x = +-rx, area close to pi rx ry.
+    const long = polyOf(U + 'diel ellipse x=0 y=0 rx=10 ry=1 n=32 er=2');
+    const xs = Array.from(long.poly).filter((_, i) => i % 2 === 0);
+    check('ellipse: a long ellipse keeps its ends', Math.max(...xs) === 10e-3 && Math.min(...xs) === -10e-3
+        && Math.abs(shapeArea({ shape: long }) / (Math.PI * 10e-6) - 1) < 0.01, `area ${(shapeArea({ shape: long }) / (Math.PI * 10e-6)).toFixed(4)} of the ellipse`);
     check('ellipse: first vertex on top, exact mirror pairs', e.poly[0] === 0 && e.poly[1] === 1e-3
         && e.poly[2 * 63] === -e.poly[2] && e.poly[2 * 63 + 1] === e.poly[3]);
     check('ellipse: area near pi*rx*ry', Math.abs(shapeArea({ shape: e }) / (Math.PI * 2e-6) - 1) < 2e-3);
@@ -144,6 +145,47 @@ const U = 'units mm\n';
         new CustomGeometrySolver({ text: T('sig+ x=-0.14 w=0.28 y=0.19 h=0.015 sigma=5.8e7 rq=1um\n') }).metal_overlaps.length === 1);
 }
 
+// --- Review fixes ---
+{
+    const convex = p => {
+        const n = p.length >> 1;
+        for (let i = 0; i < n; i++) {
+            const a = i, b = (i + 1) % n, c = (i + 2) % n;
+            const cr = (p[2 * b] - p[2 * a]) * (p[2 * c + 1] - p[2 * b + 1]) - (p[2 * b + 1] - p[2 * a + 1]) * (p[2 * c] - p[2 * b]);
+            if (cr < 0) return false;
+        }
+        return true;
+    };
+    check('radius a hair over half a side stays convex', convex(polyOf(U + 'sig+ x=-2 w=4 y=0 h=1 radius=0.5000000004').poly));
+    const tr = polyOf(U + 'sig+ trap x=-2 w=4 y=0 h=1 angle=30 radius=0.3');
+    const bottom = tr.faces.map((f, i) => [f, i]).filter(([f]) => f === 'bottom');
+    const lenOf = i => { const n = tr.faces.length, j = (i + 1) % n; return Math.hypot(tr.poly[2 * j] - tr.poly[2 * i], tr.poly[2 * j + 1] - tr.poly[2 * i + 1]); };
+    const leftB = bottom.filter(([, i]) => tr.poly[2 * i] < 0).reduce((a, [, i]) => a + lenOf(i), 0);
+    const rightB = bottom.filter(([, i]) => tr.poly[2 * ((i + 1) % tr.faces.length)] > 0).reduce((a, [, i]) => a + lenOf(i), 0);
+    check('rounded corner faces split symmetrically', Math.abs(leftB - rightB) < 1e-12, `${leftB} vs ${rightB}`);
+    check('radius=0, radius_bottom=0, wall=0 on a boundary-spanning rectangle is a plain rectangle',
+        ['radius=0', 'radius_bottom=0', 'wall=0'].every(k => { const g = parseAndEvaluate(U + `gnd x=-inf w=inf y=-1 h=1 ${k}`); return !g.errors.length && g.rects[0].shape === null; }));
+    const rm = parseAndEvaluate(U + 'sig+ x=0 w=0.3 y=0 h=0.035 radius=0.01 mirror=1');
+    check('mirror=1 widens a rounded rectangle on x=0 to one symmetric rectangle', !rm.errors.length && rm.rects.length === 1
+        && rm.rects[0].x.min === -0.3e-3 && rm.rects[0].x.max === 0.3e-3, rm.errors.map(e => e.message).join());
+    // A rotated n-gon cut by the symmetry plane: no zero-length side.
+    const rot = polyOf(U + 'sig+ ngon x=0 y=0.4 r=0.1 n=4 rot=90');
+    const half = shapeLoops(rot, { half: true })[0];
+    let minSide = Infinity;
+    for (let i = 0; i < half.length / 2; i++) { const j = (i + 1) % (half.length / 2); minSide = Math.min(minSide, Math.hypot(half[2 * j] - half[2 * i], half[2 * j + 1] - half[2 * i + 1])); }
+    check('half of a rotated n-gon has no zero-length side', minSide > 1e-9, `shortest ${minSide}`);
+    // Plating of a trapezoid's top only: its area is the top face times the thickness.
+    const pt = { shape: polyOf(U + 'sig+ trap x=-0.1 w=0.2 y=0 h=0.035 angle=0.0001'), x_min: -0.1e-3, x_max: 0.1e-3, y_min: 0, y_max: 0.035e-3 };
+    const top = { sigma: 1e7, thickness: 5e-6, top: true, sides: false, bottom: false };
+    check('plating area of a partly plated shape counts the plated faces', Math.abs(platingArea(pt, top) / (0.2e-3 * 5e-6) - 1) < 1e-3,
+        `${platingArea(pt, top)} vs ${0.2e-3 * 5e-6}`);
+    const narrow = { x_min: -4e-6, x_max: 4e-6, y_min: 0, y_max: 35e-6, width: 8e-6, height: 35e-6 };
+    check('plating that fills the width is plating through', platedThrough(narrow, { sigma: 1e7, thickness: 5e-6, top: true, sides: true, bottom: false })
+        && !platedThrough(narrow, { sigma: 1e7, thickness: 3e-6, top: true, sides: true, bottom: false }));
+    const cx = parseAndEvaluate(U + 'gnd ngon x=0 y=0 r=0.7 r_in=0.625 n=64\nsig+ ngon x=0 y=0 r=0.46 n=64').rects;
+    check('a round wire in a tight shield is inside its hole (b/a < sqrt 2)', insideRingHole(cx[0].shape, { shape: cx[1].shape }));
+}
+
 // --- Mirror ---
 {
     const g = parseAndEvaluate(U + 'sig+ trap x=0.1 y=0 w=0.3 h=0.035 angle=30 angle2=10 mirror=1');
@@ -158,6 +200,9 @@ const U = 'units mm\n';
     check('mirror: image faces follow the geometry', face(b.shape, -0.25e-3, 0) === 'bottom'
         && face(b.shape, -0.25e-3, 0.035e-3) === 'top' && face(b.shape, -0.4e-3, 0.01e-3) === 'sides');
     check('mirror: symmetric n-gon on x=0 stays one', parseAndEvaluate(U + 'gnd ngon x=0 y=0 r=1 n=8 mirror=1').rects.length === 1);
+    const touch = parseAndEvaluate(U + 'diel ngon x=0.6 y=0 r=0.6 n=64 er=2 mirror=1');
+    check('mirror: an n-gon touching x=0 from one side gets its image', !touch.errors.length && touch.rects.length === 2,
+        touch.errors.map(e => e.message).join());
     check('mirror: asymmetric trapezoid on x=0 rejected',
         /symmetric about it/.test(errorsOf(U + 'sig+ trap x=-0.1 y=0 w=0.3 h=0.035 angle=30 mirror=1')));
 }

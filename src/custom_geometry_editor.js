@@ -121,11 +121,13 @@ diel  ellipse  x=0  y=0  rx=a  ry=b  n=128  er=2.1  tand=0.0002
 sig+  ngon  x=0  y=0  r=d/2  n=64
 gnd   ellipse  x=0  y=0  rx=a+t_sh  ry=b+t_sh  rx_in=a  ry_in=b  n=128
 `,
-    'Twinax cable': `# Twinax: two insulated wires in a stadium-shaped shield, a rectangle with fully
-# rounded ends (radius = half its height) and a wall. Full-wave solver only.
+    'Twinax cable': `# Twinax: two insulated wires side by side, wrapped in a stadium-shaped shield
+# that touches the insulation (a rectangle with fully rounded ends, radius = half its
+# height, and a wall). Full-wave solver only.
 units mm
-d = 0.4; di = 1.2; s = 1.25; g = 0.02; t_sh = 0.03
-hw = s/2+di/2+g; hh = di/2+g   # half width and half height inside the shield
+d = 0.4; di = 1.2; t_sh = 0.03
+s = di   # wire spacing: the insulations touch
+hw = s/2+di/2; hh = di/2   # half width and half height inside the shield
 bounds open open open open
 domain -1.2*(hw+t_sh) 1.2*(hw+t_sh) -1.5*(hh+t_sh) 1.5*(hh+t_sh)
 
@@ -623,11 +625,14 @@ function shapeFields(fields, from, to, geoRect) {
     if (round(to) && round(from)) {
         // n-gon <-> ellipse: the radius becomes both semi-axes and back.
         if (to === 'ellipse') {
-            Object.assign(f, { rx: f.r, ry: f.r });
+            if (f.r !== undefined) Object.assign(f, { rx: f.r, ry: f.r });
             if (f.r_in !== undefined) Object.assign(f, { rx_in: f.r_in, ry_in: f.r_in });
             delete f.r; delete f.r_in;
         } else {
-            f.r = f.rx; if (f.rx_in !== undefined) f.r_in = f.rx_in;
+            // Equal semi-axes carry over, an elongated ellipse becomes the n-gon that
+            // fits inside it.
+            f.r = f.rx !== undefined && f.rx === f.ry ? f.rx : num(Math.min(x1 - x0, y1 - y0) / 2);
+            if (f.rx_in !== undefined && f.rx_in === f.ry_in) f.r_in = f.rx_in;
             for (const k of ['rx', 'ry', 'rx_in', 'ry_in']) delete f[k];
         }
     } else if (round(to)) {
@@ -743,7 +748,11 @@ function rectRow(model, st, geoRect, index, count) {
             if (cornersOpen) openCornerRows.add(st.line); else openCornerRows.delete(st.line);
             showCorners();
         });
-        const setCorner = key => v => { setField(key)(v); showCorners(); };
+        const setCorner = key => v => {
+            // A shell has one outside: its plating covers it all.
+            if (key === 'wall' && v !== '' && !/^0*\.?0*$/.test(v) && fields.plating && fields.plating !== 'none') fields.plating = 'all';
+            setField(key)(v); showCorners();
+        };
         cornerPanel = el('div', { class: 'custom-corner-panel' },
             exprInput('radius', fields.radius, setCorner('radius'), { cls: 'narrow', placeholder: '0',
                 title: lengthTip('Corner radius, every corner', 'sharp corners') }),
@@ -761,8 +770,11 @@ function rectRow(model, st, geoRect, index, count) {
                  exprInput('tand', fields.tand, setField('tand'), { placeholder: '0', cls: 'narrow', kind: 'number' })];
     } else {
         const on = new Set(fields.plating === 'all' ? FACES : (fields.plating && fields.plating !== 'none' ? fields.plating.split(',') : []));
-        // A round shape or a shell has one outside: its plating is all or nothing.
-        const round = !!ROUND_KEYS[shape] || !!(fields.wall && fields.wall !== '0') || fields.r_in !== undefined || fields.rx_in !== undefined;
+        // A round shape or a shell has one outside: its plating is all or nothing. The
+        // evaluated shape decides (a wall of 0 is no shell), the typed keys when the row
+        // has an error.
+        const round = !!ROUND_KEYS[shape] || (geoRect ? !!(geoRect.shape && geoRect.shape.type === 'ring')
+            : !!fields.wall || fields.r_in !== undefined || fields.rx_in !== undefined);
         // The plating options sit in a panel that opens from a button on the row. The
         // button names the plated faces, so a collapsed row still shows its plating.
         const platingBtn = el('button', { class: 'secondary-btn custom-plating-toggle', type: 'button' });

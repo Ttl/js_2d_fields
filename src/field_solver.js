@@ -4,7 +4,7 @@ import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor } from './
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
-import { shapeContains, visibleAreas } from './shapes.js';
+import { visibleAreas, platedThrough, platingArea, insideRingHole } from './shapes.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -454,10 +454,8 @@ export class FieldSolver2D {
         // A ground ring around every signal conductor (a coax shield) keeps the field
         // off all four walls.
         const signals = this.conductors.filter(c => c.is_signal);
-        const inHole = (ring, c) => [[c.x_min, c.y_min], [c.x_max, c.y_min], [c.x_max, c.y_max], [c.x_min, c.y_max]]
-            .every(([x, y]) => shapeContains({ shape: { type: 'polygon', poly: ring.shape.hole } }, x, y, 0));
         if (this.conductors.some(g => !g.is_signal && g.shape && g.shape.type === 'ring'
-            && signals.every(c => inHole(g, c)))) return out;
+            && signals.every(c => insideRingHole(g.shape, c)))) return out;
         const OPEN_CLEARANCE = 3;
         const tol = Math.max(xMax - xMin, yMax - yMin) * 1e-9;
         // Each wall: [name, bc, distance-to-wall, "g lies strictly between c and
@@ -1281,7 +1279,9 @@ export class FieldSolver2D {
         const ownSigma = this._own_sigma();
         // Per-conductor conductivities: conductances add within the positive traces,
         // the negative traces and the grounds.
-        const dcG = ownSigma ? this._dc_conductances() : null;
+        // Per-conductor conductances also when a plating layer conducts beside the bulk.
+        const thinPlated = (this.conductors || []).some(c => platingArea(c) > 0 && !this._solid_plating(c));
+        const dcG = (ownSigma || thinPlated) ? this._dc_conductances() : null;
         const R_gnd0 = dcG ? (dcG.gnd > 0 ? 1.0 / dcG.gnd : 0)
             : ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
         // Signal and ground are separate conductors in series, so each keeps its own
@@ -1835,12 +1835,11 @@ export class FieldSolver2D {
     // The only production caller lacking vacuum fields on a rect solver is
     // _solve_single_mode(vacuum_first=false), whose loss output is discarded
     // and recomputed by the caller with the cached vacuum fields.
-    // Plating at least as thick as the conductor makes the whole cross-section
-    // plating metal; the layered plating-over-bulk impedance has no bulk to stand on.
+    // Plating through the whole cross-section (at least as thick as the conductor, or
+    // filling its width) makes it plating metal; the layered plating-over-bulk
+    // impedance has no bulk to stand on.
     _solid_plating(cond) {
-        const pl = cond && cond.plating;
-        return !!(pl && pl.sigma > 0 && (pl.top || pl.sides || pl.bottom)
-            && (pl.thickness ?? 0) >= Math.abs(cond.height));
+        return !!cond && platedThrough(cond);
     }
 
     // Accuracy note for plated conductors in the skin transition: the layered
@@ -1856,11 +1855,11 @@ export class FieldSolver2D {
             const pl = c.plating;
             if (c.shape || !pl || !(pl.sigma > 0) || !(pl.top || pl.sides || pl.bottom)) continue;
             if (meshedThick && pl.thick_corners) continue;
+            if (this._solid_plating(c)) continue;
             const tp = pl.thickness ?? 0, t = Math.abs(c.height);
-            if (tp >= t) continue;
             const bulk = t - tp;
             const delta = Math.sqrt(2 / (2 * Math.PI * f * 4e-7 * Math.PI * (c.sigma > 0 ? c.sigma : this.sigma_cond)));
-            if (bulk < 2 * delta && (!worst || bulk < worst.bulk)) worst = { bulk, t, tp, delta };
+            if (bulk < 2 * delta && (!worst || bulk < worst.bulk)) worst = { bulk, t, tp, delta, thick: !!pl.thick_corners };
         }
         if (!worst) return null;
         const delta = worst.delta;
@@ -1870,7 +1869,7 @@ export class FieldSolver2D {
             `under it, less than two skin depths (${(delta * 1e6).toFixed(2)} µm) at this frequency. ` +
             `The layered surface impedance assumes a thick bulk, so conductor loss and internal ` +
             `inductance can be off by tens of percent here.` +
-            (fullWave ? ' Model Thick Plating (Advanced Options) solves the plating as a ' +
+            (fullWave && !worst.thick ? ' Model Thick Plating (Advanced Options) solves the plating as a ' +
                 'layer of metal on the full-wave solver.' : '') };
     }
 
@@ -1907,7 +1906,10 @@ export class FieldSolver2D {
         const g = { pos: 0, neg: 0, gnd: 0 };
         const visible = visibleAreas(this.conductors || []);
         for (const [i, c] of (this.conductors || []).entries()) {
-            const v = this._bulk_sigma(c) * (visible && visible.has(i) ? visible.get(i) : Math.abs(c.width * c.height));
+            // A plating layer inside the outline conducts at its own sigma.
+            const a = visible && visible.has(i) ? visible.get(i) : Math.abs(c.width * c.height);
+            const ap = this._solid_plating(c) ? 0 : Math.min(platingArea(c), a);
+            const v = this._bulk_sigma(c) * (a - ap) + (ap > 0 ? c.plating.sigma * ap : 0);
             if (!c.is_signal) g.gnd += v; else if (c.polarity < 0) g.neg += v; else g.pos += v;
         }
         return g;

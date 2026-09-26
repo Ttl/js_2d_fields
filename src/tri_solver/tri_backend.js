@@ -25,7 +25,8 @@ import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
          groundBodyCount } from './occ_to_mesh.js';
-import { shapeArea, shapeBBox, shapePoly, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance, visibleAreas, isComplement } from '../shapes.js';
+import { shapeArea, shapeBBox, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance, visibleAreas,
+         platedThrough, platingArea, insideRingHole, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
@@ -281,35 +282,10 @@ function meshedPlatingCR(cr) {
 // Polygon and ring shapes (custom geometry primitives), meshed like rects.
 const isPolyShape = (shape) => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
 
-// Plating at least as thick as a rectangular conductor makes the whole cross-section
-// plating metal: every face is solid plating and the layered model has no bulk.
+// Plating through a conductor's whole cross-section (at least as thick as it, or
+// filling its width): it is plating metal, and the layered model has no bulk.
 function solidPlated(r, pl) {
-    if (!(pl && pl.sigma > 0 && (pl.top || pl.sides || pl.bottom || pl.all)) || !r || r.shape) return false;
-    const h = r.height !== undefined ? Math.abs(r.height)
-        : ((r.ymax !== undefined ? r.ymax : r.y_max) - (r.ymin !== undefined ? r.ymin : r.y_min));
-    return (pl.thickness ?? 0) >= h;
-}
-
-// Cross-section of a conductor's plating layer, which lies inside its outline: the
-// plated faces of a rectangle times the thickness (a corner counted once), the whole
-// perimeter of a shape.
-function platingArea(c) {
-    const pl = c.plating;
-    const t = pl && pl.sigma > 0 ? (pl.thickness ?? 0) : 0;
-    if (!(t > 0)) return 0;
-    if (c.shape) {
-        if (isComplement(c.shape)) return 0;
-        let per = 0;
-        const loops = c.shape.type === 'ring' ? [c.shape.poly, c.shape.hole] : [shapePoly(c.shape)];
-        for (const poly of loops) {
-            const n = poly.length >> 1;
-            for (let i = 0; i < n; i++) { const j = (i + 1) % n; per += Math.hypot(poly[2 * j] - poly[2 * i], poly[2 * j + 1] - poly[2 * i + 1]); }
-        }
-        return Math.min(per * t, shapeArea(c));
-    }
-    const w = Math.abs(c.width), h = Math.abs(c.height);
-    const tb = (pl.top ? 1 : 0) + (pl.bottom ? 1 : 0), sd = pl.sides ? 2 : 0;
-    return Math.min(tb * w * t + sd * h * t - (pl.sides ? tb * 2 * t * t : 0), w * h);
+    return !!r && platedThrough(r, pl);
 }
 
 // Thickness a conductor's surface reactance saturates on: the slab reactance
@@ -2435,7 +2411,7 @@ export class TriBackend {
             && !this._modeWarnings.some(w => w.type === 'pert-shape')) {
             this._modeWarnings.push({ type: 'pert-shape', mode, freq: f, message:
                 'Conductor loss of the trapezoids and n-gons comes from the perturbation method, which has ' +
-                'no model of their corners: R can be off by 20%. The MQS loss method, the default, solves them ' +
+                'no model of their corners: R can be off by 20% or more. The MQS loss method, the default, solves them ' +
                 'accurately.' });
         }
         let eps_d = eps_eff_static, fw = null, eigen_bias = 1;
@@ -2667,9 +2643,7 @@ export class TriBackend {
             }
             // A shield ring (around every signal) carries the whole return current and
             // gets the signal budget.
-            const shieldRing = gndRects.some(r => r.shape && r.shape.type === 'ring' && sigRects.every(sr =>
-                [[sr.xmin, sr.ymin], [sr.xmax, sr.ymin], [sr.xmax, sr.ymax], [sr.xmin, sr.ymax]]
-                    .every(([x, y]) => shapeContains({ shape: { type: 'polygon', poly: r.shape.hole } }, x, y, 0))));
+            const shieldRing = gndRects.some(r => r.shape && r.shape.type === 'ring' && sigRects.every(sr => insideRingHole(r.shape, sr)));
             const gndBudget = this.opts.mqsGndMaxTris ?? Math.floor(shieldRing ? mqsMaxTris : mqsMaxTris / 2);
             // Depth grading across the band (see refineSkinBand). The target size
             // relaxes with distance from the metal surface.
@@ -2922,7 +2896,9 @@ export class TriBackend {
             // A thinner plating replaces the outer layer of the bulk and conducts at
             // its own sigma.
             const ap = solidPlated(c, c.plating) ? 0 : platingArea(c);
-            const g = visible && visible.has(ci) ? sg * visible.get(ci) : sg * (a - ap) + (ap > 0 ? c.plating.sigma * ap : 0);
+            // An overlapped conductor contributes its visible area, its plating included.
+            const av = visible && visible.has(ci) ? visible.get(ci) : a;
+            const g = sg * Math.max(av - ap, 0) + (ap > 0 ? c.plating.sigma * Math.min(ap, av) : 0);
             if (c.is_signal) {
                 sigArea += a; sigCond += g;
                 if (c.polarity < 0) negCond += g; else posCond += g;
@@ -3048,7 +3024,7 @@ export class TriBackend {
         // The note is about the layered model: plating meshed by the MQS solve (thick
         // plating) needs no bulk behind it.
         const platingNote = (f > 0 && s._plating_transition_note)
-            ? s._plating_transition_note(f, { meshedThick: lossVia === 'mqs' && !!this.condRect.platingCores, fullWave: true })
+            ? s._plating_transition_note(f, { meshedThick: lossVia === 'mqs', fullWave: true })
             : null;
         if (platingNote && this._modeWarnings && !this._modeWarnings.some(w => w.reason === 'plating-transition')) {
             this._modeWarnings.push({ ...platingNote, mode, freq: f });

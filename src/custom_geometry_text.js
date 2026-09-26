@@ -588,9 +588,11 @@ function roundPolygon(poly, faces, radii) {
     const scale = Math.max(...Array.from(poly).map(Math.abs));
     for (let i = 0; i < n; i++) {
         const [ax, ay] = P(i), [bx, by] = P(i + 1);
-        if (cut[i] + cut[(i + 1) % n] > Math.hypot(bx - ax, by - ay) * (1 + 1e-9)) {
-            throw new Error('corner radius is larger than the sides allow');
-        }
+        const side = Math.hypot(bx - ax, by - ay), j = (i + 1) % n;
+        if (cut[i] + cut[j] > side * (1 + 1e-9)) throw new Error('corner radius is larger than the sides allow');
+        // Two arcs using up a side within rounding meet exactly (a stadium): an
+        // overshoot would fold the outline back on itself.
+        if (cut[i] + cut[j] > side) { const k = side / (cut[i] + cut[j]); cut[i] *= k; cut[j] *= k; }
     }
     const pts = [];   // { x, y, face of the edge that starts here }
     for (let i = 0; i < n; i++) {
@@ -605,7 +607,8 @@ function roundPolygon(poly, faces, radii) {
         const cx = px + bis[0] * R / Math.sin(th / 2), cy = py + bis[1] * R / Math.sin(th / 2);
         const t1x = px + u1[0] * cut[i], t1y = py + u1[1] * cut[i];
         const span = Math.PI - th;
-        const m = Math.max(2, Math.ceil(CORNER_SEGMENTS * span / (Math.PI / 2)));
+        // An even count splits the arc's faces at its middle.
+        const m = 2 * Math.max(1, Math.ceil(CORNER_SEGMENTS * span / (Math.PI / 2) / 2));
         const phi = Math.atan2(t1y - cy, t1x - cx);
         for (let k = 0; k <= m; k++) {
             const a = phi + span * k / m;
@@ -631,29 +634,16 @@ export function ngonPolygon(cx, cy, r, n, rot = 0) {
     return ellipsePolygon(cx, cy, r, r, n, rot);
 }
 
-// n vertices on the ellipse of semi-axes rx, ry centred on (cx, cy), equally spaced in
-// arc length from the top, turned by rot degrees counterclockwise, CCW. A circle gives
-// the regular n-gon. Without rotation the vertices mirror exactly about x = cx.
+// n vertices on the ellipse of semi-axes rx, ry centred on (cx, cy), at equal steps of
+// the ellipse parameter from the top, turned by rot degrees counterclockwise, CCW. The
+// steps put the vertices closer together at the tightly curved ends, which keeps the
+// polygon on the ellipse there (equal steps along the outline cut the ends off a long
+// ellipse). A circle gives the regular n-gon. Without rotation the vertices mirror
+// exactly about x = cx.
 export function ellipsePolygon(cx, cy, rx, ry, n, rot = 0) {
     // Parameter t of each vertex (x = rx cos t, y = ry sin t, t = pi/2 on top).
     const ts = new Float64Array(n);
-    if (rx === ry) {
-        for (let k = 0; k < n; k++) ts[k] = Math.PI / 2 + 2 * Math.PI * k / n;
-    } else {
-        const M = 64 * n;
-        const cum = new Float64Array(M + 1);
-        for (let j = 1; j <= M; j++) {
-            const t = Math.PI / 2 + 2 * Math.PI * (j - 0.5) / M;
-            cum[j] = cum[j - 1] + Math.hypot(rx * Math.sin(t), ry * Math.cos(t)) * 2 * Math.PI / M;
-        }
-        const L = cum[M];
-        for (let k = 0, j = 0; k < n; k++) {
-            const target = L * k / n;
-            while (j < M && cum[j + 1] < target) j++;
-            const f = (target - cum[j]) / (cum[j + 1] - cum[j]);
-            ts[k] = Math.PI / 2 + 2 * Math.PI * (j + f) / M;
-        }
-    }
+    for (let k = 0; k < n; k++) ts[k] = Math.PI / 2 + 2 * Math.PI * k / n;
     const c = Math.cos(rot * Math.PI / 180), s = Math.sin(rot * Math.PI / 180);
     const poly = new Float64Array(2 * n);
     for (let k = 0; k < n; k++) {
@@ -684,14 +674,12 @@ function bboxAxes(poly) {
 // Shape of a statement in metres: { x, y axes, shape }, shape null for a plain
 // rectangle (no angle, radius or wall). The shape is a convex CCW polygon, or a ring
 // { poly, hole }, with the fields shapes.js describes.
-function evalShape(st, f, len, num) {
+// xAxis replaces the x axis of a rectangle (mirror=1 widening it to be symmetric).
+function evalShape(st, f, len, num, xAxis = null) {
     const kind = st.shape ?? 'rect';
     if (kind === 'rect' || kind === 'trap') {
-        const x = evalAxis(f, 'x', 'w', len, false);
+        const x = xAxis ?? evalAxis(f, 'x', 'w', len, false);
         const y = evalAxis(f, 'y', 'h', len, true);
-        if (![x.min, x.max, y.min, y.max].every(Number.isFinite)) {
-            throw new Error(`a ${SHAPE_NAMES[kind]} with ${kind === 'trap' ? 'angles' : 'a radius or wall'} needs finite x, w, y and h`);
-        }
         const aL = f.angle !== undefined ? num(f.angle) : (f.angle2 !== undefined ? num(f.angle2) : 0);
         const aR = f.angle2 !== undefined ? num(f.angle2) : aL;
         const rTop = f.radius !== undefined ? len(f.radius) : 0;
@@ -700,6 +688,9 @@ function evalShape(st, f, len, num) {
         if (!(rTop >= 0) || !(rBot >= 0) || !Number.isFinite(rTop) || !Number.isFinite(rBot)) throw new Error('radius must be non-negative');
         if (!(wall >= 0) || !Number.isFinite(wall)) throw new Error('wall must be non-negative');
         if (aL === 0 && aR === 0 && rTop === 0 && rBot === 0 && wall === 0) return { x, y, shape: null };
+        if (![x.min, x.max, y.min, y.max].every(Number.isFinite)) {
+            throw new Error(`a ${SHAPE_NAMES[kind]} with ${kind === 'trap' ? 'angles' : 'a radius or wall'} needs finite x, w, y and h`);
+        }
         // The base is the face at y, the other face is y + h.
         const yb = y.flipped ? y.max : y.min;
         const tp = trapezoidPolygon(x.min, x.max, yb, y.flipped ? -(y.max - y.min) : y.max - y.min, aL, aR);
@@ -729,6 +720,9 @@ function evalShape(st, f, len, num) {
     const poly = ellipsePolygon(cx, cy, rx, ry, n, rot);
     const cosn = Math.cos(Math.PI / n);
     let shape = { type: 'polygon', prim: kind, poly, round: true, thickness: 2 * Math.min(rx, ry) * cosn };
+    // A regular n-gon lies between its inscribed and circumscribed circles, which
+    // decides containment without the edge loop away from the boundary.
+    if (rx === ry) shape.radial = { cx, cy, rIn: rx * cosn, rOut: rx };
     const inner = kind === 'ngon' ? ['r_in', 'r_in'] : ['rx_in', 'ry_in'];
     if (f[inner[0]] !== undefined || f[inner[1]] !== undefined) {
         if (f[inner[0]] === undefined || f[inner[1]] === undefined) throw new Error('an elliptical ring needs rx_in and ry_in');
@@ -738,6 +732,7 @@ function evalShape(st, f, len, num) {
         }
         shape = { type: 'ring', prim: kind, poly, hole: ellipsePolygon(cx, cy, ix, iy, n, rot),
                   thickness: Math.min(rx - ix, ry - iy) * cosn };
+        if (rx === ry && ix === iy) shape.radial = { cx, cy, rIn: rx * cosn, rOut: rx, holeIn: ix * cosn, holeOut: ix };
     }
     return { ...bboxAxes(poly), shape };
 }
@@ -889,10 +884,22 @@ export function evaluateGeometry(model, overrides = {}) {
                 }
             }
             r.image = false;
+            // A rounded or hollow rectangle touching or crossing x=0 widens to one
+            // symmetric about it, like a plain rectangle.
+            if (f.mirror !== undefined && num(f.mirror) !== 0 && r.shape && !s.shape) {
+                const ax = evalAxis(f, 'x', 'w', len, false);
+                if (ax.min <= 0 && ax.max >= 0) {
+                    const m = Math.max(-ax.min, ax.max);
+                    Object.assign(r, evalShape(s, f, len, num, { pos: -m, size: 2 * m, min: -m, max: m, flipped: false }));
+                    rects.push(r);
+                    continue;
+                }
+            }
             if (f.mirror !== undefined && num(f.mirror) !== 0 && r.shape) {
-                if (r.x.min <= 0 && r.x.max >= 0) {
-                    // A shape on x=0 has to be its own image.
-                    const tol = (r.x.max - r.x.min) * 1e-9;
+                // A shape crossing x=0 has to be its own image; one touching it from
+                // one side (twinax insulations meeting in the middle) gets an image.
+                const tol = (r.x.max - r.x.min) * 1e-9;
+                if (r.x.min < -tol && r.x.max > tol) {
                     if (!isMirrorShape(r.shape, r.shape, tol)) {
                         throw new Error(`mirror=1 needs the ${SHAPE_NAMES[s.shape ?? 'rect']} on one side of x=0 or symmetric about it`);
                     }
