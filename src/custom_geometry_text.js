@@ -59,19 +59,24 @@ const FUNCTIONS = {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
 };
 // Shape words after the kind. A rectangle has none ('rect' may be written).
-export const SHAPES = ['rect', 'trap', 'ngon'];
-const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'r', 'r_in', 'n', 'rot', 'angle', 'angle2', 'er', 'tand', 'thin',
+export const SHAPES = ['rect', 'trap', 'ngon', 'ellipse'];
+const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'r', 'r_in', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot', 'angle', 'angle2',
+    'radius', 'radius_bottom', 'wall', 'er', 'tand', 'thin',
     'sigma', 'rq', 'plating', 'plating_sigma', 'plating_t', 'plating_rq', 'mirror']);
-const RECT_KEY_ORDER = ['x', 'w', 'y', 'h', 'r', 'r_in', 'n', 'rot', 'angle', 'angle2', 'er', 'tand', 'thin',
+const RECT_KEY_ORDER = ['x', 'w', 'y', 'h', 'r', 'r_in', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot', 'angle', 'angle2',
+    'radius', 'radius_bottom', 'wall', 'er', 'tand', 'thin',
     'sigma', 'rq', 'plating', 'plating_sigma', 'plating_t', 'plating_rq', 'mirror'];
 // Geometry keys each shape takes.
 const SHAPE_KEYS = {
-    rect: ['x', 'y', 'w', 'h'],
-    trap: ['x', 'y', 'w', 'h', 'angle', 'angle2'],
+    rect: ['x', 'y', 'w', 'h', 'radius', 'radius_bottom', 'wall'],
+    trap: ['x', 'y', 'w', 'h', 'angle', 'angle2', 'radius', 'radius_bottom', 'wall'],
     ngon: ['x', 'y', 'r', 'r_in', 'n', 'rot'],
+    ellipse: ['x', 'y', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot'],
 };
 const GEOMETRY_KEYS = new Set(Object.values(SHAPE_KEYS).flat());
-const SHAPE_NAMES = { trap: 'trapezoid', ngon: 'n-gon' };
+const SHAPE_NAMES = { rect: 'rectangle', trap: 'trapezoid', ngon: 'n-gon', ellipse: 'ellipse' };
+// Arc segments per quarter turn of a rounded corner.
+const CORNER_SEGMENTS = 8;
 const MIRROR_KIND = { 'sig+': 'sig-', 'sig-': 'sig+', gnd: 'gnd', diel: 'diel' };
 const PLATING_KEYS = new Set(['sigma', 't', 'rq', 'thick_corners']);
 const PLATING_FACES = ['top', 'sides', 'bottom'];
@@ -250,10 +255,10 @@ function parseStatement(src) {
             if (rest[0] !== 'rect') shape = rest[0];
             rest = rest.slice(1);
         }
-        const fields = parseFields(rest, RECT_KEYS, shape ? SHAPE_NAMES[shape] : 'rectangle');
+        const fields = parseFields(rest, RECT_KEYS, SHAPE_NAMES[shape ?? 'rect']);
         for (const k of Object.keys(fields)) {
             if (GEOMETRY_KEYS.has(k) && !SHAPE_KEYS[shape ?? 'rect'].includes(k)) {
-                throw new Error(`${k}= does not apply to a ${shape ? SHAPE_NAMES[shape] : 'rectangle'}`);
+                throw new Error(`${k}= does not apply to ${shape === 'ellipse' ? 'an' : 'a'} ${SHAPE_NAMES[shape ?? 'rect']}`);
             }
         }
         return shape ? { type: 'rect', kind: head, shape, fields } : { type: 'rect', kind: head, fields };
@@ -517,10 +522,9 @@ function evalAxis(fields, pos, size, ev, keepNegative) {
 }
 
 // Trapezoid on the base [x0, x1] at y = yb, height h (negative: the other face is
-// below), side angles aL, aR in degrees from the vertical. Returns the convex CCW
-// polygon and the face name of each edge, or null for zero angles (a rectangle).
+// below), side angles aL, aR in degrees from the vertical, as a convex CCW polygon with
+// the face name of each edge. Vertices 0 and 1 are the lower corners.
 function trapezoidPolygon(x0, x1, yb, h, aL, aR) {
-    if (aL === 0 && aR === 0) return null;
     for (const a of [aL, aR]) {
         if (!(Math.abs(a) < 89)) throw new Error('angle must be between -89 and 89 degrees');
     }
@@ -534,10 +538,118 @@ function trapezoidPolygon(x0, x1, yb, h, aL, aR) {
     return { poly: new Float64Array(poly), faces: ['bottom', 'sides', 'top', 'sides'] };
 }
 
+// The convex CCW polygon moved inward by t along every edge normal: the inside of a
+// wall of thickness t. Throws when the wall closes the inside.
+function insetPolygon(poly, t) {
+    const n = poly.length >> 1;
+    const lines = [];
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const ex = poly[2 * j] - poly[2 * i], ey = poly[2 * j + 1] - poly[2 * i + 1];
+        const l = Math.hypot(ex, ey);
+        // Inward normal of a CCW edge.
+        lines.push({ px: poly[2 * i] - ey / l * t, py: poly[2 * i + 1] + ex / l * t, dx: ex / l, dy: ey / l });
+    }
+    const out = new Float64Array(2 * n);
+    for (let i = 0; i < n; i++) {
+        const a = lines[(i + n - 1) % n], b = lines[i];
+        const den = a.dx * b.dy - a.dy * b.dx;
+        const u = ((b.px - a.px) * b.dy - (b.py - a.py) * b.dx) / den;
+        out[2 * i] = a.px + u * a.dx; out[2 * i + 1] = a.py + u * a.dy;
+    }
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const dot = (out[2 * j] - out[2 * i]) * lines[i].dx + (out[2 * j + 1] - out[2 * i + 1]) * lines[i].dy;
+        if (!(dot > 0)) throw new Error('wall is too thick: it leaves no inside');
+    }
+    return out;
+}
+
+// Rounds the corners of a convex CCW polygon: corner i becomes an arc of radius radii[i]
+// tangent to both of its edges (0 keeps the corner). Each half of an arc takes the face
+// name of the edge it runs into. Returns { poly, faces }.
+function roundPolygon(poly, faces, radii) {
+    const n = poly.length >> 1;
+    const P = i => [poly[2 * ((i + n) % n)], poly[2 * ((i + n) % n) + 1]];
+    const unit = (x, y) => { const l = Math.hypot(x, y); return [x / l, y / l]; };
+    // Distance from each corner to its tangent points.
+    const cut = radii.map((R, i) => {
+        if (!(R > 0)) return 0;
+        const [px, py] = P(i), [ax, ay] = P(i - 1), [bx, by] = P(i + 1);
+        const u1 = unit(ax - px, ay - py), u2 = unit(bx - px, by - py);
+        const th = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1])));
+        return R / Math.tan(th / 2);
+    });
+    const scale = Math.max(...Array.from(poly).map(Math.abs));
+    for (let i = 0; i < n; i++) {
+        const [ax, ay] = P(i), [bx, by] = P(i + 1);
+        if (cut[i] + cut[(i + 1) % n] > Math.hypot(bx - ax, by - ay) * (1 + 1e-9)) {
+            throw new Error('corner radius is larger than the sides allow');
+        }
+    }
+    const pts = [];   // { x, y, face of the edge that starts here }
+    for (let i = 0; i < n; i++) {
+        const [px, py] = P(i);
+        const fin = faces[(i + n - 1) % n], fout = faces[i];
+        if (!(radii[i] > 0)) { pts.push({ x: px, y: py, face: fout }); continue; }
+        const R = radii[i];
+        const [ax, ay] = P(i - 1), [bx, by] = P(i + 1);
+        const u1 = unit(ax - px, ay - py), u2 = unit(bx - px, by - py);
+        const bis = unit(u1[0] + u2[0], u1[1] + u2[1]);
+        const th = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1])));
+        const cx = px + bis[0] * R / Math.sin(th / 2), cy = py + bis[1] * R / Math.sin(th / 2);
+        const t1x = px + u1[0] * cut[i], t1y = py + u1[1] * cut[i];
+        const span = Math.PI - th;
+        const m = Math.max(2, Math.ceil(CORNER_SEGMENTS * span / (Math.PI / 2)));
+        const phi = Math.atan2(t1y - cy, t1x - cx);
+        for (let k = 0; k <= m; k++) {
+            const a = phi + span * k / m;
+            // The end points sit exactly on the edges.
+            const x = k === 0 ? t1x : k === m ? px + u2[0] * cut[i] : cx + R * Math.cos(a);
+            const y = k === 0 ? t1y : k === m ? py + u2[1] * cut[i] : cy + R * Math.sin(a);
+            pts.push({ x, y, face: k < m ? (2 * k < m ? fin : fout) : fout });
+        }
+    }
+    // A side the arcs use up entirely leaves two coincident points.
+    const tol = scale * 1e-12;
+    const kept = pts.filter((p, i) => {
+        const q = pts[(i + 1) % pts.length];
+        return Math.hypot(q.x - p.x, q.y - p.y) > tol;
+    });
+    return { poly: new Float64Array(kept.flatMap(p => [p.x, p.y])), faces: kept.map(p => p.face) };
+}
+
 // Vertices of a regular n-gon of vertex radius r centred on (cx, cy), vertex 0 at the
 // top turned by rot degrees counterclockwise, CCW. Without rotation the vertices come
 // in exact mirror pairs about x = cx, so a centred n-gon is mirror symmetric to the bit.
 export function ngonPolygon(cx, cy, r, n, rot = 0) {
+    return ellipsePolygon(cx, cy, r, r, n, rot);
+}
+
+// n vertices on the ellipse of semi-axes rx, ry centred on (cx, cy), equally spaced in
+// arc length from the top, turned by rot degrees counterclockwise, CCW. A circle gives
+// the regular n-gon. Without rotation the vertices mirror exactly about x = cx.
+export function ellipsePolygon(cx, cy, rx, ry, n, rot = 0) {
+    // Parameter t of each vertex (x = rx cos t, y = ry sin t, t = pi/2 on top).
+    const ts = new Float64Array(n);
+    if (rx === ry) {
+        for (let k = 0; k < n; k++) ts[k] = Math.PI / 2 + 2 * Math.PI * k / n;
+    } else {
+        const M = 64 * n;
+        const cum = new Float64Array(M + 1);
+        for (let j = 1; j <= M; j++) {
+            const t = Math.PI / 2 + 2 * Math.PI * (j - 0.5) / M;
+            cum[j] = cum[j - 1] + Math.hypot(rx * Math.sin(t), ry * Math.cos(t)) * 2 * Math.PI / M;
+        }
+        const L = cum[M];
+        for (let k = 0, j = 0; k < n; k++) {
+            const target = L * k / n;
+            while (j < M && cum[j + 1] < target) j++;
+            const f = (target - cum[j]) / (cum[j + 1] - cum[j]);
+            ts[k] = Math.PI / 2 + 2 * Math.PI * (j + f) / M;
+        }
+    }
+    const c = Math.cos(rot * Math.PI / 180), s = Math.sin(rot * Math.PI / 180);
     const poly = new Float64Array(2 * n);
     for (let k = 0; k < n; k++) {
         if (rot === 0 && k > n / 2) {
@@ -545,63 +657,84 @@ export function ngonPolygon(cx, cy, r, n, rot = 0) {
             poly[2 * k + 1] = poly[2 * (n - k) + 1];
             continue;
         }
-        const th = Math.PI / 2 + (rot * Math.PI / 180) + 2 * Math.PI * k / n;
         const onAxis = rot === 0 && (k === 0 || 2 * k === n);
-        poly[2 * k] = onAxis ? cx : cx + r * Math.cos(th);
-        poly[2 * k + 1] = cy + r * Math.sin(th);
+        const ex = onAxis ? 0 : rx * Math.cos(ts[k]);
+        const ey = onAxis ? (k === 0 ? ry : -ry) : ry * Math.sin(ts[k]);
+        poly[2 * k] = rot === 0 ? cx + ex : cx + c * ex - s * ey;
+        poly[2 * k + 1] = rot === 0 ? cy + ey : cy + s * ex + c * ey;
     }
     return poly;
 }
 
-// Shape of a trap or ngon statement in metres: { rect: axis pair, shape } where shape
-// is null for a trapezoid with zero angles. The shape is a convex CCW polygon, or a
-// ring { poly, hole }, with the fields shapes.js describes.
-function evalShape(st, f, len, num) {
-    if (st.shape === 'trap') {
-        const x = evalAxis(f, 'x', 'w', len, false);
-        const y = evalAxis(f, 'y', 'h', len, true);
-        if (![x.min, x.max, y.min, y.max].every(Number.isFinite)) {
-            throw new Error('a trapezoid needs finite x, w, y and h');
-        }
-        const aL = f.angle !== undefined ? num(f.angle) : (f.angle2 !== undefined ? num(f.angle2) : 0);
-        const aR = f.angle2 !== undefined ? num(f.angle2) : aL;
-        // The base is the face at y, the other face is y + h.
-        const yb = y.flipped ? y.max : y.min;
-        const tp = trapezoidPolygon(x.min, x.max, yb, y.flipped ? -(y.max - y.min) : y.max - y.min, aL, aR);
-        if (!tp) return { x, y, shape: null };
-        const xs = [tp.poly[0], tp.poly[2], tp.poly[4], tp.poly[6]];
-        const xmin = Math.min(...xs), xmax = Math.max(...xs);
-        return {
-            x: { pos: xmin, size: xmax - xmin, min: xmin, max: xmax, flipped: x.flipped },
-            y,
-            shape: { type: 'polygon', prim: 'trap', poly: tp.poly, faces: tp.faces,
-                     thickness: Math.min(y.max - y.min, xmax - xmin) },
-        };
-    }
-    for (const k of ['x', 'y', 'r', 'n']) if (f[k] === undefined) throw new Error('an n-gon needs x, y, r and n');
-    const cx = len(f.x), cy = len(f.y), r = len(f.r);
-    const n = num(f.n), rot = f.rot !== undefined ? num(f.rot) : 0;
-    if (![cx, cy].every(Number.isFinite)) throw new Error('n-gon x and y must be finite');
-    if (!(r > 0) || !Number.isFinite(r)) throw new Error('r must be positive');
-    if (!Number.isInteger(n) || n < 3 || n > 1024) throw new Error('n must be a whole number from 3 to 1024');
-    if (!Number.isFinite(rot)) throw new Error('rot must be a number');
-    const poly = ngonPolygon(cx, cy, r, n, rot);
-    let shape = { type: 'polygon', prim: 'ngon', poly, round: true, thickness: 2 * r * Math.cos(Math.PI / n) };
-    if (f.r_in !== undefined) {
-        const ri = len(f.r_in);
-        if (!(ri > 0) || !(ri < r)) throw new Error('r_in must be positive and smaller than r');
-        shape = { type: 'ring', prim: 'ngon', poly, hole: ngonPolygon(cx, cy, ri, n, rot), thickness: (r - ri) * Math.cos(Math.PI / n) };
-    }
+function bboxAxes(poly) {
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
     for (let i = 0; i < poly.length; i += 2) {
         xmin = Math.min(xmin, poly[i]); xmax = Math.max(xmax, poly[i]);
         ymin = Math.min(ymin, poly[i + 1]); ymax = Math.max(ymax, poly[i + 1]);
     }
-    return {
-        x: { pos: xmin, size: xmax - xmin, min: xmin, max: xmax, flipped: false },
-        y: { pos: ymin, size: ymax - ymin, min: ymin, max: ymax, flipped: false },
-        shape,
-    };
+    return { x: { pos: xmin, size: xmax - xmin, min: xmin, max: xmax, flipped: false },
+             y: { pos: ymin, size: ymax - ymin, min: ymin, max: ymax, flipped: false } };
+}
+
+// Shape of a statement in metres: { x, y axes, shape }, shape null for a plain
+// rectangle (no angle, radius or wall). The shape is a convex CCW polygon, or a ring
+// { poly, hole }, with the fields shapes.js describes.
+function evalShape(st, f, len, num) {
+    const kind = st.shape ?? 'rect';
+    if (kind === 'rect' || kind === 'trap') {
+        const x = evalAxis(f, 'x', 'w', len, false);
+        const y = evalAxis(f, 'y', 'h', len, true);
+        if (![x.min, x.max, y.min, y.max].every(Number.isFinite)) {
+            throw new Error(`a ${SHAPE_NAMES[kind]} with ${kind === 'trap' ? 'angles' : 'a radius or wall'} needs finite x, w, y and h`);
+        }
+        const aL = f.angle !== undefined ? num(f.angle) : (f.angle2 !== undefined ? num(f.angle2) : 0);
+        const aR = f.angle2 !== undefined ? num(f.angle2) : aL;
+        const rTop = f.radius !== undefined ? len(f.radius) : 0;
+        const rBot = f.radius_bottom !== undefined ? len(f.radius_bottom) : rTop;
+        const wall = f.wall !== undefined ? len(f.wall) : 0;
+        if (!(rTop >= 0) || !(rBot >= 0) || !Number.isFinite(rTop) || !Number.isFinite(rBot)) throw new Error('radius must be non-negative');
+        if (!(wall >= 0) || !Number.isFinite(wall)) throw new Error('wall must be non-negative');
+        if (aL === 0 && aR === 0 && rTop === 0 && rBot === 0 && wall === 0) return { x, y, shape: null };
+        // The base is the face at y, the other face is y + h.
+        const yb = y.flipped ? y.max : y.min;
+        const tp = trapezoidPolygon(x.min, x.max, yb, y.flipped ? -(y.max - y.min) : y.max - y.min, aL, aR);
+        // Vertices 0, 1 are the lower corners, 2, 3 the upper ones.
+        const radii = [rBot, rBot, rTop, rTop];
+        const outer = roundPolygon(tp.poly, tp.faces, radii);
+        const ax = bboxAxes(outer.poly);
+        let shape = { type: 'polygon', prim: kind, poly: outer.poly, faces: outer.faces,
+                      thickness: Math.min(y.max - y.min, ax.x.size) };
+        if (wall > 0) {
+            // The inside keeps the corner centres: its radii are the outer ones less the wall.
+            const hole = roundPolygon(insetPolygon(tp.poly, wall), tp.faces, radii.map(r => Math.max(r - wall, 0)));
+            shape = { type: 'ring', prim: kind, poly: outer.poly, hole: hole.poly, faces: outer.faces, thickness: wall };
+        }
+        return { x: { ...ax.x, flipped: x.flipped }, y, shape };
+    }
+    const round = kind === 'ngon' ? ['r', 'r'] : ['rx', 'ry'];
+    for (const k of ['x', 'y', ...round, 'n']) {
+        if (f[k] === undefined) throw new Error(`${kind === 'ngon' ? 'an n-gon' : 'an ellipse'} needs x, y, ${[...new Set(round)].join(', ')} and n`);
+    }
+    const cx = len(f.x), cy = len(f.y), rx = len(f[round[0]]), ry = len(f[round[1]]);
+    const n = num(f.n), rot = f.rot !== undefined ? num(f.rot) : 0;
+    if (![cx, cy].every(Number.isFinite)) throw new Error(`${SHAPE_NAMES[kind]} x and y must be finite`);
+    if (!(rx > 0) || !(ry > 0) || !Number.isFinite(rx) || !Number.isFinite(ry)) throw new Error(`${[...new Set(round)].join(' and ')} must be positive`);
+    if (!Number.isInteger(n) || n < 3 || n > 1024) throw new Error('n must be a whole number from 3 to 1024');
+    if (!Number.isFinite(rot)) throw new Error('rot must be a number');
+    const poly = ellipsePolygon(cx, cy, rx, ry, n, rot);
+    const cosn = Math.cos(Math.PI / n);
+    let shape = { type: 'polygon', prim: kind, poly, round: true, thickness: 2 * Math.min(rx, ry) * cosn };
+    const inner = kind === 'ngon' ? ['r_in', 'r_in'] : ['rx_in', 'ry_in'];
+    if (f[inner[0]] !== undefined || f[inner[1]] !== undefined) {
+        if (f[inner[0]] === undefined || f[inner[1]] === undefined) throw new Error('an elliptical ring needs rx_in and ry_in');
+        const ix = len(f[inner[0]]), iy = len(f[inner[1]]);
+        if (!(ix > 0) || !(ix < rx) || !(iy > 0) || !(iy < ry)) {
+            throw new Error(kind === 'ngon' ? 'r_in must be positive and smaller than r' : 'rx_in and ry_in must be positive and smaller than rx and ry');
+        }
+        shape = { type: 'ring', prim: kind, poly, hole: ellipsePolygon(cx, cy, ix, iy, n, rot),
+                  thickness: Math.min(rx - ix, ry - iy) * cosn };
+    }
+    return { ...bboxAxes(poly), shape };
 }
 
 // Mirror image of an x axis about x=0.
@@ -697,8 +830,9 @@ export function evaluateGeometry(model, overrides = {}) {
             const f = s.fields;
             const r = { kind: s.kind, line: s.line, shape: null,
                 er: 1, tand: 0, thin: false, plating: null, sigma: null, rq: null, platingMaterial: null };
-            if (s.shape) Object.assign(r, evalShape(s, f, len, num));
-            else { r.x = evalAxis(f, 'x', 'w', len, false); r.y = evalAxis(f, 'y', 'h', len, true); }
+            if (s.shape || f.radius !== undefined || f.radius_bottom !== undefined || f.wall !== undefined) {
+                Object.assign(r, evalShape(s, f, len, num));
+            } else { r.x = evalAxis(f, 'x', 'w', len, false); r.y = evalAxis(f, 'y', 'h', len, true); }
             if (s.kind === 'diel') {
                 if (f.er === undefined) throw new Error('diel needs er');
                 if (['plating', 'sigma', 'rq', 'plating_sigma', 'plating_t', 'plating_rq'].some(k => f[k] !== undefined)) {
@@ -721,10 +855,11 @@ export function evaluateGeometry(model, overrides = {}) {
                         }
                     }
                     r.plating = { top: faces.includes('top'), sides: faces.includes('sides'), bottom: faces.includes('bottom') };
-                    // A round shape has one surface and no faces to choose from.
-                    if (r.shape && r.shape.prim === 'ngon') {
+                    // A round shape has one surface and no faces to choose from, a ring
+                    // has an inside the faces do not name.
+                    if (r.shape && (r.shape.round || r.shape.type === 'ring')) {
                         if (!(r.plating.top && r.plating.sides && r.plating.bottom)) {
-                            throw new Error('plating on an n-gon covers its whole surface: plating=all');
+                            throw new Error(`plating on ${r.shape.type === 'ring' ? 'a ring' : `an ${SHAPE_NAMES[r.shape.prim]}`} covers its whole surface: plating=all`);
                         }
                         r.plating.all = true;
                     }
@@ -755,7 +890,7 @@ export function evaluateGeometry(model, overrides = {}) {
                     // A shape on x=0 has to be its own image.
                     const tol = (r.x.max - r.x.min) * 1e-9;
                     if (!isMirrorShape(r.shape, r.shape, tol)) {
-                        throw new Error(`mirror=1 needs the ${SHAPE_NAMES[s.shape]} on one side of x=0 or symmetric about it`);
+                        throw new Error(`mirror=1 needs the ${SHAPE_NAMES[s.shape ?? 'rect']} on one side of x=0 or symmetric about it`);
                     }
                     rects.push(r);
                 } else {
@@ -1043,7 +1178,8 @@ function scaleExpression(src, d, f, degreeOf) {
     return out;
 }
 
-const RECT_LENGTH_KEYS = ['x', 'y', 'w', 'h', 'r', 'r_in', 'rq', 'plating_t', 'plating_rq'];
+const RECT_LENGTH_KEYS = ['x', 'y', 'w', 'h', 'r', 'r_in', 'rx', 'ry', 'rx_in', 'ry_in', 'radius', 'radius_bottom', 'wall',
+    'rq', 'plating_t', 'plating_rq'];
 const PLATING_LENGTH_KEYS = ['t', 'rq'];
 
 // One statement's source rewritten.

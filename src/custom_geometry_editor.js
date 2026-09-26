@@ -100,6 +100,39 @@ diel  ngon  x=0  y=0  r=D/2  n=128  er=2.1  tand=0.0002
 sig+  ngon  x=0  y=0  r=d/2  n=64
 gnd   ngon  x=0  y=0  r=D/2+t_sh  r_in=D/2  n=128
 `,
+    'Microstrip with rounded trace corners': `# Microstrip whose trace has rounded top corners (radius) and sharp bottom
+# corners where it sits on the substrate (radius_bottom=0). Full-wave solver only.
+units mm
+w = 0.3; t = 0.035; h = 0.2; rc = 10um
+bounds open open open gnd
+domain auto   # sized from the conductors, or: domain x1 x2 y1 y2
+
+diel  x=-inf  y=0  w=inf  h=h  er=4.3  tand=0.02
+sig+  x=-w/2  y=h  w=w  h=t  radius=rc  radius_bottom=0
+`,
+    'Elliptical coaxial line': `# Round centre conductor in an elliptical shield. a and b are the semi-axes of
+# the dielectric, the shield is an elliptical ring around it. Full-wave solver only.
+units mm
+d = 0.9; a = 2.2; b = 1.4; t_sh = 0.15
+bounds open open open open
+domain -1.1*(a+t_sh) 1.1*(a+t_sh) -1.1*(b+t_sh) 1.1*(b+t_sh)
+
+diel  ellipse  x=0  y=0  rx=a  ry=b  n=128  er=2.1  tand=0.0002
+sig+  ngon  x=0  y=0  r=d/2  n=64
+gnd   ellipse  x=0  y=0  rx=a+t_sh  ry=b+t_sh  rx_in=a  ry_in=b  n=128
+`,
+    'Twinax cable': `# Twinax: two insulated wires in a stadium-shaped shield, a rectangle with fully
+# rounded ends (radius = half its height) and a wall. Full-wave solver only.
+units mm
+d = 0.4; di = 1.2; s = 1.25; g = 0.02; t_sh = 0.03
+hw = s/2+di/2+g; hh = di/2+g   # half width and half height inside the shield
+bounds open open open open
+domain -1.2*(hw+t_sh) 1.2*(hw+t_sh) -1.5*(hh+t_sh) 1.5*(hh+t_sh)
+
+diel  ngon  x=s/2  y=0  r=di/2  n=64  er=2.1  tand=0.0003  mirror=1
+sig+  ngon  x=s/2  y=0  r=d/2  n=32  mirror=1
+gnd   x=-hw-t_sh  w=2*(hw+t_sh)  y=-hh-t_sh  h=2*(hh+t_sh)  radius=hh+t_sh  wall=t_sh
+`,
     'Coplanar strips / slotline': `# Two strips on a finite substrate, the slot between them is a slotline.
 # One strip is the signal, the other the return conductor.
 units mm
@@ -115,7 +148,10 @@ gnd   x=s/2      y=0   w=w     h=t
 
 const WALLS = ['left', 'right', 'top', 'bottom'];
 const KIND_LABELS = { 'sig+': 'Signal (+)', 'sig-': 'Signal (−)', 'gnd': 'Ground', 'diel': 'Dielectric' };
-const SHAPE_LABELS = { rect: 'Rectangle', trap: 'Trapezoid', ngon: 'N-gon' };
+const SHAPE_LABELS = { rect: 'Rectangle', trap: 'Trapezoid', ngon: 'N-gon', ellipse: 'Ellipse' };
+// Shapes described by a centre and radii, and the keys of each.
+const ROUND_KEYS = { ngon: ['x', 'y', 'r', 'r_in', 'n', 'rot'], ellipse: ['x', 'y', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot'] };
+const CORNER_KEYS = ['radius', 'radius_bottom', 'wall'];
 // Side angle a rectangle turned into a trapezoid starts with, degrees from the vertical.
 const DEFAULT_ANGLE = '20';
 const FACES = ['top', 'sides', 'bottom'];
@@ -554,6 +590,8 @@ function updateFormValues(geo) {
 // Source lines of the conductor rows whose plating panel is open, kept across form
 // rebuilds.
 const openPlatingRows = new Set();
+// Source lines of the rows whose corner panel (radius, wall) is open.
+const openCornerRows = new Set();
 
 // Source line of the form row that last had the focus: new rectangles go on top of it.
 let selectedLine = 0;
@@ -580,17 +618,29 @@ function shapeFields(fields, from, to, geoRect) {
     const box = geoRect && [geoRect.x.min, geoRect.x.max, geoRect.y.min, geoRect.y.max].every(Number.isFinite)
         ? [geoRect.x.min, geoRect.x.max, geoRect.y.min, geoRect.y.max].map(v => v / geoRect.scale) : null;
     const num = v => fmt(parseFloat(v.toPrecision(6)));
-    if (to === 'ngon' && from !== 'ngon') {
-        for (const k of ['x', 'w', 'y', 'h', 'angle', 'angle2']) delete f[k];
-        const [x0, x1, y0, y1] = box ?? [-0.5, 0.5, -0.5, 0.5];
-        Object.assign(f, { x: num((x0 + x1) / 2), y: num((y0 + y1) / 2), r: num(Math.min(x1 - x0, y1 - y0) / 2), n: '32' });
-        // An n-gon is plated all around or not at all.
-        if (f.plating && f.plating !== 'none') f.plating = 'all';
-    } else if (from === 'ngon' && to !== 'ngon') {
-        for (const k of ['x', 'y', 'r', 'r_in', 'n', 'rot']) delete f[k];
-        const [x0, x1, y0, y1] = box ?? [-0.5, 0.5, -0.5, 0.5];
+    const [x0, x1, y0, y1] = box ?? [-0.5, 0.5, -0.5, 0.5];
+    const round = k => !!ROUND_KEYS[k];
+    if (round(to) && round(from)) {
+        // n-gon <-> ellipse: the radius becomes both semi-axes and back.
+        if (to === 'ellipse') {
+            Object.assign(f, { rx: f.r, ry: f.r });
+            if (f.r_in !== undefined) Object.assign(f, { rx_in: f.r_in, ry_in: f.r_in });
+            delete f.r; delete f.r_in;
+        } else {
+            f.r = f.rx; if (f.rx_in !== undefined) f.r_in = f.rx_in;
+            for (const k of ['rx', 'ry', 'rx_in', 'ry_in']) delete f[k];
+        }
+    } else if (round(to)) {
+        for (const k of ['x', 'w', 'y', 'h', 'angle', 'angle2', ...CORNER_KEYS]) delete f[k];
+        Object.assign(f, { x: num((x0 + x1) / 2), y: num((y0 + y1) / 2) },
+            to === 'ngon' ? { r: num(Math.min(x1 - x0, y1 - y0) / 2) } : { rx: num((x1 - x0) / 2), ry: num((y1 - y0) / 2) },
+            { n: '32' });
+    } else if (round(from)) {
+        for (const k of ROUND_KEYS[from]) delete f[k];
         Object.assign(f, { x: num(x0), w: num(x1 - x0), y: num(y0), h: num(y1 - y0) });
     }
+    // A round shape is plated all around or not at all.
+    if (round(to) && f.plating && f.plating !== 'none') f.plating = 'all';
     if (to === 'trap' && f.angle === undefined && f.angle2 === undefined) f.angle = DEFAULT_ANGLE;
     if (to !== 'trap') { delete f.angle; delete f.angle2; }
     return f;
@@ -625,7 +675,7 @@ function rectRow(model, st, geoRect, index, count) {
         write(true);
     });
 
-    const shapeSel = el('select', { class: 'custom-shape', title: 'Shape. Trapezoids and n-gons need the full-wave solver.' },
+    const shapeSel = el('select', { class: 'custom-shape', title: 'Shape. Anything but a plain rectangle needs the full-wave solver.' },
         ...Object.entries(SHAPE_LABELS).map(([k, label]) => el('option', { value: k, text: label })));
     shapeSel.value = shape;
     shapeSel.addEventListener('change', () => {
@@ -641,7 +691,7 @@ function rectRow(model, st, geoRect, index, count) {
     const units = model.statements.find(o => o.type === 'units')?.value ?? 'mm';
     const lengthTip = (what, empty) => `${what}. Empty: ${empty}. A bare number is in ${units}, ` +
         'a suffix gives another unit: 1um, 500nm.';
-    let geometryCells;
+    let geometryCells, cornerPanel = null;
     if (shape === 'ngon') {
         geometryCells = [
             el('span', { class: 'custom-axis' },
@@ -653,6 +703,22 @@ function rectRow(model, st, geoRect, index, count) {
                 exprInput('r_in', fields.r_in, setField('r_in'), { cls: 'narrow', placeholder: 'solid',
                     title: 'Vertex radius of a concentric hole, which makes a ring (a coax shield). Empty: solid.' })),
         ];
+    } else if (shape === 'ellipse') {
+        geometryCells = [
+            el('span', { class: 'custom-axis' },
+                exprInput('x', fields.x, setField('x'), { title: 'Centre x' }),
+                exprInput('y', fields.y, setField('y'), { title: 'Centre y' })),
+            el('span', { class: 'custom-axis' },
+                exprInput('rx', fields.rx, setField('rx'), { title: 'Horizontal semi-axis' }),
+                exprInput('ry', fields.ry, setField('ry'), { title: 'Vertical semi-axis' }),
+                exprInput('n', fields.n, setField('n'), { cls: 'narrow', kind: 'number',
+                    title: 'Number of vertices, 3 to 1024, equally spaced along the outline. One vertex is on top.' })),
+            el('span', { class: 'custom-axis' },
+                exprInput('rx_in', fields.rx_in, setField('rx_in'), { cls: 'narrow', placeholder: 'solid',
+                    title: 'Horizontal semi-axis of a concentric elliptical hole, which makes a ring. Empty: solid.' }),
+                exprInput('ry_in', fields.ry_in, setField('ry_in'), { cls: 'narrow', placeholder: 'solid',
+                    title: 'Vertical semi-axis of the hole. Empty: solid.' })),
+        ];
     } else {
         geometryCells = [axisCells('x'), axisCells('y')];
         if (shape === 'trap') {
@@ -662,6 +728,31 @@ function rectRow(model, st, geoRect, index, count) {
                 exprInput('∠R', fields.angle2, setField('angle2'), { cls: 'narrow', kind: 'number', placeholder: '= ∠L',
                     title: 'Right side angle in degrees from the vertical. Empty: the same as the left side.' })));
         }
+        // Corner radius and wall sit in a panel that opens from a button, like plating.
+        const cornersBtn = el('button', { class: 'secondary-btn custom-corners-toggle', type: 'button' });
+        let cornersOpen = openCornerRows.has(st.line);
+        const showCorners = () => {
+            const set = CORNER_KEYS.filter(k => fields[k] !== undefined && fields[k] !== '');
+            cornersBtn.textContent = `${cornersOpen ? '▾' : '▸'} corners${set.length ? ' ' + set.map(k => ({ radius: 'r', radius_bottom: 'r↓', wall: 'wall' })[k]).join(' ') : ''}`;
+            cornersBtn.classList.toggle('active', set.length > 0);
+            cornersBtn.title = 'Rounded corners and a wall (a hollow shape). Anything set here needs the full-wave solver.';
+            cornerPanel.style.display = cornersOpen ? '' : 'none';
+        };
+        cornersBtn.addEventListener('click', () => {
+            cornersOpen = !cornersOpen;
+            if (cornersOpen) openCornerRows.add(st.line); else openCornerRows.delete(st.line);
+            showCorners();
+        });
+        const setCorner = key => v => { setField(key)(v); showCorners(); };
+        cornerPanel = el('div', { class: 'custom-corner-panel' },
+            exprInput('radius', fields.radius, setCorner('radius'), { cls: 'narrow', placeholder: '0',
+                title: lengthTip('Corner radius, every corner', 'sharp corners') }),
+            exprInput('bottom', fields.radius_bottom, setCorner('radius_bottom'), { cls: 'narrow', placeholder: '= radius',
+                title: lengthTip('Radius of the two lower corners', 'the radius above. 0 keeps them sharp, as on a trace etched from a foil') }),
+            exprInput('wall', fields.wall, setCorner('wall'), { cls: 'narrow', placeholder: 'solid',
+                title: lengthTip('Wall thickness: the shape becomes a shell of this thickness, such as a cable shield', 'solid') }));
+        geometryCells.push(cornersBtn);
+        showCorners();
     }
 
     let extra, below = null;
@@ -670,8 +761,8 @@ function rectRow(model, st, geoRect, index, count) {
                  exprInput('tand', fields.tand, setField('tand'), { placeholder: '0', cls: 'narrow', kind: 'number' })];
     } else {
         const on = new Set(fields.plating === 'all' ? FACES : (fields.plating && fields.plating !== 'none' ? fields.plating.split(',') : []));
-        // An n-gon has one surface: its plating is all or nothing.
-        const round = shape === 'ngon';
+        // A round shape or a shell has one outside: its plating is all or nothing.
+        const round = !!ROUND_KEYS[shape] || !!(fields.wall && fields.wall !== '0') || fields.r_in !== undefined || fields.rx_in !== undefined;
         // The plating options sit in a panel that opens from a button on the row. The
         // button names the plated faces, so a collapsed row still shows its plating.
         const platingBtn = el('button', { class: 'secondary-btn custom-plating-toggle', type: 'button' });
@@ -735,8 +826,8 @@ function rectRow(model, st, geoRect, index, count) {
     const mirrorBtn = rowButton('⇋ mirror',
         (mirrored ? 'Mirrored about x=0. Click to remove the image.\n' : 'Mirror about x=0.\n') +
         `Adds ${image} image on the other side of x=0 (drawn dashed in the preview). ` +
-        (shape === 'rect' ? 'A rectangle that touches or crosses x=0 becomes one rectangle symmetric about x=0 instead.'
-            : 'A trapezoid or n-gon on x=0 has to be symmetric about it.'),
+        (shape === 'rect' && !CORNER_KEYS.some(k => fields[k]) ? 'A rectangle that touches or crosses x=0 becomes one rectangle symmetric about x=0 instead.'
+            : 'A shape on x=0 has to be symmetric about it.'),
         () => { if (mirrored) delete fields.mirror; else fields.mirror = '1'; write(true, 'mirror'); },
         { key: 'mirror', cls: 'custom-mirror' });
     mirrorBtn.classList.toggle('active', mirrored);
@@ -752,7 +843,7 @@ function rectRow(model, st, geoRect, index, count) {
         rowButton('✕', 'Delete', () => { const m = current(); applyText(replaceStatementInText(getCustomGeometryText(), mine(m), null), true); }));
 
     const row = el('div', { class: `custom-rect-row kind-${st.kind.replace('+', 'p').replace('-', 'n')}`, 'data-line': st.line },
-        kindSel, shapeSel, ...geometryCells, mirrorBtn, ...extra, actions, ...(below ? [below] : []));
+        kindSel, shapeSel, ...geometryCells, mirrorBtn, ...extra, actions, ...(cornerPanel ? [cornerPanel] : []), ...(below ? [below] : []));
     if (geoRect) {
         row.title = `x ${fmt(geoRect.x.min / geoRect.scale)} … ${fmt(geoRect.x.max / geoRect.scale)}, ` +
                     `y ${fmt(geoRect.y.min / geoRect.scale)} … ${fmt(geoRect.y.max / geoRect.scale)} ${geoRect.units}` +
@@ -779,8 +870,8 @@ const niceNumber = v => fmt(parseFloat(v.toPrecision(4)));
 // g or gap for a ground, s or gap for a signal, else the new conductor's width.
 function newRectFields(kind, model, geo) {
     const k = LENGTH_UNITS[geo.units];
-    // An n-gon has no position and size fields to place a rectangle from.
-    const drawn = model.statements.filter(s => s.type === 'rect' && s.shape !== 'ngon')
+    // An n-gon or ellipse has no position and size fields to place a rectangle from.
+    const drawn = model.statements.filter(s => s.type === 'rect' && !ROUND_KEYS[s.shape])
         .map(st => ({ st, r: geo.rects.find(r => r.line === st.line && !r.image) }))
         .filter(o => o.r);
     const stacked = drawn.filter(o => Number.isFinite(o.r.y.max));
@@ -861,7 +952,7 @@ function renderForm(model, geo) {
     });
     form.append(el('div', { class: 'custom-form-section' },
         el('div', { class: 'custom-form-title', text: 'Shapes' },
-            el('span', { class: 'custom-hint', text: '  Fields take expressions of the sidebar parameters: w/2, h1+h2, 35um. -inf / inf runs an edge to the boundary, a negative size flips the rectangle to the other side of its position. ⇋ mirror adds the mirror image about x=0. A later dielectric covers an earlier one. Trapezoids and n-gons need the full-wave solver.' })),
+            el('span', { class: 'custom-hint', text: '  Fields take expressions of the sidebar parameters: w/2, h1+h2, 35um. -inf / inf runs an edge to the boundary, a negative size flips the rectangle to the other side of its position. ⇋ mirror adds the mirror image about x=0. A later dielectric covers an earlier one. Trapezoids, n-gons, ellipses and rounded or hollow shapes need the full-wave solver.' })),
         el('div', { class: 'custom-rect-list' }, ...rects.map((r, i) => rectRow(model, r, byLine.get(r.line), i, rects.length))),
         el('div', { class: 'custom-adders' }, ...adders)));
 
@@ -976,12 +1067,14 @@ function lineMap(before, after) {
 
 // Row state kept by source line follows the text through an edit.
 function remapRowState(before, after, source) {
-    if (source === 'load') { openPlatingRows.clear(); selectedLine = 0; return; }
+    if (source === 'load') { openPlatingRows.clear(); openCornerRows.clear(); selectedLine = 0; return; }
     if (before === null || before === after) return;
     const map = lineMap(before, after);
-    const open = [...openPlatingRows].map(map).filter(l => l > 0);
-    openPlatingRows.clear();
-    open.forEach(l => openPlatingRows.add(l));
+    for (const set of [openPlatingRows, openCornerRows]) {
+        const open = [...set].map(map).filter(l => l > 0);
+        set.clear();
+        open.forEach(l => set.add(l));
+    }
     selectedLine = map(selectedLine);
 }
 

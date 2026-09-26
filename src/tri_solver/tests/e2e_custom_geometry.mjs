@@ -623,7 +623,7 @@ check('leaving the custom type restores the fixed sidebar', await page.evaluate(
     await p5.click('#btn_solve');
     await p5.waitForFunction(() => /does not support/.test(document.getElementById('console_out').textContent), null, { timeout: 30000 });
     const refused = await p5.evaluate(() => document.getElementById('console_out').textContent);
-    check('the quasi-static solver refuses the trapezoids', /non-rectangular shapes .*line 8.*quasi-static solver does not support/.test(refused));
+    check('the quasi-static solver refuses the trapezoids', /other than plain rectangles.*line 8.*quasi-static solver does not support/.test(refused));
 
     await row.locator('select.custom-shape').selectOption('ngon');
     await p5.waitForTimeout(500);
@@ -633,6 +633,27 @@ check('leaving the custom type restores the fixed sidebar', await page.evaluate(
     await p5.locator('#custom-form .custom-rect-row.kind-sigp select.custom-shape').selectOption('rect');
     await p5.waitForTimeout(500);
     check('and back to a rectangle', /sig\+ {2}x=\S+ w=\S+ y=\S+ h=\S+ mirror=1/.test(await p5.inputValue('#custom_geom_text')));
+
+    await p5.locator('#custom-form .custom-rect-row.kind-sigp select.custom-shape').selectOption('ellipse');
+    await p5.waitForTimeout(500);
+    check('switching to an ellipse writes its semi-axes', /sig\+ {2}ellipse {2}x=\S+ y=\S+ rx=\S+ ry=\S+ n=32/.test(await p5.inputValue('#custom_geom_text')));
+
+    // Corner radius and wall from the corners panel of a rectangle row.
+    await p5.selectOption('#custom-template', 'Microstrip with rounded trace corners');
+    await p5.waitForTimeout(600);
+    const sig = p5.locator('#custom-form .custom-rect-row.kind-sigp');
+    const btnText = await sig.locator('.custom-corners-toggle').textContent();
+    check('the corners button names what is set', /corners r r↓/.test(btnText), btnText);
+    await sig.locator('.custom-corners-toggle').click();
+    await sig.locator('.custom-corner-panel .custom-cell', { has: p5.locator('.custom-cell-label', { hasText: /^radius$/ }) }).locator('input').fill('5um');
+    await p5.waitForTimeout(500);
+    check('the radius field rewrites the line', /sig\+ {2}x=-w\/2 w=w y=h h=t radius=5um radius_bottom=0/.test(await p5.inputValue('#custom_geom_text')));
+    await p5.selectOption('#custom-template', 'Twinax cable');
+    await p5.waitForTimeout(600);
+    const tw = await p5.evaluate(() => ({ shapes: [...document.querySelectorAll('#custom-form select.custom-shape')].map(s => s.value).join(),
+        paths: (document.getElementById('sim_canvas').layout.shapes || []).filter(s => s.type === 'path').length,
+        errors: document.getElementById('custom-geom-errors').textContent }));
+    check('the twinax template: n-gons and a stadium shell', tw.shapes === 'ngon,ngon,rect' && tw.paths >= 5 && !tw.errors, JSON.stringify(tw));
 
     // Coax: converts to n-gons and solves on the full-wave solver.
     await p5.selectOption('#tl_type', 'coax');

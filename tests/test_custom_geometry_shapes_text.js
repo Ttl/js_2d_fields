@@ -64,6 +64,58 @@ const U = 'units mm\n';
     check('ngon: plating=all plates the whole surface', pl.all && pl.top && pl.sides && pl.bottom);
 }
 
+// --- Ellipse ---
+{
+    const e = polyOf(U + 'diel ellipse x=0 y=0 rx=2 ry=1 n=64 er=2');
+    const sides = [];
+    for (let i = 0; i < 64; i++) { const j = (i + 1) % 64; sides.push(Math.hypot(e.poly[2 * j] - e.poly[2 * i], e.poly[2 * j + 1] - e.poly[2 * i + 1])); }
+    check('ellipse: vertices spaced evenly along the outline', Math.max(...sides) / Math.min(...sides) < 1.02,
+        `${(Math.max(...sides) / Math.min(...sides)).toFixed(4)}`);
+    check('ellipse: first vertex on top, exact mirror pairs', e.poly[0] === 0 && e.poly[1] === 1e-3
+        && e.poly[2 * 63] === -e.poly[2] && e.poly[2 * 63 + 1] === e.poly[3]);
+    check('ellipse: area near pi*rx*ry', Math.abs(shapeArea({ shape: e }) / (Math.PI * 2e-6) - 1) < 2e-3);
+    const c = polyOf(U + 'gnd ellipse x=0.3 y=0.1 rx=1 ry=1 n=24'), g = polyOf(U + 'gnd ngon x=0.3 y=0.1 r=1 n=24');
+    check('ellipse: equal semi-axes give the n-gon exactly', c.poly.every((v, i) => v === g.poly[i]));
+    const ring = polyOf(U + 'gnd ellipse x=0 y=0 rx=2 ry=1 rx_in=1.8 ry_in=0.8 n=64');
+    check('ellipse: rx_in, ry_in make a ring', ring.type === 'ring' && ring.hole.length === 128);
+    check('ellipse: a ring needs both inner semi-axes', /needs rx_in and ry_in/.test(errorsOf(U + 'gnd ellipse x=0 y=0 rx=2 ry=1 rx_in=1 n=64')));
+    check('ellipse: plating must be all', /plating=all/.test(errorsOf(U + 'gnd ellipse x=0 y=0 rx=2 ry=1 n=16 plating=top')));
+    check('ellipse: r= rejected', /r= does not apply to an ellipse/.test(errorsOf(U + 'gnd ellipse x=0 y=0 r=2 n=16')));
+}
+
+// --- Rounded corners and walls ---
+{
+    const area = t => shapeArea({ shape: polyOf(U + t) }) * 1e6;
+    const st = polyOf(U + 'sig+ x=0 y=0 w=2 h=1 radius=0.5');
+    // The arcs are inscribed polygons: area short by the segment areas.
+    check('radius: half the height gives a stadium', st.type === 'polygon' && Math.abs(area('sig+ x=0 y=0 w=2 h=1 radius=0.5') / (1 + Math.PI / 4) - 1) < 5e-3
+        && Math.abs(Math.min(...Array.from(st.poly).filter((_, i) => i % 2 === 1))) < 1e-15);
+    const rr = polyOf(U + 'sig+ x=0 y=0 w=2 h=1 radius=0.2 radius_bottom=0');
+    const has = (p, x, y) => [...Array(p.length / 2).keys()].some(k => Math.abs(p[2 * k] - x) < 1e-15 && Math.abs(p[2 * k + 1] - y) < 1e-15);
+    check('radius_bottom=0: sharp lower corners, rounded upper ones', has(rr.poly, 0, 0) && has(rr.poly, 2e-3, 0) && !has(rr.poly, 2e-3, 1e-3));
+    check('radius: arc halves take the faces they run into', rr.faces.filter(f => f === 'top').length > 1 && rr.faces.filter(f => f === 'sides').length > 2
+        && shapeFaceAt(rr, 1e-3, 1e-3).face === 'top' && shapeFaceAt(rr, 2e-3, 0.5e-3).face === 'sides');
+    const tr = polyOf(U + 'sig+ trap x=0 y=0 w=2 h=0.5 angle=30 radius=0.1');
+    check('radius: rounds a trapezoid inside its outline', area('sig+ trap x=0 y=0 w=2 h=0.5 angle=30 radius=0.1')
+        < area('sig+ trap x=0 y=0 w=2 h=0.5 angle=30') && tr.faces.includes('top'));
+    check('radius: too large rejected', /larger than the sides allow/.test(errorsOf(U + 'sig+ x=0 y=0 w=2 h=1 radius=0.6')));
+    const w = polyOf(U + 'gnd x=0 y=0 w=2 h=1 wall=0.1');
+    check('wall: a hollow rectangle', w.type === 'ring' && Math.abs(area('gnd x=0 y=0 w=2 h=1 wall=0.1') - (2 - 1.8 * 0.8)) < 1e-9);
+    const ws = polyOf(U + 'gnd x=0 y=0 w=2 h=1 radius=0.5 wall=0.1');
+    const minY = Math.min(...Array.from(ws.hole).filter((_, i) => i % 2 === 1));
+    check('wall: a stadium shell keeps the corner centres', ws.type === 'ring' && Math.abs(minY - 0.1e-3) < 1e-15);
+    check('wall: too thick rejected', /too thick/.test(errorsOf(U + 'gnd x=0 y=0 w=2 h=1 wall=0.5')));
+    check('wall: plating on a shell must be all', /plating=all/.test(errorsOf(U + 'gnd x=0 y=0 w=2 h=1 wall=0.1 plating=top')));
+    check('radius: needs finite edges', /finite/.test(errorsOf(U + 'gnd x=-inf y=0 w=inf h=1 radius=0.1')));
+    const um = changeUnitsInText(U + 'rc = 0.1\nsig+ x=0 y=0 w=2 h=1 radius=rc radius_bottom=0.05 wall=0.02\n', 'um');
+    check('units: radius and wall are lengths', /rc = 100\b/.test(um) && /radius_bottom=50 wall=20/.test(um), um);
+    let qs = '';
+    try {
+        new CustomGeometrySolver({ text: U + 'bounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.2 er=4\nsig+ x=-0.1 w=0.2 y=0.2 h=0.035 radius=5um\n' }).ensure_mesh();
+    } catch (e) { qs = e.message; }
+    check('radius: the quasi-static solver refuses rounded corners', /quasi-static solver does not support/.test(qs), qs);
+}
+
 // --- Mirror ---
 {
     const g = parseAndEvaluate(U + 'sig+ trap x=0.1 y=0 w=0.3 h=0.035 angle=30 angle2=10 mirror=1');

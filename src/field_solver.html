@@ -656,6 +656,10 @@
                         <dd>Trapezoid, a trace with an etch angle: the base <code>x</code> to <code>x+w</code> at <code>y</code>, height <code>h</code>. The sides lean in by <code>angle</code> (left) and <code>angle2</code> (right, default <code>angle</code>) degrees from the vertical, so a positive angle narrows the face at <code>y+h</code> and a negative one widens it. A negative <code>h</code> puts that face below <code>y</code>. Full-wave solver only.</dd>
                         <dt><code>gnd ngon x= y= r= n= r_in= rot=</code></dt>
                         <dd>Regular n-gon centred on <code>x, y</code>, vertex radius <code>r</code>, <code>n</code> vertices with one on top, turned by <code>rot</code> degrees. <code>r_in</code> cuts a concentric hole: a ring such as a coax shield. Plating covers the whole surface: <code>plating=all</code>. Full-wave solver only.</dd>
+                        <dt><code>gnd ellipse x= y= rx= ry= n= rx_in= ry_in= rot=</code></dt>
+                        <dd>Ellipse centred on <code>x, y</code> with semi-axes <code>rx, ry</code>, <code>n</code> vertices spaced evenly along the outline, one on top. <code>rx_in ry_in</code> cut a concentric elliptical hole (a ring). Plating: <code>plating=all</code>. Full-wave solver only.</dd>
+                        <dt><code>radius= radius_bottom= wall=</code></dt>
+                        <dd>On a rectangle or trapezoid: <code>radius</code> rounds every corner, <code>radius_bottom</code> the two lower ones (<code>0</code> keeps them sharp). A radius of half the height gives a stadium. <code>wall</code> hollows the shape into a shell of that thickness, such as a cable shield; a shell is plated with <code>plating=all</code>. Full-wave solver only.</dd>
                         <dt><code>er= tand=</code></dt>
                         <dd>Dielectric. Where dielectrics overlap the later line wins. <code>thin=1</code> marks a thin sheet for the mesher.</dd>
                         <dt><code>sigma= rq=</code></dt>
@@ -1220,7 +1224,7 @@
         },
         custom_geometry: {
             title: 'Custom Geometry',
-            body: '<p>A cross-section built from rectangles: dielectrics, grounds and one signal conductor or a <b>+</b> / <b>&minus;</b> pair. Everything not covered by a dielectric is air, and the solved region is drawn white in the preview. Trapezoids (traces with an etch angle) and n-gons (round conductors, and rings such as a coax shield) are available on the full-wave solver.</p>' +
+            body: '<p>A cross-section built from rectangles: dielectrics, grounds and one signal conductor or a <b>+</b> / <b>&minus;</b> pair. Everything not covered by a dielectric is air, and the solved region is drawn white in the preview. Trapezoids (traces with an etch angle), n-gons and ellipses (round conductors, and rings such as a coax shield), rounded corners and hollow shells are available on the full-wave solver.</p>' +
                 '<p>The sidebar holds the length unit, the parameters, the boundaries and the solved region. Parameters take a number or an expression, can be used in every rectangle field (<code>w/2</code>, <code>h1+h2</code>, <code>35um</code>), and those set to a number can be swept in the Parameter Sweep tab. Click a name to rename it.</p>' +
                 '<p>The editor under the preview lists the rectangles, one row each, with the conductor\'s own conductivity, roughness and plating. Its <b>Text</b> view is the whole geometry as links and files carry it, with a format reference. Errors appear on the row they belong to and block Solve; Ctrl+Z undoes any edit.</p>'
         },

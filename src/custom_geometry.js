@@ -79,7 +79,7 @@ class CustomGeometrySolver extends FieldSolver2D {
         const rects = this._resolve_rects(geo);
         this._validate_rects(rects, platingMaterial);
         this._build_lists(rects, platingMaterial);
-        // Source lines of the trapezoids and n-gons, which only the full-wave solver takes.
+        // Source lines of the non-rectangular shapes, which only the full-wave solver takes.
         this.shaped_lines = [...new Set(rects.filter(r => r.shape && !r.image).map(r => r.line))];
 
         const signals = this.conductors.filter(c => c.is_signal);
@@ -226,7 +226,8 @@ class CustomGeometrySolver extends FieldSolver2D {
             o.y0 = o.h >= 0 ? o.y : o.y + o.h;
             o.y1 = o.h >= 0 ? o.y + o.h : o.y;
             if (o.shape && (o.x0 < X0 - tol || o.x1 > X1 + tol || o.y0 < Y0 - tol || o.y1 > Y1 + tol)) {
-                throw new Error(`line ${o.line}: the ${o.shape.prim === 'trap' ? 'trapezoid' : 'n-gon'} lies outside the domain.`);
+                const name = { rect: 'rectangle', trap: 'trapezoid', ngon: 'n-gon', ellipse: 'ellipse' }[o.shape.prim];
+                throw new Error(`line ${o.line}: the ${name} lies outside the domain.`);
             }
             if (o.kind === 'diel') {
                 // Dielectrics are clipped to the domain, conductors must fit.
@@ -353,7 +354,8 @@ class CustomGeometrySolver extends FieldSolver2D {
     ensure_mesh() {
         if (this.mesh_backend !== 'triangular' && this.shaped_lines.length) {
             const n = this.shaped_lines.length;
-            throw new Error(`The geometry has non-rectangular shapes (trapezoid or n-gon, line${n > 1 ? 's' : ''} ` +
+            throw new Error('The geometry has shapes other than plain rectangles (trapezoids, n-gons, ellipses, ' +
+                `rounded corners or walls, line${n > 1 ? 's' : ''} ` +
                 `${this.shaped_lines.join(', ')}), which the quasi-static solver does not support. ` +
                 'Use the full-wave solver.');
         }
