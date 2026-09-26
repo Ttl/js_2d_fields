@@ -620,3 +620,102 @@ export function svgShapePath(shape) {
         return d + 'Z';
     }).join(' ');
 }
+
+// Intersection of the half-planes of a convex CCW polygon's edges, each edge moved
+// inward by offsets[i] (outward for a negative offset): the polygon with some faces
+// inset (a plating layer's inside) or grown (a hole widened by a plating layer). Empty
+// when nothing is left.
+export function offsetConvex(poly, offsets) {
+    const n = poly.length >> 1;
+    let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+    for (let i = 0; i < n; i++) {
+        xmin = Math.min(xmin, poly[2 * i]); xmax = Math.max(xmax, poly[2 * i]);
+        ymin = Math.min(ymin, poly[2 * i + 1]); ymax = Math.max(ymax, poly[2 * i + 1]);
+    }
+    const grow = Math.max(0, ...offsets.map(d => -d)) * 2 + (xmax - xmin + ymax - ymin) * 1e-6;
+    let q = [xmin - grow, ymin - grow, xmax + grow, ymin - grow, xmax + grow, ymax + grow, xmin - grow, ymax + grow];
+    for (let i = 0; i < n && q.length >= 6; i++) {
+        const j = (i + 1) % n;
+        const ax = poly[2 * i], ay = poly[2 * i + 1];
+        const ex = poly[2 * j] - ax, ey = poly[2 * j + 1] - ay;
+        const l = Math.hypot(ex, ey);
+        if (!(l > 0)) continue;
+        const nx = -ey / l, ny = ex / l, d = offsets[i];   // inward normal of a CCW edge
+        const side = (x, y) => (x - ax) * nx + (y - ay) * ny - d;
+        const out = [];
+        const m = q.length >> 1;
+        for (let k = 0; k < m; k++) {
+            const k2 = (k + 1) % m;
+            const px = q[2 * k], py = q[2 * k + 1], rx = q[2 * k2], ry = q[2 * k2 + 1];
+            const sp = side(px, py), sr = side(rx, ry);
+            if (sp >= 0) out.push(px, py);
+            if ((sp >= 0) !== (sr >= 0)) {
+                const t = sp / (sp - sr);
+                out.push(px + t * (rx - px), py + t * (ry - py));
+            }
+        }
+        q = out;
+    }
+    return q.length >= 6 && polyArea(q) > 0 ? new Float64Array(q) : new Float64Array(0);
+}
+
+// Cross-section each conductor contributes where conductors of one kind (positive,
+// negative, ground) overlap: an overlapped area counts once, for the later conductor,
+// whose metal fills it. A Map from conductor index, only for the overlapping ones; null
+// when nothing overlaps. Axis-aligned rects are cut into the cells of their edge lines,
+// which is exact; shapes add a fine grid over their bounding box.
+export function visibleAreas(conductors) {
+    const kind = c => (c.is_signal ? (c.polarity < 0 ? -1 : 1) : 0);
+    const box = c => ({ xmin: c.x_min, xmax: c.x_max, ymin: c.y_min, ymax: c.y_max });
+    const overlaps = (a, b) => {
+        if (kind(a) !== kind(b) || (a.shape && isComplement(a.shape)) || (b.shape && isComplement(b.shape))) return false;
+        const w = Math.min(a.x_max, b.x_max) - Math.max(a.x_min, b.x_min);
+        const h = Math.min(a.y_max, b.y_max) - Math.max(a.y_min, b.y_min);
+        // Touching blocks whose shared edge differs by rounding do not overlap.
+        const tol = 1e-9 * Math.max(a.x_max - a.x_min, a.y_max - a.y_min, b.x_max - b.x_min, b.y_max - b.y_min);
+        if (!(w > tol && h > tol)) return false;
+        if (!a.shape && !b.shape) return true;
+        // Shapes: some point of the common box inside both.
+        const n = 16;
+        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+            const x = Math.max(a.x_min, b.x_min) + w * (i + 0.5) / n, y = Math.max(a.y_min, b.y_min) + h * (j + 0.5) / n;
+            if (shapeContains(a, x, y, 0) && shapeContains(b, x, y, 0)) return true;
+        }
+        return false;
+    };
+    const cs = conductors;
+    const inCluster = new Set();
+    for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
+        if (overlaps(cs[i], cs[j])) { inCluster.add(i); inCluster.add(j); }
+    }
+    if (!inCluster.size) return null;
+    const out = new Map();
+    for (const k of [-1, 0, 1]) {
+        // In list order: the later conductor wins.
+        const idx = [...inCluster].filter(i => kind(cs[i]) === k).sort((a, b) => a - b);
+        if (!idx.length) continue;
+        const xs = new Set(), ys = new Set();
+        let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+        for (const i of idx) {
+            const b = box(cs[i]);
+            xs.add(b.xmin); xs.add(b.xmax); ys.add(b.ymin); ys.add(b.ymax);
+            bx0 = Math.min(bx0, b.xmin); bx1 = Math.max(bx1, b.xmax); by0 = Math.min(by0, b.ymin); by1 = Math.max(by1, b.ymax);
+        }
+        if (idx.some(i => cs[i].shape)) {
+            const N = 400;
+            for (let m = 1; m < N; m++) { xs.add(bx0 + (bx1 - bx0) * m / N); ys.add(by0 + (by1 - by0) * m / N); }
+        }
+        const X = [...xs].sort((a, b) => a - b), Y = [...ys].sort((a, b) => a - b);
+        for (const i of idx) out.set(i, 0);
+        for (let a = 0; a + 1 < X.length; a++) {
+            for (let b = 0; b + 1 < Y.length; b++) {
+                const x = (X[a] + X[a + 1]) / 2, y = (Y[b] + Y[b + 1]) / 2;
+                for (let q = idx.length - 1; q >= 0; q--) {
+                    const c = cs[idx[q]];
+                    if (shapeContains(c, x, y, 0)) { out.set(idx[q], out.get(idx[q]) + (X[a + 1] - X[a]) * (Y[b + 1] - Y[b])); break; }
+                }
+            }
+        }
+    }
+    return out;
+}

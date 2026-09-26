@@ -4,7 +4,7 @@ import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor } from './
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
-import { shapeContains } from './shapes.js';
+import { shapeContains, visibleAreas } from './shapes.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -1209,9 +1209,11 @@ export class FieldSolver2D {
 
         let signal_area = 0;
         let ground_area = 0;
+        // Overlapping conductors of one kind count the shared area once.
+        const visible = visibleAreas(this.conductors);
 
-        for (const cond of this.conductors) {
-            const area = Math.abs(cond.width * cond.height);
+        for (const [i, cond] of this.conductors.entries()) {
+            const area = visible && visible.has(i) ? visible.get(i) : Math.abs(cond.width * cond.height);
             if (cond.is_signal) {
                 signal_area += area;
             } else {
@@ -1845,12 +1847,15 @@ export class FieldSolver2D {
     // plating-over-bulk surface impedance assumes a bulk thick against its skin
     // depth. Returns null when no plated rectangular conductor has less than two
     // bulk skin depths under its plating (solid plating is exact by convention).
-    _plating_transition_note(f) {
+    //   meshedThick - thick plating was solved as meshed metal and is left out
+    //   fullWave    - the full-wave solver, which can mesh the plating
+    _plating_transition_note(f, { meshedThick = false, fullWave = false } = {}) {
         if (!(f > 0) || !this.conductors) return null;
         let worst = null;
         for (const c of this.conductors) {
             const pl = c.plating;
             if (c.shape || !pl || !(pl.sigma > 0) || !(pl.top || pl.sides || pl.bottom)) continue;
+            if (meshedThick && pl.thick_corners) continue;
             const tp = pl.thickness ?? 0, t = Math.abs(c.height);
             if (tp >= t) continue;
             const bulk = t - tp;
@@ -1864,7 +1869,9 @@ export class FieldSolver2D {
             `${(worst.t * 1e6).toFixed(2)} µm conductor leaves ${(worst.bulk * 1e6).toFixed(2)} µm of bulk metal ` +
             `under it, less than two skin depths (${(delta * 1e6).toFixed(2)} µm) at this frequency. ` +
             `The layered surface impedance assumes a thick bulk, so conductor loss and internal ` +
-            `inductance can be off by tens of percent here.` };
+            `inductance can be off by tens of percent here.` +
+            (fullWave ? ' Model Thick Plating (Advanced Options) solves the plating as a ' +
+                'layer of metal on the full-wave solver.' : '') };
     }
 
     // DC conductivity of the signal metal: the plating's when every signal
@@ -1898,8 +1905,9 @@ export class FieldSolver2D {
     // the grounds.
     _dc_conductances() {
         const g = { pos: 0, neg: 0, gnd: 0 };
-        for (const c of this.conductors || []) {
-            const v = this._bulk_sigma(c) * Math.abs(c.width * c.height);
+        const visible = visibleAreas(this.conductors || []);
+        for (const [i, c] of (this.conductors || []).entries()) {
+            const v = this._bulk_sigma(c) * (visible && visible.has(i) ? visible.get(i) : Math.abs(c.width * c.height));
             if (!c.is_signal) g.gnd += v; else if (c.polarity < 0) g.neg += v; else g.pos += v;
         }
         return g;

@@ -1027,9 +1027,11 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 .custom-plating-panel, .custom-corner-panel { flex-basis: 100%; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0 2px 24px; }
 .custom-plating-material { display: inline-flex; gap: 6px; padding-left: 6px; border-left: 1px solid var(--border-color); }
 
-/* Custom geometry: plating is set per conductor in the editor */
-body.tl-custom #plating-params,
+/* Custom geometry: plating is set per conductor in the editor, only Model Thick
+   Plating (for every conductor) stays in the sidebar. */
 body.tl-custom .control-group:has(#chk_plating) { display: none !important; }
+body.tl-custom #plating-params { display: block !important; margin: 0; padding: 0; border: none; background: none; }
+body.tl-custom #plating-params > .control-group:not(:has(#chk_plating_thick_corners)) { display: none !important; }
 
 /* Question dialog of the custom geometry editor, styled like the help modal. */
 dialog.custom-choice { padding: 0; border: none; background: transparent; max-width: min(500px, calc(100vw - 32px)); }

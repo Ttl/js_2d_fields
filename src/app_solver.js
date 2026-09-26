@@ -433,9 +433,10 @@ const EXCLUDED_BY_TYPE = {
     broadside_stripline: BROADSIDE_EXCLUDED_KEYS,
     coax: COAX_EXCLUDED_KEYS,
     rect_waveguide: WAVEGUIDE_EXCLUDED_KEYS,
-    // The text carries the whole stackup, the boundaries and the plated faces.
+    // The text carries the whole stackup, the boundaries and the plated faces. Model
+    // Thick Plating stays: it applies to every plated conductor.
     custom: new Set([...COAX_EXCLUDED_KEYS, 'use_plating', 'plating_sigma', 'plating_t', 'plating_rq',
-        'plating_top', 'plating_sides', 'plating_bottom', 'plating_thick_corners']),
+        'plating_top', 'plating_sides', 'plating_bottom']),
 };
 
 function settingsToURL(settings) {

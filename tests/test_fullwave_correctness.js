@@ -36,12 +36,19 @@ async function fdm(opts) {
     const cached = await s.solve_adaptive({ max_iters: 6, energy_tol: 0.005, param_tol: 0.02, max_nodes: 40000 });
     return { s, cached };
 }
-function expectedRdc(s) {
-    let sig = 0, gnd = 0;
-    for (const c of s.conductors) {
-        const a = Math.abs(c.width * c.height);
-        if (c.is_signal) sig += a; else gnd += a;
+// Union area of axis-aligned rects: overlapping metal counts once.
+function unionArea(list) {
+    const xs = [...new Set(list.flatMap(c => [c.x_min, c.x_max]))].sort((a, b) => a - b);
+    const ys = [...new Set(list.flatMap(c => [c.y_min, c.y_max]))].sort((a, b) => a - b);
+    let a = 0;
+    for (let i = 0; i + 1 < xs.length; i++) for (let j = 0; j + 1 < ys.length; j++) {
+        const x = (xs[i] + xs[i + 1]) / 2, y = (ys[j] + ys[j + 1]) / 2;
+        if (list.some(c => x > c.x_min && x < c.x_max && y > c.y_min && y < c.y_max)) a += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j]);
     }
+    return a;
+}
+function expectedRdc(s) {
+    const sig = unionArea(s.conductors.filter(c => c.is_signal)), gnd = unionArea(s.conductors.filter(c => !c.is_signal));
     return (sig > 0 ? 1 / (s.sigma_cond * sig) : 0) + (gnd > 0 ? 1 / (s.sigma_cond * gnd) : 0);
 }
 

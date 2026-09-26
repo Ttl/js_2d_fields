@@ -23,7 +23,7 @@
 // makes that outline PEC and the loss integral finds its surface edges.
 
 import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, shapeLoops,
-         isComplement, REL_SHAPE_TOL } from '../shapes.js';
+         offsetConvex, isComplement, REL_SHAPE_TOL } from '../shapes.js';
 
 // Polygon and ring shapes (custom geometry primitives), as opposed to the circles of
 // the coax model, which keep their own meshing path.
@@ -170,11 +170,61 @@ export function _clipDomain(domain, conductors, boundaries, tol) {
     return { X0, X1, Y0, Y1, wallPEC, wallThick };
 }
 
+// Inside of a conductor's plating layer: the conductor with its plated faces inset by
+// the plating thickness, as a list of rects { xmin, xmax, ymin, ymax } or a shape. The
+// layer lies inside the outline and covers the corners next to it. Only thick plating
+// (thick_corners) is meshed; thin plating stays a layered surface impedance. null when
+// the conductor has no such plating, or so much that nothing is left (solid plating).
+export function platingCore(c) {
+    const pl = c.plating;
+    const t = pl && pl.sigma > 0 ? (pl.thickness ?? 0) : 0;
+    if (!(t > 0) || !pl.thick_corners || !(pl.top || pl.sides || pl.bottom || pl.all)) return null;
+    if (c.shape) {
+        const sh = c.shape;
+        if (sh.type !== 'polygon' && sh.type !== 'ring') return null;
+        const n = sh.poly.length >> 1;
+        const plated = i => pl.all || !sh.faces || !!pl[sh.faces[i]];
+        const poly = offsetConvex(sh.poly, Array.from({ length: n }, (_, i) => (plated(i) ? t : 0)));
+        if (!poly.length) return null;
+        if (sh.type === 'polygon') return { shape: { type: 'polygon', prim: sh.prim, poly, faces: sh.faces && sh.faces.length === n ? sh.faces : undefined } };
+        // A ring is plated on both surfaces: the hole grows by the layer.
+        const hole = offsetConvex(sh.hole, new Array(sh.hole.length >> 1).fill(-t));
+        const inside = (x, y) => shapeContains({ shape: { type: 'polygon', poly } }, x, y, -t * 1e-3);
+        for (let i = 0; i < hole.length; i += 2) if (!inside(hole[i], hole[i + 1])) return null;
+        return { shape: { type: 'ring', prim: sh.prim, poly, hole } };
+    }
+    const r = _rectOf(c);
+    const core = { xmin: r.xmin + (pl.sides ? t : 0), xmax: r.xmax - (pl.sides ? t : 0),
+                   ymin: r.ymin + (pl.bottom ? t : 0), ymax: r.ymax - (pl.top ? t : 0) };
+    if (!(core.xmax > core.xmin && core.ymax > core.ymin)) return null;
+    return { rects: [core] };
+}
+
 // Conductor rects clipped to the meshed box (absorbed / outside ones dropped) and
 // their roles, in matching order. Exported with _clipDomain so tests can rebuild the
 // condRect view of a geometry without meshing it.
 export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) {
-    const rects = [], roles = [];
+    const rects = [], roles = [], cores = [];
+    // Plating core of each entry (meshOpts.plating): a rect clipped like the entry, or
+    // a shape, with the same bookkeeping fields.
+    const coreOf = (c) => {
+        if (!meshOpts.plating) return null;
+        const core = platingCore(c);
+        if (!core) return null;
+        if (core.shape) {
+            const bb = shapeBBox(core.shape);
+            return [{ xmin: bb.xmin, xmax: bb.xmax, ymin: bb.ymin, ymax: bb.ymax, shape: core.shape,
+                      meshArea: shapeArea({ shape: core.shape }, meshOpts) }];
+        }
+        const list = [];
+        for (const k of core.rects) {
+            const xmin = Math.max(k.xmin, X0), xmax = Math.min(k.xmax, X1);
+            const ymin = Math.max(k.ymin, Y0), ymax = Math.min(k.ymax, Y1);
+            if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
+            list.push({ xmin, xmax, ymin, ymax, meshArea: (xmax - xmin) * (ymax - ymin) });
+        }
+        return list.length ? list : null;
+    };
     // sigma, rq: the conductor's own conductivity and surface roughness (custom geometry),
     // null for the solver-wide ones.
     const roleOf = (c) => ({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
@@ -197,6 +247,7 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
             rects.push({ xmin: bb.xmin, xmax: bb.xmax, ymin: bb.ymin, ymax: bb.ymax,
                          shape: c.shape, meshArea: shapeArea(c, meshOpts) });
             roles.push(roleOf(c));
+            cores.push(coreOf(c));
             continue;
         }
         const r = _rectOf(c);
@@ -205,8 +256,9 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
         if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
         rects.push({ xmin, xmax, ymin, ymax, meshArea: (xmax - xmin) * (ymax - ymin) });
         roles.push(roleOf(c));
+        cores.push(coreOf(c));
     }
-    return { rects, roles };
+    return { rects, roles, cores };
 }
 
 // Number of electrically separate ground bodies in a meshed cross-section: ground
@@ -297,7 +349,9 @@ export function buildOccMeshFromGeometry(G, opts) {
     const domainShape = opts.domainShape || null;
     // Half-domain meshing of a shaped domain uses the x >= 0 half of every polygon.
     // Containment, however, always tests the FULL polygon (see condRects below).
-    const meshOpts = { half: symmetry };
+    // plating: mesh the inside of every plating layer as an interface, so the MQS
+    // loss can solve the plating as metal of its own.
+    const meshOpts = { half: symmetry, plating: !!opts.meshPlating };
 
     let X0, X1, Y0, Y1, wallPEC, wallThick;
     if (domainShape) {
@@ -314,7 +368,7 @@ export function buildOccMeshFromGeometry(G, opts) {
     }
 
     // Conductor rects clipped to the meshed domain (absorbed/outside ones dropped).
-    const { rects: condRects, roles: condRoles } = condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts);
+    const { rects: condRects, roles: condRoles, cores: platingCores } = condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts);
 
     const stack = G.stackSave();
     const ierr = G.stackAlloc(4);
@@ -451,6 +505,11 @@ export function buildOccMeshFromGeometry(G, opts) {
         }
         toolTags.push(c.shape ? addPolygon(shapePoly(c.shape, meshOpts)) : addRect(c)); toolCond.push(-1);
     });
+    // Plating cores: interfaces inside the conductors.
+    for (const core of platingCores.flatMap(c => c || [])) {
+        const t = core.shape ? addShapeLoops(core.shape) : addRect(core);
+        if (t !== null) { toolTags.push(t); toolCond.push(-1); }
+    }
 
     // fragment([(2,domTag)], [(2,tool)...]) → conforming arrangement (remove originals).
     const obj = G.stackAlloc(8); G.setValue(obj, 2, 'i32'); G.setValue(obj + 4, domTag, 'i32');
@@ -851,6 +910,9 @@ export function buildOccMeshFromGeometry(G, opts) {
     // ---- condRect for the FEM freedom map ----
     const condRect = {
         rects: condRects, rectRoles: condRoles,
+        // Inside of each entry's plating layer (a list of rects or one shape, null for
+        // none), when meshed.
+        platingCores: platingCores.some(c => c) ? platingCores : null,
         xmin_domain: X0, xmax_domain: X1, ymin_domain: Y0, ymax_domain: Y1,
         // Absolute geometric tolerance (domain-diagonal relative). Shaped containment
         // tests need it: an exact-zero tolerance would reject boundary nodes that are
@@ -888,6 +950,11 @@ export function buildOccMeshFromGeometry(G, opts) {
         if (c.shape) { constraintSegments.push(...shapeSegments(c, meshOpts)); continue; }
         addYR(c.ymin, c.xmin, c.xmax); addYR(c.ymax, c.xmin, c.xmax);
         addXR(c.xmin, c.ymin, c.ymax); addXR(c.xmax, c.ymin, c.ymax);
+    }
+    for (const core of platingCores.flatMap(c => c || [])) {
+        if (core.shape) { constraintSegments.push(...shapeSegments({ shape: core.shape }, meshOpts)); continue; }
+        addYR(core.ymin, core.xmin, core.xmax); addYR(core.ymax, core.xmin, core.xmax);
+        addXR(core.xmin, core.ymin, core.ymax); addXR(core.xmax, core.ymin, core.ymax);
     }
     if (symmetry) addXR(X0, Y0, Y1);
     // Only layers at least two fine element sizes thick contribute their faces: a

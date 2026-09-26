@@ -66,18 +66,26 @@ const warnsOf = (s, r) => [...(r.warnings || []), ...(s.modeWarnings || [])];
     check('no MQS rejection warning', !warnsOf(s, b).some(w => w.type === 'mqs-rejected'));
 }
 
-// F2: plating-transition warning on both backends.
+// F2: plating-transition warning on both backends, wherever the layered plating model
+// is used: the quasi-static solver and the full-wave perturbation path. The full-wave
+// MQS path meshes the plating as metal and needs no bulk behind it.
+const tin = (thickness) => ({ sigma: 8.7e6, thickness, rq: 0, top: true, sides: true, bottom: false, thick_corners: true });
+const hasWarn = (s, r) => warnsOf(s, r).some(w => w.reason === 'plating-transition');
 for (const backend of ['rectilinear', 'triangular']) {
-    console.log(`F2 plating in the skin transition [${backend}]`);
-    const tin = (thickness) => ({ sigma: 8.7e6, thickness, rq: 0, top: true, sides: true, bottom: false, thick_corners: true });
-    const hasWarn = (s, r) => warnsOf(s, r).some(w => w.reason === 'plating-transition');
-    const thin = await solved(ms({ trace_thickness: 1e-6, plating: tin(0.5e-6) }, backend));
+    console.log(`F2 plating in the skin transition [${backend === 'triangular' ? 'full-wave perturbation' : backend}]`);
+    const pert = { lossMethod: 'perturbation' };
+    const thin = await solved(ms({ trace_thickness: 1e-6, plating: tin(0.5e-6) }, backend, pert));
     check('1 um Cu + 0.5 um Sn at 1 GHz warns', hasWarn(thin.s, thin.r));
-    const thick = await solved(ms({ plating: tin(4e-6) }, backend));
+    const thick = await solved(ms({ plating: tin(4e-6) }, backend, pert));
     check('35 um Cu + 4 um Sn at 1 GHz does not warn', !hasWarn(thick.s, thick.r));
     const thickLow = await at(thick.s, thick.r, 1e6);
     check('35 um Cu + 4 um Sn at 1 MHz warns (bulk under the plating thinner than 2 delta)',
         (thickLow.warnings || []).some(w => w.reason === 'plating-transition') || hasWarn(thick.s, thickLow));
+}
+{
+    console.log('F2 plating in the skin transition [full-wave MQS, meshed plating]');
+    const thin = await solved(ms({ trace_thickness: 1e-6, plating: tin(0.5e-6) }));
+    check('1 um Cu + 0.5 um Sn at 1 GHz: MQS, no warning', thin.r.modes[0].lossVia === 'mqs' && !hasWarn(thin.s, thin.r));
 }
 
 // F3: perturbation-path internal inductance near DC.
@@ -111,17 +119,24 @@ for (const backend of ['rectilinear', 'triangular']) {
     check('perturbation L_int below the old cap', lp.L_internal < 0.4 * lp.L_external);
 }
 
-// F8: plating face classification on a thin trace in a wide domain.
+// F8: plating face classification on a thin trace in a wide domain. The layered plating
+// model classifies faces, so this runs the perturbation path (the MQS path meshes the
+// plating, and on a 20 nm film the current is uniform whichever face is plated).
 {
-    console.log('F8 plating faces on a 20 nm trace in a 50 mm enclosure');
+    console.log('F8 plating faces on a 20 nm trace in a 50 mm enclosure (perturbation path)');
     const pl = (top, bottom) => ({ sigma: 1e7, thickness: 10e-9, rq: 1e-6, top, sides: false, bottom, thick_corners: false });
     const geo = { trace_thickness: 20e-9, enclosure_width: 50e-3, boundaries: ['gnd', 'gnd', 'open', 'gnd'], freq: 5e9 };
-    const topOnly = await solved(ms({ ...geo, plating: pl(true, false) }));
-    const botOnly = await solved(ms({ ...geo, plating: pl(false, true) }));
-    const bare = await solved(ms({ ...geo }));
+    const pert = { lossMethod: 'perturbation' };
+    const topOnly = await solved(ms({ ...geo, plating: pl(true, false) }, 'triangular', pert));
+    const botOnly = await solved(ms({ ...geo, plating: pl(false, true) }, 'triangular', pert));
+    const bare = await solved(ms({ ...geo }, 'triangular', pert));
     const Rt = topOnly.r.modes[0].RLGC.R, Rb = botOnly.r.modes[0].RLGC.R, R0 = bare.r.modes[0].RLGC.R;
-    check('rough poor plating on the bottom face costs more than on the top face', Rb > Rt * 1.02,
-        `bottom-only ${Rb.toFixed(1)}, top-only ${Rt.toFixed(1)}, bare ${R0.toFixed(1)} ohm/m`);
+    // R = sqrt(R_dc^2 + R_ac^2) there, and on a 20 nm film the DC part dominates: the
+    // faces show in the AC part.
+    const ac = async (c, R) => { const dc = (await at(c.s, c.r, 0)).modes[0].RLGC.R; return Math.sqrt(Math.max(R * R - dc * dc, 0)); };
+    const At = await ac(topOnly, Rt), Ab = await ac(botOnly, Rb);
+    check('rough poor plating on the bottom face costs more than on the top face', Ab > At * 1.02,
+        `AC part bottom-only ${Ab.toFixed(1)}, top-only ${At.toFixed(1)} ohm/m (R ${Rb.toFixed(1)}, ${Rt.toFixed(1)}, bare ${R0.toFixed(1)})`);
     check('both plated cases exceed bare', Rt > R0 && Rb > R0);
 }
 

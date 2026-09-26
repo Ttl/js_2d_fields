@@ -4,9 +4,9 @@
 // the lists.
 import { FieldSolver2D } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
-import { halfDomainSymmetry, isXSymmetric } from './geometry_symmetry.js';
+import { halfDomainSymmetry, isXSymmetric, conductorFinishKey } from './geometry_symmetry.js';
 import { parseAndEvaluate, formatErrors } from './custom_geometry_text.js';
-import { bodyDistance, translateShapeX } from './shapes.js';
+import { bodyDistance, translateShapeX, shapeContains } from './shapes.js';
 
 const BIG = 1e30;
 const WALLS = ['left', 'right', 'top', 'bottom'];
@@ -51,6 +51,8 @@ class CustomGeometrySolver extends FieldSolver2D {
     //   geometry          - an evaluateGeometry() result
     //   plating           - plating material for rectangles with plating= when the
     //                       text has no plating statement
+    //   thick_plating     - Model Thick Plating for every plated conductor: a layer of
+    //                       metal the full-wave solver meshes, else a layered surface
     //   wall_thickness    - thickness of the ground slab added behind a gnd wall
     //   sigma_cond, freq, nx, ny, rq, mesh_backend, symmetry as for the other solvers
     constructor(options) {
@@ -71,16 +73,20 @@ class CustomGeometrySolver extends FieldSolver2D {
         this.geometry_params = { ...geo.params };
 
         const platingMaterial = geo.plating ?? (options.plating
-            ? { sigma: options.plating.sigma, thickness: options.plating.thickness,
-                rq: options.plating.rq, thick_corners: options.plating.thick_corners }
+            ? { sigma: options.plating.sigma, thickness: options.plating.thickness, rq: options.plating.rq }
             : null);
         this.plating = platingMaterial;
+        this.thick_plating = !!options.thick_plating;
 
         const rects = this._resolve_rects(geo);
         this._validate_rects(rects, platingMaterial);
         this._build_lists(rects, platingMaterial);
         // Source lines of the non-rectangular shapes, which only the full-wave solver takes.
         this.shaped_lines = [...new Set(rects.filter(r => r.shape && !r.image).map(r => r.line))];
+        // Conductors of one kind and different metal that overlap, as [earlier, later]
+        // source lines: the later one's metal fills the overlap, which only the
+        // full-wave solver models.
+        this.metal_overlaps = this._metal_overlaps();
 
         const signals = this.conductors.filter(c => c.is_signal);
         const grounds = this.conductors.filter(c => !c.is_signal);
@@ -339,7 +345,7 @@ class CustomGeometrySolver extends FieldSolver2D {
             // Same fields whether the material comes from the statement, the line or the options.
             const plating = r.faces
                 ? { rq: 0, thick_corners: false, ...platingMaterial, ...(r.platingOwn || {}), ...r.faces } : null;
-            if (plating) { plating.rq = plating.rq ?? 0; plating.thick_corners = !!plating.thick_corners; }
+            if (plating) { plating.rq = plating.rq ?? 0; plating.thick_corners = this.thick_plating; }
             const polarity = r.kind === 'sig+' ? 1 : (r.kind === 'sig-' ? -1 : 0);
             const c = new Conductor(bx, by, bw, bh, polarity !== 0, polarity, plating, r.shape);
             c.src_line = r.line;   // source line, the editor highlights the rectangle from it
@@ -350,8 +356,38 @@ class CustomGeometrySolver extends FieldSolver2D {
         }
     }
 
-    // The quasi-static solver meshes rectangles only.
+    _metal_overlaps() {
+        const cs = this.conductors;
+        const kind = c => (c.is_signal ? c.polarity : 0);
+        const out = [];
+        for (let i = 0; i < cs.length; i++) {
+            for (let j = i + 1; j < cs.length; j++) {
+                const a = cs[i], b = cs[j];
+                if (kind(a) !== kind(b) || conductorFinishKey(a) === conductorFinishKey(b)) continue;
+                const w = Math.min(a.x_max, b.x_max) - Math.max(a.x_min, b.x_min);
+                const h = Math.min(a.y_max, b.y_max) - Math.max(a.y_min, b.y_min);
+                // Touching blocks whose shared edge differs by rounding do not overlap.
+                const tol = 1e-9 * Math.max(a.x_max - a.x_min, a.y_max - a.y_min, b.x_max - b.x_min, b.y_max - b.y_min);
+                if (!(w > tol && h > tol)) continue;
+                let common = !a.shape && !b.shape;
+                // Shapes: a point of the common box inside both.
+                for (let k = 0; k < 256 && !common; k++) {
+                    const x = Math.max(a.x_min, b.x_min) + w * ((k % 16) + 0.5) / 16;
+                    const y = Math.max(a.y_min, b.y_min) + h * (Math.floor(k / 16) + 0.5) / 16;
+                    common = shapeContains(a, x, y, 0) && shapeContains(b, x, y, 0);
+                }
+                if (common) out.push([a.src_line, b.src_line]);
+            }
+        }
+        return out;
+    }
+
+    // The quasi-static solver meshes rectangles only, one metal per point.
     ensure_mesh() {
+        if (this.mesh_backend !== 'triangular' && this.metal_overlaps.length) {
+            throw new Error(`Conductors of different metal overlap (${this.metal_overlaps.map(([a, b]) => `lines ${a} and ${b}`).join(', ')}), ` +
+                'which the quasi-static solver does not support. Use the full-wave solver, or draw the conductors as touching blocks.');
+        }
         if (this.mesh_backend !== 'triangular' && this.shaped_lines.length) {
             const n = this.shaped_lines.length;
             throw new Error('The geometry has shapes other than plain rectangles (trapezoids, n-gons, ellipses, ' +
@@ -441,7 +477,10 @@ class CustomGeometrySolver extends FieldSolver2D {
     }
 
     openBoundaryWarnings(opts) {
-        return [...super.openBoundaryWarnings(opts), ...this.boundaryContactWarnings(), ...this.signalBodyWarnings()];
+        return [...super.openBoundaryWarnings(opts), ...this.boundaryContactWarnings(), ...this.signalBodyWarnings(),
+            ...this.metal_overlaps.map(([a, b]) => `Conductors of different metal overlap (lines ${a} and ${b}): ` +
+                `the later line's metal fills the overlap on the full-wave solver. The quasi-static solver does not support ` +
+                'overlapping metals and refuses this geometry; touching blocks work on both solvers.')];
     }
 
     // Accuracy note for a strongly coupled broadside pair, see BroadsideStriplineSolver.

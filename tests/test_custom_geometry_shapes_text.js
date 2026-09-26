@@ -116,6 +116,34 @@ const U = 'units mm\n';
     check('radius: the quasi-static solver refuses rounded corners', /quasi-static solver does not support/.test(qs), qs);
 }
 
+// --- Thick plating: one solver option for every conductor ---
+{
+    const text = U + 'bounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.2 er=4\n' +
+        'sig- x=-0.4 w=0.3 y=0.2 h=0.035 plating=top plating_sigma=1e7 plating_t=4um\n' +
+        'sig+ x=0.1 w=0.3 y=0.2 h=0.035 plating=top,sides plating_sigma=2e7 plating_t=2um\n';
+    const th = opt => new CustomGeometrySolver({ text, thick_plating: opt }).conductors.filter(c => c.plating).map(c => c.plating.thick_corners);
+    check('thick plating: the solver option sets every conductor, off by default',
+        th(undefined).every(v => v === false) && th(true).every(v => v === true));
+    check('thick plating: thick_corners= in the text points to the option',
+        /Model Thick Plating option/.test(errorsOf(U + 'plating sigma=1e7 t=4um thick_corners=1\n'))
+        && /unknown rectangle key 'plating_thick_corners'/.test(errorsOf(U + 'sig+ x=0 y=0 w=1 h=1 plating_thick_corners=1\n')));
+}
+
+// --- Overlapping conductors of different metal ---
+{
+    const T = extra => U + 'bounds open open gnd gnd\ndomain -1 1 0 0.4\ndiel x=-inf w=inf y=0 h=0.4 er=3.5\n' +
+        'sig+ x=-0.15 w=0.3 y=0.18 h=0.035 sigma=5.8e7\n' + extra;
+    const refuse = t => { try { new CustomGeometrySolver({ text: t }).ensure_mesh(); return ''; } catch (e) { return e.message; } };
+    const diff = new CustomGeometrySolver({ text: T('sig+ x=-0.14 w=0.28 y=0.19 h=0.015 sigma=5.8e5\n') });
+    check('overlap: different metals found', JSON.stringify(diff.metal_overlaps) === '[[5,6]]', JSON.stringify(diff.metal_overlaps));
+    check('overlap: warned, with the rule', diff.openBoundaryWarnings().some(w => /later line's metal fills the overlap/.test(w)));
+    check('overlap: the quasi-static solver refuses it', /different metal overlap \(lines 5 and 6\).*quasi-static/.test(refuse(T('sig+ x=-0.14 w=0.28 y=0.19 h=0.015 sigma=5.8e5\n'))));
+    check('overlap: the same metal is fine', refuse(T('sig+ x=-0.14 w=0.28 y=0.19 h=0.015\n'.replace('\n', ' sigma=5.8e7\n'))) === '');
+    check('overlap: touching blocks of different metal are fine', refuse(T('sig+ x=0.15 w=0.05 y=0.18 h=0.035 sigma=5.8e5\n')) === '');
+    check('overlap: different roughness counts as different metal',
+        new CustomGeometrySolver({ text: T('sig+ x=-0.14 w=0.28 y=0.19 h=0.015 sigma=5.8e7 rq=1um\n') }).metal_overlaps.length === 1);
+}
+
 // --- Mirror ---
 {
     const g = parseAndEvaluate(U + 'sig+ trap x=0.1 y=0 w=0.3 h=0.035 angle=30 angle2=10 mirror=1');

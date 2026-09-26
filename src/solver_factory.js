@@ -216,6 +216,7 @@ export function buildSolverFromParams(p, onError = null) {
                 nx: p.nx,
                 ny: p.ny,
                 rq: p.rq,
+                thick_plating: !!p.plating_thick_corners,
             });
         } else if (p.tl_type === 'coax') {
             // Full-wave only. CoaxSolver throws on any other backend. addCommonOptions is

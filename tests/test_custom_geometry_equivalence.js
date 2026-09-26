@@ -73,7 +73,8 @@ function fingerprint(s, r) {
 }
 
 function common(opts, extra = {}) {
-    return { sigma_cond: opts.sigma_cond, freq: opts.freq, nx: opts.nx, ny: opts.ny, rq: opts.rq, ...extra };
+    return { sigma_cond: opts.sigma_cond, freq: opts.freq, nx: opts.nx, ny: opts.ny, rq: opts.rq,
+             thick_plating: !!(opts.plating && opts.plating.thick_corners), ...extra };
 }
 
 for (const [name, Cls, opts] of CASES) {

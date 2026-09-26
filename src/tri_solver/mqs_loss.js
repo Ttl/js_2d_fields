@@ -283,17 +283,17 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         const xc = (nodes[2*v0]+nodes[2*v1]+nodes[2*v2])/3;
         const yc = (nodes[2*v0+1]+nodes[2*v1+1]+nodes[2*v2+1])/3;
         // Same containment test as inAnyRect, but keeping the matching rect's
-        // index so the triangle lands in its polarity group (first match wins,
-        // identical iteration order = identical classification).
+        // index so the triangle lands in its polarity group. Where rects of one kind
+        // overlap the later one wins, as for dielectrics.
         let si = -1;
-        for (let i = 0; i < sigRects.length; i++) {
+        for (let i = sigRects.length - 1; i >= 0; i--) {
             const r = sigRects[i];
             if (r.shape ? shapeContains(r, xc, yc, TOL)
                 : (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL)) { si = i; break; }
         }
         if (si >= 0) { isCondTri[t] = 1; triGroup[t] = groupOfSig[si]; triRect[t] = sigIdx[si]; }
         else {
-            for (let i = 0; i < gndRects.length; i++) {
+            for (let i = gndRects.length - 1; i >= 0; i--) {
                 const r = gndRects[i];
                 if (r.shape ? shapeContains(r, xc, yc, TOL)
                     : (xc > r.xmin - TOL && xc < r.xmax + TOL && yc > r.ymin - TOL && yc < r.ymax + TOL)) {
@@ -842,7 +842,9 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             let qx = (x0 + x1) / 2, qy = (y0 + y1) / 2;
             const ccx = (nodes[2*tris[3*cnd]] + nodes[2*tris[3*cnd+1]] + nodes[2*tris[3*cnd+2]]) / 3;
             const ccy = (nodes[2*tris[3*cnd]+1] + nodes[2*tris[3*cnd+1]+1] + nodes[2*tris[3*cnd+2]+1]) / 3;
-            for (const r of rects) {
+            // Later rects first: where rects overlap the later one is the metal.
+            for (let ri = rects.length - 1; ri >= 0; ri--) {
+                const r = rects[ri];
                 if (r.shape) {
                     // A polygon side: snap onto the nearest point of its boundary.
                     if (!shapeContains(r, ccx, ccy, TOL)) continue;
@@ -932,8 +934,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     };
     const rolesX = condRect.rectRoles || null;
     let dSig = Infinity, dGr = Infinity;
+    // Thin dimension: a shape's declared thickness (a ring's wall), else the smaller side.
+    const thinOf = r => ((r.shape && r.shape.thickness > 0) ? r.shape.thickness : Math.min(r.xmax - r.xmin, r.ymax - r.ymin));
     rects.forEach((r, i) => {
-        const d = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+        const d = thinOf(r);
         if (!rolesX || rolesX[i].is_signal) dSig = Math.min(dSig, d / 2); else dGr = Math.min(dGr, d);
     });
     const kTrace = 1 / slabR(dSig), kGr = 1 / slabR(dGr);
@@ -955,7 +959,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 const Zs = calculate_Zrough(freq, sigma * sRel[i], Rq);
                 psiR = Zs.re / RsI; psiX = Zs.im / RsI;
             }
-            const d = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+            const d = thinOf(r);
             const x = (isSig ? d / 2 : d) / deltaI;
             const k = (!(x > 0) || x > 20) ? 1
                 : (Math.cosh(2*x) - Math.cos(2*x)) / (Math.sinh(2*x) + Math.sin(2*x));

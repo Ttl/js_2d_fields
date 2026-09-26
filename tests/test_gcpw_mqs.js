@@ -33,6 +33,18 @@ const base = {
 };
 const gcpw = { ...base, use_coplanar_gnd: true, gap: 0.15e-3, via_gap: 0.3e-3, use_vias: true };
 
+// Union area of axis-aligned rects: overlapping metal counts once.
+function unionArea(list) {
+    const xs = [...new Set(list.flatMap(c => [c.x_min, c.x_max]))].sort((a, b) => a - b);
+    const ys = [...new Set(list.flatMap(c => [c.y_min, c.y_max]))].sort((a, b) => a - b);
+    let a = 0;
+    for (let i = 0; i + 1 < xs.length; i++) for (let j = 0; j + 1 < ys.length; j++) {
+        const x = (xs[i] + xs[i + 1]) / 2, y = (ys[j] + ys[j + 1]) / 2;
+        if (list.some(c => x > c.x_min && x < c.x_max && y > c.y_min && y < c.y_max)) a += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j]);
+    }
+    return a;
+}
+
 async function tri(opts, triOpts = {}) {
     const s = new MicrostripSolver(opts);
     const b = new TriBackend(ctx, s, { maxNodes: 18000, ...triOpts });
@@ -46,11 +58,8 @@ async function tri(opts, triOpts = {}) {
     const bP = await tri(gcpw, { lossMethod: 'perturbation' });
 
     const r0 = b.solveAt(0).modes[0];
-    let sig = 0, gnd = 0;
-    for (const c of b.solver.conductors) {
-        const a = Math.abs(c.width * c.height);
-        if (c.is_signal) sig += a; else gnd += a;
-    }
+    const sig = unionArea(b.solver.conductors.filter(c => c.is_signal));
+    const gnd = unionArea(b.solver.conductors.filter(c => !c.is_signal));
     const rdc = 1 / (SIGMA * sig) + 1 / (SIGMA * gnd);
     check('GCPW R(f=0) = geometric R_dc', relDiff(r0.RLGC.R, rdc) < 1e-9,
         `${r0.RLGC.R.toFixed(4)} vs ${rdc.toFixed(4)} Ω/m`);

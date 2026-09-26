@@ -25,7 +25,7 @@ import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
          groundBodyCount } from './occ_to_mesh.js';
-import { shapeArea, shapeBBox, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance, isComplement } from '../shapes.js';
+import { shapeArea, shapeBBox, shapePoly, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance, visibleAreas, isComplement } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
@@ -255,6 +255,29 @@ function makePlatingZs(solver, condRect, freq) {
     return { Zbare, zForFace, zAt };
 }
 
+// Conductor list of the MQS loss with plating meshed: each plated entry becomes the
+// entry itself as plating metal (plating sigma and roughness, no plating) followed by
+// its core (bulk metal, own sigma and roughness). The later of overlapping rects wins,
+// so a triangle in the core is bulk and one in the layer is plating. A face the
+// plating leaves bare is a face of the core. null without plating cores.
+function meshedPlatingCR(cr) {
+    const cores = cr.platingCores;
+    if (!cores) return null;
+    const rects = [], rectRoles = [];
+    cr.rects.forEach((r, i) => {
+        const role = cr.rectRoles[i], core = cores[i];
+        if (!core) { rects.push(r); rectRoles.push(role); return; }
+        const pl = role.plating;
+        rects.push(r);
+        rectRoles.push({ ...role, plating: null, sigma: pl.sigma, rq: pl.rq ?? 0 });
+        for (const k of core) {
+            rects.push({ ...k, symmetry: r.symmetry, xmin_domain: r.xmin_domain, ymin_domain: r.ymin_domain, is_signal: r.is_signal });
+            rectRoles.push({ ...role, plating: null });
+        }
+    });
+    return { ...cr, rects, rectRoles };
+}
+
 // Polygon and ring shapes (custom geometry primitives), meshed like rects.
 const isPolyShape = (shape) => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
 
@@ -265,6 +288,28 @@ function solidPlated(r, pl) {
     const h = r.height !== undefined ? Math.abs(r.height)
         : ((r.ymax !== undefined ? r.ymax : r.y_max) - (r.ymin !== undefined ? r.ymin : r.y_min));
     return (pl.thickness ?? 0) >= h;
+}
+
+// Cross-section of a conductor's plating layer, which lies inside its outline: the
+// plated faces of a rectangle times the thickness (a corner counted once), the whole
+// perimeter of a shape.
+function platingArea(c) {
+    const pl = c.plating;
+    const t = pl && pl.sigma > 0 ? (pl.thickness ?? 0) : 0;
+    if (!(t > 0)) return 0;
+    if (c.shape) {
+        if (isComplement(c.shape)) return 0;
+        let per = 0;
+        const loops = c.shape.type === 'ring' ? [c.shape.poly, c.shape.hole] : [shapePoly(c.shape)];
+        for (const poly of loops) {
+            const n = poly.length >> 1;
+            for (let i = 0; i < n; i++) { const j = (i + 1) % n; per += Math.hypot(poly[2 * j] - poly[2 * i], poly[2 * j + 1] - poly[2 * i + 1]); }
+        }
+        return Math.min(per * t, shapeArea(c));
+    }
+    const w = Math.abs(c.width), h = Math.abs(c.height);
+    const tb = (pl.top ? 1 : 0) + (pl.bottom ? 1 : 0), sd = pl.sides ? 2 : 0;
+    return Math.min(tb * w * t + sd * h * t - (pl.sides ? tb * 2 * t * t : 0), w * h);
 }
 
 // Thickness a conductor's surface reactance saturates on: the slab reactance
@@ -318,8 +363,9 @@ function buildFaceZs(solver, condRect, freq) {
     const rects = condRect.rects || [];
     const tol = platingTol(condRect);
     const { Zbare, zForFace, zAt } = makePlatingZs(solver, condRect, freq);
+    // Later rects first: where rects of one kind overlap the later one is the metal.
     return (x, y, orient) => {
-        for (let ri = 0; ri < rects.length; ri++) {
+        for (let ri = rects.length - 1; ri >= 0; ri--) {
             const r = rects[ri];
             if (r.shape) {
                 // Curved surface: orientation carries no face information. A point on
@@ -364,7 +410,7 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
             const n0 = edges[2 * e], n1 = edges[2 * e + 1];
             const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1];
             const x1 = nodes[2 * n1], y1 = nodes[2 * n1 + 1];
-            for (let ri = 0; ri < rects.length; ri++) {
+            for (let ri = rects.length - 1; ri >= 0; ri--) {
                 const r = rects[ri];
                 if (r.shape) {
                     // Both endpoints on the curved boundary => a surface edge. There is
@@ -1149,6 +1195,9 @@ export class TriBackend {
             // always lands here: its shaped (non-rectangular) conductors rule
             // MQS out.
             meshConductorInterior: mqsPre,
+            // The MQS loss solves plating as a layer of metal, which needs the inside of
+            // each plating layer as a mesh interface.
+            meshPlating: mqsPre,
             occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
             gmshOptions: this.opts.gmshOptions,
         };
@@ -2289,6 +2338,13 @@ export class TriBackend {
         return r.L_internal > 0 ? r.L_internal : 0;
     }
 
+    // meshedPlatingCR of this.condRect, built once per mesh.
+    _meshedPlatingCR() {
+        const cr = this.condRect;
+        if (!this._mpc || this._mpc.src !== cr) this._mpc = { src: cr, cr: meshedPlatingCR(cr) };
+        return this._mpc.cr;
+    }
+
     _modeAtFreq(mode, f) {
         const { mesh } = this;
         const s = this.solver;
@@ -2524,6 +2580,15 @@ export class TriBackend {
             minDim = Math.min(minDim, c.shape ? condThinDim(c) : Math.min(c.xmax - c.xmin, c.ymax - c.ymin));
         }
         if (f > 0 && useMQS) {
+            // Plating is meshed: each plated conductor is its plating layer (plating
+            // metal and roughness) around its core (the bulk). The conductor list of
+            // this solve carries the two as separate metals, see _meshedPlatingCR.
+            const crM = this._meshedPlatingCR() || cr;
+            const meshedPlating = crM !== cr;
+            const anyPlatingM = crM.rectRoles.some(r => r.plating && r.plating.sigma > 0
+                && (r.plating.top || r.plating.sides || r.plating.bottom));
+            const ownRqM = crM.rectRoles.some(r => r.rq !== null && r.rq !== undefined && r.rq !== (s.rq ?? 0));
+            const ownSigmaM = crM.rectRoles.some(r => r.sigma && r.sigma !== (s.sigma_cond ?? 5.8e7));
             // The volume eddy solve runs the conductor BODY at the bulk metal σ;
             // plating is a SURFACE effect applied only through surfaceZs (relative to
             // the bulk Rs). So with plating, use the bulk σ here — NOT effectiveSurface's
@@ -2533,15 +2598,17 @@ export class TriBackend {
             // thick as the trace) have no bulk: the body runs at the plating sigma,
             // and the walls keep the bulk metal through wallSigma.
             const bulkSigma = s.sigma_cond ?? 5.8e7;
-            const sigIdx = cr.rectRoles.map((r, i) => r.is_signal ? i : -1).filter(i => i >= 0);
-            const solidSig = anyPlating && sigIdx.length > 0
-                && sigIdx.every(i => solidPlated(cr.rects[i], cr.rectRoles[i].plating));
-            const mqsSigma = solidSig ? cr.rectRoles[sigIdx[0]].plating.sigma
-                : anyPlating ? bulkSigma : sigma;
-            const mqsDelta = anyPlating ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
+            const sigIdx = crM.rectRoles.map((r, i) => r.is_signal ? i : -1).filter(i => i >= 0);
+            const solidSig = anyPlatingM && sigIdx.length > 0
+                && sigIdx.every(i => solidPlated(crM.rects[i], crM.rectRoles[i].plating));
+            const mqsSigma = solidSig ? crM.rectRoles[sigIdx[0]].plating.sigma
+                : (anyPlatingM || meshedPlating) ? bulkSigma : sigma;
+            const mqsDelta = (anyPlatingM || meshedPlating) ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
+            // The walls are bulk metal whenever the solve runs at another sigma.
+            const wallSigma = (solidSig || meshedPlating) ? bulkSigma : undefined;
             // Conductivity of each meshed rect when any conductor has its own.
-            const rectSigma = ownSigma ? cr.rects.map((r, i) => {
-                const role = cr.rectRoles[i];
+            const rectSigma = ownSigmaM ? crM.rects.map((r, i) => {
+                const role = crM.rectRoles[i];
                 return solidPlated(r, role.plating) ? role.plating.sigma : (role.sigma || bulkSigma);
             }) : null;
             // Skin-band element size at the conductor surface (xδ) and band width (xδ).
@@ -2580,7 +2647,7 @@ export class TriBackend {
             // whole refinement with the trace still coarse, worse than no
             // ground band at all).
             const sigRects = [], gndRects = [];
-            cr.rects.forEach((r, i) => (cr.rectRoles[i].is_signal ? sigRects : gndRects).push(r));
+            crM.rects.forEach((r, i) => (crM.rectRoles[i].is_signal ? sigRects : gndRects).push(r));
             let gndGrading = null;
             if (gndRects.length) {
                 // Dfine keys off the signal-ground clearance (the GCPW slot width):
@@ -2616,8 +2683,8 @@ export class TriBackend {
             // one entry unless conductors have their own conductivity.
             const byDelta = (isSig) => {
                 const out = new Map();
-                cr.rects.forEach((r, i) => {
-                    if (cr.rectRoles[i].is_signal !== isSig) return;
+                crM.rects.forEach((r, i) => {
+                    if (crM.rectRoles[i].is_signal !== isSig) return;
                     const k = rectSigma ? Math.sqrt(mqsSigma / rectSigma[i]) : 1;
                     if (!out.has(k)) out.set(k, []);
                     out.get(k).push(r);
@@ -2727,18 +2794,18 @@ export class TriBackend {
             // of the mode solves at this frequency, so it adds no factorization.
             this._lineEval = mqsMulti ? { f, mesh: mqsMesh, run: (line) => {
                 const cache = this._mqsMultiCache || (this._mqsMultiCache = {});
-                const o = { wallPEC: cr.wallPEC || null, wallThick: cr.wallThick || null,
-                            wallSigma: solidSig ? bulkSigma : undefined,
-                            topGround: !!(cr.wallPEC && cr.wallPEC.top), oddSymmetry: false,
+                const o = { wallPEC: crM.wallPEC || null, wallThick: crM.wallThick || null,
+                            wallSigma,
+                            topGround: !!(crM.wallPEC && crM.wallPEC.top), oddSymmetry: false,
                             diffPair: true, cache,
                             modeCurrents: line === 0 ? [Math.SQRT2, 0] : line === 1 ? [0, Math.SQRT2] : [1, 1] };
                 if (rectSigma) o.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
-                if (anyPlating || ownRq || ownSigma) o.surfaceZs = buildFaceZs(s, cr, f);
+                if (anyPlatingM || ownRqM || ownSigmaM) o.surfaceZs = buildFaceZs(s, crM, f);
                 else o.Rq = rq;
-                const m = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, o);
+                const m = mqsConductorLoss(mqsMesh, crM, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, o);
                 const pl = (cache.pecLine && cache.pecLine.mesh === mqsMesh) ? cache.pecLine
                     : (cache.pecLine = { mesh: mqsMesh, L: [] });
-                if (pl.L[line] === undefined) pl.L[line] = mqsPecInductance(mqsMesh, cr, this.ctx.helpers.solveSparseMulti, o);
+                if (pl.L[line] === undefined) pl.L[line] = mqsPecInductance(mqsMesh, crM, this.ctx.helpers.solveSparseMulti, o);
                 return { R: m.R_total / 2, L_internal: m.L_loop - pl.L[line] + m.L_wall };
             } } : null;
             const rTol = this.opts.mqsInterpTol ?? 2e-3;
@@ -2760,9 +2827,9 @@ export class TriBackend {
             // modeCurrents instead, and shares one cache across both modes. The
             // assembly and the per-frequency unit solves are mode-independent
             // there, so the second mode at each frequency skips the factorization.
-            const mqsOpts = { wallPEC: cr.wallPEC || null, wallThick: cr.wallThick || null,
-                              wallSigma: solidSig ? bulkSigma : undefined,
-                              topGround: !!(cr.wallPEC && cr.wallPEC.top),   // legacy fallback
+            const mqsOpts = { wallPEC: crM.wallPEC || null, wallThick: crM.wallThick || null,
+                              wallSigma,
+                              topGround: !!(crM.wallPEC && crM.wallPEC.top),   // legacy fallback
                               oddSymmetry: this.symmetry && mode === 'odd',
                               diffPair: !!s.is_differential,
                               // Frequency-invariant assembly cache (validated
@@ -2772,11 +2839,11 @@ export class TriBackend {
                                               : (st.mqsCache || (st.mqsCache = {})) };
             if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st);
             if (rectSigma) mqsOpts.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
-            if (anyPlating || ownRq || ownSigma) mqsOpts.surfaceZs = buildFaceZs(s, cr, f);
+            if (anyPlatingM || ownRqM || ownSigmaM) mqsOpts.surfaceZs = buildFaceZs(s, crM, f);
             else mqsOpts.Rq = rq;
             let mqs = null;
             try {
-                mqs = mqsConductorLoss(mqsMesh, cr, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, mqsOpts);
+                mqs = mqsConductorLoss(mqsMesh, crM, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, mqsOpts);
             } catch (e) {
                 // Surface the downgrade instead of silently falling back: an MQS solve
                 // failure here is almost always the factorization exhausting the WASM heap
@@ -2810,7 +2877,7 @@ export class TriBackend {
                 // R/omega orders of magnitude above its true internal inductance.
                 const pc = mqsOpts.cache;
                 if (!(pc.pecMesh === mqsMesh && pc.pecMode === mode)) {
-                    pc.Lpec = mqsPecInductance(mqsMesh, cr, this.ctx.helpers.solveSparseMulti, mqsOpts);
+                    pc.Lpec = mqsPecInductance(mqsMesh, crM, this.ctx.helpers.solveSparseMulti, mqsOpts);
                     pc.pecMesh = mqsMesh; pc.pecMode = mode;
                 }
                 L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
@@ -2842,17 +2909,24 @@ export class TriBackend {
         // plating sigma.
         const sigmaDC = s.sigma_cond ?? 5.8e7;
         let sigArea = 0, gndArea = 0, sigCond = 0, gndCond = 0, posCond = 0, negCond = 0;
-        for (const c of s.conductors) {
+        // Conductors of one kind that overlap count the shared area once, at the later one's metal.
+        const visible = visibleAreas(s.conductors);
+        for (const [ci, c] of s.conductors.entries()) {
             // shapeArea is the bbox product for a plain rect (unchanged) but
             // the true cross-section for a shaped one. A complement shell
             // returns 0: the coax shield is modelled as infinitely thick, so it
             // carries no DC resistance.
             const a = shapeArea(c);
-            const sg = solidPlated(c, c.plating) ? c.plating.sigma : (c.sigma > 0 ? c.sigma : sigmaDC);
+            const bulk = c.sigma > 0 ? c.sigma : sigmaDC;
+            const sg = solidPlated(c, c.plating) ? c.plating.sigma : bulk;
+            // A thinner plating replaces the outer layer of the bulk and conducts at
+            // its own sigma.
+            const ap = solidPlated(c, c.plating) ? 0 : platingArea(c);
+            const g = visible && visible.has(ci) ? sg * visible.get(ci) : sg * (a - ap) + (ap > 0 ? c.plating.sigma * ap : 0);
             if (c.is_signal) {
-                sigArea += a; sigCond += sg * a;
-                if (c.polarity < 0) negCond += sg * a; else posCond += sg * a;
-            } else { gndArea += a; gndCond += sg * a; }
+                sigArea += a; sigCond += g;
+                if (c.polarity < 0) negCond += g; else posCond += g;
+            } else { gndArea += a; gndCond += g; }
         }
         // Mode-aware per-line convention for a differential pair (mirrors
         // field_solver.calculate_conductor_loss): sigArea sums both traces, the odd
@@ -2971,7 +3045,11 @@ export class TriBackend {
 
         // Plating whose bulk underneath is thinner than two skin depths: the layered
         // surface impedance both loss paths weight by has no bulk to stand on.
-        const platingNote = (f > 0 && s._plating_transition_note) ? s._plating_transition_note(f) : null;
+        // The note is about the layered model: plating meshed by the MQS solve (thick
+        // plating) needs no bulk behind it.
+        const platingNote = (f > 0 && s._plating_transition_note)
+            ? s._plating_transition_note(f, { meshedThick: lossVia === 'mqs' && !!this.condRect.platingCores, fullWave: true })
+            : null;
         if (platingNote && this._modeWarnings && !this._modeWarnings.some(w => w.reason === 'plating-transition')) {
             this._modeWarnings.push({ ...platingNote, mode, freq: f });
         }

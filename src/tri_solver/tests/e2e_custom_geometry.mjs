@@ -244,9 +244,10 @@ check('a field value with a space before the unit parses', await page.evaluate((
     /rq=1um/.test(document.getElementById('custom_geom_text').value)
     && document.getElementById('custom-geom-errors').textContent === ''));
 await sigRow.locator('.custom-cell', { has: page.locator('.custom-cell-label', { hasText: /^rq$/ }) }).first().locator('input').fill('0.001');
-check('the sidebar has no surface plating block in the custom type', await page.evaluate(() =>
+check('the sidebar has no surface plating block in the custom type, only Model Thick Plating', await page.evaluate(() =>
     getComputedStyle(document.querySelector('.control-group:has(#chk_plating)')).display === 'none'
-    && getComputedStyle(document.getElementById('plating-params')).display === 'none'));
+    && [...document.querySelectorAll('#plating-params > .control-group')]
+        .every(g => (getComputedStyle(g).display === 'none') !== !!g.querySelector('#chk_plating_thick_corners'))));
 const platingToggle = sigRow.locator('.custom-plating-toggle');
 check('the plating options are collapsed on an unplated conductor',
     !(await sigRow.locator('.custom-plating-panel').isVisible()) && /▸ plating$/.test(await platingToggle.textContent()));
@@ -654,6 +655,13 @@ check('leaving the custom type restores the fixed sidebar', await page.evaluate(
         paths: (document.getElementById('sim_canvas').layout.shapes || []).filter(s => s.type === 'path').length,
         errors: document.getElementById('custom-geom-errors').textContent }));
     check('the twinax template: n-gons and a stadium shell', tw.shapes === 'ngon,ngon,rect' && tw.paths >= 5 && !tw.errors, JSON.stringify(tw));
+
+    // Model Thick Plating applies to every conductor: the only plating control in the sidebar.
+    const side = await p5.evaluate(() => {
+        const vis = id => { const e = document.getElementById(id); return !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden'; };
+        return { thick: vis('chk_plating_thick_corners'), faces: vis('chk_plating_top'), sigma: vis('inp_plating_sigma') };
+    });
+    check('the sidebar keeps Model Thick Plating, not the other plating controls', side.thick && !side.faces && !side.sigma, JSON.stringify(side));
 
     // Coax: converts to n-gons and solves on the full-wave solver.
     await p5.selectOption('#tl_type', 'coax');
