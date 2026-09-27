@@ -103,11 +103,6 @@ class CustomGeometrySolver extends FieldSolver2D {
         const symAllowed = options.symmetry !== false && mirror;
         if (!symAllowed) this.tri_symmetry = false;
         this.sym_half = this.mesh_backend !== 'triangular' && symAllowed && symInfo.ok;
-        // A signal body drawn as two rectangles that meet on the plane is cut by it
-        // just like a single rectangle that crosses it.
-        const planeTol = this.domain_width * 1e-6;
-        const meetsPlane = signals.some(c => Math.abs(c.x_min) <= planeTol || Math.abs(c.x_max) <= planeTol);
-        this._sym_signal_straddles = this.sym_half && (symInfo.straddles || meetsPlane);
         this._proximityWarn = this._broadside_proximity_note(signals);
         // Per-conductor finishes need the centred loss quadrature (see
         // calculate_conductor_loss): the default rule only balances over mirrored pairs

@@ -228,12 +228,6 @@ for (const fam of FAMILIES) {
         sigma_cond: 5.8e7, freq: 1e9,
     });
     check('broadside pair never takes the half domain', !bs.sym_half);
-    const single = new MicrostripSolver({ ...geom, nx: 30, ny: 30 });
-    check('single-ended straddling trace flagged for x2 charge scaling',
-        single.sym_half === true && single._sym_signal_straddles === true);
-    const pair = new MicrostripSolver({ ...FAMILIES[2].geom, nx: 30, ny: 30 });
-    check('differential pair: no straddle scaling (full per-trace contour)',
-        pair.sym_half === true && pair._sym_signal_straddles === false);
 }
 
 done();

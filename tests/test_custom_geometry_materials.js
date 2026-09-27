@@ -117,6 +117,13 @@ for (const [name, extra] of BACKENDS) {
 
     // --- 5 ---
     await mixedPair(name, 'two-metal', `sigma=${LOW}`, '', extra, 0.03, 0.2);
+    // Solid plating on one trace is a trace of the plating metal, also below the skin
+    // transition where the surface impedance cannot stand in for it.
+    const solidOne = await solveR(pair('', 'plating=top,sides,bottom plating_sigma=1e7 plating_t=0.04'), { ...extra, freq: 1e6 });
+    const ownOne = await solveR(pair('', 'sigma=1e7'), { ...extra, freq: 1e6 });
+    check(`${name}: solid plating on one trace of a pair = that trace in the plating metal`,
+        [0, 1].every(i => rel(solidOne[i].R, ownOne[i].R) < 0.01),
+        solidOne.map((m, i) => `${m.R.toFixed(3)} vs ${ownOne[i].R.toFixed(3)}`).join(', '));
     // A poorly conducting plating on one trace, a rough bare surface on the other.
     await mixedPair(name, 'two-finish', 'plating=top,sides,bottom plating_sigma=2e6 plating_t=0.004', 'rq=0.001',
         extra, extra.mesh_backend ? 0.04 : 0.03, 0.05);

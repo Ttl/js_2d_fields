@@ -6,6 +6,8 @@
 //      plating=top model, down to a block thinner than its skin depth. The full-wave
 //      eddy-current solve meshes the block and is the reference; the quasi-static
 //      surface integral takes the layered impedance for it.
+//   4. two separate traces of one net, mirrored about x = 0: the half domain solves
+//      like the full domain (the meshed trace carries half the line current)
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { check, quiet, rel, done } from './helpers.js';
 
@@ -18,10 +20,10 @@ const stacked = e => S(-0.15, 0.3, 0.2, 0.0175, e) + S(-0.15, 0.3, 0.2175, 0.017
 const topBlock = (t, e) => S(-0.15, 0.3, 0.2, 0.035 - t) + S(-0.15, 0.3, 0.235 - t, t, e);
 
 const SOLVE = { max_iters: 8, energy_tol: 0.005, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
-async function solve(body, backend) {
-    const s = new CustomGeometrySolver({ text: HEAD + body, nx: 30, ny: 30, freq: 5e9, mesh_backend: backend });
+async function solve(body, backend, extra = {}) {
+    const s = new CustomGeometrySolver({ text: HEAD + body, nx: 30, ny: 30, freq: 5e9, mesh_backend: backend, ...extra });
     const m = (await quiet(() => s.solve_adaptive(SOLVE))).modes[0];
-    return { R: m.RLGC.R, Li: m.L_internal, Z0: m.Z0 };
+    return { R: m.RLGC.R, Li: m.L_internal, Z0: m.Z0, C: m.RLGC.C };
 }
 
 const ref = {};
@@ -56,6 +58,13 @@ for (const t of [0.001, 0.005]) {
     const q = ref[`rectilinear${t}`], f = ref[`triangular${t}`];
     check(`${t * 1e3} um top block: quasi-static agrees with full-wave`, rel(q.R, f.R) < 0.05 && rel(q.Li, f.Li) < 0.06,
         `R ${q.R.toFixed(2)} vs ${f.R.toFixed(2)}, L_int ${(q.Li * 1e9).toFixed(3)} vs ${(f.Li * 1e9).toFixed(3)} nH/m`);
+}
+for (const [name, backend] of [['QS', 'rectilinear'], ['full-wave', 'triangular']]) {
+    const two = S(-0.3, 0.2, 0.2, 0.035) + S(0.1, 0.2, 0.2, 0.035);
+    const half = await solve(two, backend), full = await solve(two, backend, { symmetry: false });
+    check(`${name}: two traces of one net, half domain = full domain`,
+        rel(half.C, full.C) < 0.01 && rel(half.R, full.R) < 0.02 && rel(half.Li, full.Li) < 0.02,
+        `C ${(half.C * 1e12).toFixed(2)} vs ${(full.C * 1e12).toFixed(2)} pF/m, R ${half.R.toFixed(3)} vs ${full.R.toFixed(3)} ohm/m`);
 }
 {
     let msg = '';

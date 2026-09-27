@@ -131,10 +131,6 @@ class MicrostripSolver extends FieldSolver2D {
                                            this.domain_width, this.is_differential);
         if (options.symmetry === false) this.tri_symmetry = false;
         this.sym_half = this.mesh_backend !== 'triangular' && options.symmetry !== false && symInfo.ok;
-        // A signal straddling the plane is cut in half by the grid, so its charge
-        // contour captures Q/2 (capacitance needs x2). A signal entirely at x>0
-        // (one trace of a differential pair) keeps its full contour (x1).
-        this._sym_signal_straddles = this.sym_half && symInfo.straddles;
 
         // Create mesher but don't generate mesh yet
         // Geometry is centered at x=0, so domain spans from -domain_width/2 to +domain_width/2

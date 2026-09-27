@@ -1522,10 +1522,10 @@ export class FieldSolver2D {
                 }
             }
         }
-        // A signal cut in half by the symmetry plane captures exactly half the
-        // charge. A signal entirely inside x > 0 (one trace of a differential
-        // pair) keeps its full contour.
-        const scale = (this.sym_half && this._sym_signal_straddles) ? 2 : 1;
+        // A single-ended half domain holds half the line charge (a signal cut by the
+        // symmetry plane, or one of a mirrored pair of traces). A differential half
+        // domain holds one full trace of the pair.
+        const scale = (this.sym_half && !this.is_differential) ? 2 : 1;
         return scale * Math.abs(Q);
     }
 

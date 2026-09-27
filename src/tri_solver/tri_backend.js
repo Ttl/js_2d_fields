@@ -2694,7 +2694,6 @@ export class TriBackend {
             // A conductor with a surface roughness of its own needs the per-face surface
             // impedance just like plating does.
             const ownRqM = crM.rectRoles.some(r => r.rq !== null && r.rq !== undefined && r.rq !== (s.rq ?? 0));
-            const ownSigmaM = crM.rectRoles.some(r => r.sigma && r.sigma !== (s.sigma_cond ?? 5.8e7));
             // The volume eddy solve runs the conductor BODY at the bulk metal σ;
             // plating is a SURFACE effect applied only through surfaceZs (relative to
             // the bulk Rs). So with plating, use the bulk σ here — NOT effectiveSurface's
@@ -2709,6 +2708,10 @@ export class TriBackend {
                 && sigIdx.every(i => solidPlated(crM.rects[i], crM.rectRoles[i].plating));
             const mqsSigma = solidSig ? crM.rectRoles[sigIdx[0]].plating.sigma
                 : (anyPlatingM || meshedPlating) ? bulkSigma : sigma;
+            // A conductor of another metal: its own sigma, or solid plating while the
+            // solve runs at the bulk sigma.
+            const ownSigmaM = crM.rectRoles.some((r, i) => (r.sigma && r.sigma !== bulkSigma)
+                || (!solidSig && solidPlated(crM.rects[i], r.plating)));
             const mqsDelta = (anyPlatingM || meshedPlating) ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
             // The walls are bulk metal whenever the solve runs at another sigma.
             const wallSigma = (solidSig || meshedPlating) ? bulkSigma : undefined;

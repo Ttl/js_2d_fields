@@ -471,8 +471,6 @@ function cachedPrecompute(mesh, condRect, opts) {
 // per skin mesh by the caller. Same I_mesh normalization as mqsConductorLoss.
 export function mqsPecInductance(mesh, condRect, solveSparseMulti, opts = {}) {
     const { tris, triEdges, nNodes, nTris } = mesh;
-    const rects = condRect.rects || [condRect];
-    const roles = condRect.rectRoles || null;
     const sym = condRect.symmetry > 1 ? 2 : 1;
     const pre = cachedPrecompute(mesh, condRect, opts);
     const { isCondTri, dofOf, nF, triGroup, rowPtr, colIdx, valS } = pre;
@@ -524,10 +522,8 @@ export function mqsPecInductance(mesh, condRect, solveSparseMulti, opts = {}) {
         }
         for (let k = 0; k < nG; k++) { let a = 0; for (let i = 0; i < nF; i++) a += Sp[i] * phi[k][i]; Phi[j].push(a); }
     }
-    // Same current normalization as the MQS solve. Signal cut by the symmetry
-    // plane carries half the current.
-    const straddles = rects.some((r, i) => (!roles || roles[i].is_signal) && r.xmin <= condRect.xmin_domain + 1e-12);
-    const I_mesh = (sym === 2 && straddles) ? 0.5 : 1;
+    // Same current normalization as the MQS solve.
+    const I_mesh = (sym === 2 && !opts.diffPair) ? 0.5 : 1;
     const I = (opts.modeCurrents && sym === 1 && nG > 1 && opts.modeCurrents.length === nG) ? opts.modeCurrents : null;
     if (!I) return I_mesh * MU0 / Phi[0][0];
     // L = mu0 * Phi^-1 contracted with the mode currents: (I^T L I) / (I^T I).
@@ -673,15 +669,12 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         for (let i = 0; i < nF; i++) rhs[i] = MU0 * sigma * Fc[i];
         [sol] = solveComplexSymmetric(nF, csr, [rhs]);
 
-        // Rescale C for trace current 1 A. When the signal conductor straddles the
-        // symmetry plane (single-ended half mesh), the meshed part carries half the
-        // current. When it lies entirely inside the half domain (differential pair,
-        // one full trace meshed), it carries the full per-trace current. Ground rects
-        // are excluded. They carry return current, not the normalized drive current.
-        const rolesCR = condRect.rectRoles || null;
-        const straddles = rects.some((r, i) =>
-            (!rolesCR || rolesCR[i].is_signal) && r.xmin <= xmin_d + 1e-12);
-        const I_mesh = (sym === 2 && straddles) ? 0.5 : 1;
+        // Rescale C for trace current 1 A. A single-ended half mesh carries half the
+        // line current, whether its signal straddles the symmetry plane or is one of a
+        // mirrored pair of traces. A differential half mesh holds one full trace and
+        // carries the full per-trace current. Ground rects are excluded, they carry
+        // return current, not the normalized drive current.
+        const I_mesh = (sym === 2 && !opts.diffPair) ? 0.5 : 1;
         let fr = 0, fi = 0;
         for (let i = 0; i < nF; i++) { fr += Fc[i] * sol[i]; fi += Fc[i] * sol[nF + i]; }
         const dR = sigma * (condArea + omega * fi);
@@ -966,7 +959,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         }
     }
 
-    // Totals: R = 2P/|I|². Single-ended (straddling): R_total is the line R for
+    // Totals: R = 2P/|I|². Single-ended: R_total is the line R for
     // |I| = 1 A. Differential half mesh (full trace meshed, per-trace |I| = 1):
     // R_total covers BOTH traces (mirror included) — per-trace mode R is
     // R_total/2, and L_loop is already per-trace (from the drive field C/I₁).
