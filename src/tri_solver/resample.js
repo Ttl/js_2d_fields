@@ -7,11 +7,10 @@
 // and the same quasi-TEM field the FDM plots), not the complex full-wave
 // eigenvector. The triangle mesh itself is also returned for the mesh overlay.
 
-import { triCoefficients, lv, le, lvGrad, leGrad } from './tri_fem.js';
+import { triCoefficients } from './tri_fem.js';
 import { shapeContains, distToShapeBoundary } from '../shapes.js';
 import { evalFieldsAtPoint } from './tri_ms_solver.js';
 
-const EDGE_VERTS = [[0, 1], [1, 2], [2, 0]];
 
 // Build the regular sample grid for `domain`, honoring an optional caller-supplied
 // grid (normally buildGridFromMesh's mesh-derived graded grid). Shared by
@@ -123,9 +122,39 @@ function buildLocator(mesh) {
         }
         return coeffCache[t];
     }
+    // The adaptively refined triangles crowd the few buckets around the conductors,
+    // exactly where the graded plot grid samples most. A bucket holding many triangles
+    // gets a sub-grid, each sub-cell listing (in the same ascending order) the bucket's
+    // triangles whose bounding box, widened past the containment tolerance below,
+    // reaches it. Every triangle that can pass the test at a point is in that point's
+    // sub-cell, so the first hit is the same triangle the whole bucket would give.
+    const SUB_MIN = 24;
+    const subs = new Array(nb * nb).fill(null);
+    for (let k = 0; k < nb * nb; k++) {
+        const list = buckets[k];
+        if (list.length <= SUB_MIN) continue;
+        const i = Math.floor(k / nb), j = k % nb;
+        const cx0 = xmin + i * dx, cy0 = ymin + j * dy;
+        const m = Math.ceil(Math.sqrt(list.length / 4));
+        const sdx = dx / m, sdy = dy / m;
+        const cells = Array.from({ length: m * m }, () => []);
+        const sx = v => Math.min(m - 1, Math.max(0, Math.floor((v - cx0) / sdx)));
+        const sy = v => Math.min(m - 1, Math.max(0, Math.floor((v - cy0) / sdy)));
+        for (const t of list) {
+            const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
+            const x0 = Math.min(nodes[2*v0], nodes[2*v1], nodes[2*v2]), x1 = Math.max(nodes[2*v0], nodes[2*v1], nodes[2*v2]);
+            const y0 = Math.min(nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]), y1 = Math.max(nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]);
+            const pad = 1e-6 * Math.hypot(x1 - x0, y1 - y0);
+            for (let a = sx(x0 - pad); a <= sx(x1 + pad); a++)
+                for (let b = sy(y0 - pad); b <= sy(y1 + pad); b++) cells[a * m + b].push(t);
+        }
+        subs[k] = { cells, sx, sy, m };
+    }
     function locate(x, y) {
         if (x < xmin || x > xmax || y < ymin || y > ymax) return -1;
-        const list = buckets[bx(x) * nb + by(y)];
+        const k = bx(x) * nb + by(y);
+        const sub = subs[k];
+        const list = sub ? sub.cells[sub.sx(x) * sub.m + sub.sy(y)] : buckets[k];
         for (const t of list) {
             const c = coeffOf(t);
             const l0 = c[0][0] + c[0][1] * x + c[0][2] * y;
@@ -138,25 +167,24 @@ function buildLocator(mesh) {
     return { locate, coeffOf };
 }
 
-// Evaluate φ and ∇φ of a P2 static solution at point (x,y) in triangle t.
-function evalPhi(phi, mesh, coeff, t, x, y) {
+// φ of a P2 static solution at (x, y) in triangle t: the vertex bases -λ + 2λ² and the
+// edge bases 4 λi λj, without the gradient (E comes from differences of V). The
+// resampler samples V several times per grid point, so this is its inner loop.
+function evalPhiValue(phi, mesh, coeff, t, x, y) {
     const { tris, triEdges } = mesh;
-    const v = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
-    let val = 0, gx = 0, gy = 0;
-    for (let k = 0; k < 3; k++) {
-        const pv = phi.phiVertex[v[k]];
-        val += pv * lv(coeff, k, x, y);
-        const g = lvGrad(coeff, k, x, y);
-        gx += pv * g[0]; gy += pv * g[1];
-    }
-    for (let k = 0; k < 3; k++) {
-        const pe = phi.phiEdge[triEdges[3 * t + k]];
-        const [i, j] = EDGE_VERTS[k];
-        val += pe * le(coeff, i, j, x, y);
-        const g = leGrad(coeff, i, j, x, y);
-        gx += pe * g[0]; gy += pe * g[1];
-    }
-    return { V: val, Ex: -gx, Ey: -gy };
+    const c0 = coeff[0], c1 = coeff[1], c2 = coeff[2];
+    const l0 = c0[0] + c0[1]*x + c0[2]*y;
+    const l1 = c1[0] + c1[1]*x + c1[2]*y;
+    const l2 = c2[0] + c2[1]*x + c2[2]*y;
+    const pv = phi.phiVertex, pe = phi.phiEdge, e = 3 * t;
+    let val = 0;
+    val += pv[tris[e]] * (-l0 + 2*l0*l0);
+    val += pv[tris[e + 1]] * (-l1 + 2*l1*l1);
+    val += pv[tris[e + 2]] * (-l2 + 2*l2*l2);
+    val += pe[triEdges[e]] * (4*l0*l1);
+    val += pe[triEdges[e + 1]] * (4*l1*l2);
+    val += pe[triEdges[e + 2]] * (4*l2*l0);
+    return val;
 }
 
 // Resample a static solution onto a regular grid spanning `domain`.
@@ -225,7 +253,7 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
         let t = locate(qx + eps, qy + eps);
         if (t < 0) t = locate(qx, qy);
         if (t < 0) return NaN;
-        return s * evalPhi(phi, mesh, coeffOf(t), t, qx, qy).V;
+        return s * evalPhiValue(phi, mesh, coeffOf(t), t, qx, qy);
     };
     for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
@@ -237,8 +265,7 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
             let t = locate(qx + eps, y[j] + eps);
             if (t < 0) t = locate(qx, y[j]);   // domain edge: fall back to the exact point
             if (t < 0) continue;
-            const r = evalPhi(phi, mesh, coeffOf(t), t, qx, y[j]);
-            V[j][i] = sV * r.V;
+            V[j][i] = sV * evalPhiValue(phi, mesh, coeffOf(t), t, qx, y[j]);
             hT[j][i] = sizeAt(t, qx, y[j]);
         }
     }
