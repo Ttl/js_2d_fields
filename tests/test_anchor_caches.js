@@ -131,5 +131,22 @@ for (const c of CASES) {
     }
 }
 
+// The static anchor walk (_eigenBias) caches only accepted picks: a pick 7% off the
+// static eps (another mode) at 100 MHz is rejected and must not become the exact
+// dispersion-cache answer for a later sweep point at 100 MHz.
+{
+    const { TriBackend } = await import('../src/tri_solver/tri_backend.js');
+    const b = Object.create(TriBackend.prototype);
+    b.mesh = {}; b.solver = { use_causal_materials: false }; b._modeWarnings = [];
+    const epsStatic = 3.3;
+    b._eigenPick = (st, f) => ({ fw: { eps: f < 1.5e8 ? 1.07 * epsStatic : 1.002 * epsStatic, ambiguous: false }, fwErr: null });
+    const st = { disp: { xs: [], ys: [] } };
+    const bias = b._eigenBias('single', st, null, epsStatic);
+    const cached = st.disp.xs.map(x => Math.exp(x));
+    check('static anchor walk: a rejected pick is not cached', !cached.some(f => Math.abs(f / 1e8 - 1) < 1e-9)
+        && cached.some(f => Math.abs(f / 2e8 - 1) < 1e-9) && Math.abs(bias - 1.002) < 1e-12,
+        `cached ${cached.map(f => (f / 1e6).toFixed(0) + ' MHz').join(', ')}, bias ${bias}`);
+}
+
 console.log(`\n${failures === 0 ? 'ALL PASSED' : `${failures} FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

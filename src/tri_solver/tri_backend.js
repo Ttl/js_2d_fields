@@ -2292,7 +2292,7 @@ export class TriBackend {
         const cache = this._eigenBiasCache.byMode;
         if (cache[mode] !== undefined) return cache[mode];
         // Safety net: walk up to 1 GHz if the anchor solve returns no quasi-TEM candidate.
-        // This shouldn't be needed with tree-cotree cauge.
+        // This shouldn't be needed with the tree-cotree gauge.
         const ANCHORS = [F_STATIC_MAX, 2e8, 5e8, 1e9];
         let bias = 1, ok = false;
         const reasons = [];
@@ -2311,11 +2311,12 @@ export class TriBackend {
         for (const fa of (fwAtAnchor ? ANCHORS.slice(1) : ANCHORS)) {
             if (ok) break;
             const { fw, fwErr } = this._eigenPick(st, fa, phiEps, eps_eff_static);
-            // An exact eigensolve like any sweep point's: the dispersion cache keeps it.
-            // Not with causal materials, the material map is the one of the current
-            // frequency, not fa's.
-            if (st.disp && fw && fw.eps > 0 && !this.solver.use_causal_materials) dispersionInsert(st.disp, fa, fw.eps);
             ok = accept(fw, fwErr, fa);
+            // An accepted exact eigensolve like any sweep point's: the dispersion cache
+            // keeps it. Not a rejected or ambiguous pick (it may be another mode, and a
+            // sweep point at fa would reuse it without warning), and not with causal
+            // materials, the material map is the one of the current frequency, not fa's.
+            if (ok && st.disp && !fw.ambiguous && !this.solver.use_causal_materials) dispersionInsert(st.disp, fa, fw.eps);
         }
         if (!ok && this._modeWarnings && !this._modeWarnings.some(w => w.mode === mode && w.type === 'eigen-anchor')) {
             const msg = `${mode} mode: no usable full-wave anchor eigensolve (${reasons.join('; ')}) — reported `
