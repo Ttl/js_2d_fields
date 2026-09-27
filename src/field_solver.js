@@ -918,76 +918,7 @@ export class FieldSolver2D {
                 const fn = idx(i, j);
                 const n = full_to_red[fn];
 
-                const boundary =
-                    i === 0 || i === ny - 1 || j === 0 || j === nx - 1;
-
-                let dxr, dxl, dyu, dyd;
-                if (boundary) {
-                    dxr = j < nx - 1 ? dx[j] : dx[j - 1];
-                    dxl = j > 0 ? dx[j - 1] : dx[j];
-                    dyu = i < ny - 1 ? dy[i] : dy[i - 1];
-                    dyd = i > 0 ? dy[i - 1] : dy[i];
-                } else {
-                    dxr = dx[j];
-                    dxl = dx[j - 1];
-                    dyu = dy[i];
-                    dyd = dy[i - 1];
-                }
-
-                // The control volume around node (i,j) spans half a cell in each
-                // direction. At a domain edge the missing half is the mirror of
-                // the present one (V[-1] = V[1]),
-                // which is what the dxl/dyd fallbacks above encode. Each of its
-                // four faces is therefore split across two cells, and the flux
-                // through it is the cell permittivities weighted by how much of
-                // the face each cell covers:
-                //
-                //     cr = -( eps[cid][j] * hd + eps[ciu][j] * hu ) / dxr
-                //
-                // and so on. With interfaces on grid lines (which is where the
-                // mesher puts them) no cell straddles a material boundary, so
-                // this is exact, unlike averaging the two nodal permittivities,
-                // which smears every interface by half a cell. It is also
-                // symmetric by construction: node (i,j+1)'s left face reads the
-                // same cells with the same weights, which is what lets the
-                // system be factored by Cholesky rather than LU.
-                //
-                // Conductors need no special case: a cell fully inside a
-                // conductor is only ever read by a node inside that conductor,
-                // and those nodes are pinned.
-                const cid = i > 0 ? i - 1 : 0;                 // cell row below the node
-                const ciu = i < ny - 1 ? i : ny - 2;           // cell row above
-                const cjl = j > 0 ? j - 1 : 0;                 // cell column left of the node
-                const cjr = j < nx - 1 ? j : nx - 2;           // cell column right
-                const hd = 0.5 * dyd, hu = 0.5 * dyu;          // face halves in y
-                const wl = 0.5 * dxl, wr = 0.5 * dxr;          // face halves in x
-
-                let cr = 0, cl = 0, cu = 0, cd = 0;
-                if (j < nx - 1) cr = -(epsC(cid, j) * hd + epsC(ciu, j) * hu) / dxr;
-                if (j > 0)      cl = -(epsC(cid, cjl) * hd + epsC(ciu, cjl) * hu) / dxl;
-                if (i < ny - 1) cu = -(epsC(i, cjl) * wl + epsC(i, cjr) * wr) / dyu;
-                if (i > 0)      cd = -(epsC(cid, cjl) * wl + epsC(cid, cjr) * wr) / dyd;
-                // Magnetic-wall symmetry plane. The mirrored ghost (V[-1] = V[1],
-                // dxl = dxr) folds the left flux into the right one, so the
-                // full-domain row restricted to x >= 0 is 2*cr*(V1-V0) plus
-                // vertical terms over the full width dx[0] (cjl == cjr == 0 there
-                // already gives that width).
-                if (this.sym_half && j === 0 && !pec) cr *= 2;
-
-                // Half-domain rows at j >= 1 each stand for a mirror pair of
-                // full-domain nodes while the plane row (j = 0) stands for one,
-                // so the restriction above (cr *= 2) leaves the operator
-                // unsymmetric: A[0,1] = 2*cr but A[1,0] = cr. Scaling every
-                // j >= 1 row by 2 makes it exactly P^T A P (P = the half -> full
-                // prolongation that duplicates x > 0 nodes), which is symmetric
-                // positive definite. Same solution, scaling a row and its
-                // right-hand side entry together is an identity, but Cholesky
-                // can factor it. Cholesky is ~1.4x faster than LU here.
-                // (In the PEC case every unknown row has j >= 1, so this is a
-                // uniform x2 and the matrix was symmetric either way.)
-                if (this.sym_half && j > 0) {
-                    cr *= 2; cl *= 2; cu *= 2; cd *= 2;
-                }
+                const [cd, cl, cr, cu] = this._stencil(i, j, dx, dy, epsC, pec);
 
                 const cc = -(cr + cl + cu + cd);
 
@@ -1027,6 +958,229 @@ export class FieldSolver2D {
         }
 
         return Vs;
+    }
+
+    // Flux coefficients [down, left, right, up] of node (i, j) in the Laplace
+    // operator of solve_laplace_multi, then the cells and half widths of its control
+    // volume. epsC(ci, cj) is the cell permittivity, pec pins the half-domain symmetry
+    // plane. The coefficients are negative and symmetric between neighbouring rows
+    // (see the notes below).
+    _stencil(i, j, dx, dy, epsC, pec) {
+        const ny = this.y.length, nx = this.x.length;
+        const boundary =
+            i === 0 || i === ny - 1 || j === 0 || j === nx - 1;
+
+        let dxr, dxl, dyu, dyd;
+        if (boundary) {
+            dxr = j < nx - 1 ? dx[j] : dx[j - 1];
+            dxl = j > 0 ? dx[j - 1] : dx[j];
+            dyu = i < ny - 1 ? dy[i] : dy[i - 1];
+            dyd = i > 0 ? dy[i - 1] : dy[i];
+        } else {
+            dxr = dx[j];
+            dxl = dx[j - 1];
+            dyu = dy[i];
+            dyd = dy[i - 1];
+        }
+
+        // The control volume around node (i,j) spans half a cell in each
+        // direction. At a domain edge the missing half is the mirror of
+        // the present one (V[-1] = V[1]),
+        // which is what the dxl/dyd fallbacks above encode. Each of its
+        // four faces is therefore split across two cells, and the flux
+        // through it is the cell permittivities weighted by how much of
+        // the face each cell covers:
+        //
+        //     cr = -( eps[cid][j] * hd + eps[ciu][j] * hu ) / dxr
+        //
+        // and so on. With interfaces on grid lines (which is where the
+        // mesher puts them) no cell straddles a material boundary, so
+        // this is exact, unlike averaging the two nodal permittivities,
+        // which smears every interface by half a cell. It is also
+        // symmetric by construction: node (i,j+1)'s left face reads the
+        // same cells with the same weights, which is what lets the
+        // system be factored by Cholesky rather than LU.
+        //
+        // Conductors need no special case: a cell fully inside a
+        // conductor is only ever read by a node inside that conductor,
+        // and those nodes are pinned.
+        const cid = i > 0 ? i - 1 : 0;                 // cell row below the node
+        const ciu = i < ny - 1 ? i : ny - 2;           // cell row above
+        const cjl = j > 0 ? j - 1 : 0;                 // cell column left of the node
+        const cjr = j < nx - 1 ? j : nx - 2;           // cell column right
+        const hd = 0.5 * dyd, hu = 0.5 * dyu;          // face halves in y
+        const wl = 0.5 * dxl, wr = 0.5 * dxr;          // face halves in x
+
+        let cr = 0, cl = 0, cu = 0, cd = 0;
+        if (j < nx - 1) cr = -(epsC(cid, j) * hd + epsC(ciu, j) * hu) / dxr;
+        if (j > 0)      cl = -(epsC(cid, cjl) * hd + epsC(ciu, cjl) * hu) / dxl;
+        if (i < ny - 1) cu = -(epsC(i, cjl) * wl + epsC(i, cjr) * wr) / dyu;
+        if (i > 0)      cd = -(epsC(cid, cjl) * wl + epsC(cid, cjr) * wr) / dyd;
+        // Magnetic-wall symmetry plane. The mirrored ghost (V[-1] = V[1],
+        // dxl = dxr) folds the left flux into the right one, so the
+        // full-domain row restricted to x >= 0 is 2*cr*(V1-V0) plus
+        // vertical terms over the full width dx[0] (cjl == cjr == 0 there
+        // already gives that width).
+        if (this.sym_half && j === 0 && !pec) cr *= 2;
+
+        // Half-domain rows at j >= 1 each stand for a mirror pair of
+        // full-domain nodes while the plane row (j = 0) stands for one,
+        // so the restriction above (cr *= 2) leaves the operator
+        // unsymmetric: A[0,1] = 2*cr but A[1,0] = cr. Scaling every
+        // j >= 1 row by 2 makes it exactly P^T A P (P = the half -> full
+        // prolongation that duplicates x > 0 nodes), which is symmetric
+        // positive definite. Same solution, scaling a row and its
+        // right-hand side entry together is an identity, but Cholesky
+        // can factor it. Cholesky is ~1.4x faster than LU here.
+        // (In the PEC case every unknown row has j >= 1, so this is a
+        // uniform x2 and the matrix was symmetric either way.)
+        if (this.sym_half && j > 0) {
+            cr *= 2; cl *= 2; cu *= 2; cd *= 2;
+        }
+        // Also the node's control volume: the cells around it and the half widths.
+        return [cd, cl, cr, cu, cid, ciu, cjl, cjr, hd, hu, wl, wr];
+    }
+
+    // DC internal inductance of the signal conductors with perfectly conducting grounds,
+    // per unit current: a 2x2 matrix over the positive (or single-ended) and negative
+    // traces seen on this grid, zero where a trace is absent, or null. The traces carry
+    // uniform current, split by conductivity, and the result is the loop inductance
+    // (integral of J A) less the external inductance of perfectly conducting traces on
+    // the same operator, so their discretization errors largely cancel. A half-domain
+    // trace stands for itself and its mirror image: the currents are the full-domain
+    // conjugates of the drives. Frequency independent, cached per grid and planeBC.
+    // The cached _dc_signal_inductance matrix for a mode's symmetry-plane condition,
+    // or null when it has not been computed on the current grid.
+    _dc_signal_matrix(mode) {
+        const c = this._dcSig, key = this._plane_bc(mode) || 'none';
+        return c && c.x === this.x && c.y === this.y ? c.m[key] ?? null : null;
+    }
+
+    async _ensure_dc_signal_inductance(planeBC = null) {
+        const key = planeBC || 'none';
+        const cache = this._dcSig;
+        if (cache && cache.x === this.x && cache.y === this.y && key in cache.m) return cache.m[key];
+        if (!cache || cache.x !== this.x || cache.y !== this.y) this._dcSig = { x: this.x, y: this.y, m: {} };
+        const result = await this._dc_signal_inductance(planeBC).catch(() => null);
+        this._dcSig.m[key] = result;
+        return result;
+    }
+
+    async _dc_signal_inductance(planeBC) {
+        if (!this.conductors || !this.ground_mask) return null;
+        const nx = this.x.length, ny = this.y.length, ncx = nx - 1;
+        const dx = diff(this.x), dy = diff(this.y);
+        const pec = planeBC === 'pec';
+        const mult = this.sym_half ? 2 : 1;
+        const netOf = c => (this.is_differential && c.polarity < 0 ? 1 : 0);
+        // Signal net and conductivity of each cell, the later conductor winning.
+        const cellNet = new Int8Array((ny - 1) * ncx).fill(-1), cellSig = new Float64Array((ny - 1) * ncx);
+        for (const c of this.conductors) {
+            if (!c.is_signal) continue;
+            const sig = this._bulk_sigma(c);
+            for (let i = 0; i < ny - 1; i++) {
+                const yc = 0.5 * (this.y[i] + this.y[i + 1]);
+                if (yc < c.y_min || yc > c.y_max) continue;
+                for (let j = 0; j < ncx; j++) {
+                    const xc = 0.5 * (this.x[j] + this.x[j + 1]);
+                    if (xc < c.x_min || xc > c.x_max) continue;
+                    cellNet[i * ncx + j] = netOf(c); cellSig[i * ncx + j] = sig;
+                }
+            }
+        }
+        const G = [0, 0];
+        for (let i = 0; i < ny - 1; i++) for (let j = 0; j < ncx; j++) {
+            const k = i * ncx + j;
+            if (cellNet[k] >= 0) G[cellNet[k]] += cellSig[k] * dx[j] * dy[i] * mult;
+        }
+        const nets = [0, 1].filter(k => G[k] > 0);
+        if (!nets.length) return null;
+        const isSig = (i, j) => (this.is_differential ? this.signal_p_mask[i][j] || this.signal_n_mask[i][j] : this.signal_mask[i][j]);
+        const sigNet = (i, j) => (this.is_differential && this.signal_n_mask[i][j] ? 1 : 0);
+        let grounded = pec;
+        for (let i = 0; i < ny && !grounded; i++) for (let j = 0; j < nx; j++) if (this.ground_mask[i][j]) { grounded = true; break; }
+        if (!grounded) return null;
+
+        const one = () => 1.0;
+        const st = [];
+        for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) st.push(this._stencil(i, j, dx, dy, one, pec));
+        // Solves the vacuum operator with pinned nodes at fixed(m, i, j) and the source
+        // density J(m, cell) (per unit mu0). Returns the full node arrays and the
+        // right-hand sides.
+        const solve = async (pinned, fixed, J, nDrives) => {
+            const idx = new Int32Array(nx * ny).fill(-1);
+            let N = 0;
+            for (let n = 0; n < nx * ny; n++) if (!pinned((n / nx) | 0, n % nx)) idx[n] = N++;
+            const Bs = Array.from({ length: nDrives }, () => new Float64Array(N));
+            const rowPtr = new Int32Array(N + 1), colIdx = new Int32Array(5 * N), values = new Float64Array(5 * N);
+            let nnz = 0;
+            for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+                const r = idx[i * nx + j];
+                if (r < 0) continue;
+                const [cd, cl, cr, cu, cid, ciu, cjl, cjr, hd, hu, wl, wr] = st[i * nx + j];
+                const scale = this.sym_half && j > 0 ? 2 : 1;
+                for (let m = 0; m < nDrives; m++) {
+                    Bs[m][r] += scale * (J(m, cid * ncx + cjl) * wl * hd + J(m, cid * ncx + cjr) * wr * hd
+                        + J(m, ciu * ncx + cjl) * wl * hu + J(m, ciu * ncx + cjr) * wr * hu);
+                }
+                const nb = (ii, jj, c) => {
+                    const q = idx[ii * nx + jj];
+                    if (q >= 0) { colIdx[nnz] = q; values[nnz++] = c; }
+                    else for (let m = 0; m < nDrives; m++) Bs[m][r] -= c * fixed(m, ii, jj);
+                };
+                if (i > 0) nb(i - 1, j, cd);
+                if (j > 0) nb(i, j - 1, cl);
+                colIdx[nnz] = r; values[nnz++] = -(cd + cl + cr + cu);
+                if (j < nx - 1) nb(i, j + 1, cr);
+                if (i < ny - 1) nb(i + 1, j, cu);
+                rowPtr[r + 1] = nnz;
+            }
+            const xs = await solveWithWASMMulti({ rowPtr, colIdx: colIdx.subarray(0, nnz), values: values.subarray(0, nnz) }, Bs);
+            const As = xs.map((x, m) => {
+                const A = new Float64Array(nx * ny);
+                for (let n = 0; n < nx * ny; n++) A[n] = idx[n] >= 0 ? x[idx[n]] : fixed(m, (n / nx) | 0, n % nx);
+                return A;
+            });
+            return { As, Bs, idx };
+        };
+
+        // Uniform current in each net, unit full-domain current per drive.
+        const J = (m, k) => (cellNet[k] === nets[m] ? cellSig[k] / G[nets[m]] : 0);
+        const dcPinned = (i, j) => this.ground_mask[i][j] || (pec && j === 0);
+        const dc = await solve(dcPinned, () => 0, J, nets.length);
+        const MU0 = CONSTANTS.MU0;
+        const Ldc = nets.map(() => nets.map(() => 0));
+        for (let a = 0; a < nets.length; a++) for (let b = 0; b < nets.length; b++) {
+            let w = 0;
+            for (let n = 0; n < nx * ny; n++) { const r = dc.idx[n]; if (r >= 0) w += dc.Bs[a][r] * dc.As[b][n]; }
+            Ldc[a][b] = MU0 * w;
+        }
+
+        // Perfectly conducting traces at unit potential, one drive per net: the energy
+        // form K of the same operator gives the external inductance mu0 K^-1.
+        const pecPinned = (i, j) => dcPinned(i, j) || isSig(i, j);
+        const ext = await solve(pecPinned, (m, i, j) => (isSig(i, j) && sigNet(i, j) === nets[m] ? 1 : 0), () => 0, nets.length);
+        const K = nets.map(() => nets.map(() => 0));
+        for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+            const n = i * nx + j;
+            const edges = [];
+            if (j < nx - 1) edges.push([n + 1, -st[n + 1][1]]);   // right edge, the neighbour's left coefficient
+            if (i < ny - 1) edges.push([n + nx, -st[n][3]]);      // up edge
+            for (const [q, g] of edges) {
+                for (let a = 0; a < nets.length; a++) for (let b = 0; b < nets.length; b++) {
+                    K[a][b] += g * (ext.As[a][n] - ext.As[a][q]) * (ext.As[b][n] - ext.As[b][q]);
+                }
+            }
+        }
+        let Lext;
+        if (nets.length === 1) Lext = [[MU0 / K[0][0]]];
+        else {
+            const det = K[0][0] * K[1][1] - K[0][1] * K[1][0];
+            Lext = [[MU0 * K[1][1] / det, -MU0 * K[0][1] / det], [-MU0 * K[1][0] / det, MU0 * K[0][0] / det]];
+        }
+        const M = [[0, 0], [0, 0]];
+        nets.forEach((a, ia) => nets.forEach((b, ib) => { M[a][b] = Ldc[ia][ib] - Lext[ia][ib]; }));
+        return M;
     }
 
     /**
@@ -1595,9 +1749,12 @@ export class FieldSolver2D {
         // whose reactance tends to omega mu0 d/3 (a finite internal inductance)
         // once delta > d. Only the reactance takes the slab factor: the resistance
         // path has its own DC limit (R_total below) and a transition calibration
-        // fitted against the semi-infinite R_ac. Signal traces carry current on
-        // both faces, so each face sees half the thickness; ground planes and
-        // pours are treated as one-sided slabs of their full thickness.
+        // fitted against the semi-infinite R_ac. A signal trace carries current on
+        // both faces: with surface fields a (bottom) and b (top) its DC internal
+        // inductance is mu t (a^2 - ab + b^2) / 3 per unit width, the per-face slab
+        // of thickness t (1 - ab / (a^2 + b^2)). That is t/2 when both faces carry
+        // the same field (stripline) and t when one does (microstrip). Ground planes
+        // and pours are treated as one-sided slabs of their full thickness.
         const deltaOf = (sigma) => Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * sigma));
         // delta is the skin depth of the signal metal (transition calibration and
         // warning below), deltaCond the one of each conductor.
@@ -1619,10 +1776,35 @@ export class FieldSolver2D {
             }
             return h;
         };
-        const kX = (this.conductors || []).map((c, ci) => slabReactanceFactor(
-            c.is_signal ? stackH(c, ci) / 2 : stackH(c, ci), deltaCond(c)));
-        const kXDefault = slabReactanceFactor(Math.abs(this.t) / 2);
-        const reactanceFactor = ci => (ci >= 0 && ci < kX.length) ? kX[ci] : kXDefault;
+        // Reactance integrand Im(Zs)|H|^2 dl per conductor (the slab factor is applied
+        // after the loop, once the face split is known) and |H|^2 dl on the bottom and
+        // top faces of each conductor.
+        // Also |H|^2 dl over all faces and the current (the signed tangential H, dl)
+        // of each signal net, for the DC calibration below.
+        const nCond = (this.conductors || []).length;
+        const sumL = new Float64Array(nCond), faceBot = new Float64Array(nCond), faceTop = new Float64Array(nCond);
+        const faceAll = new Float64Array(nCond), netI = [0, 0];
+        let sumLDefault = 0;
+        // direction points from the dielectric node to the conductor: 'u' is a bottom face.
+        const addL = (ci, zim, H2dl, direction, Hdl) => {
+            if (!(ci >= 0 && ci < nCond)) { sumLDefault += zim * H2dl; return; }
+            sumL[ci] += zim * H2dl;
+            faceAll[ci] += H2dl;
+            const c = this.conductors[ci];
+            if (c.is_signal) netI[this.is_differential && c.polarity < 0 ? 1 : 0] += Hdl;
+            if (direction === 'u') faceBot[ci] += H2dl;
+            else if (direction === 'd') faceTop[ci] += H2dl;
+        };
+        // Effective slab thickness of a signal conductor from the split of the surface
+        // field between its bottom and top faces, taken over the stack it belongs to.
+        const signalSlab = (c, ci) => {
+            const members = [ci];
+            if (ownSigma) for (const dir of ['d', 'u']) { const k = backingOf(ci, dir); if (k >= 0) members.push(k); }
+            let A = 0, B = 0;
+            for (const k of members) { A += faceBot[k]; B += faceTop[k]; }
+            const share = A + B > 0 ? Math.sqrt(A * B) / (A + B) : 0.5;
+            return stackH(c, ci) * (1 - share);
+        };
         // Ground conductors take the resistance twin of that factor,
         // Re[(1+j) coth((1+j) d/delta)]: 1 for a thick ground, delta/d (the sheet
         // resistance 1/(sigma d)) once delta passes its thickness. The vacuum-field
@@ -1683,6 +1865,10 @@ export class FieldSolver2D {
                         // Legacy: local plane-wave relation on the dielectric field.
                         const eps_fac = vacuum_fields ? 1.0 : Math.sqrt(this.epsilon_r[i][j]);
                         const H_tan = E_norm * eps_fac / Z0_freespace;
+                        // Signed: the outward normal field, whose sign is the current's.
+                        const E_out = direction === 'r' ? -Ex_val : direction === 'l' ? Ex_val
+                            : direction === 'u' ? -Ey_val : Ey_val;
+                        const H_out = E_out * eps_fac / Z0_freespace;
 
                         // Look up per-surface impedance (with plating if applicable)
                         const ci = this.conductor_id ? this.conductor_id[ni][nj] : -1;
@@ -1706,7 +1892,7 @@ export class FieldSolver2D {
                                 const H2 = H_tan * H_tan * dseg / 2;
                                 if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dseg / 2);
                                 else sum_H2_dl_R += Zs.re * H2;
-                                sum_H2_dl_L += Zs.im * reactanceFactor(ci) * H2;
+                                addL(ci, Zs.im, H2, direction, H_out * dseg / 2);
                             }
                         } else if (this.centred_loss_quadrature && !this.sym_half) {
                             // Full-domain solve with different surface finishes: the one-sided
@@ -1723,7 +1909,7 @@ export class FieldSolver2D {
                                 const H2 = H_tan * H_tan * dseg / 2;
                                 if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dseg / 2);
                                 else sum_H2_dl_R += Zs.re * H2;
-                                sum_H2_dl_L += Zs.im * reactanceFactor(ci) * H2;
+                                addL(ci, Zs.im, H2, direction, H_out * dseg / 2);
                             }
                         } else {
                             const dl = dl_func(dl_idx);
@@ -1732,12 +1918,45 @@ export class FieldSolver2D {
                             const H2_dl = H_tan * H_tan * dl;
                             if (isGroundCond(ci)) addGnd(ci, Z_surf.re, H_tan, dl);
                             else sum_H2_dl_R += Z_surf.re * H2_dl;
-                            sum_H2_dl_L += Z_surf.im * reactanceFactor(ci) * H2_dl;
+                            addL(ci, Z_surf.im, H2_dl, direction, H_out * dl);
                         }
                     }
                 }
             }
         }
+
+        // Signal conductors with the DC internal inductance of uniform trace current
+        // (_dc_signal_inductance) blend it with the semi-infinite surface value of the
+        // smooth metal, 1/L^2 = 1/L_dc^2 + 1/L_ac^2, the counterpart of
+        // R = sqrt(R_dc^2 + R_ac^2): the current spreads over the cross-section once the
+        // surface reactance passes the DC value, before delta reaches the thickness. What
+        // roughness and plating add to the surface reactance is a surface layer and
+        // stays on top. Without the DC value each signal face takes the slab factor of
+        // its effective thickness (signalSlab).
+        const omega = 2 * Math.PI * this.freq;
+        const dcM = vacuum_fields && omega > 0 ? this._dc_signal_matrix(line === null ? mode : null) : null;
+        let Ldc = 0;
+        if (dcM) {
+            // Full-domain currents: a half domain holds half of each.
+            const m = this.sym_half ? 2 : 1, I0 = m * netI[0], I1 = m * netI[1];
+            Ldc = (I0 * I0 * dcM[0][0] + 2 * I0 * I1 * dcM[0][1] + I1 * I1 * dcM[1][1]) / m;
+        }
+        let sumSig = 0, sumExcess = 0;
+        (this.conductors || []).forEach((c, ci) => {
+            if (!(sumL[ci] !== 0)) return;
+            if (c.is_signal && Ldc > 0) {
+                const smooth = faceAll[ci] / (this._bulk_sigma(c) * deltaCond(c));
+                sumSig += smooth; sumExcess += sumL[ci] - smooth;
+                return;
+            }
+            const d = c.is_signal ? signalSlab(c, ci) : stackH(c, ci);
+            sum_H2_dl_L += sumL[ci] * slabReactanceFactor(d, deltaCond(c));
+        });
+        if (sumSig > 0) {
+            const Lac = sumSig / omega;
+            sum_H2_dl_L += omega / Math.sqrt(1 / (Ldc * Ldc) + 1 / (Lac * Lac)) + sumExcess;
+        }
+        sum_H2_dl_L += sumLDefault * slabReactanceFactor(Math.abs(this.t) / 2);
 
         // Half-domain solve: the surface integral covered only x >= 0. The
         // mirror half contributes the same power. After this the sums mean
@@ -1782,9 +2001,10 @@ export class FieldSolver2D {
         const R_ac_gnd = power_factor * sum_H2_dl_Rgnd * Z0_sq;
         const R_ac = R_ac_sig + R_ac_gnd;
 
-        // Bounded below the skin regime by the slab reactance factor above; the
-        // surface-field weighting still lacks the lateral current spreading of a
-        // true magnetostatic solve, so delta > t carries the skin-transition note.
+        // Bounded below the skin regime by the DC solve of the traces and the slab
+        // factor of the grounds above. The grounds still lack the lateral spreading of
+        // their return current at low frequency, so delta > t carries the
+        // skin-transition note.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
 		// DC-skin transition correction (vacuum-field path only): against
@@ -2537,6 +2757,7 @@ export class FieldSolver2D {
         this._modalPhys = physMatrix;
         if (!modalVecs) return null;
         const comb = (a, P, b, Q) => P.map((row, i) => row.map((val, j) => a * val + b * Q[i][j]));
+        await this._ensure_dc_signal_inductance(null);
         const results = [];
         ['odd', 'even'].forEach((label, li) => {
             const v = modalVecs[li];
@@ -2630,6 +2851,7 @@ export class FieldSolver2D {
         }
 
         // Calculate conductor losses with surface roughness and DC resistance
+        await this._ensure_dc_signal_inductance(planeBC);
         const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
         // Calculate dielectric loss (returns alpha in dB/m)
@@ -3619,6 +3841,11 @@ export class FieldSolver2D {
         if (this.mesh_backend === 'triangular') {
             const tri = await this._ensureTriBackend();
             return tri.solveAt(freq, { skipFieldResample: true });
+        }
+
+        // DC internal inductance of the traces, cached per grid.
+        for (const mode of this.is_differential ? ['odd', 'even'] : ['single']) {
+            await this._ensure_dc_signal_inductance(this._plane_bc(mode));
         }
 
         // If causal materials are enabled, we must re-solve the Laplace equation
