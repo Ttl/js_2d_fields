@@ -1353,6 +1353,11 @@ export class TriBackend {
         const certify = this.opts.certify ?? true;
         this.certification = null;
         this._certWarn = null;
+        // Fallbacks of the refinement passes, surfaced with every solve on this mesh.
+        this._buildNotes = new Map();
+        const buildNote = (type, message) => {
+            if (!this._buildNotes.has(type)) this._buildNotes.set(type, { type: 'accuracy', reason: type, mode: 'all', message });
+        };
         // Require the convergence test to hold for this many CONSECUTIVE passes before
         // stopping (matches the FDM backend's min_converged_passes / UI "Min Converged
         // Passes"): guards against a premature stop on a single lucky pass.
@@ -1405,6 +1410,8 @@ export class TriBackend {
                 let fw = null;
                 const femCache = {};
                 try { fw = fullwaveMode(this.ctx, mesh, fm, this._eigenAbc(abc, mesh.epsMap), this.condRect, mesh.epsMap, fRef, phiEps, eps_static, femCache); } catch { fw = null; }
+                if (!fw) buildNote('refine-eigen', 'The full-wave eigensolve failed on a mesh refinement pass: that pass ' +
+                    'refined on the static field alone, without the H-field metric of the loss.');
                 passWork.byMode[rm] = { fm, phiEps, phiAir, W_eps, W_air, femCache, fw, fRef, epsMap: mesh.epsMap };
                 // Converge on the REPORTED quantities, not a static proxy:
                 //   • static characteristic impedance Z0 = sqrt(L/C) ∝ 1/sqrt(W_eps·W_air)
@@ -1420,9 +1427,15 @@ export class TriBackend {
                 // metric if it degenerates (e.g. every edge constrained).
                 let metricS = null;
                 try { metricS = perElementKelly(phiEps, mesh, mesh.epsMap, fm); } catch { metricS = null; }
-                if (!metricS || !metricS.some(v => v > 0)) metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
+                if (!metricS || !metricS.some(v => v > 0)) {
+                    metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
+                    buildNote('refine-metric', 'The flux-jump error indicator failed on a mesh refinement pass, which ' +
+                        'refined on the field energy instead: the mesh may be less efficient for its size.');
+                }
                 let zz = null;
                 if (fw) { try { zz = computeHtZZMetric(mesh, fm, fw.vRe, fw.vIm, fw.g2Re, fw.g2Im, fRef, this.condRect.rects, null, this.ctx.wasmSolver); } catch { zz = null; } }
+                if (fw && !zz) buildNote('refine-h-metric', 'The H-field refinement metric failed on a mesh refinement ' +
+                    'pass, which refined on the static field alone: conductor surfaces may be less resolved.');
                 let mS = 0, mZ = 0;
                 for (let i = 0; i < metricS.length; i++) { if (metricS[i] > mS) mS = metricS[i]; if (zz && zz[i] > mZ) mZ = zz[i]; }
                 if (!metric) metric = new Float64Array(metricS.length);
@@ -1511,7 +1524,12 @@ export class TriBackend {
                 try { cert = this._certifyStatic(mesh, refTol); this.certification = cert; }
                 catch { /* keep whatever we had */ }
             }
-            if (cert && !cert.pass) {
+            if (!cert) {
+                this._certWarn = { type: 'accuracy', reason: 'certificate', mode: 'all', message:
+                    `Full-wave mesh refinement stopped without an error estimate: the certificate ` +
+                    `mesh is over its size cap or the check failed. The requested tolerance ` +
+                    `(${(100 * refTol).toFixed(2)}%) is not verified.` };
+            } else if (!cert.pass) {
                 // Three failure regimes need three phrasings: pre-asymptotic (estimate
                 // is only a lower bound), estimate over the tolerance, and estimate
                 // under the tolerance but without the safety margin the certificate
@@ -1793,8 +1811,15 @@ export class TriBackend {
                 this.ctx.wasmSolver, wg.projCache);
             P = Math.abs(computePoyntingFromProjectedH(mesh, wg.fm, wg.vRe, wg.vIm,
                 projH.htRe, projH.htIm, omega * MU0, projH.hDofs));
-        } catch { return { alpha_c_np: 0, R_ac: 0, X_ac: 0 }; }
-        if (!(P > 1e-30)) return { alpha_c_np: 0, R_ac: 0, X_ac: 0 };
+        } catch { P = 0; }
+        if (!(P > 1e-30)) {
+            if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'wg-loss-failed')) {
+                this._modeWarnings.push({ type: 'wg-loss-failed', freq: f, message:
+                    'The waveguide conductor-loss evaluation failed at this frequency: the reported ' +
+                    'conductor loss is zero.' });
+            }
+            return { alpha_c_np: 0, R_ac: 0, X_ac: 0 };
+        }
         const loss = solveConductorLoss(this.condRect.rects, f, sigma, mesh, wg.fm,
             wg.vRe, wg.vIm, -beta * beta, 0, P, Zpv, mesh.epsMap, wg.lossMask,
             projH, this.ctx.wasmSolver);
@@ -2334,32 +2359,51 @@ export class TriBackend {
     // from the robust static-field method.
     // Internal inductance at DC. For rectangular conductors driven odd/even or single,
     // the exact free-space value of uniform current in the conductors carrying it,
-    // with the grounds of unlimited width as ideal returns (dcLineParameters). Otherwise the loss solve
-    // evaluated where the skin depth is 100x the thickest conductor, so the current is
-    // uniform across every cross-section and L_internal sits on its low-frequency
-    // plateau.
+    // with the grounds of unlimited width as ideal returns (dcLineParameters), plus
+    // what roughness and thin plating add as a surface layer, the increment the loss
+    // solve carries at every frequency (thin plating is that layer, not a conductor
+    // of its own). Otherwise the loss solve evaluated where the skin depth is 100x
+    // the thickest conductor, so the current is uniform across every cross-section
+    // and L_internal sits on its low-frequency plateau.
     _dcInternalInductance(mode, cr) {
         const s = this.solver;
-        if (!this._modalPhys) {
-            const key = s.conductors, sigma = s.sigma_cond ?? 5.8e7;
-            if (!this._dcExact || this._dcExact.key !== key || this._dcExact.sigma !== sigma)
-                this._dcExact = { key, sigma, byMode: {} };
-            const byMode = this._dcExact.byMode;
-            if (!(mode in byMode)) byMode[mode] = s._ground_classes ? dcLineParameters(s.conductors, mode, {
-                sigmaDefault: sigma, unlimited: s._unlimited_grounds(), walls: s._wall_grounds(),
-                box: { x_min: -s.domain_width / 2, x_max: s.domain_width / 2, y_min: s.domain_y_min ?? -s.t_gnd, y_max: s.domain_height } })
-                : null;
-            if (byMode[mode]) return Math.max(0, byMode[mode].Lint);
-        }
         let tMax = 0;
         for (const c of cr.rects) {
             if (c.shape && isComplement(c.shape)) continue;
             tMax = Math.max(tMax, condThinDim(c));
         }
-        if (!(tMax > 0)) return 0;
-        const sigma = this.solver.sigma_cond ?? 5.8e7;
+        const sigma = s.sigma_cond ?? 5.8e7;
         const delta = 100 * tMax;
-        const fDc = 2 / (2 * Math.PI * MU0 * sigma * delta * delta);
+        const fDc = tMax > 0 ? 2 / (2 * Math.PI * MU0 * sigma * delta * delta) : 0;
+        if (!this._modalPhys && s._ground_classes) {
+            const key = s.conductors;
+            if (!this._dcExact || this._dcExact.key !== key || this._dcExact.sigma !== sigma)
+                this._dcExact = { key, sigma, byMode: {} };
+            const byMode = this._dcExact.byMode;
+            if (!(mode in byMode)) {
+                const thin = c => c.plating && !c.plating.thick_corners && !solidPlated(c, c.plating);
+                const dc = dcLineParameters(s.conductors.map(c => (thin(c) ? { ...c, plating: null } : c)), mode, {
+                    sigmaDefault: sigma, unlimited: s._unlimited_grounds(), walls: s._wall_grounds(),
+                    box: { x_min: -s.domain_width / 2, x_max: s.domain_width / 2, y_min: s.domain_y_min ?? -s.t_gnd, y_max: s.domain_height } });
+                let Ls = 0;
+                const finish = (s.rq ?? 0) > 0 || cr.rectRoles.some(r => r && ((r.rq ?? 0) > 0
+                    || (r.plating && r.plating.sigma > 0 && !r.plating.thick_corners)));
+                if (dc && finish && fDc > 0) {
+                    this._modeAtFreq(mode, fDc);
+                    const sf = this._static[mode].mqsSurface;
+                    if (sf && sf.f === fDc) Ls = sf.L;
+                }
+                byMode[mode] = dc ? { Lint: dc.Lint + Ls } : null;
+            }
+            if (byMode[mode]) return Math.max(0, byMode[mode].Lint);
+        }
+        if (!(fDc > 0)) return 0;
+        if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'dc-inductance-approx')) {
+            this._modeWarnings.push({ type: 'dc-inductance-approx', mode, freq: 0, message:
+                'The exact DC internal inductance covers rectangular conductors on a single line or a ' +
+                'symmetric pair. Here it is the loss solve at a frequency where the skin depth is 100 ' +
+                'times the conductor thickness.' });
+        }
         const r = this._modeAtFreq(mode, fDc);
         return r.L_internal > 0 ? r.L_internal : 0;
     }
@@ -2388,13 +2432,24 @@ export class TriBackend {
             return 2 / (omega * MU0 * sg) / Math.min(r.xmax - r.xmin, r.ymax - r.ymin) / wLo;
         }));
         if (!(uMax > 0.02)) return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
-        const b = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, { ...opts, idealRects: ideal, cache: idealCache });
+        let b;
+        try {
+            b = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, { ...opts, idealRects: ideal, cache: idealCache });
+        } catch (e) {
+            if (this._modeWarnings && !this._modeWarnings.some(w => w.type === 'ideal-ground-failed')) {
+                this._modeWarnings.push({ type: 'ideal-ground-failed', freq: f, message:
+                    `The low-frequency loss solve with the grounds reaching the domain edge as ideal returns ` +
+                    `failed (${String((e && e.message) || e).slice(0, 120)}). Those grounds are solved as ` +
+                    `finite conductors of the domain width instead: R and L near DC depend on the domain size.` });
+            }
+            return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
+        }
         const w = Math.min(1, Math.max(0, Math.log10(b.uIdeal / 0.02)));
         if (w >= 1) return b;
         const a = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
         const mix = k => w * b[k] + (1 - w) * a[k];
         return { ...a, R_total: mix('R_total'), X_total: mix('X_total'), L_loop: mix('L_loop'), L_wall: mix('L_wall'),
-                 R_trace: mix('R_trace'), R_gnd: mix('R_gnd') };
+                 L_surface: mix('L_surface'), R_trace: mix('R_trace'), R_gnd: mix('R_gnd') };
     }
 
     // meshedPlatingCR of this.condRect, built once per mesh.
@@ -2496,6 +2551,19 @@ export class TriBackend {
                 'Conductor loss of the trapezoids and n-gons comes from the perturbation method, which has ' +
                 'no model of their corners: R can be off by 20% or more. The MQS loss method, the default, solves them ' +
                 'accurately.' });
+        }
+        // Any other geometry the default MQS method passes to the perturbation method. Not
+        // one of round conductors only (a coax): with no corners, the perturbation method
+        // is accurate there.
+        const roundOnly = cr.rects.every(r => r.shape && !isPolyShape(r.shape));
+        if (lossMethod === 'auto' && !useMQS && f > 0 && !roundOnly && !this._noMqsThisSolve && this._modeWarnings
+            && !this._modeWarnings.some(w => ['pert-shape', 'mqs-no-interior', 'mqs-perturbation'].includes(w.type))) {
+            this._modeWarnings.push({ type: 'mqs-perturbation', mode, freq: f, message:
+                'The MQS conductor-loss solve does not apply here (' + (!mqsOk
+                    ? 'curved conductors next to cornered ones, or no signal conductor in the solved domain'
+                    : 'a differential pair with one trace outside the solved domain') + '). Conductor loss and ' +
+                'internal inductance come from the perturbation method, which is less accurate in the skin ' +
+                'transition and at conductor corners.' });
         }
         let eps_d = eps_eff_static, fw = null, eigen_bias = 1;
         if (f >= F_STATIC_MAX) {
@@ -2939,6 +3007,7 @@ export class TriBackend {
                     pc.pecMesh = mqsMesh; pc.pecMode = mode;
                 }
                 L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
+                st.mqsSurface = { f, L: mqs.L_surface };
                 dispersionInsert(rc, f, R_total);
                 dispersionInsert(lc, f, L_internal);
             }
@@ -3049,6 +3118,13 @@ export class TriBackend {
                 } catch { projH = null; Pfw = 0; }
             }
             const haveFW = useFW && projH && Pfw > 1e-30 && minDim > 0;
+            if (useFW && !(projH && Pfw > 1e-30) && this._modeWarnings
+                && !this._modeWarnings.some(w => w.type === 'sibc-failed')) {
+                this._modeWarnings.push({ type: 'sibc-failed', mode, freq: f, message:
+                    'The eigenmode surface-impedance loss estimate failed at this frequency. Conductor ' +
+                    'loss comes from the static-field estimate alone, which is less accurate in the deep ' +
+                    'skin regime (rough conductors, high frequency).' });
+            }
             const wFW = haveFW ? Math.max(0, Math.min(1, (0.15 - deltaRef / minDim) / (0.15 - 0.08))) : 0;
 
             // A differential drive carries TWICE the transmitted power of the
@@ -3237,6 +3313,7 @@ export class TriBackend {
         // Surface the buildMesh-time accuracy warning (failed verification certificate)
         // through the same per-solve channel as the mode warnings, so the UI logs it.
         if (this._certWarn) this._modeWarnings.push(this._certWarn);
+        if (this._buildNotes) this._modeWarnings.push(...this._buildNotes.values());
         // A waveguide never reaches _modeAtFreq, so its quasi-static fallback (which would
         // be physically meaningless below cutoff) is unreachable for this medium.
         let modes = this._isWG ? [this._waveguideModeAtFreq(f)]
@@ -3286,11 +3363,13 @@ export class TriBackend {
                 for (const m of [odd, even]) m.RLGC.Gm = this._modalPhys.Gw.map(v => v * 2 * Math.PI * f);
             }
             if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
-            else if (f > 0 && !this._modalPhys && this._pairFinishDiffers() && !this._modeWarnings.some(w => w.type === 'line-asymmetry')) {
-                this._modeWarnings.push({ type: 'line-asymmetry', freq: f, message:
-                    'The two traces differ in metal or finish, but the per-line R and L need the MQS ' +
-                    'conductor-loss solve, which did not run here. The R and L matrices carry the mean of ' +
-                    'the two traces and the S-parameters have no mode conversion.' });
+            else if (f > 0 && (this._modalPhys || this._pairFinishDiffers()) && !this._modeWarnings.some(w => w.type === 'line-asymmetry')) {
+                this._modeWarnings.push({ type: 'line-asymmetry', freq: f, message: this._modalPhys
+                    ? 'The per-line R and L of this asymmetric pair need the MQS conductor-loss solve of each ' +
+                      'trace, which did not run or failed here. The R and L matrices come from the two modes alone.'
+                    : 'The two traces differ in metal or finish, but the per-line R and L need the MQS ' +
+                      'conductor-loss solve, which did not run here. The R and L matrices carry the mean of ' +
+                      'the two traces and the S-parameters have no mode conversion.' });
                 result.warnings = this._modeWarnings;
             }
             result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, this._modalPhys);

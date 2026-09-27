@@ -96,6 +96,7 @@ const TIERS = {
         { file: 'tests/test_qs_dc_internal_inductance.js', cost: 58 },
         { file: 'tests/test_qs_ground_spreading.js', cost: 22 },
         { file: 'tests/test_dc_resistance.js', cost: 45 },
+        { file: 'tests/test_fallback_warnings.js', cost: 30 },
         { file: 'tests/test_anchor_caches.js', cost: 90 },
         { file: 'tests/test_certification.js', cost: 39 },
         { file: 'tests/test_invariants.js', cost: 110 },

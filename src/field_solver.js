@@ -1050,15 +1050,24 @@ export class FieldSolver2D {
     }
     _dc_signal_matrix(mode) { return this._dc_signal_entry(mode)?.M ?? null; }
 
+    // A fallback taken by the loss model on this solve, surfaced as an accuracy warning
+    // by _build_results (once per type).
+    _note_fallback(type, message) {
+        if (!this._fallbackNotes) this._fallbackNotes = new Map();
+        if (!this._fallbackNotes.has(type)) this._fallbackNotes.set(type, { type: 'accuracy', reason: type, mode: 'all', message });
+    }
+
     async _ensure_dc_signal_inductance(planeBC = null) {
         const key = planeBC || 'none';
         if (!this._dcSig || this._dcSig.x !== this.x || this._dcSig.y !== this.y) this._dcSig = { x: this.x, y: this.y, m: {} };
         const cache = this._dcSig.m;
-        if (!(key in cache)) cache[key] = await this._dc_signal_inductance(planeBC).catch(() => null);
+        // A failure is kept with its reason, for the warning of the loss that falls back.
+        const failed = e => ({ failed: String((e && e.message) || e) });
+        if (!(key in cache)) cache[key] = await this._dc_signal_inductance(planeBC).catch(failed);
         const entry = cache[key];
         // The ground sheet setup only where the return current can spread.
-        if (entry && entry.sheet === undefined && this._ground_may_spread()) {
-            entry.sheet = await this._ground_sheet_setup(entry.dc, entry.st, entry.nets, entry.pec).catch(() => null);
+        if (entry && !entry.failed && entry.sheet === undefined && this._ground_may_spread()) {
+            entry.sheet = await this._ground_sheet_setup(entry.dc, entry.st, entry.nets, entry.pec).catch(failed);
         }
         return entry;
     }
@@ -1279,7 +1288,8 @@ export class FieldSolver2D {
             if (ox > 0 && oy > 0) groups[g].area += (this.sym_half && j > 0 ? 2 : 1) * ox * oy;
         }
         const m = groups.length;
-        if (m === 0 || m > 1500) return null;
+        if (m === 0) return null;
+        if (m > 1500) return { failed: `${m} ground groups, over the 1500 of the dense solve` };
 
         // Couplings: C (eliminated node -> group, entries of the eliminated node's row)
         // and the group block P^T K_gg P.
@@ -1340,7 +1350,7 @@ export class FieldSolver2D {
     // _ground_sheet_impedance of a mode's setup, computed once per frequency.
     _ground_sheet_cached(mode) {
         const sheet = this._dc_signal_entry(mode)?.sheet;
-        if (!sheet) return null;
+        if (!sheet || sheet.failed) return null;
         if (sheet.freq !== this.freq) { sheet.freq = this.freq; sheet.Z = this._ground_sheet_impedance(sheet); }
         return sheet.Z;
     }
@@ -2024,15 +2034,15 @@ export class FieldSolver2D {
         // Reactance integrand Im(Zs)|H|^2 dl per conductor (the slab factor is applied
         // after the loop, once the face split is known) and |H|^2 dl on the bottom and
         // top faces of each conductor.
-        // For the DC blend of signal conductors: the current (the signed tangential
-        // H, dl) of each signal net, the reactance integrand of the smooth metal the
-        // DC solve describes (sumLref) and the one with the low-frequency face
-        // impedances (sumLdc, see layeredZ).
+        // For the low-frequency limits: the current (the signed tangential H, dl) of
+        // each signal net, the reactance integrand of the smooth metal the DC solve
+        // and the slab factor describe (sumLref) and the one with the low-frequency
+        // face impedances (sumLdc, see layeredZ).
         const nCond = (this.conductors || []).length;
         const sumL = new Float64Array(nCond), faceBot = new Float64Array(nCond), faceTop = new Float64Array(nCond);
         const sumLref = new Float64Array(nCond), sumLdc = new Float64Array(nCond), netI = [0, 0];
         let sumLDefault = 0;
-        // Smooth reference reactance of a signal face: the bulk metal under any
+        // Smooth reference reactance of a face: the bulk metal under any
         // plating, the smooth face impedance for blocks of different metals (which
         // the DC solve resolves).
         const refIm = (ci, direction) => {
@@ -2049,8 +2059,8 @@ export class FieldSolver2D {
             if (!(ci >= 0 && ci < nCond)) { sumLDefault += Zs.im * H2dl; return; }
             sumL[ci] += Zs.im * H2dl;
             const c = this.conductors[ci];
-            if (c.is_signal && vacuum_fields) {
-                netI[this.is_differential && c.polarity < 0 ? 1 : 0] += H_out * dl;
+            if (vacuum_fields) {
+                if (c.is_signal) netI[this.is_differential && c.polarity < 0 ? 1 : 0] += H_out * dl;
                 sumLref[ci] += refIm(ci, direction) * H2dl;
                 sumLdc[ci] += getZsurf(ci, direction, i, j, span, xStart, true).im * H2dl;
             }
@@ -2182,12 +2192,27 @@ export class FieldSolver2D {
         // its effective thickness (signalSlab).
         const omega = 2 * Math.PI * this.freq;
         const dcM = vacuum_fields && omega > 0 ? this._dc_signal_matrix(line === null ? mode : null) : null;
-        let Ldc = 0;
-        if (dcM) {
-            // Full-domain currents: a half domain holds half of each.
-            const m = this.sym_half ? 2 : 1, I0 = m * netI[0], I1 = m * netI[1];
-            Ldc = (I0 * I0 * dcM[0][0] + 2 * I0 * I1 * dcM[0][1] + I1 * I1 * dcM[1][1]) / m;
+        // Trace currents of the drive, as the half-domain sums count them (m times the
+        // meshed part). A single line or a mode of a symmetric pair carries 1/Z0 per
+        // trace for the unit drive the fields are per, which the discrete contour sum
+        // netI reads to 1-2%: it only gives the sign there. Per-line drives and the modes
+        // of an asymmetric pair keep netI.
+        const m = this.sym_half ? 2 : 1;
+        let I0 = m * netI[0], I1 = m * netI[1];
+        if (line === null && !this._modalPhys && vacuum_fields && Z0 > 0) {
+            const whole = pol => !(this.conductors || []).some(c => c.is_signal
+                && (this.is_differential && c.polarity < 0 ? -1 : 1) === pol && c.x_min < 0 && c.x_max > 0);
+            const mult = pol => (this.sym_half && whole(pol) ? 2 : 1) / Z0;
+            I0 = I0 ? Math.sign(I0) * mult(1) : 0;
+            I1 = I1 ? Math.sign(I1) * mult(-1) : 0;
         }
+        let Ldc = 0;
+        if (dcM) Ldc = (I0 * I0 * dcM[0][0] + 2 * I0 * I1 * dcM[0][1] + I1 * I1 * dcM[1][1]) / m;
+        const dcEntry = vacuum_fields && omega > 0 ? this._dc_signal_entry(line === null ? mode : null) : null;
+        if (dcEntry && dcEntry.failed) this._note_fallback('dc-inductance-failed',
+            `The DC current solve of the traces failed (${dcEntry.failed}). The internal inductance ` +
+            `below the skin transition comes from the surface model instead, about half the DC value ` +
+            `on a microstrip.`);
         const idealGnd = this._unlimited_grounds();
         // Lateral spreading of the return current in a ground thinner than delta
         // (wallSpreadFactor): the current of effective width W_K = (int|K|)^2 / int|K|^2
@@ -2222,7 +2247,10 @@ export class FieldSolver2D {
                 return;
             }
             if (!c.is_signal) {
-                const v = sumL[ci] * slabReactanceFactor(Math.min(Math.abs(c.width), stackH(c, ci)), deltaCond(c));
+                // The slab factor bounds the smooth metal's reactance. What roughness and
+                // plating add is a surface layer, kept whole like on the traces.
+                const slab = slabReactanceFactor(Math.min(Math.abs(c.width), stackH(c, ci)), deltaCond(c));
+                const v = vacuum_fields ? sumLref[ci] * slab + (sumLdc[ci] - sumLref[ci]) : sumL[ci] * slab;
                 if (idealGnd.has(ci)) sumLgnd += v; else sumLsheet += v;
                 return;
             }
@@ -2273,9 +2301,14 @@ export class FieldSolver2D {
         const wSheet = Math.min(1, Math.max(0, Math.log10(spread / 0.02)));
         const sheetZ = vacuum_fields && omega > 0 && wSheet > 0
             ? this._ground_sheet_cached(line === null ? mode : null) : null;
+        if (vacuum_fields && omega > 0 && wSheet > 0 && !sheetZ) {
+            const sheet = dcEntry && dcEntry.sheet;
+            this._note_fallback('ground-sheet-failed', `The return current spreads sideways in the grounds ` +
+                `at this frequency, but the thin-sheet ground solve ${sheet && sheet.failed ? `failed (${sheet.failed})`
+                    : 'did not run'}. The ground resistance and inductance come from the surface model, ` +
+                `which confines the return current: R reads high and L low.`);
+        }
         if (sheetZ) {
-            // Full-domain currents: a half domain holds half of each.
-            const m = this.sym_half ? 2 : 1, I0 = m * netI[0], I1 = m * netI[1];
             const quad = X => I0 * I0 * X[0][0] + 2 * I0 * I1 * X[0][1] + I1 * I1 * X[1][1];
             sum_H2_dl_Rgnd += (1 - wSheet) * sumRsheet + wSheet * quad(sheetZ.R);
             sum_H2_dl_L += sumLgnd + (1 - wSheet) * sumLsheet + wSheet * omega * quad(sheetZ.L);
@@ -3604,6 +3637,7 @@ export class FieldSolver2D {
         const certOpts = { maxNodes: certify_max_nodes, l2MaxNodes: certify_l2_max_nodes };
         this.certification = null;
         this._certWarn = null;
+        this._fallbackNotes = null;
 
         // The refinement pass that trips the gate has already computed exactly the
         // quantities the certificate compares against (C, C0 per mode via
@@ -3791,7 +3825,12 @@ export class FieldSolver2D {
                 }
                 catch { /* keep whatever we had */ }
             }
-            if (cert && !cert.pass) {
+            if (!cert) {
+                this._certWarn = { type: 'accuracy', reason: 'certificate', mode: 'all', message:
+                    `Quasi-static mesh refinement stopped without an error estimate: the ` +
+                    `certificate grid is over its size cap or the check failed. The requested ` +
+                    `tolerance (${(100 * energy_tol).toFixed(2)}%) is not verified.` };
+            } else if (!cert.pass) {
                 // Failure regimes: pre-asymptotic (estimate is only a lower
                 // bound), estimate over the tolerance, and estimate under the
                 // tolerance but without the safety margin the certificate
@@ -3901,6 +3940,12 @@ export class FieldSolver2D {
             if (this._modalPhys) result.physMatrix = this._modalPhys;
         }
 
+        // Fallbacks the loss model took for these results, including the line asymmetry above.
+        if (this._fallbackNotes && this._fallbackNotes.size) {
+            result.warnings = [...(result.warnings || []), ...this._fallbackNotes.values()];
+            this.modeWarnings = result.warnings;
+        }
+        this._fallbackNotes = null;
         return result;
     }
 
@@ -4126,6 +4171,7 @@ export class FieldSolver2D {
     async computeAtFrequency(freq, cachedResults) {
         // Update frequency
         this.freq = freq;
+        this._fallbackNotes = null;
 
         // Triangular FEM backend: re-run the per-frequency solve (eigenmode +
         // loss) on the cached mesh/static solution. skipFieldResample: sweep

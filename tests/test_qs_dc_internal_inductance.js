@@ -90,6 +90,17 @@ for (const [name, plating] of [['thick corners', { ...PLATING, thick_corners: tr
     // DC/skin blend reads about 5% low on the bare trace too.
     check(`${name} @ 1 MHz: QS internal L within 6% of full-wave`, rel(q[2], t[0]) < 0.06, `${q[2].toFixed(2)} vs ${t[0].toFixed(2)} nH/m`);
 }
+// Roughness is a surface layer far inside the skin depth at low frequency, a constant
+// excess inductance: L_int falls monotonically from DC on both backends.
+{
+    const FR = [0, 1e2, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9];
+    const [q, t] = await Promise.all([lintMs({ rq: 1e-6 }, FR, false), lintMs({ rq: 1e-6 }, FR, true)]);
+    for (const [name, v] of [['QS', q], ['full-wave', t]]) {
+        // 0.5% slack: the full-wave value from 100 Hz carries its small low-frequency bias over the exact DC one.
+        const ok = v.every((x, i) => i === 0 || x <= v[i - 1] * 1.005);
+        check(`rough 1 um, ${name}: internal L non-increasing from DC to 1 GHz`, ok, v.map(x => x.toFixed(2)).join(' / '));
+    }
+}
 {
     const text = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.21 er=4.4\n' +
         'sig+ x=-0.175 w=0.35 y=0.21 h=0.031 sigma=5.8e7\nsig+ x=-0.175 w=0.35 y=0.241 h=0.004 sigma=1e7';

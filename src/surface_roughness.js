@@ -77,8 +77,20 @@ function calculate_Zrough(f, sigma, Rq) {
 
     // 5. Final Z_rough = (Rq / (Rq_ref * lambda)) * Psi * Z_smooth_ref
     const scale = Rq / (Rq_ref * lambda_scale);
-    return Psi.mul(Z_smooth_ref).mul(scale);
+    const Z = Psi.mul(Z_smooth_ref).mul(scale);
+    // The excess inductance (Im(Z) - Rs) / omega of the fitted model peaks at
+    // f_ref = ROUGH_LX_PEAK and decays below it, negative below about 1 Hz. The
+    // roughness is then a thin surface layer far inside the skin depth, whose excess
+    // inductance is a constant: it is held at the peak, which keeps L(f) monotone.
+    if (f_ref < ROUGH_LX_PEAK && omega > 0) {
+        const fp = ROUGH_LX_PEAK / lambda_scale, wp = 2 * Math.PI * fp;
+        const Zp = calculate_Zrough(fp, sigma, Rq);
+        const Lx = (Zp.im - Math.sqrt(wp * MU0 / (2 * sigma))) / wp;
+        return new Complex(Z.re, R_smooth + omega * Lx);
+    }
+    return Z;
 }
+const ROUGH_LX_PEAK = 1.2e6;
 
 // Abramowitz & Stegun approximation 7.1.28, max error ~1.5e-7
 function _erf(x) {

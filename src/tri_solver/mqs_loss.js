@@ -740,6 +740,9 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // opts.wallPEC carries that distinction from the mesher (which clears `left` on a
     // half domain, so the symmetry plane can never be mistaken for metal).
     let Pgnd = 0, Xgnd = 0;
+    // Half the |K|^2 integral over the walls and ideal grounds, unweighted: the
+    // surface-layer increment of roughness or plating on them is (Zs - Zs_smooth) times it.
+    let wallS2 = 0;
     // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
     // conductor surfaces, used below to scale the smooth loss per face.
     let gndS = 0, gndZreS = 0, gndZimS = 0;
@@ -835,6 +838,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         }
         Pgnd += 0.5 * zWall[w].re * S2 * g;
         Xgnd += 0.5 * zWall[w].im * S2;
+        wallS2 += 0.5 * S2;
     }
 
     // Ideal grounds (class 3, opts.idealRects): perfect conductors in the solve, like
@@ -911,6 +915,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             uIdeal = Math.max(uIdeal, u);
             Pgnd += 0.5 * zr * S2 * wallSpreadFactor(2 * Math.PI * u);
             Xgnd += 0.5 * zi * S2;
+            wallS2 += 0.5 * S2;
         }
     }
 
@@ -1036,7 +1041,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // Re[(1+j) coth((1+j) d/delta)] recovers |K|^2 at every delta (it is 1 for a thick
     // conductor and delta/d for a thin one, where R = |K|^2 / (sigma d)). A signal
     // trace carries current on both faces, so each face sees half the thickness;
-    // ground rects are one-sided slabs.
+    // ground rects are one-sided slabs. The walls and ideal grounds add the same
+    // increment, (Zs - Zs_smooth) * |K|^2 (wallS2), to their slab reactance.
     const slabR = (d) => {
         const x = d / delta;
         if (!(x > 0) || x > 20) return 1;
@@ -1079,11 +1085,11 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         });
         if (sigS > 0) PsiR = sigPsi / sigS;
         if (gndS > 0) {
-            X_gw = X_gw_smooth * gndZimS / (RsW * gndS);
+            X_gw = X_gw_smooth + (gndZimS / gndS - RsW) * 2 * sym * wallS2;
             R_gw *= gndZreS / (RsW * gndS);
         } else if (!opts.surfaceZs && Rq > 0) {
             const Zs = calculate_Zrough(freq, sigmaW, Rq);
-            X_gw = X_gw_smooth * Zs.im / RsW;
+            X_gw = X_gw_smooth + (Zs.im - RsW) * 2 * sym * wallS2;
             R_gw *= Zs.re / RsW;
         }
     } else if (opts.surfaceZs) {
@@ -1100,7 +1106,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         }
         if (gndS > 0) {
             const psiR = gndZreS / (RsW * gndS), psiX = gndZimS / (RsW * gndS);
-            X_gw = X_gw_smooth * psiX;
+            X_gw = X_gw_smooth + RsW * (psiX - 1) * 2 * sym * wallS2;
             R_gw *= psiR;
         }
     } else if (Rq > 0) {
@@ -1109,7 +1115,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         const PsiX = Zs.im / Rs;
         X_trace = R_trace * (1 + kTrace * (PsiX - 1));
         X_gr = R_gr * (1 + kGr * (PsiX - 1));
-        X_gw = X_gw_smooth * PsiX;
+        X_gw = X_gw_smooth + RsW * (PsiX - 1) * 2 * sym * wallS2;
         R_trace *= PsiR;
         R_gr *= PsiR;
         R_gw *= PsiR;
@@ -1123,14 +1129,15 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // construction, so it is formed ONCE from X_total here rather than accumulated
     // branch by branch. That keeps L_loop and X_total from ever describing different
     // surfaces, and it is identically zero for smooth metal (X_total === X_smooth_total).
-    L_loop += perTrace * (X_total - X_smooth_total) / omega;
+    const L_surface = perTrace * (X_total - X_smooth_total) / omega;
+    L_loop += L_surface;
     // Internal inductance of the domain walls. They are A = 0 in the solve, so
     // their skin layer is not in L_loop; the smooth slab reactance over omega
     // supplies it (their rough/plated increment is in L_loop above).
     const L_wall = perTrace * X_gw_smooth / omega;
     const alpha_c = Z0 > 0 ? R_total / (2 * Z0) : NaN;
     return {
-        R_trace, R_gnd, R_total, X_total, L_loop, L_wall, PsiR, uIdeal,
+        R_trace, R_gnd, R_total, X_total, L_loop, L_wall, L_surface, PsiR, uIdeal,
         alpha_c, alpha_c_dBm: alpha_c * 8.686,
         Rs, delta, nDofs: nF, modeZ: Zmode,
     };
