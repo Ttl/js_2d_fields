@@ -1041,6 +1041,43 @@ export class FieldSolver2D {
         return [cd, cl, cr, cu, cid, ciu, cjl, cjr, hd, hu, wl, wr];
     }
 
+    // The cached _dc_signal_inductance result for a mode's symmetry-plane condition,
+    // or null when it has not been computed on the current grid.
+    _dc_signal_entry(mode) {
+        const c = this._dcSig, key = this._plane_bc(mode) || 'none';
+        return c && c.x === this.x && c.y === this.y ? c.m[key] ?? null : null;
+    }
+    _dc_signal_matrix(mode) { return this._dc_signal_entry(mode)?.M ?? null; }
+
+    async _ensure_dc_signal_inductance(planeBC = null) {
+        const key = planeBC || 'none';
+        if (!this._dcSig || this._dcSig.x !== this.x || this._dcSig.y !== this.y) this._dcSig = { x: this.x, y: this.y, m: {} };
+        const cache = this._dcSig.m;
+        if (!(key in cache)) cache[key] = await this._dc_signal_inductance(planeBC).catch(() => null);
+        const entry = cache[key];
+        // The ground sheet setup only where the return current can spread.
+        if (entry && entry.sheet === undefined && this._ground_may_spread()) {
+            entry.sheet = await this._ground_sheet_setup(entry.dc, entry.st, entry.nets, entry.pec).catch(() => null);
+        }
+        return entry;
+    }
+
+    // Whether some ground's spreading length delta^2/d can reach the blend range of the
+    // thin-sheet model at this frequency (see calculate_conductor_loss), with the return
+    // width W_K bounded below by a quarter of the narrowest trace.
+    _ground_may_spread() {
+        if (!(this.freq > 0)) return true;
+        const sig = (this.conductors || []).filter(c => c.is_signal);
+        const wLo = 0.25 * Math.min(...sig.map(c => Math.abs(c.width)));
+        const omega = 2 * Math.PI * this.freq;
+        const walls = this._wall_grounds();
+        return (this.conductors || []).some((c, ci) => {
+            if (c.is_signal || walls.has(ci)) return false;
+            const d = Math.min(Math.abs(c.width), Math.abs(c.height));
+            return 2 / (omega * CONSTANTS.MU0 * this._bulk_sigma(c)) / d / wLo > 0.02;
+        });
+    }
+
     // DC internal inductance of the signal conductors with perfectly conducting grounds,
     // per unit current: a 2x2 matrix over the positive (or single-ended) and negative
     // traces seen on this grid, zero where a trace is absent, or null. The traces carry
@@ -1049,23 +1086,9 @@ export class FieldSolver2D {
     // the same operator, so their discretization errors largely cancel. A half-domain
     // trace stands for itself and its mirror image: the currents are the full-domain
     // conjugates of the drives. Frequency independent, cached per grid and planeBC.
-    // The cached _dc_signal_inductance matrix for a mode's symmetry-plane condition,
-    // or null when it has not been computed on the current grid.
-    _dc_signal_matrix(mode) {
-        const c = this._dcSig, key = this._plane_bc(mode) || 'none';
-        return c && c.x === this.x && c.y === this.y ? c.m[key] ?? null : null;
-    }
-
-    async _ensure_dc_signal_inductance(planeBC = null) {
-        const key = planeBC || 'none';
-        const cache = this._dcSig;
-        if (cache && cache.x === this.x && cache.y === this.y && key in cache.m) return cache.m[key];
-        if (!cache || cache.x !== this.x || cache.y !== this.y) this._dcSig = { x: this.x, y: this.y, m: {} };
-        const result = await this._dc_signal_inductance(planeBC).catch(() => null);
-        this._dcSig.m[key] = result;
-        return result;
-    }
-
+    //
+    // Returns { M, ... } with what the thin-sheet ground model (_ground_sheet_setup)
+    // needs of the same system.
     async _dc_signal_inductance(planeBC) {
         if (!this.conductors || !this.ground_mask) return null;
         const nx = this.x.length, ny = this.y.length, ncx = nx - 1;
@@ -1135,13 +1158,14 @@ export class FieldSolver2D {
                 if (i < ny - 1) nb(i + 1, j, cu);
                 rowPtr[r + 1] = nnz;
             }
-            const xs = await solveWithWASMMulti({ rowPtr, colIdx: colIdx.subarray(0, nnz), values: values.subarray(0, nnz) }, Bs);
+            const csr = { rowPtr, colIdx: colIdx.subarray(0, nnz), values: values.subarray(0, nnz) };
+            const xs = await solveWithWASMMulti(csr, Bs);
             const As = xs.map((x, m) => {
                 const A = new Float64Array(nx * ny);
                 for (let n = 0; n < nx * ny; n++) A[n] = idx[n] >= 0 ? x[idx[n]] : fixed(m, (n / nx) | 0, n % nx);
                 return A;
             });
-            return { As, Bs, idx };
+            return { As, Bs, idx, csr, N };
         };
 
         // Uniform current in each net, unit full-domain current per drive.
@@ -1180,7 +1204,215 @@ export class FieldSolver2D {
         }
         const M = [[0, 0], [0, 0]];
         nets.forEach((a, ia) => nets.forEach((b, ib) => { M[a][b] = Ldc[ia][ib] - Lext[ia][ib]; }));
-        return M;
+        // The thin-sheet ground setup reuses the DC solve, see _ensure_dc_signal_inductance.
+        return { M, dc, st, nets, pec, sheet: undefined };
+    }
+
+    // Grounds that span the domain along one of its edges, which the triangular backend
+    // absorbs into that wall (_clipDomain): a ground plane on a wall, with nothing
+    // beyond it. They keep the surface model, whose spreading stops at the wall's width,
+    // and the thin-sheet model below is left to the other grounds, which both backends
+    // solve as conductors in open space.
+    _wall_grounds() {
+        if (this._wallGnd) return this._wallGnd;
+        const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;
+        const Y0 = this.domain_y_min, Y1 = this.domain_height;
+        const tol = 1e-9 * Math.max(X1 - X0, Y1 - Y0);
+        const out = new Set();
+        (this.conductors || []).forEach((c, ci) => {
+            if (c.is_signal || c.shape) return;
+            const l = c.x_min <= X0 + tol, r = c.x_max >= X1 - tol, b = c.y_min <= Y0 + tol, t = c.y_max >= Y1 - tol;
+            if ((l && r && (b || t)) || (b && t && (l || r))) out.add(ci);
+        });
+        return (this._wallGnd = out);
+    }
+
+    // Thin-sheet model of the grounds for the return current spreading sideways at low
+    // frequency. Each ground conductor is tied across its thin dimension into groups
+    // (a column of a horizontal ground, a row of a vertical one) that carry the sheet
+    // current Y_s (E0 - j omega A) with Y_s the admittance of a one-sided slab. The rest
+    // of the grid is eliminated on the factorization of the DC trace solve (grounds
+    // pinned there too), leaving the dense Schur complement S on the groups and the
+    // right-hand side r of each trace drive. Per frequency (S + j omega mu0 D) u = r
+    // then gives the ground's resistance and its inductance above perfectly conducting
+    // grounds, see _ground_sheet_impedance.
+    async _ground_sheet_setup(dc, st, nets, pec) {
+        const nx = this.x.length, ny = this.y.length;
+        // Wall grounds stay perfectly conducting here (their nodes stay pinned at 0).
+        const walls = this._wall_grounds();
+        const groupOf = new Int32Array(nx * ny).fill(-1);
+        const groups = [], byKey = new Map();
+        for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+            if (!this.ground_mask[i][j] || (pec && j === 0)) continue;
+            const ci = this.conductor_id[i][j];
+            const c = this.conductors[ci];
+            if (!c || c.is_signal || walls.has(ci)) continue;
+            const horiz = Math.abs(c.height) <= Math.abs(c.width);
+            const key = `${ci}:${horiz ? 'c' : 'r'}${horiz ? j : i}`;
+            let g = byKey.get(key);
+            if (g === undefined) {
+                g = groups.length;
+                byKey.set(key, g);
+                groups.push({ ci, d: Math.min(Math.abs(c.width), Math.abs(c.height)), sigma: this._bulk_sigma(c), area: 0 });
+            }
+            groupOf[i * nx + j] = g;
+            // Conductor area of the node's control volume, with its row weight.
+            const [, , , , , , , , hd, hu, wl, wr] = st[i * nx + j];
+            const ox = Math.min(this.x[j] + wr, c.x_max) - Math.max(this.x[j] - wl, c.x_min);
+            const oy = Math.min(this.y[i] + hu, c.y_max) - Math.max(this.y[i] - hd, c.y_min);
+            if (ox > 0 && oy > 0) groups[g].area += (this.sym_half && j > 0 ? 2 : 1) * ox * oy;
+        }
+        const m = groups.length;
+        if (m === 0 || m > 1500) return null;
+
+        // Couplings: C (eliminated node -> group, entries of the eliminated node's row)
+        // and the group block P^T K_gg P.
+        const S = Array.from({ length: m }, () => new Float64Array(m));
+        const cEntries = [];                 // [reduced row of the eliminated node, group, coefficient]
+        const nbs = (n, i, j) => {
+            const [cd, cl, cr, cu] = st[n];
+            const out = [];
+            if (i > 0) out.push([n - nx, cd]);
+            if (j > 0) out.push([n - 1, cl]);
+            if (j < nx - 1) out.push([n + 1, cr]);
+            if (i < ny - 1) out.push([n + nx, cu]);
+            return out;
+        };
+        for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+            const n = i * nx + j, g = groupOf[n];
+            if (g >= 0) {
+                const [cd, cl, cr, cu] = st[n];
+                S[g][g] -= cd + cl + cr + cu;
+                for (const [q, c] of nbs(n, i, j)) if (groupOf[q] >= 0) S[g][groupOf[q]] += c;
+            } else if (dc.idx[n] >= 0) {
+                for (const [q, c] of nbs(n, i, j)) if (groupOf[q] >= 0) cEntries.push([dc.idx[n], groupOf[q], c]);
+            }
+        }
+        // r_b = -C^T z_b with z_b the DC trace solution of drive b.
+        const r = nets.map((_, b) => {
+            const v = new Float64Array(m);
+            const z = dc.As[b];
+            for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+                const n = i * nx + j;
+                if (dc.idx[n] < 0 || groupOf[n] >= 0) continue;
+                for (const [q, c] of nbs(n, i, j)) if (groupOf[q] >= 0) v[groupOf[q]] -= c * z[n];
+            }
+            return v;
+        });
+        // S -= C^T K_aa^-1 C, in chunks of right-hand sides (each call refactors, which
+        // costs about one Laplace solve), keeping only the rows C touches.
+        const colEntries = Array.from({ length: m }, () => []);
+        for (const e of cEntries) colEntries[e[1]].push(e);
+        const chunk = Math.max(1, Math.min(m, Math.floor(4e6 / dc.N)));
+        for (let k0 = 0; k0 < m; k0 += chunk) {
+            const ks = [];
+            for (let k = k0; k < Math.min(m, k0 + chunk); k++) ks.push(k);
+            const Bs = ks.map(k => {
+                const B = new Float64Array(dc.N);
+                for (const [row, , c] of colEntries[k]) B[row] += c;
+                return B;
+            });
+            const xs = await solveWithWASMMulti(dc.csr, Bs);
+            ks.forEach((l, t) => {
+                const X = xs[t];
+                for (const [row, k, c] of cEntries) S[k][l] -= c * X[row];
+            });
+        }
+        return { S, r, groups, nets };
+    }
+
+    // _ground_sheet_impedance of a mode's setup, computed once per frequency.
+    _ground_sheet_cached(mode) {
+        const sheet = this._dc_signal_entry(mode)?.sheet;
+        if (!sheet) return null;
+        if (sheet.freq !== this.freq) { sheet.freq = this.freq; sheet.Z = this._ground_sheet_impedance(sheet); }
+        return sheet.Z;
+    }
+
+    // Ground contribution of the thin-sheet model at the current frequency, as 2x2
+    // matrices over the traces per unit full-domain current: { R, L } with L the
+    // inductance added to perfectly conducting grounds. null without a setup.
+    _ground_sheet_impedance(sheet) {
+        const omega = 2 * Math.PI * this.freq, MU0 = CONSTANTS.MU0;
+        if (!sheet || !(omega > 0)) return null;
+        const { S, r, groups, nets } = sheet;
+        const m = groups.length;
+        // Sheet admittance of each group: 1/Zs of a slab driven from one side, sigma d
+        // for a thin one, times the group's sheet width.
+        const Y = groups.map(g => {
+            const delta = Math.sqrt(2 / (omega * MU0 * g.sigma));
+            const q = new Complex(g.d / delta, g.d / delta);
+            // coth(q) = (e^2q + 1) / (e^2q - 1), capped where it is 1 to double precision.
+            const coth = q.re > 20 ? new Complex(1, 0) : (() => {
+                const e = new Complex(Math.exp(2 * q.re) * Math.cos(2 * q.im), Math.exp(2 * q.re) * Math.sin(2 * q.im));
+                return new Complex(e.re + 1, e.im).div(new Complex(e.re - 1, e.im));
+            })();
+            const Zs = new Complex(1 / (g.sigma * delta), 1 / (g.sigma * delta)).mul(coth);
+            return new Complex(1, 0).div(Zs).mul(new Complex(g.area / g.d, 0));
+        });
+        // Complex symmetric LDL^T of S + j omega mu0 D, no pivoting: its real part is
+        // positive semidefinite and the imaginary part a positive diagonal.
+        const Are = S.map(row => Float64Array.from(row)), Aim = S.map(() => new Float64Array(m));
+        for (let k = 0; k < m; k++) { Are[k][k] -= omega * MU0 * Y[k].im; Aim[k][k] += omega * MU0 * Y[k].re; }
+        // Lower triangle only: L[i][k] overwrites A[i][k], D the diagonal.
+        const tr = new Float64Array(m), ti = new Float64Array(m);
+        for (let k = 0; k < m; k++) {
+            const pr = Are[k][k], pi = Aim[k][k], pd = pr * pr + pi * pi;
+            for (let i = k + 1; i < m; i++) { tr[i] = Are[i][k]; ti[i] = Aim[i][k]; }
+            for (let i = k + 1; i < m; i++) {
+                if (tr[i] === 0 && ti[i] === 0) continue;
+                const fr = (tr[i] * pr + ti[i] * pi) / pd, fi = (ti[i] * pr - tr[i] * pi) / pd;
+                const Ri = Are[i], Ii = Aim[i];
+                for (let j = k + 1; j <= i; j++) {
+                    Ri[j] -= fr * tr[j] - fi * ti[j];
+                    Ii[j] -= fr * ti[j] + fi * tr[j];
+                }
+                Ri[k] = fr; Ii[k] = fi;
+            }
+        }
+        const solve = b => {
+            const ur = Float64Array.from(b), ui = new Float64Array(m);
+            for (let i = 0; i < m; i++) for (let k = 0; k < i; k++) {
+                const lr = Are[i][k], li = Aim[i][k];
+                ur[i] -= lr * ur[k] - li * ui[k]; ui[i] -= lr * ui[k] + li * ur[k];
+            }
+            for (let i = 0; i < m; i++) {
+                const dr = Are[i][i], di = Aim[i][i], dd = dr * dr + di * di;
+                const xr = (ur[i] * dr + ui[i] * di) / dd, xi = (ui[i] * dr - ur[i] * di) / dd;
+                ur[i] = xr; ui[i] = xi;
+            }
+            for (let i = m - 1; i >= 0; i--) for (let k = i + 1; k < m; k++) {
+                const lr = Are[k][i], li = Aim[k][i];
+                ur[i] -= lr * ur[k] - li * ui[k]; ui[i] -= lr * ui[k] + li * ur[k];
+            }
+            return [ur, ui];
+        };
+        const U = r.map(solve);
+        // Per pair of drives: the magnetic energy change outside the grounds,
+        // mu0 Re[-conj(u_a) . (-r_b) - j omega mu0 sum D conj(u_a) u_b] (the DC energy
+        // of perfectly conducting grounds cancels), and the complex power into the
+        // sheets, omega^2 mu0^2 sum conj(Y) conj(u_a) u_b.
+        const R = [[0, 0], [0, 0]], L = [[0, 0], [0, 0]];
+        nets.forEach((na, a) => nets.forEach((nb, b) => {
+            const [ar, ai] = U[a], [br, bi] = U[b];
+            let eRe = 0, pRe = 0, pIm = 0;
+            for (let k = 0; k < m; k++) {
+                // conj(u_a) u_b
+                const cr = ar[k] * br[k] + ai[k] * bi[k], cim = ar[k] * bi[k] - ai[k] * br[k];
+                eRe += ar[k] * r[b][k];                               // Re(conj(u_a) r_b)
+                // Re(-j omega mu0 D conj(u_a) u_b) = omega mu0 Im(Y conj(u_a) u_b), D = Y_k
+                eRe += omega * MU0 * (Y[k].re * cim + Y[k].im * cr);
+                // conj(Y) conj(u_a) u_b
+                pRe += Y[k].re * cr + Y[k].im * cim;
+                pIm += Y[k].re * cim - Y[k].im * cr;
+            }
+            const w2 = omega * omega * MU0 * MU0;
+            R[na][nb] = w2 * pRe;
+            L[na][nb] = MU0 * eRe + w2 * pIm / omega;
+        }));
+        // Symmetric parts.
+        for (const X of [R, L]) { const o = 0.5 * (X[0][1] + X[1][0]); X[0][1] = X[1][0] = o; }
+        return { R, L };
     }
 
     /**
@@ -1941,7 +2173,8 @@ export class FieldSolver2D {
             const m = this.sym_half ? 2 : 1, I0 = m * netI[0], I1 = m * netI[1];
             Ldc = (I0 * I0 * dcM[0][0] + 2 * I0 * I1 * dcM[0][1] + I1 * I1 * dcM[1][1]) / m;
         }
-        let sumSig = 0, sumExcess = 0;
+        const wallGnd = this._wall_grounds();
+        let sumSig = 0, sumExcess = 0, sumLgnd = 0, sumLsheet = 0;
         (this.conductors || []).forEach((c, ci) => {
             if (!(sumL[ci] !== 0)) return;
             if (c.is_signal && Ldc > 0) {
@@ -1949,8 +2182,12 @@ export class FieldSolver2D {
                 sumSig += smooth; sumExcess += sumL[ci] - smooth;
                 return;
             }
-            const d = c.is_signal ? signalSlab(c, ci) : stackH(c, ci);
-            sum_H2_dl_L += sumL[ci] * slabReactanceFactor(d, deltaCond(c));
+            if (!c.is_signal) {
+                const v = sumL[ci] * slabReactanceFactor(stackH(c, ci), deltaCond(c));
+                if (wallGnd.has(ci)) sumLgnd += v; else sumLsheet += v;
+                return;
+            }
+            sum_H2_dl_L += sumL[ci] * slabReactanceFactor(signalSlab(c, ci), deltaCond(c));
         });
         if (sumSig > 0) {
             const Lac = sumSig / omega;
@@ -1966,6 +2203,8 @@ export class FieldSolver2D {
             sum_H2_dl_R *= 2;
             for (let c = 0; c < gndR.length; c++) gndR[c] *= 2;
             sum_H2_dl_L *= 2;
+            sumLgnd *= 2;
+            sumLsheet *= 2;
         }
 
         // Power normalization factor: differential has 0.5 factor
@@ -1982,7 +2221,7 @@ export class FieldSolver2D {
         // Lateral spreading of the return current in a ground thinner than delta
         // (wallSpreadFactor): the current of effective width W_K = (int|K|)^2 / int|K|^2
         // diffuses sideways over delta^2/d, and cannot get wider than the conductor.
-        let sum_H2_dl_Rgnd = 0.0;
+        let sum_H2_dl_Rgnd = 0.0, sumRsheet = 0.0, spread = 0;
         for (let c = 0; c < gndR.length; c++) {
             if (!(gndS2[c] > 0)) continue;
             const cond = this.conductors[c];
@@ -1996,15 +2235,33 @@ export class FieldSolver2D {
             const Wk = (straddles ? 2 : 1) * gndS1[c] * gndS1[c] / gndS2[c];
             const dlt = deltaCond(cond);
             const g = vacuum_fields ? Math.max(wallSpreadFactor(2 * Math.PI * (dlt * dlt / d) / Wk), Math.min(1, Wk / wMax)) : 1;
-            sum_H2_dl_Rgnd += gndR[c] * g;
+            if (wallGnd.has(c)) { sum_H2_dl_Rgnd += gndR[c] * g; continue; }
+            sumRsheet += gndR[c] * g;
+            spread = Math.max(spread, dlt * dlt / d / Wk);
+        }
+        // Once the spreading length delta^2/d of a ground passes a fraction of its return
+        // width W_K, the thin-sheet solve (_ground_sheet_impedance) takes over the
+        // resistance and inductance of the grounds that are not walls (_wall_grounds) from
+        // the surface model: fully above 0.2, blended on log(spread) down to 0.02, where
+        // the two agree to a few tenths of a percent.
+        const wSheet = Math.min(1, Math.max(0, Math.log10(spread / 0.02)));
+        const sheetZ = vacuum_fields && omega > 0 && wSheet > 0
+            ? this._ground_sheet_cached(line === null ? mode : null) : null;
+        if (sheetZ) {
+            // Full-domain currents: a half domain holds half of each.
+            const m = this.sym_half ? 2 : 1, I0 = m * netI[0], I1 = m * netI[1];
+            const quad = X => I0 * I0 * X[0][0] + 2 * I0 * I1 * X[0][1] + I1 * I1 * X[1][1];
+            sum_H2_dl_Rgnd += (1 - wSheet) * sumRsheet + wSheet * quad(sheetZ.R);
+            sum_H2_dl_L += sumLgnd + (1 - wSheet) * sumLsheet + wSheet * omega * quad(sheetZ.L);
+        } else {
+            sum_H2_dl_Rgnd += sumRsheet;
+            sum_H2_dl_L += sumLgnd + sumLsheet;
         }
         const R_ac_gnd = power_factor * sum_H2_dl_Rgnd * Z0_sq;
         const R_ac = R_ac_sig + R_ac_gnd;
 
-        // Bounded below the skin regime by the DC solve of the traces and the slab
-        // factor of the grounds above. The grounds still lack the lateral spreading of
-        // their return current at low frequency, so delta > t carries the
-        // skin-transition note.
+        // Bounded below the skin regime by the DC solve of the traces, and by the slab
+        // factor or the thin-sheet solve of the grounds above.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
 		// DC-skin transition correction (vacuum-field path only): against

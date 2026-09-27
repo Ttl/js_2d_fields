@@ -363,22 +363,21 @@ async function solve_microstrip() {
     return solver_results;
 }
 
+// Microstrip at 1 kHz on a 50 mm ground in open space. The return
+// current spreads over the whole ground width, which raises L well above its
+// high-frequency value: the ground is a conductor of its own here, not a ground plane on
+// a wall. This is required to solve for ground inductance correctly.
 async function solve_microstrip_1khz() {
-    const solver = new MicrostripSolver({
-        substrate_height: 1.6e-3,
-        trace_width: 3e-3,
-        trace_thickness: 35e-6,
-        gnd_thickness: 35e-6,
-        epsilon_r: 4.5,
-        tan_delta: 0,
-        sigma_cond: 1e7,
-        enclosure_width: 50e-3,
-        freq: 1e3,
-        nx: 10,
-        ny: 10,
-        use_sm: false,
-        boundaries: ["open", "open", "open", "gnd"]
+    const solver = new CustomGeometrySolver({
+        text: `units mm
+bounds open open open open
+diel x=-25   w=50 y=0      h=1.6 er=4.5
+gnd  x=-25   w=50 y=-0.035 h=0.035
+sig+ x=-1.5  w=3  y=1.6    h=0.035
+`,
+        sigma_cond: 1e7, freq: 1e3, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
     });
+    solver.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
 
     const results = await solver.solve_adaptive();
     const mode = results.modes[0];
@@ -396,7 +395,6 @@ async function solve_microstrip_1khz() {
         'G': mode.RLGC.G
     };
 
-    // Reference values from HFSS
     const reference = {
         "RZc": 866,
         "IZc": -864,
@@ -404,16 +402,12 @@ async function solve_microstrip_1khz() {
         "C": 123.25e-12,
         "R": 1.01,
         "G": 0,
-        // L can't be solved correctly without solving for magnetic field due
-        // to current spreading in the ground plane.
-        // "L": 523e-9
+        "L": 523e-9,
     };
 
-    // Zc gets a looser bound than the suite default. At 1 kHz the line is deep
-    // in the DC-skin transition and the return current spreads through the
-    // ground plane, the same effect that makes L inaccurate.
-    test_microstrip_solution(solver_results, reference, "Microstrip 1 kHz",
-                             { 'RZc': 12.0, 'IZc': 12.0 });
+    // Zc: with R >> omega L it is sqrt(R / (j omega C)), which the reference's own R and C
+    // put at 808 - 806j, 7% below the reported 866 - 864j. Both backends give about 807.
+    test_microstrip_solution(solver_results, reference, "Microstrip 1 kHz");
 
     return solver_results;
 }
