@@ -54,6 +54,14 @@ const eps0 = 8.854187817e-12;
 const MU0 = 4 * Math.PI * 1e-7;
 const NP_TO_DB = 8.685889638;
 
+// Phase effective permittivity (beta/k0)^2 of a line with series impedance Zser =
+// R + jwL and shunt admittance Ysh = G + jwC per unit length, beta = Im(gamma).
+function phaseEpsEff(Zser, Ysh, omega) {
+    const beta = Zser.mul(Ysh).sqrt().im;
+    const k0 = omega / c0;
+    return (beta / k0) * (beta / k0);
+}
+
 
 // ---- Mesh-size budget (memory parity with the FDM backend) ----
 // The full-wave eigensolve is far heavier per mesh entity than the quasi-static FDM
@@ -1869,8 +1877,9 @@ export class TriBackend {
         // Exact per-unit-length equivalent circuit of the mode, normalized to Zpv:
         //   series Z = j*omega*mu0*kappa  (+ the wall surface resistance)
         //   shunt  Y = (omega*eps0*er*tand + j*omega*eps0*er − j*kc²/(omega*mu0)) / kappa
-        // It reproduces gamma and Zc exactly, and eps_eff = c0²*L*C = er - (kc/k0)² falls
-        // out with kappa cancelling. The R/G split is normalization-dependent, gamma is not.
+        // It reproduces gamma and Zc exactly, and c0²*L*C = er - (kc/k0)² falls out with
+        // kappa cancelling. The R/G split is normalization-dependent, gamma is not, so the
+        // reported eps_eff is the phase value (beta/k0)² from gamma.
         const L_external = kappa * MU0;
         // The wall's internal inductance is its surface REACTANCE over omega, not its
         // resistance: those coincide only while Zs = Rs(1+j), which a rough or plated
@@ -1882,11 +1891,12 @@ export class TriBackend {
         const C = (eps0 * er - kc * kc / (omega * omega * MU0)) / kappa;
         const G = omega * eps0 * er * tand / kappa;
         const R = R_ac;
-        const Zc = new Complex(R, omega * L).div(new Complex(G, omega * C)).sqrt();
+        const Zser = new Complex(R, omega * L), Zsh = new Complex(G, omega * C);
+        const Zc = Zser.div(Zsh).sqrt();
         return {
             mode: 'single',
             Z0: Zpv,
-            eps_eff: c0 * c0 * L * C, eps_eff_mode: er - (kc / k0) ** 2,
+            eps_eff: phaseEpsEff(Zser, Zsh, omega), eps_eff_mode: er - (kc / k0) ** 2,
             C, C0: eps0,
             RLGC: { R, L, G, C },
             Zc,
@@ -3053,19 +3063,21 @@ export class TriBackend {
         }
 
         // assemble RLGC + Zc
-        // Reported eps_eff = phase ε_eff = c²·L·C: dielectric dispersion (via eps_d)
-        // plus the conductor-roughness ΔL increment (matches the FDM convention).
+        // Reported eps_eff = phase ε_eff = (β/k0)², β = Im γ of the RLGC line, as on the
+        // FDM backend and the interpolating sweep. It differs from c²·L·C once R/ωL or
+        // G/ωC is not small (thin on-chip lines, very lossy substrates).
         const L_total = L_external + L_internal;
-        const eps_eff = c0 * c0 * L_total * C;
-        let Zc, alpha_c;
+        let Zc, alpha_c, eps_eff;
         if (f > 0) {
             const Znum = new Complex(R_total, omega * L_total);
             const Zden = new Complex(G, omega * C);
             Zc = Znum.div(Zden).sqrt();
             alpha_c = Zc.re > 0 ? NP_TO_DB * R_total / (2 * Zc.re) : 0;
+            eps_eff = phaseEpsEff(Znum, Zden, omega);
         } else {
             Zc = new Complex(Z0, 0);
             alpha_c = 0;
+            eps_eff = c0 * c0 * L_total * C;
         }
 
         return {

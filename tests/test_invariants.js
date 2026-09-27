@@ -271,11 +271,17 @@ const F_STATIC = [1e6, 5e7], F_WAVE = [1e9, 40e9];
     const m = at.get(1e9);
     near('eps_eff_mode == c^2*L_external*C', m.eps_eff_mode, C0 * C0 * m.L_external * m.RLGC.C, 1e-4);
     near('Z0 == sqrt(eps_eff_mode)/(c*C)', m.Z0, Math.sqrt(m.eps_eff_mode) / (C0 * m.RLGC.C), 1e-4);
-    // The reported eps_eff carries the internal inductance and eps_eff_mode does not, so
+    // The reported eps_eff is the phase value (beta/k0)^2 of the RLGC line: c^2*L*C times
+    // [sqrt((1+a^2)(1+b^2)) + 1 - a*b] / 2 with a = R/(wL), b = G/(wC).
+    const { R, L, G, C } = m.RLGC, w = 2 * Math.PI * 1e9;
+    const a = R / (w * L), b = G / (w * C);
+    const lossFactor = (Math.sqrt((1 + a * a) * (1 + b * b)) + 1 - a * b) / 2;
+    near('eps_eff == (beta/k0)^2 of the RLGC line', m.eps_eff, C0 * C0 * L * C * lossFactor, 1e-4);
+    // The lossless part carries the internal inductance and eps_eff_mode does not, so
     // their ratio is exactly L/L_external. This is where a regression in the surface
     // reactance (tests/test_surface_reactance.js) would surface as an eps_eff error.
-    near('eps_eff / eps_eff_mode == L / L_external (the internal-inductance share)',
-        m.eps_eff / m.eps_eff_mode, (m.L_external + m.L_internal) / m.L_external, 1e-4);
+    near('eps_eff / (loss factor * eps_eff_mode) == L / L_external (the internal-inductance share)',
+        m.eps_eff / lossFactor / m.eps_eff_mode, (m.L_external + m.L_internal) / m.L_external, 1e-4);
     check('the internal-inductance share is large enough for that ratio to mean something',
         m.eps_eff / m.eps_eff_mode - 1 > 1e-3,
         `eps_eff ${m.eps_eff.toFixed(6)} vs eps_eff_mode ${m.eps_eff_mode.toFixed(6)}`);
