@@ -4,7 +4,8 @@ import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor } from './
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
-import { visibleAreas, platedThrough, platingArea, insideRingHole } from './shapes.js';
+import { visibleAreas, platedThrough, platingArea, insideRingHole, bodyDistance } from './shapes.js';
+import { unlimitedGrounds } from './wall_grounds.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -1070,9 +1071,9 @@ export class FieldSolver2D {
         const sig = (this.conductors || []).filter(c => c.is_signal);
         const wLo = 0.25 * Math.min(...sig.map(c => Math.abs(c.width)));
         const omega = 2 * Math.PI * this.freq;
-        const walls = this._wall_grounds();
+        const ideal = this._unlimited_grounds();
         return (this.conductors || []).some((c, ci) => {
-            if (c.is_signal || walls.has(ci)) return false;
+            if (c.is_signal || ideal.has(ci)) return false;
             const d = Math.min(Math.abs(c.width), Math.abs(c.height));
             return 2 / (omega * CONSTANTS.MU0 * this._bulk_sigma(c)) / d / wLo > 0.02;
         });
@@ -1208,29 +1209,33 @@ export class FieldSolver2D {
         return { M, dc, st, nets, pec, sheet: undefined };
     }
 
-    // Grounds that span the domain along one of its edges, which the triangular backend
-    // absorbs into that wall (_clipDomain): a ground plane on a wall, with nothing
-    // beyond it. They keep the surface model, whose spreading stops at the wall's width,
-    // and the thin-sheet model below is left to the other grounds, which both backends
-    // solve as conductors in open space.
-    _wall_grounds() {
-        if (this._wallGnd) return this._wallGnd;
-        const X0 = -this.domain_width / 2, X1 = this.domain_width / 2;
-        const Y0 = this.domain_y_min, Y1 = this.domain_height;
-        const tol = 1e-9 * Math.max(X1 - X0, Y1 - Y0);
-        const out = new Set();
-        (this.conductors || []).forEach((c, ci) => {
-            if (c.is_signal || c.shape) return;
-            const l = c.x_min <= X0 + tol, r = c.x_max >= X1 - tol, b = c.y_min <= Y0 + tol, t = c.y_max >= Y1 - tol;
-            if ((l && r && (b || t)) || (b && t && (l || r))) out.add(ci);
-        });
-        return (this._wallGnd = out);
+    // Ground slabs absorbed into the domain walls, and the grounds of unlimited width:
+    // the walls and every ground reaching an open domain edge (unlimitedGrounds, the
+    // rule of both backends). The unlimited grounds are ideal returns: at DC they carry
+    // the return current with no resistance, their surface model spreads it without
+    // limit towards DC, and the thin-sheet model below is left to the other grounds,
+    // conductors in open space.
+    _ground_classes() {
+        const key = this.conductors;
+        const dom = { x_min: -this.domain_width / 2, x_max: this.domain_width / 2,
+            y_min: this.domain_y_min ?? -this.t_gnd, y_max: this.domain_height };
+        const c = this._gndClasses;
+        if (c && c.key === key && c.x_max === dom.x_max && c.y_min === dom.y_min && c.y_max === dom.y_max) return c;
+        const cls = (this.domain_shape || !key) ? { walls: new Set(), unlimited: new Set() }
+            : unlimitedGrounds(dom, key, this.boundaries, this.domain_width * 1e-9);
+        this._gndClasses = { key, ...dom, ...cls };
+        return this._gndClasses;
     }
+    _wall_grounds() { return this._ground_classes().walls; }
+    _unlimited_grounds() { return this._ground_classes().unlimited; }
 
     // Thin-sheet model of the grounds for the return current spreading sideways at low
     // frequency. Each ground conductor is tied across its thin dimension into groups
     // (a column of a horizontal ground, a row of a vertical one) that carry the sheet
-    // current Y_s (E0 - j omega A) with Y_s the admittance of a one-sided slab. The rest
+    // current Y_s (E0 - j omega A) with Y_s the admittance of a one-sided slab. A thick
+    // ground (a via slab) is split across its thickness into layers no thicker than
+    // half its distance to the nearest trace: towards DC it is transparent to the
+    // field, which one potential across its whole thickness would stiffen. The rest
     // of the grid is eliminated on the factorization of the DC trace solve (grounds
     // pinned there too), leaving the dense Schur complement S on the groups and the
     // right-hand side r of each trace drive. Per frequency (S + j omega mu0 D) u = r
@@ -1238,22 +1243,33 @@ export class FieldSolver2D {
     // grounds, see _ground_sheet_impedance.
     async _ground_sheet_setup(dc, st, nets, pec) {
         const nx = this.x.length, ny = this.y.length;
-        // Wall grounds stay perfectly conducting here (their nodes stay pinned at 0).
-        const walls = this._wall_grounds();
+        // Unlimited grounds stay perfectly conducting here (their nodes stay pinned at 0).
+        const ideal = this._unlimited_grounds();
+        const signals = this.conductors.filter(c => c.is_signal);
+        const layers = this.conductors.map((c, ci) => {
+            if (c.is_signal || ideal.has(ci)) return null;
+            const d = Math.min(Math.abs(c.width), Math.abs(c.height));
+            const gap = Math.min(...signals.map(sc => bodyDistance(sc, c)));
+            const n = gap > 0 ? Math.max(1, Math.ceil(d / (0.5 * gap))) : 1;
+            return { n, d: d / n };
+        });
         const groupOf = new Int32Array(nx * ny).fill(-1);
         const groups = [], byKey = new Map();
         for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
             if (!this.ground_mask[i][j] || (pec && j === 0)) continue;
             const ci = this.conductor_id[i][j];
             const c = this.conductors[ci];
-            if (!c || c.is_signal || walls.has(ci)) continue;
+            if (!c || c.is_signal || ideal.has(ci)) continue;
             const horiz = Math.abs(c.height) <= Math.abs(c.width);
-            const key = `${ci}:${horiz ? 'c' : 'r'}${horiz ? j : i}`;
+            const { n, d } = layers[ci];
+            const across = horiz ? (this.y[i] - c.y_min) : (this.x[j] - c.x_min);
+            const layer = Math.min(n - 1, Math.max(0, Math.floor(across / d)));
+            const key = `${ci}:${horiz ? 'c' : 'r'}${horiz ? j : i}:${layer}`;
             let g = byKey.get(key);
             if (g === undefined) {
                 g = groups.length;
                 byKey.set(key, g);
-                groups.push({ ci, d: Math.min(Math.abs(c.width), Math.abs(c.height)), sigma: this._bulk_sigma(c), area: 0 });
+                groups.push({ ci, d, sigma: this._bulk_sigma(c), area: 0 });
             }
             groupOf[i * nx + j] = g;
             // Conductor area of the node's control volume, with its row weight.
@@ -1668,7 +1684,10 @@ export class FieldSolver2D {
         // Per-conductor conductances also when a plating layer conducts beside the bulk.
         const thinPlated = (this.conductors || []).some(c => platingArea(c) > 0 && !this._solid_plating(c));
         const dcG = (ownSigma || thinPlated) ? this._dc_conductances() : null;
-        const R_gnd0 = dcG ? (dcG.gnd > 0 ? 1.0 / dcG.gnd : 0)
+        // A ground of unlimited width is an ideal return: with one, the return current
+        // has no DC resistance and the other grounds carry none of it.
+        const R_gnd0 = this._unlimited_grounds().size ? 0
+            : dcG ? (dcG.gnd > 0 ? 1.0 / dcG.gnd : 0)
             : ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
         // Signal and ground are separate conductors in series, so each keeps its own
         // DC term and the two resistances add.
@@ -2169,7 +2188,32 @@ export class FieldSolver2D {
             const m = this.sym_half ? 2 : 1, I0 = m * netI[0], I1 = m * netI[1];
             Ldc = (I0 * I0 * dcM[0][0] + 2 * I0 * I1 * dcM[0][1] + I1 * I1 * dcM[1][1]) / m;
         }
-        const wallGnd = this._wall_grounds();
+        const idealGnd = this._unlimited_grounds();
+        // Lateral spreading of the return current in a ground thinner than delta
+        // (wallSpreadFactor): the current of effective width W_K = (int|K|)^2 / int|K|^2
+        // diffuses sideways over delta^2/d. A ground conductor cannot spread wider than
+        // itself; a ground of unlimited width has no such limit, so its resistance
+        // vanishes towards DC, where it is an ideal return. Its reactance keeps the slab
+        // value of the confined current (the DC convention of dcLineParameters): the
+        // inductance the spreading adds outside the ground is not modelled, and removing
+        // the one inside would make L rise with frequency.
+        const spreadG = kR.map(() => 1), spreadU = kR.map(() => 0);
+        for (let c = 0; c < gndR.length; c++) {
+            if (!(gndS2[c] > 0) || !vacuum_fields) continue;
+            const cond = this.conductors[c];
+            const d = Math.min(Math.abs(cond.width), Math.abs(cond.height));
+            const wMax = Math.max(Math.abs(cond.width), Math.abs(cond.height));
+            // Half-domain moments cover x >= 0: a conductor straddling the plane has
+            // twice the width seen, one beside it is complete (its mirror image is a
+            // separate conductor).
+            const x0 = Math.min(cond.x, cond.x + cond.width), x1 = Math.max(cond.x, cond.x + cond.width);
+            const straddles = this.sym_half && x0 < 0 && x1 > 0;
+            const Wk = (straddles ? 2 : 1) * gndS1[c] * gndS1[c] / gndS2[c];
+            const dlt = deltaCond(cond);
+            spreadU[c] = dlt * dlt / d / Wk;
+            const g = wallSpreadFactor(2 * Math.PI * spreadU[c]);
+            spreadG[c] = idealGnd.has(c) ? g : Math.max(g, Math.min(1, Wk / wMax));
+        }
         let sumSig = 0, sumExcess = 0, sumLgnd = 0, sumLsheet = 0;
         (this.conductors || []).forEach((c, ci) => {
             if (!(sumL[ci] !== 0)) return;
@@ -2178,8 +2222,8 @@ export class FieldSolver2D {
                 return;
             }
             if (!c.is_signal) {
-                const v = sumL[ci] * slabReactanceFactor(stackH(c, ci), deltaCond(c));
-                if (wallGnd.has(ci)) sumLgnd += v; else sumLsheet += v;
+                const v = sumL[ci] * slabReactanceFactor(Math.min(Math.abs(c.width), stackH(c, ci)), deltaCond(c));
+                if (idealGnd.has(ci)) sumLgnd += v; else sumLsheet += v;
                 return;
             }
             sum_H2_dl_L += sumL[ci] * slabReactanceFactor(signalSlab(c, ci), deltaCond(c));
@@ -2213,26 +2257,13 @@ export class FieldSolver2D {
 
         // AC Resistance per unit length from skin effect (Ohm/m)
         const R_ac_sig = power_factor * sum_H2_dl_R * Z0_sq;
-        // Lateral spreading of the return current in a ground thinner than delta
-        // (wallSpreadFactor): the current of effective width W_K = (int|K|)^2 / int|K|^2
-        // diffuses sideways over delta^2/d, and cannot get wider than the conductor.
+        // Ground resistance with the spreading factors above.
         let sum_H2_dl_Rgnd = 0.0, sumRsheet = 0.0, spread = 0;
         for (let c = 0; c < gndR.length; c++) {
             if (!(gndS2[c] > 0)) continue;
-            const cond = this.conductors[c];
-            const d = Math.min(Math.abs(cond.width), Math.abs(cond.height));
-            const wMax = Math.max(Math.abs(cond.width), Math.abs(cond.height));
-            // Half-domain moments cover x >= 0: a conductor straddling the plane has
-            // twice the width seen, one beside it is complete (its mirror image is a
-            // separate conductor).
-            const x0 = Math.min(cond.x, cond.x + cond.width), x1 = Math.max(cond.x, cond.x + cond.width);
-            const straddles = this.sym_half && x0 < 0 && x1 > 0;
-            const Wk = (straddles ? 2 : 1) * gndS1[c] * gndS1[c] / gndS2[c];
-            const dlt = deltaCond(cond);
-            const g = vacuum_fields ? Math.max(wallSpreadFactor(2 * Math.PI * (dlt * dlt / d) / Wk), Math.min(1, Wk / wMax)) : 1;
-            if (wallGnd.has(c)) { sum_H2_dl_Rgnd += gndR[c] * g; continue; }
-            sumRsheet += gndR[c] * g;
-            spread = Math.max(spread, dlt * dlt / d / Wk);
+            if (idealGnd.has(c)) { sum_H2_dl_Rgnd += gndR[c] * spreadG[c]; continue; }
+            sumRsheet += gndR[c] * spreadG[c];
+            spread = Math.max(spread, spreadU[c]);
         }
         // Once the spreading length delta^2/d of a ground passes a fraction of its return
         // width W_K, the thin-sheet solve (_ground_sheet_impedance) takes over the

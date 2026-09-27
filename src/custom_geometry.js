@@ -176,13 +176,15 @@ class CustomGeometrySolver extends FieldSolver2D {
         // Reference length of the fringing field: distance from the signals to the
         // nearest ground rectangle or ground wall.
         const wallRects = [];
-        // An auto gnd wall sits on the edge of the stack when a dielectric ends there,
-        // as the ground plane of a substrate. Past a conductor it is an enclosure wall
-        // at the open-boundary distance.
+        // An auto gnd wall sits on the edge of the stack when a dielectric or a
+        // full-width ground ends there, as the ground plane of a substrate (the ground
+        // is then that plane). Past any other conductor it is an enclosure wall at the
+        // open-boundary distance.
         const eps = (yHi - yLo) * 1e-9;
-        const diels = rects.filter(r => r.kind === 'diel');
-        const snapBot = b[3] === 'gnd' && diels.some(r => r.y0 <= yLo + eps);
-        const snapTop = b[2] === 'gnd' && diels.some(r => r.y1 >= yHi - eps);
+        const fullWidth = r => r.src.x.min === -Infinity && r.src.x.max === Infinity;
+        const edges = rects.filter(r => r.kind === 'diel' || (r.kind === 'gnd' && !r.shape && fullWidth(r)));
+        const snapBot = b[3] === 'gnd' && edges.some(r => r.y0 <= yLo + eps);
+        const snapTop = b[2] === 'gnd' && edges.some(r => r.y1 >= yHi - eps);
         const yBot = d.y_min ?? (snapBot ? yLo : null);
         const yTop = d.y_max ?? (snapTop ? yHi : null);
         if (b[3] === 'gnd' && yBot !== null) wallRects.push({ x0: -BIG, x1: BIG, y0: -BIG, y1: yBot });

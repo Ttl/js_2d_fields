@@ -22,6 +22,7 @@
 // boundary is the domain outline, but still gets a condRects entry so the freedom map
 // makes that outline PEC and the loss integral finds its surface edges.
 
+import { clipDomainWalls } from '../wall_grounds.js';
 import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, shapeLoops,
          platingCoreOf, bodyDistance, isComplement, REL_SHAPE_TOL } from '../shapes.js';
 
@@ -134,41 +135,10 @@ function _rectOf(o) {
 }
 
 // Absorb full-span boundary ground slabs into wall PEC BCs + clip the meshed domain
-// (identical logic to geom_to_mesh._clipDomain). Exported for tests/test_geometry.js —
+// (clipDomainWalls, shared with the FDM backend). Exported for tests/test_geometry.js —
 // the wall-absorption rule defines the effective cavity that the analytic mode tests
 // (box_modes_test.mjs) compute their truth from.
-export function _clipDomain(domain, conductors, boundaries, tol) {
-    let { x_min: X0, x_max: X1, y_min: Y0, y_max: Y1 } = domain;
-    const b = boundaries || ['open', 'open', 'open', 'gnd'];
-    const wallPEC = { left: b[0] === 'gnd', right: b[1] === 'gnd', top: b[2] === 'gnd', bottom: b[3] === 'gnd' };
-    // Metal thickness of each PEC wall: the absorbed slab's thickness (stacked
-    // slabs add up), Infinity for a bare 'gnd' boundary. A slab against a 'gnd'
-    // boundary is the ground plane itself, so its thickness is the slab's.
-    const wallThick = { left: Infinity, right: Infinity, top: Infinity, bottom: Infinity };
-    const absorb = (side, t) => {
-        wallThick[side] = (Number.isFinite(wallThick[side]) ? wallThick[side] : 0) + t;
-        wallPEC[side] = true;
-    };
-    let changed = true;
-    while (changed) {
-        changed = false;
-        for (const c of conductors) {
-            if (c.is_signal) continue;
-            // Shaped grounds (e.g. a coax shield) are not full-span slabs and must not
-            // be absorbed into a wall: their bounding box spans the domain but their
-            // actual body does not fill it.
-            if (c.shape) continue;
-            const r = _rectOf(c);
-            const touchesL = r.xmin <= X0 + tol, touchesR = r.xmax >= X1 - tol;
-            const touchesB = r.ymin <= Y0 + tol, touchesT = r.ymax >= Y1 - tol;
-            if (touchesB && touchesL && touchesR && r.ymax < Y1 - tol && r.ymax > Y0 + tol) { absorb('bottom', r.ymax - Y0); Y0 = r.ymax; changed = true; continue; }
-            if (touchesT && touchesL && touchesR && r.ymin > Y0 + tol && r.ymin < Y1 - tol) { absorb('top', Y1 - r.ymin); Y1 = r.ymin; changed = true; continue; }
-            if (touchesL && touchesB && touchesT && r.xmax < X1 - tol && r.xmax > X0 + tol) { absorb('left', r.xmax - X0); X0 = r.xmax; changed = true; continue; }
-            if (touchesR && touchesB && touchesT && r.xmin > X0 + tol && r.xmin < X1 - tol) { absorb('right', X1 - r.xmin); X1 = r.xmin; changed = true; continue; }
-        }
-    }
-    return { X0, X1, Y0, Y1, wallPEC, wallThick };
-}
+export const _clipDomain = clipDomainWalls;
 
 // Inside of a conductor's plating layer when the plating is thick (thick_corners), the
 // only plating that is meshed: see platingCoreOf. Thin plating stays a layered surface
@@ -206,11 +176,11 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
         return list.length ? list : null;
     };
     // sigma, rq: the conductor's own conductivity and surface roughness (custom geometry),
-    // null for the solver-wide ones.
-    const roleOf = (c) => ({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
-                             slab_thickness: c.slab_thickness ?? null, rq: c.rq ?? null,
-                             sigma: c.sigma > 0 ? c.sigma : null });
-    for (const c of conductors) {
+    // null for the solver-wide ones. ci: the conductor's index.
+    const roleOf = (c, ci) => ({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
+                                 slab_thickness: c.slab_thickness ?? null, rq: c.rq ?? null,
+                                 sigma: c.sigma > 0 ? c.sigma : null, ci });
+    for (const [ci, c] of conductors.entries()) {
         // A polygon entirely left of the plane is not in a half domain.
         if (isPolyShape(c.shape) && meshOpts.half && !shapeLoops(c.shape, meshOpts).length) continue;
         if (c.shape) {
@@ -226,7 +196,7 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
             const bb = shapeBBox(c.shape);
             rects.push({ xmin: bb.xmin, xmax: bb.xmax, ymin: bb.ymin, ymax: bb.ymax,
                          shape: c.shape, meshArea: shapeArea(c, meshOpts) });
-            roles.push(roleOf(c));
+            roles.push(roleOf(c, ci));
             cores.push(coreOf(c));
             continue;
         }
@@ -235,7 +205,7 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
         const ymin = Math.max(r.ymin, Y0), ymax = Math.min(r.ymax, Y1);
         if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
         rects.push({ xmin, xmax, ymin, ymax, meshArea: (xmax - xmin) * (ymax - ymin) });
-        roles.push(roleOf(c));
+        roles.push(roleOf(c, ci));
         cores.push(coreOf(c));
     }
     return { rects, roles, cores };

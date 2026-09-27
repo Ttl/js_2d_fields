@@ -60,7 +60,8 @@ async function tri(opts, triOpts = {}) {
     const r0 = b.solveAt(0).modes[0];
     const sig = unionArea(b.solver.conductors.filter(c => c.is_signal));
     const gnd = unionArea(b.solver.conductors.filter(c => !c.is_signal));
-    const rdc = 1 / (SIGMA * sig) + 1 / (SIGMA * gnd);
+    // The bottom plane is a wall ground, an ideal return: the ground adds no DC resistance.
+    const rdc = 1 / (SIGMA * sig) + (b.solver._wall_grounds().size ? 0 : 1 / (SIGMA * gnd));
     check('GCPW R(f=0) = geometric R_dc', relDiff(r0.RLGC.R, rdc) < 1e-9,
         `${r0.RLGC.R.toFixed(4)} vs ${rdc.toFixed(4)} Ω/m`);
 

@@ -56,6 +56,7 @@ const TIERS = {
         { file: 'tests/test_custom_geometry_mirror.js', cost: 1 },
         { file: 'tests/test_custom_geometry_shapes_text.js', cost: 1 },
         { file: 'tests/test_custom_geometry_equivalence.js', cost: 25 },
+        { file: 'tests/test_dc_inductance.js', cost: 1 },
     ],
     slow: [
         { file: 'tests/test_fullwave_correctness.js', cost: 98 },
@@ -94,6 +95,7 @@ const TIERS = {
         { file: 'tests/test_surface_reactance.js', cost: 75 },
         { file: 'tests/test_qs_dc_internal_inductance.js', cost: 58 },
         { file: 'tests/test_qs_ground_spreading.js', cost: 22 },
+        { file: 'tests/test_dc_resistance.js', cost: 45 },
         { file: 'tests/test_anchor_caches.js', cost: 90 },
         { file: 'tests/test_certification.js', cost: 39 },
         { file: 'tests/test_invariants.js', cost: 110 },

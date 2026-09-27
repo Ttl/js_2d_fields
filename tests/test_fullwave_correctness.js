@@ -47,9 +47,11 @@ function unionArea(list) {
     }
     return a;
 }
+// Signal and ground in series; a wall ground is an ideal return with no DC resistance.
 function expectedRdc(s) {
     const sig = unionArea(s.conductors.filter(c => c.is_signal)), gnd = unionArea(s.conductors.filter(c => !c.is_signal));
-    return (sig > 0 ? 1 / (s.sigma_cond * sig) : 0) + (gnd > 0 ? 1 / (s.sigma_cond * gnd) : 0);
+    const gndR = s._wall_grounds().size ? 0 : (gnd > 0 ? 1 / (s.sigma_cond * gnd) : 0);
+    return (sig > 0 ? 1 / (s.sigma_cond * sig) : 0) + gndR;
 }
 
 // ---- 1+2: R_dc — GCPW-like geometry (coplanar ground strips) ----
@@ -64,10 +66,10 @@ function expectedRdc(s) {
     const hasCoplanarGnd = s.conductors.some(c => !c.is_signal && c.width < s.domain_width * 0.99);
     check('GCPW geometry has coplanar ground rects', hasCoplanarGnd);
 
-    // f = 0: exact geometric DC resistance, FDM convention (series ground return).
+    // f = 0: exact geometric DC resistance, FDM convention.
     const r0 = b.solveAt(0).modes[0];
     const rdcExp = expectedRdc(s);
-    check('R(f=0) = R_dc (signal + ground series)', relDiff(r0.RLGC.R, rdcExp) < 1e-9,
+    check('R(f=0) = R_dc (signal, wall ground ideal)', relDiff(r0.RLGC.R, rdcExp) < 1e-9,
         `tri ${r0.RLGC.R.toFixed(4)} vs expected ${rdcExp.toFixed(4)} Ω/m`);
     check('R(f=0) > 0', r0.RLGC.R > 0);
 

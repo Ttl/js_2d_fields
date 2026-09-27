@@ -45,6 +45,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
 import { Complex } from '../complex.js';
+import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry, conductorFinishKey } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar, causalModelWarning } from '../djordjevic_sarkar.js';
@@ -2330,10 +2331,25 @@ export class TriBackend {
     // eps_eff comes from the full-wave eigenmode (f ≥ 100 MHz), anchored to the
     // static solve (_eigenBias), or the static solve alone (below), conductor loss is
     // from the robust static-field method.
-    // Internal inductance at DC: the loss solve evaluated where the skin depth is
-    // 100x the thickest conductor, so the current is uniform across every
-    // cross-section and L_internal sits on its low-frequency plateau.
+    // Internal inductance at DC. For rectangular conductors driven odd/even or single,
+    // the exact free-space value of uniform current in the conductors carrying it,
+    // with the grounds of unlimited width as ideal returns (dcLineParameters). Otherwise the loss solve
+    // evaluated where the skin depth is 100x the thickest conductor, so the current is
+    // uniform across every cross-section and L_internal sits on its low-frequency
+    // plateau.
     _dcInternalInductance(mode, cr) {
+        const s = this.solver;
+        if (!this._modalPhys) {
+            const key = s.conductors, sigma = s.sigma_cond ?? 5.8e7;
+            if (!this._dcExact || this._dcExact.key !== key || this._dcExact.sigma !== sigma)
+                this._dcExact = { key, sigma, byMode: {} };
+            const byMode = this._dcExact.byMode;
+            if (!(mode in byMode)) byMode[mode] = s._ground_classes ? dcLineParameters(s.conductors, mode, {
+                sigmaDefault: sigma, unlimited: s._unlimited_grounds(), walls: s._wall_grounds(),
+                box: { x_min: -s.domain_width / 2, x_max: s.domain_width / 2, y_min: s.domain_y_min ?? -s.t_gnd, y_max: s.domain_height } })
+                : null;
+            if (byMode[mode]) return Math.max(0, byMode[mode].Lint);
+        }
         let tMax = 0;
         for (const c of cr.rects) {
             if (c.shape && isComplement(c.shape)) continue;
@@ -2345,6 +2361,39 @@ export class TriBackend {
         const fDc = 2 / (2 * Math.PI * MU0 * sigma * delta * delta);
         const r = this._modeAtFreq(mode, fDc);
         return r.L_internal > 0 ? r.L_internal : 0;
+    }
+
+    // MQS conductor loss with the meshed grounds of unlimited width (reaching an open
+    // domain edge, _unlimited_grounds) as ideal returns towards DC. Once their spreading
+    // parameter delta^2 / (d W_K) passes 0.02 they are solved as perfect conductors with
+    // a surface term like the walls (opts.idealRects), fully from 0.2, blended on
+    // log(u) in between with the volume solve that holds them as finite eddy-current
+    // conductors: the range the quasi-static thin-sheet model uses. `idealCache` holds
+    // the assembly of the ideal-ground system.
+    _mqsSolve(mesh, cr, f, sigma, opts, idealCache) {
+        const s = this.solver, solve = this.ctx.helpers.solveComplexSymmetric;
+        const U = s._unlimited_grounds ? s._unlimited_grounds() : null;
+        const roles = cr.rectRoles || [];
+        const ideal = roles.map(r => !!(U && r && !r.is_signal && U.has(r.ci)));
+        if (!ideal.some(v => v)) return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
+        // Skip the ideal solve while u cannot reach the blend range: W_K is at least a
+        // quarter of the narrowest trace.
+        const traces = s.conductors.filter(c => c.is_signal).map(c => Math.abs(c.x_max - c.x_min));
+        const wLo = 0.25 * Math.min(...traces);
+        const omega = 2 * Math.PI * f;
+        const uMax = Math.max(...cr.rects.map((r, i) => {
+            if (!ideal[i]) return 0;
+            const sg = roles[i].sigma || s.sigma_cond || sigma;
+            return 2 / (omega * MU0 * sg) / Math.min(r.xmax - r.xmin, r.ymax - r.ymin) / wLo;
+        }));
+        if (!(uMax > 0.02)) return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
+        const b = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, { ...opts, idealRects: ideal, cache: idealCache });
+        const w = Math.min(1, Math.max(0, Math.log10(b.uIdeal / 0.02)));
+        if (w >= 1) return b;
+        const a = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
+        const mix = k => w * b[k] + (1 - w) * a[k];
+        return { ...a, R_total: mix('R_total'), X_total: mix('X_total'), L_loop: mix('L_loop'), L_wall: mix('L_wall'),
+                 R_trace: mix('R_trace'), R_gnd: mix('R_gnd') };
     }
 
     // meshedPlatingCR of this.condRect, built once per mesh.
@@ -2809,7 +2858,7 @@ export class TriBackend {
                 if (rectSigma) o.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
                 if (anyPlatingM || ownRqM || ownSigmaM) o.surfaceZs = buildFaceZs(s, crM, f);
                 else o.Rq = rq;
-                const m = mqsConductorLoss(mqsMesh, crM, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, o);
+                const m = this._mqsSolve(mqsMesh, crM, f, mqsSigma, o, this._mqsMultiIdealCache || (this._mqsMultiIdealCache = {}));
                 const pl = (cache.pecLine && cache.pecLine.mesh === mqsMesh) ? cache.pecLine
                     : (cache.pecLine = { mesh: mqsMesh, L: [] });
                 if (pl.L[line] === undefined) pl.L[line] = mqsPecInductance(mqsMesh, crM, this.ctx.helpers.solveSparseMulti, o);
@@ -2850,7 +2899,8 @@ export class TriBackend {
             else mqsOpts.Rq = rq;
             let mqs = null;
             try {
-                mqs = mqsConductorLoss(mqsMesh, crM, f, mqsSigma, this.ctx.helpers.solveComplexSymmetric, 0, mqsOpts);
+                mqs = this._mqsSolve(mqsMesh, crM, f, mqsSigma, mqsOpts, mqsMulti
+                    ? (this._mqsMultiIdealCache || (this._mqsMultiIdealCache = {})) : (st.mqsIdealCache || (st.mqsIdealCache = {})));
             } catch (e) {
                 // Surface the downgrade instead of silently falling back: an MQS solve
                 // failure here is almost always the factorization exhausting the WASM heap
@@ -2941,6 +2991,9 @@ export class TriBackend {
         // field_solver.calculate_conductor_loss): sigArea sums both traces, the odd
         // mode's DC return is the partner trace (no net ground current), the even
         // mode returns 2I through the ground.
+        // A ground of unlimited width is an ideal return: with one, the return current
+        // has no DC resistance and the other grounds carry none of it.
+        if (s._unlimited_grounds && s._unlimited_grounds().size) gndArea = 0;
         let R_dc;
         if (s.is_differential && (mode === 'odd' || mode === 'even')) {
             // Traces of different metals: the per-line value is the mean of the two.
