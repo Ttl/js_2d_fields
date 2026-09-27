@@ -1553,9 +1553,20 @@
         const isWG = document.getElementById('tl_type').value === 'rect_waveguide';
         const chk = document.getElementById('chk_interp_sweep');
         if (chk) {
+            // The user's choice is kept while the waveguide locks the box and put back
+            // when another line type is selected. This runs on every visibility update,
+            // so the choice is only taken when the lock first engages.
+            let want = null;
+            if (isWG) {
+                if (!chk.disabled) chk.dataset.savedChecked = chk.checked ? '1' : '0';
+                want = false;
+            } else if (chk.disabled && chk.dataset.savedChecked !== undefined) {
+                want = chk.dataset.savedChecked === '1';
+                delete chk.dataset.savedChecked;
+            }
             chk.disabled = isWG;
-            if (isWG && chk.checked) {
-                chk.checked = false;
+            if (want !== null && chk.checked !== want) {
+                chk.checked = want;
                 // Setting .checked in script fires no event, and the tolerance row's
                 // visibility is driven by one — so it would stay open with the box off.
                 chk.dispatchEvent(new Event('change', { bubbles: true }));
