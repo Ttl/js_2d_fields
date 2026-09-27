@@ -287,9 +287,28 @@ function computeGeometryView(solver, maxY, fraction = SIGNAL_CONDUCTOR_VIEW_FRAC
     // edges facing them.
     const W2 = (solver.domain_width || 0) / 2, tolW = W2 * 1e-9;
     const inner = v => !(W2 > 0) || Math.abs(Math.abs(v) - W2) > tolW;
+    const sx0 = Math.min(...signal.map(c => c.x_min)), sx1 = Math.max(...signal.map(c => c.x_max));
+    const sy0 = Math.min(...signal.map(c => c.y_min)), sy1 = Math.max(...signal.map(c => c.y_max));
+    // A ground around the signals (coax or twinax shield) holds the fields: frame it.
+    const shield = grounds.find(g => g.x_min <= sx0 && g.x_max >= sx1 && g.y_min <= sy0 && g.y_max >= sy1);
+    if (shield) {
+        const pad = 0.10 * Math.max(shield.x_max - shield.x_min, shield.y_max - shield.y_min);
+        // The margin stops at the edge of a custom geometry's solved region.
+        const u = solver.user_domain || { x_min: -Infinity, x_max: Infinity, y_min: -Infinity, y_max: Infinity };
+        return {
+            xRange: [Math.max(shield.x_min - pad, u.x_min) * 1000, Math.min(shield.x_max + pad, u.x_max) * 1000],
+            yRange: [Math.max(shield.y_min - pad, u.y_min) * 1000, Math.min(shield.y_max + pad, u.y_max) * 1000],
+        };
+    }
     let xs = signal.flatMap(c => [c.x_min, c.x_max]).filter(inner);
     if (xs.length < 2) xs = xs.concat(grounds.flatMap(c => [c.x_min, c.x_max]).filter(inner));
     if (xs.length < 2) xs = signal.flatMap(c => [c.x_min, c.x_max]);
+    // A return strip no wider than the signal cluster (coplanar strips) belongs to the
+    // structure, wide grounds (CPW, planes) are framed by the signals alone.
+    const clusterW = Math.max(...xs) - Math.min(...xs);
+    for (const g of grounds) {
+        if (inner(g.x_min) && inner(g.x_max) && g.x_max - g.x_min <= clusterW) xs.push(g.x_min, g.x_max);
+    }
     let xl = Math.min(...xs), xr = Math.max(...xs);
     if (!(xr > xl)) { xl -= W2 / 20; xr += W2 / 20; }
     const center = (xl + xr) / 2;
