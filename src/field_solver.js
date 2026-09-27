@@ -1764,10 +1764,10 @@ export class FieldSolver2D {
             }
             return -1;
         };
-        const bareZ = (ci, direction = null) => {
-            const r = bareRq(ci), sg = sigmaOf(ci);
+        const bareZ = (ci, direction = null, r = bareRq(ci)) => {
+            const sg = sigmaOf(ci);
             if (ownSigma && direction && !this.conductors[ci].plating) {
-                const key = `${ci}_bare_${direction}`;
+                const key = `${ci}_bare_${direction}_${r}`;
                 if (!Z_cache.has(key)) {
                     const k = backingOf(ci, direction);
                     const c = this.conductors[ci];
@@ -1794,12 +1794,23 @@ export class FieldSolver2D {
                 if (z) return z;
             }
             if (r === rq && sg === this.sigma_cond) return Z_surf_default;
-            const key = `${ci}_bare`;
+            const key = `${ci}_bare_${r}`;
             if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, sg, r));
             return Z_cache.get(key);
         };
 
-        const getZsurf = (ci, direction, i, j, dl, xStart = null) => {
+        // Plating over the bulk metal. With `dc` set it also stands in for the faces
+        // modelled as plating metal alone (top plating down the sides, thick corners):
+        // their semi-infinite plating reactance never returns to the bulk value, so
+        // its excess over the bulk would grow as 1/sqrt(f) in the low-frequency blend.
+        const layeredZ = (ci, platingRq) => {
+            const cond = this.conductors[ci];
+            const key = `${ci}_layered_${platingRq}`;
+            if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough_layered(
+                this.freq, sigmaOf(ci), platingRq, cond.plating.sigma, cond.plating.thickness));
+            return Z_cache.get(key);
+        };
+        const getZsurf = (ci, direction, i, j, dl, xStart = null, dc = false) => {
             if (!this.conductors || ci < 0) return Z_surf_default;
             const Z_bare = bareZ(ci, direction);
             const cond = this.conductors[ci];
@@ -1839,7 +1850,9 @@ export class FieldSolver2D {
                 if (fraction > 0) {
                     const key_top_side = `${ci}_top_side_plating`;
                     let Z_plating;
-                    if (Z_cache.has(key_top_side)) {
+                    if (dc) {
+                        Z_plating = layeredZ(ci, cond.plating.rq);
+                    } else if (Z_cache.has(key_top_side)) {
                         Z_plating = Z_cache.get(key_top_side);
                     } else {
                         Z_plating = calculate_Zrough(
@@ -1874,12 +1887,14 @@ export class FieldSolver2D {
                 if (fraction > 0) {
                     const key_corner = `${ci}_corner_plating`;
                     let Z_plating;
-                    if (Z_cache.has(key_corner)) {
+                    if (dc) {
+                        Z_plating = layeredZ(ci, bareRq(ci));
+                    } else if (Z_cache.has(key_corner)) {
                         Z_plating = Z_cache.get(key_corner);
                     } else {
                         // Side plating material with bulk surface roughness
                         Z_plating = calculate_Zrough(
-                            this.freq, cond.plating.sigma, rq
+                            this.freq, cond.plating.sigma, bareRq(ci)
                         );
                         Z_cache.set(key_corner, Z_plating);
                     }
@@ -1906,7 +1921,9 @@ export class FieldSolver2D {
                 // Get corner plating impedance (single-layer, no bulk)
                 const key_corner = `${ci}_corner_plating`;
                 let Z_corner;
-                if (Z_cache.has(key_corner)) {
+                if (dc) {
+                    Z_corner = layeredZ(ci, bareRq(ci));
+                } else if (Z_cache.has(key_corner)) {
                     Z_corner = Z_cache.get(key_corner);
                 } else {
                     // At corners: single-layer with plating sigma and bulk rq
@@ -1928,21 +1945,7 @@ export class FieldSolver2D {
                 const corner_fraction = corner_size / dl;
 
                 // Get bottom surface impedance
-                let Z_bottom;
-                if (cond.plating.bottom) {
-                    const key_bottom = `${ci}_bottom`;
-                    if (Z_cache.has(key_bottom)) {
-                        Z_bottom = Z_cache.get(key_bottom);
-                    } else {
-                        Z_bottom = calculate_Zrough_layered(
-                            this.freq, sigmaOf(ci),
-                            cond.plating.rq, cond.plating.sigma, cond.plating.thickness
-                        );
-                        Z_cache.set(key_bottom, Z_bottom);
-                    }
-                } else {
-                    Z_bottom = Z_bare;
-                }
+                const Z_bottom = cond.plating.bottom ? layeredZ(ci, cond.plating.rq) : Z_bare;
 
                 // Weighted average: corner region uses corner plating impedance, bulk uses bottom impedance
                 const Z_avg_re = corner_fraction * Z_corner.re + (1 - corner_fraction) * Z_bottom.re;
@@ -1952,16 +1955,7 @@ export class FieldSolver2D {
 
             // Standard surface impedance (no corner effects)
             if (!cond.plating[surface]) return Z_bare;
-
-            const key = `${ci}_${surface}`;
-            if (Z_cache.has(key)) return Z_cache.get(key);
-
-            const Z = calculate_Zrough_layered(
-                this.freq, sigmaOf(ci),
-                cond.plating.rq, cond.plating.sigma, cond.plating.thickness
-            );
-            Z_cache.set(key, Z);
-            return Z;
+            return layeredZ(ci, cond.plating.rq);
         };
 
         const ny = this.y.length;
@@ -2011,19 +2005,36 @@ export class FieldSolver2D {
         // Reactance integrand Im(Zs)|H|^2 dl per conductor (the slab factor is applied
         // after the loop, once the face split is known) and |H|^2 dl on the bottom and
         // top faces of each conductor.
-        // Also |H|^2 dl over all faces and the current (the signed tangential H, dl)
-        // of each signal net, for the DC calibration below.
+        // For the DC blend of signal conductors: the current (the signed tangential
+        // H, dl) of each signal net, the reactance integrand of the smooth metal the
+        // DC solve describes (sumLref) and the one with the low-frequency face
+        // impedances (sumLdc, see layeredZ).
         const nCond = (this.conductors || []).length;
         const sumL = new Float64Array(nCond), faceBot = new Float64Array(nCond), faceTop = new Float64Array(nCond);
-        const faceAll = new Float64Array(nCond), netI = [0, 0];
+        const sumLref = new Float64Array(nCond), sumLdc = new Float64Array(nCond), netI = [0, 0];
         let sumLDefault = 0;
-        // direction points from the dielectric node to the conductor: 'u' is a bottom face.
-        const addL = (ci, zim, H2dl, direction, Hdl) => {
-            if (!(ci >= 0 && ci < nCond)) { sumLDefault += zim * H2dl; return; }
-            sumL[ci] += zim * H2dl;
-            faceAll[ci] += H2dl;
+        // Smooth reference reactance of a signal face: the bulk metal under any
+        // plating, the smooth face impedance for blocks of different metals (which
+        // the DC solve resolves).
+        const refIm = (ci, direction) => {
             const c = this.conductors[ci];
-            if (c.is_signal) netI[this.is_differential && c.polarity < 0 ? 1 : 0] += Hdl;
+            return c.plating ? 1 / (this._bulk_sigma(c) * deltaCond(c)) : bareZ(ci, direction, 0).im;
+        };
+        // direction points from the dielectric node to the conductor: 'u' is a bottom face.
+        // span is the segment getZsurf sees for coverage fractions, dl its quadrature weight.
+        const addFace = (ci, direction, i, j, span, xStart, dl, H_tan, H_out) => {
+            const Zs = getZsurf(ci, direction, i, j, span, xStart);
+            const H2dl = H_tan * H_tan * dl;
+            if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dl);
+            else sum_H2_dl_R += Zs.re * H2dl;
+            if (!(ci >= 0 && ci < nCond)) { sumLDefault += Zs.im * H2dl; return; }
+            sumL[ci] += Zs.im * H2dl;
+            const c = this.conductors[ci];
+            if (c.is_signal && vacuum_fields) {
+                netI[this.is_differential && c.polarity < 0 ? 1 : 0] += H_out * dl;
+                sumLref[ci] += refIm(ci, direction) * H2dl;
+                sumLdc[ci] += getZsurf(ci, direction, i, j, span, xStart, true).im * H2dl;
+            }
             if (direction === 'u') faceBot[ci] += H2dl;
             else if (direction === 'd') faceTop[ci] += H2dl;
         };
@@ -2119,13 +2130,8 @@ export class FieldSolver2D {
                             const segs = j > 0
                                 ? [[j, get_dx(j)], [j - 1, get_dx(j - 1)]]
                                 : [[0, get_dx(0)]];
-                            for (const [js, dseg] of segs) {
-                                const Zs = getZsurf(ci, direction, i, j, dseg, this.x[js]);
-                                const H2 = H_tan * H_tan * dseg / 2;
-                                if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dseg / 2);
-                                else sum_H2_dl_R += Zs.re * H2;
-                                addL(ci, Zs.im, H2, direction, H_out * dseg / 2);
-                            }
+                            for (const [js, dseg] of segs)
+                                addFace(ci, direction, i, j, dseg, this.x[js], dseg / 2, H_tan, H_out);
                         } else if (this.centred_loss_quadrature && !this.sym_half) {
                             // Full-domain solve with different surface finishes: the one-sided
                             // rule below gives mirrored conductors unequal shares of the
@@ -2136,21 +2142,11 @@ export class FieldSolver2D {
                             const horiz = direction === 'u' || direction === 'd';
                             const k = horiz ? j : i, get = horiz ? get_dx : get_dy;
                             const segs = k > 0 ? [[k, get(k)], [k - 1, get(k - 1)]] : [[0, get(0)]];
-                            for (const [ks, dseg] of segs) {
-                                const Zs = getZsurf(ci, direction, i, j, dseg, horiz ? this.x[ks] : null);
-                                const H2 = H_tan * H_tan * dseg / 2;
-                                if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dseg / 2);
-                                else sum_H2_dl_R += Zs.re * H2;
-                                addL(ci, Zs.im, H2, direction, H_out * dseg / 2);
-                            }
+                            for (const [ks, dseg] of segs)
+                                addFace(ci, direction, i, j, dseg, horiz ? this.x[ks] : null, dseg / 2, H_tan, H_out);
                         } else {
                             const dl = dl_func(dl_idx);
-                            const Z_surf = getZsurf(ci, direction, i, j, dl);
-
-                            const H2_dl = H_tan * H_tan * dl;
-                            if (isGroundCond(ci)) addGnd(ci, Z_surf.re, H_tan, dl);
-                            else sum_H2_dl_R += Z_surf.re * H2_dl;
-                            addL(ci, Z_surf.im, H2_dl, direction, H_out * dl);
+                            addFace(ci, direction, i, j, dl, null, dl, H_tan, H_out);
                         }
                     }
                 }
@@ -2178,8 +2174,7 @@ export class FieldSolver2D {
         (this.conductors || []).forEach((c, ci) => {
             if (!(sumL[ci] !== 0)) return;
             if (c.is_signal && Ldc > 0) {
-                const smooth = faceAll[ci] / (this._bulk_sigma(c) * deltaCond(c));
-                sumSig += smooth; sumExcess += sumL[ci] - smooth;
+                sumSig += sumLref[ci]; sumExcess += sumLdc[ci] - sumLref[ci];
                 return;
             }
             if (!c.is_signal) {
