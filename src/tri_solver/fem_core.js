@@ -264,12 +264,14 @@ export function createWasmHelpers(M) {
                     sigma[0], sigma[1], nev, ncv, ncvMax, pEvRe, pEvIm, pVRe, pVIm
                 );
             }
-            if (_stats) _stats.eig.push({ N, nnz: csrA.colIdx.length, nev, ncv, ms: performance.now() - _t0 });
+            const _st = _stats ? { N, nnz: csrA.colIdx.length, nev, ncv, sigma: sigma[0], ms: performance.now() - _t0 } : null;
+            if (_st) _stats.eig.push(_st);
             // Negative nc = solver-reported failure (factorization failed,
             // exception caught in C++, …). Throw so callers can't mistake it for
             // a truthy "converged" count.
             if (nc < 0) throw new Error(`Eigensolver failed (code ${nc})`);
             _dumpDone(dumpPath);
+            if (_st && nc > 0) _st.ev = M.HEAPF64[pEvRe >> 3];   // first eigenvalue, vs the shift
             return {
                 nconv: nc,
                 evalsRe: readFloat64(pEvRe, nc > 0 ? nc : 0),

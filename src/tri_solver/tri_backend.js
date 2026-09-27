@@ -625,7 +625,13 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
         throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem, GAUGED_NNZ_SCALE) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
     // solveGeneralized throws on solver failure (negative return code) — let it
     // propagate so the caller can warn. nconv === 0 (nothing converged) → null.
-    const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * epsRef, 0], nev, ncv, seed);
+    // The shift sits a little off epsRef. A sweep guesses epsRef from a neighbouring
+    // anchor, which at low frequency or at an already solved frequency is the
+    // eigenvalue itself to 1e-6 or better: A - sigma*B is then numerically singular,
+    // the unpivoted LDL^T fails its probe and the solve falls back to a pivoted LU at
+    // about five times the cost. At 1e-3 the wanted eigenvalue is still by far the
+    // nearest, so the Arnoldi converges as fast.
+    const res = ctx.helpers.solveGeneralized(N, fem.csrA, fem.csrB, [-k2 * epsRef * (1 + 1e-3), 0], nev, ncv, seed);
     if (!res || res.nconv <= 0) return null;
     // Pick the quasi-TEM mode by overlap with the static drive (the static field IS the
     // quasi-TEM shape), with a tie-break by proximity to eps_static. A loose eps gate drops
@@ -849,6 +855,15 @@ function dispersionInsert(dc, f, v) {
 // meeting at the removed anchor may differ by at most 2x, which is what
 // bisection produces; anything more lopsided fails outright, which sends the
 // point to an exact solve and narrows the gap.
+// Value of the anchor at exactly f, or null.
+function dispersionAt(dc, f) {
+    const x = Math.log(f);
+    let lo = 0, hi = dc.xs.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (dc.xs[m] < x) lo = m + 1; else hi = m; }
+    if (lo < dc.xs.length && Math.abs(dc.xs[lo] - x) < 1e-12) return dc.log ? Math.exp(dc.ys[lo]) : dc.ys[lo];
+    return null;
+}
+
 // Value of the anchor nearest to f in log-frequency, or null with no anchors: the
 // starting shift for an eigensolve at a new sweep point.
 function dispersionNearest(dc, f) {
@@ -862,6 +877,9 @@ function dispersionNearest(dc, f) {
 
 function dispersionInterp(dc, f, tol) {
     const n = dc.xs.length;
+    // A frequency solved before on this mesh is its own answer.
+    const hit = dispersionAt(dc, f);
+    if (hit !== null) return hit;
     if (n < 5) return null;
     const x = Math.log(f);
     if (x <= dc.xs[0] || x >= dc.xs[n - 1]) return null;
@@ -2281,6 +2299,10 @@ export class TriBackend {
         for (const fa of (fwAtAnchor ? ANCHORS.slice(1) : ANCHORS)) {
             if (ok) break;
             const { fw, fwErr } = this._eigenPick(st, fa, phiEps, eps_eff_static);
+            // An exact eigensolve like any sweep point's: the dispersion cache keeps it.
+            // Not with causal materials, the material map is the one of the current
+            // frequency, not fa's.
+            if (st.disp && fw && fw.eps > 0 && !this.solver.use_causal_materials) dispersionInsert(st.disp, fa, fw.eps);
             ok = accept(fw, fwErr, fa);
         }
         if (!ok && this._modeWarnings && !this._modeWarnings.some(w => w.mode === mode && w.type === 'eigen-anchor')) {

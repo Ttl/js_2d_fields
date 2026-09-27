@@ -8,7 +8,7 @@ import { shapeContains } from '../shapes.js';
 import { ne1, ne2, nf1, nf2,
          lv, le, lvGrad, leGrad, triCoefficients,
          ne1Curl, ne2Curl, nf1Curl, nf2Curl,
-         QW, QL1, QL2, QL3, NQ,
+         QW, QL1, QL2, QL3, NQ, P2_MASS,
          getLzOffsets } from './tri_fem.js';
 
 // --- Helper: edge → list-of-adjacent-triangles adjacency map ---
@@ -86,6 +86,16 @@ const MU0 = 4 * Math.PI * 1e-7;
 // microstrip and rectangular-coax test geometries.
 const SAT_KAPPA = 1.0;
 
+// Per-element scratch for projectH (one element at a time, never reentrant).
+const _pjHD = new Int32Array(8), _pjHS = new Float64Array(8), _pjHzD = new Int32Array(6);
+const _pjEtR = new Float64Array(8), _pjEtI = new Float64Array(8);
+const _pjEzR = new Float64Array(6), _pjEzI = new Float64Array(6);
+const _pjWx = new Float64Array(8), _pjWy = new Float64Array(8), _pjCW = new Float64Array(8);
+const _pjNz = new Float64Array(6), _pjGx = new Float64Array(6), _pjGy = new Float64Array(6);
+const _pjMt = new Float64Array(64);
+const _pjRR = new Float64Array(8), _pjRI = new Float64Array(8);
+const _pjRzR = new Float64Array(6), _pjRzI = new Float64Array(6);
+
 // --- Galerkin projection of Ht and Hz (also used for Poynting power) ---
 // Ht: jωμ·Mt·Ht = ẑ×∇Ez + γ·(ẑ×Et)  →  Mt·Ht_s = RHS_t  (Ht_s = jωμ·Ht)
 // Hz: jωμ·Mz·Hz = curl_z(Et)          →  Mz·Hz_s = RHS_z  (Hz_s = jωμ·Hz)
@@ -97,7 +107,6 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver, cache 
     const omega = 2 * Math.PI * freq;
     const omu = omega * MU0;
     const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
-    const edgeVerts = [[0, 1], [1, 2], [2, 0]];
 
     // The Ht/Hz MASS matrices are purely geometric — on a repeated call for the
     // same (mesh, fm) reuse the cached CSRs and only rebuild the eigenvector-
@@ -110,132 +119,138 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver, cache 
     const hDofs = cached ? cached.hDofs : computeHDofCounts(mesh, fm);
     const { NH, NHz, htEdgeDofStart, htFaceDofStart } = hDofs;
 
-    // Ht system
-    const MtR = [], MtC = [], MtV = [];
     const rhsRe = new Float64Array(NH), rhsIm = new Float64Array(NH);
-
-    // Hz system
-    const MzR = [], MzC = [], MzV = [];
     const rhsHzRe = new Float64Array(NHz), rhsHzIm = new Float64Array(NHz);
+    // Mass triplets: at most 64 (Ht) and 36 (Hz) per element.
+    let nMt = 0, nMz = 0;
+    const MtR = needMass ? new Int32Array(64 * nTris + NH) : null, MtC = needMass ? new Int32Array(64 * nTris + NH) : null;
+    const MtV = needMass ? new Float64Array(64 * nTris + NH) : null;
+    const MzR = needMass ? new Int32Array(36 * nTris + NHz) : null, MzC = needMass ? new Int32Array(36 * nTris + NHz) : null;
+    const MzV = needMass ? new Float64Array(36 * nTris + NHz) : null;
+    const faceBlockStart = hDofs.htEdgeTotal;
+    const hD = _pjHD, hS = _pjHS, hzD = _pjHzD;
+    const etR = _pjEtR, etI = _pjEtI, ezR = _pjEzR, ezI = _pjEzI;
+    const Wx = _pjWx, Wy = _pjWy, cW = _pjCW, Nz = _pjNz, Gx = _pjGx, Gy = _pjGy;
+    const MtEl = _pjMt, rR = _pjRR, rI = _pjRI, rzR = _pjRzR, rzI = _pjRzI;
+    const gRe = gamma.re, gIm = gamma.im;
 
     for (let t = 0; t < nTris; t++) {
         if (faceF[2*t] < 0) continue;
 
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
-        const txs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-        const tys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
-        const verts = [v0, v1, v2];
-        const nNed = 8;
-        const nLag = 6;
+        const x0 = nodes[2*v0], y0 = nodes[2*v0+1];
+        const x1 = nodes[2*v1], y1 = nodes[2*v1+1];
+        const x2 = nodes[2*v2], y2 = nodes[2*v2+1];
+        const sA = 0.5 * ((x0 - x2) * (y1 - y0) - (x0 - x1) * (y2 - y0));
+        const Area = Math.abs(sA);
+        const inv = (sA >= 0 ? 1 : -1) / (2 * Area);
+        const b0 = (y1 - y2) * inv, b1 = (y2 - y0) * inv, b2 = (y0 - y1) * inv;
+        const c0 = (x2 - x1) * inv, c1 = (x0 - x2) * inv, c2 = (x1 - x0) * inv;
+        const cw0 = 2 * (b0*c1 - b1*c0), cw1 = 2 * (b1*c2 - b2*c1), cw2 = 2 * (b2*c0 - b0*c2);
 
-        // Ht DOFs: full numbering
-        const hD = new Int32Array(nNed), hS = new Float64Array(nNed).fill(1);
+        // Ht DOFs (full numbering) and the eigenvector's Et on the element
         for (let k = 0; k < 3; k++) {
-            const eIdx = triEdges[3*t+k], base = htEdgeDofStart[eIdx];
-            hD[k] = base; hS[k] = triSigns[3*t+k]; // ne1
-            hD[k+4] = base + 1; // ne2
+            const eIdx = triEdges[3*t+k], base = htEdgeDofStart[eIdx], sg = triSigns[3*t+k];
+            hD[k] = base; hS[k] = sg;         // ne1
+            hD[k+4] = base + 1; hS[k+4] = 1;  // ne2
+            const g1 = edgeF[2*eIdx], g2 = edgeF[2*eIdx+1];
+            etR[k] = g1 >= 0 ? sg * vecRe[g1] : 0; etI[k] = g1 >= 0 ? sg * vecIm[g1] : 0;
+            etR[k+4] = g2 >= 0 ? vecRe[g2] : 0; etI[k+4] = g2 >= 0 ? vecIm[g2] : 0;
         }
-        const faceBlockStart = hDofs.htEdgeTotal;
-        hD[3] = faceBlockStart + htFaceDofStart[t]; // nf1
-        hD[7] = faceBlockStart + htFaceDofStart[t] + 1; // nf2
+        hD[3] = faceBlockStart + htFaceDofStart[t]; hS[3] = 1;      // nf1
+        hD[7] = faceBlockStart + htFaceDofStart[t] + 1; hS[7] = 1;  // nf2
+        const f1 = faceF[2*t], f2 = faceF[2*t+1];
+        etR[3] = f1 >= 0 ? vecRe[f1] : 0; etI[3] = f1 >= 0 ? vecIm[f1] : 0;
+        etR[7] = f2 >= 0 ? vecRe[f2] : 0; etI[7] = f2 >= 0 ? vecIm[f2] : 0;
 
-        // Hz DOFs: full numbering
-        const hzD = new Int32Array(nLag);
-        for (let k = 0; k < 3; k++) hzD[k] = verts[k];
-        for (let k = 0; k < 3; k++) hzD[k+3] = nNodes + triEdges[3*t+k];
-
-        // E DOFs: free (PEC eliminated) — for building RHS
-        const eD = new Int32Array(nNed), eS = new Float64Array(nNed).fill(1);
+        // Hz DOFs (vertices, then edge midpoints) and the eigenvector's Ez
+        hzD[0] = v0; hzD[1] = v1; hzD[2] = v2;
         for (let k = 0; k < 3; k++) {
+            const nf = nodeF[hzD[k]];
+            ezR[k] = nf >= 0 ? vecRe[lzOff + nf] : 0; ezI[k] = nf >= 0 ? vecIm[lzOff + nf] : 0;
             const eIdx = triEdges[3*t+k];
-            eD[k] = edgeF[2*eIdx]; eS[k] = triSigns[3*t+k];
-            eD[k+4] = edgeF[2*eIdx+1];
+            hzD[k+3] = nNodes + eIdx;
+            const enf = edgeNodeF[eIdx];
+            ezR[k+3] = enf >= 0 ? vecRe[lzEdgeMidOff + enf] : 0; ezI[k+3] = enf >= 0 ? vecIm[lzEdgeMidOff + enf] : 0;
         }
-        eD[3] = faceF[2*t]; eD[7] = faceF[2*t+1];
 
-        // Gather Et from eigenvector
-        const etR = new Float64Array(nNed), etI = new Float64Array(nNed);
-        for (let k = 0; k < nNed; k++) { const g=eD[k]; if(g>=0){etR[k]=eS[k]*vecRe[g]; etI[k]=eS[k]*vecIm[g];} }
+        rR.fill(0); rI.fill(0); rzR.fill(0); rzI.fill(0);
+        if (needMass) MtEl.fill(0);
 
-        // Gather Ez from eigenvector
-        const ezR = new Float64Array(nLag), ezI = new Float64Array(nLag);
-        for (let k = 0; k < 3; k++) { const nf=nodeF[verts[k]]; if(nf>=0){ezR[k]=vecRe[lzOff+nf]; ezI[k]=vecIm[lzOff+nf];} }
-        for (let k = 0; k < 3; k++) { const enf=edgeNodeF[triEdges[3*t+k]]; if(enf>=0){ezR[k+3]=vecRe[lzEdgeMidOff+enf]; ezI[k+3]=vecIm[lzEdgeMidOff+enf];} }
+        // Quadrature on barycentric coordinates, bases written out as in
+        // computeTriP2Matrices (tri_fem.js), same functions as ne1/ne2/nf1/nf2 and
+        // the P2 Lagrange set.
+        for (let q = 0; q < NQ; q++) {
+            const w = QW[q], l0 = QL1[q], l1 = QL2[q], l2 = QL3[q];
+            const W0x = l0*b1 - l1*b0, W0y = l0*c1 - l1*c0;
+            const W1x = l1*b2 - l2*b1, W1y = l1*c2 - l2*c1;
+            const W2x = l2*b0 - l0*b2, W2y = l2*c0 - l0*c2;
+            Wx[0] = W0x; Wy[0] = W0y; cW[0] = cw0;
+            Wx[1] = W1x; Wy[1] = W1y; cW[1] = cw1;
+            Wx[2] = W2x; Wy[2] = W2y; cW[2] = cw2;
+            const d0 = l0 - l1, d1 = l1 - l2, d2 = l2 - l0;
+            Wx[4] = W0x*d0; Wy[4] = W0y*d0;
+            Wx[5] = W1x*d1; Wy[5] = W1y*d1;
+            Wx[6] = W2x*d2; Wy[6] = W2y*d2;
+            cW[4] = cw0*d0 + (b0 - b1)*W0y - (c0 - c1)*W0x;
+            cW[5] = cw1*d1 + (b1 - b2)*W1y - (c1 - c2)*W1x;
+            cW[6] = cw2*d2 + (b2 - b0)*W2y - (c2 - c0)*W2x;
+            Wx[3] = l0*W1x - l1*W2x; Wy[3] = l0*W1y - l1*W2y;
+            cW[3] = l0*cw1 + (b0*W1y - c0*W1x) - l1*cw2 - (b1*W2y - c1*W2x);
+            Wx[7] = l1*W2x - l2*W0x; Wy[7] = l1*W2y - l2*W0y;
+            cW[7] = l1*cw2 + (b1*W2y - c1*W2x) - l2*cw0 - (b2*W0y - c2*W0x);
+            const g0 = 4*l0 - 1, g1 = 4*l1 - 1, g2 = 4*l2 - 1;
+            Gx[0] = b0*g0; Gy[0] = c0*g0;
+            Gx[1] = b1*g1; Gy[1] = c1*g1;
+            Gx[2] = b2*g2; Gy[2] = c2*g2;
+            Gx[3] = 4*(b0*l1 + b1*l0); Gy[3] = 4*(c0*l1 + c1*l0);
+            Gx[4] = 4*(b1*l2 + b2*l1); Gy[4] = 4*(c1*l2 + c2*l1);
+            Gx[5] = 4*(b2*l0 + b0*l2); Gy[5] = 4*(c2*l0 + c0*l2);
+            Nz[0] = 2*l0*l0 - l0; Nz[1] = 2*l1*l1 - l1; Nz[2] = 2*l2*l2 - l2;
+            Nz[3] = 4*l0*l1; Nz[4] = 4*l1*l2; Nz[5] = 4*l2*l0;
 
-        const MtEl = new Float64Array(nNed * nNed);
-        const rR = new Float64Array(nNed), rI = new Float64Array(nNed);
-        const MzEl = new Float64Array(nLag * nLag);
-        const rzR = new Float64Array(nLag), rzI = new Float64Array(nLag);
-
-        const nqp = NQ;
-        const qw = QW;
-        const ql1 = QL1;
-        const ql2 = QL2;
-        const ql3 = QL3;
-
-        for (let q = 0; q < nqp; q++) {
-            const w = qw[q];
-            const xq = txs[0]*ql1[q]+txs[1]*ql2[q]+txs[2]*ql3[q];
-            const yq = tys[0]*ql1[q]+tys[1]*ql2[q]+tys[2]*ql3[q];
-
-            const { Wx, Wy, curlW } = evalNedelecBasis(coeff, edgeVerts, xq, yq);
-            const { Nz, Gx: LGx, Gy: LGy } = evalLagrangeBasis(coeff, edgeVerts, xq, yq);
-
-            // ∇Ez and Et interpolation from eigenvector
-            let dxR=0,dxI=0,dyR=0,dyI=0;
-            for (let k=0;k<nLag;k++){dxR+=LGx[k]*ezR[k];dxI+=LGx[k]*ezI[k];dyR+=LGy[k]*ezR[k];dyI+=LGy[k]*ezI[k];}
-
-            let exR=0,exI=0,eyR=0,eyI=0;
-            for (let k=0;k<nNed;k++){exR+=Wx[k]*etR[k];exI+=Wx[k]*etI[k];eyR+=Wy[k]*etR[k];eyI+=Wy[k]*etI[k];}
-
+            // ∇Ez, Et and curl_z(Et) at the point
+            let dxR = 0, dxI = 0, dyR = 0, dyI = 0;
+            for (let k = 0; k < 6; k++) { dxR += Gx[k]*ezR[k]; dxI += Gx[k]*ezI[k]; dyR += Gy[k]*ezR[k]; dyI += Gy[k]*ezI[k]; }
+            let exR = 0, exI = 0, eyR = 0, eyI = 0, curlR = 0, curlI = 0;
+            for (let k = 0; k < 8; k++) {
+                exR += Wx[k]*etR[k]; exI += Wx[k]*etI[k]; eyR += Wy[k]*etR[k]; eyI += Wy[k]*etI[k];
+                curlR += cW[k]*etR[k]; curlI += cW[k]*etI[k];
+            }
             // Ht RHS (γ-scaled convention)
-            const fxR=-dyR+gamma.re*(-eyR)-gamma.im*(-eyI);
-            const fxI=-dyI+gamma.re*(-eyI)+gamma.im*(-eyR);
-            const fyR=dxR+gamma.re*exR-gamma.im*exI;
-            const fyI=dxI+gamma.re*exI+gamma.im*exR;
+            const fxR = -dyR + gRe*(-eyR) - gIm*(-eyI);
+            const fxI = -dyI + gRe*(-eyI) + gIm*(-eyR);
+            const fyR = dxR + gRe*exR - gIm*exI;
+            const fyI = dxI + gRe*exI + gIm*exR;
 
-            // curl_z(Et)
-            let curlR=0, curlI=0;
-            for (let k=0;k<nNed;k++){ curlR+=curlW[k]*etR[k]; curlI+=curlW[k]*etI[k]; }
-
-            // Ht mass matrix and RHS
-            for (let i=0;i<nNed;i++){
-                rR[i]+=w*(Wx[i]*fxR+Wy[i]*fyR);
-                rI[i]+=w*(Wx[i]*fxI+Wy[i]*fyI);
-                if (needMass) for (let j=0;j<nNed;j++) MtEl[i*nNed+j]+=w*(Wx[i]*Wx[j]+Wy[i]*Wy[j]);
+            for (let i = 0; i < 8; i++) {
+                const wxi = w*Wx[i], wyi = w*Wy[i];
+                rR[i] += wxi*fxR + wyi*fyR;
+                rI[i] += wxi*fxI + wyi*fyI;
+                if (needMass) for (let j = 0; j < 8; j++) MtEl[i*8+j] += wxi*Wx[j] + wyi*Wy[j];
             }
-
-            // Hz mass matrix and RHS
-            for (let i=0;i<nLag;i++){
-                rzR[i]+=w*Nz[i]*curlR;
-                rzI[i]+=w*Nz[i]*curlI;
-                if (needMass) for (let j=0;j<nLag;j++) MzEl[i*nLag+j]+=w*Nz[i]*Nz[j];
+            for (let i = 0; i < 6; i++) {
+                rzR[i] += w*Nz[i]*curlR;
+                rzI[i] += w*Nz[i]*curlI;
             }
         }
-        if (needMass) for (let k=0;k<nNed*nNed;k++) MtEl[k]*=Area;
-        for (let k=0;k<nNed;k++){rR[k]*=Area; rI[k]*=Area;}
-        if (needMass) for (let k=0;k<nLag*nLag;k++) MzEl[k]*=Area;
-        for (let k=0;k<nLag;k++){rzR[k]*=Area; rzI[k]*=Area;}
 
         // Assemble Ht system
-        for (let li=0;li<nNed;li++){
-            const gi=hD[li], si=hS[li];
-            rhsRe[gi]+=si*rR[li]; rhsIm[gi]+=si*rI[li];
-            if (needMass) for (let lj=0;lj<nNed;lj++){
-                const gj=hD[lj], v=si*hS[lj]*MtEl[li*nNed+lj];
-                if(v!==0){MtR.push(gi);MtC.push(gj);MtV.push(v);}
+        for (let li = 0; li < 8; li++) {
+            const gi = hD[li], si = hS[li];
+            rhsRe[gi] += si*rR[li]*Area; rhsIm[gi] += si*rI[li]*Area;
+            if (needMass) for (let lj = 0; lj < 8; lj++) {
+                const v = si*hS[lj]*MtEl[li*8+lj]*Area;
+                if (v !== 0) { MtR[nMt] = gi; MtC[nMt] = hD[lj]; MtV[nMt++] = v; }
             }
         }
-
-        // Assemble Hz system
-        const hzS = new Float64Array(nLag).fill(1);
-        for (let li=0;li<nLag;li++){
-            const gi=hzD[li];
-            rhsHzRe[gi]+=hzS[li]*rzR[li]; rhsHzIm[gi]+=hzS[li]*rzI[li];
-            if (needMass) for (let lj=0;lj<nLag;lj++){
-                const gj=hzD[lj], v=hzS[li]*hzS[lj]*MzEl[li*nLag+lj];
-                if(v!==0){MzR.push(gi);MzC.push(gj);MzV.push(v);}
+        // Assemble Hz system; its mass is the closed-form P2 mass
+        for (let li = 0; li < 6; li++) {
+            const gi = hzD[li];
+            rhsHzRe[gi] += rzR[li]*Area; rhsHzIm[gi] += rzI[li]*Area;
+            if (needMass) for (let lj = 0; lj < 6; lj++) {
+                const v = Area*P2_MASS[li*6+lj];
+                if (v !== 0) { MzR[nMz] = gi; MzC[nMz] = hzD[lj]; MzV[nMz++] = v; }
             }
         }
     }
@@ -248,13 +263,13 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver, cache 
         // structurally singular mass matrices. Pin them with unit diagonals (rhs is
         // zero there, so H = 0 inside the conductor — physically correct).
         const touchedT = new Uint8Array(NH);
-        for (const r of MtR) touchedT[r] = 1;
-        for (let i = 0; i < NH; i++) if (!touchedT[i]) { MtR.push(i); MtC.push(i); MtV.push(1); }
+        for (let k = 0; k < nMt; k++) touchedT[MtR[k]] = 1;
+        for (let i = 0; i < NH; i++) if (!touchedT[i]) { MtR[nMt] = i; MtC[nMt] = i; MtV[nMt++] = 1; }
         const touchedZ = new Uint8Array(NHz);
-        for (const r of MzR) touchedZ[r] = 1;
-        for (let i = 0; i < NHz; i++) if (!touchedZ[i]) { MzR.push(i); MzC.push(i); MzV.push(1); }
-        csrHt = tripletsToCSR(MtR, MtC, MtV, NH);
-        csrHz = tripletsToCSR(MzR, MzC, MzV, NHz);
+        for (let k = 0; k < nMz; k++) touchedZ[MzR[k]] = 1;
+        for (let i = 0; i < NHz; i++) if (!touchedZ[i]) { MzR[nMz] = i; MzC[nMz] = i; MzV[nMz++] = 1; }
+        csrHt = tripletsToCSR(MtR.subarray(0, nMt), MtC.subarray(0, nMt), MtV.subarray(0, nMt), NH);
+        csrHz = tripletsToCSR(MzR.subarray(0, nMz), MzC.subarray(0, nMz), MzV.subarray(0, nMz), NHz);
         if (cache) { cache.mesh = mesh; cache.fm = fm; cache.hDofs = hDofs; cache.csrHt = csrHt; cache.csrHz = csrHz; }
     } else {
         csrHt = cached.csrHt;

@@ -40,13 +40,24 @@
 // even, or the modal current vector for an asymmetric pair).
 
 import { tripletsToCSRMulti, GL3p, GL3w } from './fem_core.js';
-import { triCoefficients, lv, le, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
+import { triCoefficients, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
          triP2Stiffness, P2_MASS, P2_LOAD, refineTriMesh } from './tri_fem.js';
 import { calculate_Zrough, wallSpreadFactor } from '../surface_roughness.js';
 import { shapeContains, shapeSignedDist, shapeFaceAt, insideRingHole } from '../shapes.js';
 
 const MU0 = 4 * Math.PI * 1e-7;
 const edgeVerts = [[0,1],[1,2],[2,0]];
+// P2 shape functions at the quadrature points, P2_AT_Q[6*q + k]: vertices 2λ^2 - λ,
+// edges (edgeVerts) 4 λ_p λ_q. Constant on every straight-sided triangle.
+const P2_AT_Q = (() => {
+    const out = new Float64Array(6 * NQ);
+    for (let q = 0; q < NQ; q++) {
+        const l = [QL1[q], QL2[q], QL3[q]];
+        for (let k = 0; k < 3; k++) out[6*q + k] = 2*l[k]*l[k] - l[k];
+        for (let k = 0; k < 3; k++) out[6*q + 3 + k] = 4*l[edgeVerts[k][0]]*l[edgeVerts[k][1]];
+    }
+    return out;
+})();
 
 function inAnyRect(rects, x, y, tol) {
     for (const r of rects) {
@@ -674,11 +685,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         const cls = isCondTri[t];
         if (!cls) continue;
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
-        const { coeff, Area } = triCoefficients(nodes, v0, v1, v2);
+        const x0 = nodes[2*v0], y0 = nodes[2*v0+1];
+        const Area = 0.5 * Math.abs((nodes[2*v1] - x0) * (nodes[2*v2+1] - y0) - (nodes[2*v2] - x0) * (nodes[2*v1+1] - y0));
         lg[0] = dofOf[v0]; lg[1] = dofOf[v1]; lg[2] = dofOf[v2];
         for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*t+k]];
-        const xs = [nodes[2*v0], nodes[2*v1], nodes[2*v2]];
-        const ys = [nodes[2*v0+1], nodes[2*v1+1], nodes[2*v2+1]];
         // Drive term: 1 (single) or the group's complex C_k (multi) in the
         // signal, 0 in passive ground rects (pure eddy / return current).
         let dvR = 0, dvI = 0;
@@ -686,12 +696,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         let Ptri = 0;
         for (let q = 0; q < NQ; q++) {
             const w = QW[q] * Area;
-            const xq = xs[0]*QL1[q] + xs[1]*QL2[q] + xs[2]*QL3[q];
-            const yq = ys[0]*QL1[q] + ys[1]*QL2[q] + ys[2]*QL3[q];
             let aR = 0, aI = 0;
             for (let k = 0; k < 6; k++) {
                 const g = lg[k]; if (g < 0) continue;
-                const Nk = k < 3 ? lv(coeff, k, xq, yq) : le(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
+                const Nk = P2_AT_Q[6*q + k];
                 aR += Nk * sol[g]; aI += Nk * sol[nF + g];
             }
             const uR = dvR + omega * aI, uI = dvI - omega * aR;
