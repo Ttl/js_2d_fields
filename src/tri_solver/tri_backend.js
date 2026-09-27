@@ -1564,16 +1564,32 @@ export class TriBackend {
         // hundreds that would otherwise trip the UI warning. Shaped conductors are
         // never interior-meshed and their bbox can span the domain (coax shield), so
         // only rects are tested.
+        // Nor the triangles inside a dielectric layer thinner than their longest edge: a
+        // layer thinner than the element size (a solder mask) is meshed as slivers
+        // spanning it, its faces held by the refiner, and their shape is the layer's
+        // aspect, which the field along the layer does not need resolved.
         try {
             const skip = new Uint8Array(mesh.nTris);
             const rects = (this.condRect.rects || []).filter(r => !r.shape || isPolyShape(r.shape));
-            if (rects.length) for (let t = 0; t < mesh.nTris; t++) {
+            const layers = (this.solver.dielectrics || []).filter(d => !d.shape);
+            const tolL = 1e-9 * (this.domain.x_max - this.domain.x_min);
+            for (let t = 0; t < mesh.nTris; t++) {
                 const v0 = mesh.tris[3 * t], v1 = mesh.tris[3 * t + 1], v2 = mesh.tris[3 * t + 2];
-                const xc = (mesh.nodes[2 * v0] + mesh.nodes[2 * v1] + mesh.nodes[2 * v2]) / 3;
-                const yc = (mesh.nodes[2 * v0 + 1] + mesh.nodes[2 * v1 + 1] + mesh.nodes[2 * v2 + 1]) / 3;
+                const xs = [mesh.nodes[2 * v0], mesh.nodes[2 * v1], mesh.nodes[2 * v2]];
+                const ys = [mesh.nodes[2 * v0 + 1], mesh.nodes[2 * v1 + 1], mesh.nodes[2 * v2 + 1]];
+                const xc = (xs[0] + xs[1] + xs[2]) / 3, yc = (ys[0] + ys[1] + ys[2]) / 3;
                 for (const r of rects) {
                     if (r.shape ? shapeContains(r, xc, yc, 0)
                         : (xc > r.xmin && xc < r.xmax && yc > r.ymin && yc < r.ymax)) { skip[t] = 1; break; }
+                }
+                if (skip[t]) continue;
+                const edge = Math.max(Math.hypot(xs[1] - xs[0], ys[1] - ys[0]), Math.hypot(xs[2] - xs[1], ys[2] - ys[1]),
+                    Math.hypot(xs[0] - xs[2], ys[0] - ys[2]));
+                for (const d of layers) {
+                    if (!(xc > d.x_min && xc < d.x_max && yc > d.y_min && yc < d.y_max)) continue;
+                    const inside = xs.every(x => x > d.x_min - tolL && x < d.x_max + tolL)
+                        && ys.every(y => y > d.y_min - tolL && y < d.y_max + tolL);
+                    if (inside && Math.min(d.x_max - d.x_min, d.y_max - d.y_min) < edge) { skip[t] = 1; break; }
                 }
             }
             const mq = checkMeshQuality(mesh, [], [], { skip });

@@ -910,13 +910,14 @@ export function buildOccMeshFromGeometry(G, opts) {
         addXR(core.xmin, core.ymin, core.ymax); addXR(core.xmax, core.ymin, core.ymax);
     }
     if (symmetry) addXR(X0, Y0, Y1);
-    // Only layers at least two fine element sizes thick contribute their faces: a
-    // thinner layer (a solder mask on a 35 um trace) with both faces constrained
-    // leaves slivers the smoother cannot fix by sliding nodes along the lines
-    // (maxQ ~150), and its faces stay as they were. opts.constrainDielectrics false
-    // disables the dielectric lines; opts.minDielThickness (metres) overrides the
-    // threshold.
-    const minDielT = opts.minDielThickness ?? 2 * hFine;
+    // Every layer contributes its faces, a thin one too: left free, its faces are
+    // moved by the smoother and the edge swaps, and the centroid tagging then gives
+    // triangles across the interface one material (a 0.2 mm substrate, a solder
+    // mask). A layer thinner than the element size is meshed as slivers spanning it,
+    // which the mesh-quality metric leaves out (TriBackend.buildMesh).
+    // opts.constrainDielectrics false disables the dielectric lines;
+    // opts.minDielThickness (metres) leaves out the layers thinner than it.
+    const minDielT = opts.minDielThickness ?? 0;
     for (const d of (opts.constrainDielectrics === false ? [] : dielectrics)) {
         // A polygon's sides are held like a conductor's, whatever its thickness.
         if (isPolyShape(d.shape)) { constraintSegments.push(...shapeSegments(d, meshOpts)); continue; }
