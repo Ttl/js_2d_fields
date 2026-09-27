@@ -338,17 +338,22 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     const xmin_d = condRect.xmin_domain, xmax_d = condRect.xmax_domain;
     const ymax_d = condRect.ymax_domain;
     const ymin_d = condRect.ymin_domain ?? 0;
-    // A domain with no metal wall at all (a line whose return conductor is a
-    // ground rect, open on every side) keeps the natural BC on the outer walls.
-    // No current can then close through a wall: the enclosed net current is zero,
-    // so the ground rects carry the whole return current whatever the domain size.
-    // The conductor mass term keeps the system regular without a Dirichlet wall.
+    // A = 0 on the metal walls (opts.wallPEC) and on the symmetry plane of an odd
+    // mode. An open wall is a field truncation and keeps the natural BC, the dual of
+    // the static solve's: no current can close through it, so the return current
+    // stays in the metal whatever the domain size. With no metal wall the conductor
+    // mass term keeps the system regular, which needs a ground rect; without a wall
+    // map, or with neither walls nor ground rects, every outer wall is A = 0.
     const wpec = opts.wallPEC;
-    const openDomain = !!wpec && !wpec.left && !wpec.right && !wpec.top && !wpec.bottom
-        && gndRects.length > 0;
+    const anyWall = !!wpec && (wpec.left || wpec.right || wpec.top || wpec.bottom);
+    const perWall = !!wpec && (anyWall || gndRects.length > 0);
     function isDirichletPt(x, y) {
         const onPlane = Math.abs(x - xmin_d) < 1e-9;
-        if (openDomain) return !!opts.oddSymmetry && sym === 2 && onPlane;
+        if (perWall) {
+            if ((wpec.bottom && Math.abs(y - ymin_d) < 1e-9) || (wpec.top && Math.abs(y - ymax_d) < 1e-9)
+                || (wpec.right && Math.abs(x - xmax_d) < 1e-9)) return true;
+            return onPlane && (sym === 2 ? !!opts.oddSymmetry : !!wpec.left);
+        }
         if (Math.abs(y - ymin_d) < 1e-9 || Math.abs(y - ymax_d) < 1e-9) return true;
         if (Math.abs(x - xmax_d) < 1e-9) return true;
         if ((sym === 1 || opts.oddSymmetry) && onPlane) return true;
@@ -730,11 +735,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // that is actually metal. |Hx| = |∂A/∂y|/μ₀ on a horizontal wall, |Hy| =
     // |∂A/∂x|/μ₀ on a vertical one. (edgeToTri comes precomputed from mqsPrecompute.)
     //
-    // Every domain wall is Dirichlet in the MQS solve (A = 0 confines the flux), but
-    // only the metal ones dissipate. An 'open' far-field truncation and the symmetry
-    // plane are boundary conditions, not surfaces. opts.wallPEC carries that
-    // distinction from the mesher (which clears `left` on a half domain, so the
-    // symmetry plane can never be mistaken for metal).
+    // The metal walls are A = 0 in the MQS solve and dissipate. An 'open' far-field
+    // truncation and the symmetry plane are boundary conditions, not surfaces.
+    // opts.wallPEC carries that distinction from the mesher (which clears `left` on a
+    // half domain, so the symmetry plane can never be mistaken for metal).
     let Pgnd = 0, Xgnd = 0;
     // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
     // conductor surfaces, used below to scale the smooth loss per face.

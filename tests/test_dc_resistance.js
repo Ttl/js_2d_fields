@@ -53,6 +53,13 @@ const cases = {
         'gnd x=-2.035 w=0.035 y=0 h=inf\ngnd x=2 w=0.035 y=0 h=inf\nsig+ x=-0.5 w=1 y=1 h=0.035'),
     'nickel block on copper': custom('units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.21 er=4.4\n' +
         'sig+ x=-0.175 w=0.35 y=0.21 h=0.031 sigma=5.8e7\nsig+ x=-0.175 w=0.35 y=0.241 h=0.004 sigma=1e7'),
+    // A finite plate over the auto ground wall far below: the open side and top walls
+    // must not take return current (natural BC), or the backends part ways. The DC
+    // return runs in the far wall, a loop as large as the domain, so its inductance at
+    // 100 Hz is the domain's, not the free-space value: the backends are checked
+    // against each other instead.
+    'finite plate over a far wall': custom('units mm\nbounds open open open gnd\ndiel x=-5 w=10 y=0 h=0.21 er=4.4\n' +
+        'gnd x=-5 w=10 y=-0.035 h=0.035\nsig+ x=-0.175 w=0.35 y=0.21 h=0.035'),
     'finite ground in open space': custom('units mm\nbounds open open open open\ndiel x=-3 w=6 y=0 h=0.21 er=4.4\n' +
         'gnd x=-3 w=6 y=-0.035 h=0.035\nsig+ x=-0.175 w=0.35 y=0.21 h=0.035'),
 };
@@ -79,6 +86,7 @@ async function run(mk, tri, freqs) {
     });
 }
 
+const DOMAIN_LOOP = new Set(['finite plate over a far wall']);
 for (const [name, mk] of Object.entries(cases)) {
     const [q, t] = await Promise.all([run(mk, false, [0, 100]), run(mk, true, [0, 100])]);
     const wq = [...q.s._wall_grounds()].sort(), wt = [...t.s._wall_grounds()].sort();
@@ -98,6 +106,14 @@ for (const [name, mk] of Object.entries(cases)) {
         check(`${tag}: full-wave internal L at DC is the exact value`, rel(m.L_internal, ex.Lint) < 1e-9,
             `${(m.L_internal * 1e9).toFixed(2)} vs ${(ex.Lint * 1e9).toFixed(2)} nH/m`);
         const t100 = t.at[1][k], q100 = q.at[1][k];
+        if (DOMAIN_LOOP.has(name)) {
+            check(`${tag}: L at 100 Hz, the backends within 3%`, rel(q100.RLGC.L, t100.RLGC.L) < 0.03,
+                `${(q100.RLGC.L * 1e9).toFixed(1)} / ${(t100.RLGC.L * 1e9).toFixed(1)} nH/m`);
+            check(`${tag}: R at 100 Hz within 0.2% of DC on both backends`,
+                rel(q100.RLGC.R, ex.R) < 2e-3 && rel(t100.RLGC.R, ex.R) < 2e-3,
+                `${q100.RLGC.R.toFixed(5)} / ${t100.RLGC.R.toFixed(5)} vs ${ex.R.toFixed(5)} ohm/m`);
+            return;
+        }
         check(`${tag}: R at 100 Hz within 0.2% of DC on both backends`,
             rel(q100.RLGC.R, ex.R) < 2e-3 && rel(t100.RLGC.R, ex.R) < 2e-3,
             `${q100.RLGC.R.toFixed(5)} / ${t100.RLGC.R.toFixed(5)} vs ${ex.R.toFixed(5)} ohm/m`);
