@@ -79,7 +79,7 @@ export function circlePolygon(cx, cy, r, n, phase = 0) {
 // halves would not tile the full polygon, and the half-domain symmetry solve would be
 // integrating a slightly different body than the full-domain one it is validated
 // against. Callers building symmetric geometry must clamp n to a multiple of 4.
-export function halfCirclePolygon(cx, cy, r, n, phase = 0) {
+function halfCirclePolygon(cx, cy, r, n, phase = 0) {
     if (n % 4 !== 0 || phase !== 0) {
         throw new Error(`halfCirclePolygon needs n % 4 === 0 and phase === 0 (got n=${n}, phase=${phase})`);
     }
@@ -124,6 +124,13 @@ export function halfCirclePolygon(cx, cy, r, n, phase = 0) {
 export function isComplement(shape) {
     return shape.type === 'outside_circle' || shape.type === 'outside_polygon';
 }
+
+// Polygon and ring shapes (custom geometry primitives), as opposed to the circles of
+// the coax model.
+export const isPolyShape = shape => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
+
+// Bounds of a rect { x_min.. } or { xmin.. } as { xmin, xmax, ymin, ymax }.
+export const rectOf = o => ({ xmin: o.xmin ?? o.x_min, xmax: o.xmax ?? o.x_max, ymin: o.ymin ?? o.y_min, ymax: o.ymax ?? o.y_max });
 
 function isCircular(shape) {
     return shape.type === 'circle' || shape.type === 'outside_circle';
@@ -369,10 +376,7 @@ export function shapePerimeterPoint(o, t) {
 // it to size steps near metal.
 export function distToShapeBoundary(o, x, y) {
     if (!o.shape) {
-        const xmin = o.xmin !== undefined ? o.xmin : o.x_min;
-        const xmax = o.xmax !== undefined ? o.xmax : o.x_max;
-        const ymin = o.ymin !== undefined ? o.ymin : o.y_min;
-        const ymax = o.ymax !== undefined ? o.ymax : o.y_max;
+        const { xmin, xmax, ymin, ymax } = rectOf(o);
         const dx = Math.max(xmin - x, 0, x - xmax);
         const dy = Math.max(ymin - y, 0, y - ymax);
         if (dx > 0 || dy > 0) return Math.hypot(dx, dy);
@@ -421,7 +425,7 @@ export function svgRingPath(cx, cy, rIn, rOut, n = 180) {
 // Part of the convex CCW polygon `poly` at x >= x0 (one Sutherland-Hodgman stage),
 // still CCW, empty when nothing is right of x0. Vertices on the plane stay exact, and
 // a crossing edge gets its new vertex at exactly x = x0.
-export function clipPolyX(poly, x0) {
+function clipPolyX(poly, x0) {
     const n = poly.length >> 1;
     // A vertex meant to lie on the plane (a rotated n-gon's, an inset core's) can come
     // out of the arithmetic an ulp off it: it is put on the plane, or the cut would add
@@ -528,7 +532,7 @@ function bodyLoops(o) {
         if (isComplement(o.shape)) return null;
         return o.shape.type === 'ring' ? [o.shape.poly, o.shape.hole] : [shapePoly(o.shape)];
     }
-    const x0 = o.xmin ?? o.x_min, x1 = o.xmax ?? o.x_max, y0 = o.ymin ?? o.y_min, y1 = o.ymax ?? o.y_max;
+    const { xmin: x0, xmax: x1, ymin: y0, ymax: y1 } = rectOf(o);
     return [new Float64Array([x0, y0, x1, y0, x1, y1, x0, y1])];
 }
 
@@ -652,7 +656,7 @@ export function svgShapePath(shape) {
 // inward by offsets[i] (outward for a negative offset): the polygon with some faces
 // inset (a plating layer's inside) or grown (a hole widened by a plating layer). Empty
 // when nothing is left.
-export function offsetConvex(poly, offsets) {
+function offsetConvex(poly, offsets) {
     const n = poly.length >> 1;
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
     for (let i = 0; i < n; i++) {
@@ -686,6 +690,24 @@ export function offsetConvex(poly, offsets) {
     return q.length >= 6 && polyArea(q) > 0 ? new Float64Array(q) : new Float64Array(0);
 }
 
+// Two conductors or dielectrics { x_min.., shape? } share some area. Touching blocks
+// whose shared edge differs by rounding do not overlap. Shapes are tested on a grid of
+// points over the common box.
+export function bodiesOverlap(a, b) {
+    if ((a.shape && isComplement(a.shape)) || (b.shape && isComplement(b.shape))) return false;
+    const w = Math.min(a.x_max, b.x_max) - Math.max(a.x_min, b.x_min);
+    const h = Math.min(a.y_max, b.y_max) - Math.max(a.y_min, b.y_min);
+    const tol = 1e-9 * Math.max(a.x_max - a.x_min, a.y_max - a.y_min, b.x_max - b.x_min, b.y_max - b.y_min);
+    if (!(w > tol && h > tol)) return false;
+    if (!a.shape && !b.shape) return true;
+    const n = 16;
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        const x = Math.max(a.x_min, b.x_min) + w * (i + 0.5) / n, y = Math.max(a.y_min, b.y_min) + h * (j + 0.5) / n;
+        if (shapeContains(a, x, y, 0) && shapeContains(b, x, y, 0)) return true;
+    }
+    return false;
+}
+
 // Cross-section each conductor contributes where conductors of one kind (positive,
 // negative, ground) overlap: an overlapped area counts once, for the later conductor,
 // whose metal fills it. A Map from conductor index, only for the overlapping ones; null
@@ -694,26 +716,10 @@ export function offsetConvex(poly, offsets) {
 export function visibleAreas(conductors) {
     const kind = c => (c.is_signal ? (c.polarity < 0 ? -1 : 1) : 0);
     const box = c => ({ xmin: c.x_min, xmax: c.x_max, ymin: c.y_min, ymax: c.y_max });
-    const overlaps = (a, b) => {
-        if (kind(a) !== kind(b) || (a.shape && isComplement(a.shape)) || (b.shape && isComplement(b.shape))) return false;
-        const w = Math.min(a.x_max, b.x_max) - Math.max(a.x_min, b.x_min);
-        const h = Math.min(a.y_max, b.y_max) - Math.max(a.y_min, b.y_min);
-        // Touching blocks whose shared edge differs by rounding do not overlap.
-        const tol = 1e-9 * Math.max(a.x_max - a.x_min, a.y_max - a.y_min, b.x_max - b.x_min, b.y_max - b.y_min);
-        if (!(w > tol && h > tol)) return false;
-        if (!a.shape && !b.shape) return true;
-        // Shapes: some point of the common box inside both.
-        const n = 16;
-        for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-            const x = Math.max(a.x_min, b.x_min) + w * (i + 0.5) / n, y = Math.max(a.y_min, b.y_min) + h * (j + 0.5) / n;
-            if (shapeContains(a, x, y, 0) && shapeContains(b, x, y, 0)) return true;
-        }
-        return false;
-    };
     const cs = conductors;
     const inCluster = new Set();
     for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
-        if (overlaps(cs[i], cs[j])) { inCluster.add(i); inCluster.add(j); }
+        if (kind(cs[i]) === kind(cs[j]) && bodiesOverlap(cs[i], cs[j])) { inCluster.add(i); inCluster.add(j); }
     }
     if (!inCluster.size) return null;
     const out = new Map();
@@ -751,7 +757,6 @@ export function visibleAreas(conductors) {
 // A plating layer lies inside its conductor's outline. These give its cross-section
 // and what is left inside it, for a rect { x_min.. } / { xmin.. } or a shaped object.
 
-const rectOf = o => ({ xmin: o.xmin ?? o.x_min, xmax: o.xmax ?? o.x_max, ymin: o.ymin ?? o.y_min, ymax: o.ymax ?? o.y_max });
 const isPlated = pl => !!(pl && pl.sigma > 0 && (pl.thickness ?? 0) > 0 && (pl.top || pl.sides || pl.bottom || pl.all));
 
 // Whether the edges of a shape carry plating `pl`: per face name, every edge for a

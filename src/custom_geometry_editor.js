@@ -6,10 +6,10 @@
 import { parseGeometryText, evaluateGeometry, setParamInText, renameParamInText, setStatementInText, replaceStatementInText,
          insertLineInText, moveRectInText, rectStatementText, formatErrors, evaluateExpression, LENGTH_UNITS,
          axisEdges, addExpr, formatLength, plausibilityWarnings, isPlainNumber, isLengthLiteral, isReservedName,
-         changeUnitsInText } from './custom_geometry_text.js';
+         changeUnitsInText, WALLS, ROUND_KEYS, PLATING_FACES as FACES, SHAPE_NAMES, CONDUCTOR_KEYS } from './custom_geometry_text.js';
 import { CustomGeometrySolver } from './custom_geometry.js';
 
-export const CUSTOM_TEMPLATES = {
+const CUSTOM_TEMPLATES = {
     'Stacked-dielectric microstrip': `# Microstrip on two dielectric layers. The ground boundary below the
 # substrate is the ground plane, the air above is the rest of the domain.
 units mm
@@ -148,15 +148,10 @@ gnd   x=s/2      y=0   w=w     h=t
 `,
 };
 
-const WALLS = ['left', 'right', 'top', 'bottom'];
 const KIND_LABELS = { 'sig+': 'Signal (+)', 'sig-': 'Signal (−)', 'gnd': 'Ground', 'diel': 'Dielectric' };
-const SHAPE_LABELS = { rect: 'Rectangle', trap: 'Trapezoid', ngon: 'N-gon', ellipse: 'Ellipse' };
-// Shapes described by a centre and radii, and the keys of each.
-const ROUND_KEYS = { ngon: ['x', 'y', 'r', 'r_in', 'n', 'rot'], ellipse: ['x', 'y', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot'] };
 const CORNER_KEYS = ['radius', 'radius_bottom', 'wall'];
 // Side angle a rectangle turned into a trapezoid starts with, degrees from the vertical.
 const DEFAULT_ANGLE = '20';
-const FACES = ['top', 'sides', 'bottom'];
 const $ = id => document.getElementById(id);
 const paramInputId = name => `inp_cgp_${name}`;
 // Value of a number with an optional unit in the declared units, NaN when it is not one.
@@ -612,6 +607,27 @@ function rowButton(text, title, handler, { disabled = false, key = null, cls = '
     return b;
 }
 
+// Button that opens and closes a panel of a form row. The open rows are kept by source
+// line in `openSet` across form rebuilds. label() gives the button's { text, title,
+// active }. Returns { btn, show }, show() redraws the button and the panel.
+function panelToggle(cls, openSet, line, panel, label) {
+    const btn = el('button', { class: `secondary-btn ${cls}`, type: 'button' });
+    let open = openSet.has(line);
+    const show = () => {
+        const { text, title, active } = label();
+        btn.textContent = `${open ? '▾' : '▸'} ${text}`;
+        btn.classList.toggle('active', active);
+        btn.title = title;
+        panel.style.display = open ? '' : 'none';
+    };
+    btn.addEventListener('click', () => {
+        open = !open;
+        if (open) openSet.add(line); else openSet.delete(line);
+        show();
+    });
+    return { btn, show };
+}
+
 // st - the parsed statement, geoRect - its evaluated rectangle (null when it has an error)
 // Fields of a row whose shape changes from `from` to `to`. Position and size carry over
 // through the evaluated bounding box when the two shapes describe them differently.
@@ -673,7 +689,7 @@ function rectRow(model, st, geoRect, index, count) {
         const wasDiel = isDiel();
         kind = kindSel.value;
         if (isDiel() && !wasDiel) {
-            for (const k of ['plating', 'sigma', 'rq', 'plating_sigma', 'plating_t', 'plating_rq']) delete fields[k];
+            for (const k of CONDUCTOR_KEYS) delete fields[k];
             fields.er = fields.er ?? '4.4'; fields.tand = fields.tand ?? '0.02';
         }
         if (!isDiel() && wasDiel) { delete fields.er; delete fields.tand; delete fields.thin; }
@@ -681,7 +697,7 @@ function rectRow(model, st, geoRect, index, count) {
     });
 
     const shapeSel = el('select', { class: 'custom-shape', title: 'Shape. Anything but a plain rectangle needs the full-wave solver.' },
-        ...Object.entries(SHAPE_LABELS).map(([k, label]) => el('option', { value: k, text: label })));
+        ...Object.entries(SHAPE_NAMES).map(([k, name]) => el('option', { value: k, text: name[0].toUpperCase() + name.slice(1) })));
     shapeSel.value = shape;
     shapeSel.addEventListener('change', () => {
         fields = shapeFields(fields, shape, shapeSel.value, geoRect);
@@ -734,20 +750,6 @@ function rectRow(model, st, geoRect, index, count) {
                     title: 'Right side angle in degrees from the vertical. Empty: the same as the left side.' })));
         }
         // Corner radius and wall sit in a panel that opens from a button, like plating.
-        const cornersBtn = el('button', { class: 'secondary-btn custom-corners-toggle', type: 'button' });
-        let cornersOpen = openCornerRows.has(st.line);
-        const showCorners = () => {
-            const set = CORNER_KEYS.filter(k => fields[k] !== undefined && fields[k] !== '');
-            cornersBtn.textContent = `${cornersOpen ? '▾' : '▸'} corners${set.length ? ' ' + set.map(k => ({ radius: 'r', radius_bottom: 'r↓', wall: 'wall' })[k]).join(' ') : ''}`;
-            cornersBtn.classList.toggle('active', set.length > 0);
-            cornersBtn.title = 'Rounded corners and a wall (a hollow shape). Anything set here needs the full-wave solver.';
-            cornerPanel.style.display = cornersOpen ? '' : 'none';
-        };
-        cornersBtn.addEventListener('click', () => {
-            cornersOpen = !cornersOpen;
-            if (cornersOpen) openCornerRows.add(st.line); else openCornerRows.delete(st.line);
-            showCorners();
-        });
         const setCorner = key => v => {
             // A shell has one outside: its plating covers it all.
             if (key === 'wall' && v !== '' && !/^0*\.?0*$/.test(v) && fields.plating && fields.plating !== 'none') fields.plating = 'all';
@@ -760,6 +762,12 @@ function rectRow(model, st, geoRect, index, count) {
                 title: lengthTip('Radius of the two lower corners', 'the radius above. 0 keeps them sharp, as on a trace etched from a foil') }),
             exprInput('wall', fields.wall, setCorner('wall'), { cls: 'narrow', placeholder: 'solid',
                 title: lengthTip('Wall thickness: the shape becomes a shell of this thickness, such as a cable shield', 'solid') }));
+        const { btn: cornersBtn, show: showCorners } = panelToggle('custom-corners-toggle', openCornerRows, st.line, cornerPanel, () => {
+            const set = CORNER_KEYS.filter(k => fields[k] !== undefined && fields[k] !== '');
+            return { text: `corners${set.length ? ' ' + set.map(k => ({ radius: 'r', radius_bottom: 'r↓', wall: 'wall' })[k]).join(' ') : ''}`,
+                active: set.length > 0,
+                title: 'Rounded corners and a wall (a hollow shape). Anything set here needs the full-wave solver.' };
+        });
         geometryCells.push(cornersBtn);
         showCorners();
     }
@@ -775,24 +783,6 @@ function rectRow(model, st, geoRect, index, count) {
         // has an error.
         const round = !!ROUND_KEYS[shape] || (geoRect ? !!(geoRect.shape && geoRect.shape.type === 'ring')
             : !!fields.wall || fields.r_in !== undefined || fields.rx_in !== undefined);
-        // The plating options sit in a panel that opens from a button on the row. The
-        // button names the plated faces, so a collapsed row still shows its plating.
-        const platingBtn = el('button', { class: 'secondary-btn custom-plating-toggle', type: 'button' });
-        let platingOpen = openPlatingRows.has(st.line);
-        const showPlating = () => {
-            const list = FACES.filter(f => on.has(f));
-            // Initials keep the row on one line: T S B for top, sides, bottom.
-            platingBtn.textContent = `${platingOpen ? '▾' : '▸'} plating${list.length ? ' ' + (round ? 'all' : list.map(f => f[0].toUpperCase()).join('')) : ''}`;
-            platingBtn.classList.toggle('active', list.length > 0);
-            platingBtn.title = list.length ? `Plated faces: ${list.join(', ')}. Open for the faces and the plating material`
-                : 'No plating. Open to plate faces of this conductor';
-            platingPanel.style.display = platingOpen ? '' : 'none';
-        };
-        platingBtn.addEventListener('click', () => {
-            platingOpen = !platingOpen;
-            if (platingOpen) openPlatingRows.add(st.line); else openPlatingRows.delete(st.line);
-            showPlating();
-        });
         const boxes = (round ? ['all'] : FACES).map(face => {
             const cb = el('input', { type: 'checkbox' });
             cb.checked = round ? on.size === FACES.length : on.has(face);
@@ -824,6 +814,16 @@ function rectRow(model, st, geoRect, index, count) {
                     { ...opt, kind: 'small', title: lengthTip('Plating thickness', 'the plating statement') }),
                 exprInput('rq', fields.plating_rq, setField('plating_rq'),
                     { ...opt, kind: 'small', title: lengthTip('Plating surface roughness (rms)', 'the plating statement') })));
+        // The plating options sit in a panel that opens from a button on the row. The
+        // button names the plated faces, so a collapsed row still shows its plating.
+        const { btn: platingBtn, show: showPlating } = panelToggle('custom-plating-toggle', openPlatingRows, st.line, platingPanel, () => {
+            const list = FACES.filter(f => on.has(f));
+            // Initials keep the row on one line: T S B for top, sides, bottom.
+            return { text: `plating${list.length ? ' ' + (round ? 'all' : list.map(f => f[0].toUpperCase()).join('')) : ''}`,
+                active: list.length > 0,
+                title: list.length ? `Plated faces: ${list.join(', ')}. Open for the faces and the plating material`
+                    : 'No plating. Open to plate faces of this conductor' };
+        });
         showPlating();
         extra = [exprInput('σ', fields.sigma, setField('sigma'),
                 { ...opt, kind: 'number', title: 'Conductivity in S/m. Empty: the Conductivity option.' }),
@@ -844,15 +844,16 @@ function rectRow(model, st, geoRect, index, count) {
         { key: 'mirror', cls: 'custom-mirror' });
     mirrorBtn.classList.toggle('active', mirrored);
 
-    const current = () => analyse().model;
+    // A structural edit of this row's statement in the current text.
+    const edit = fn => () => { const m = analyse().model; applyText(fn(getCustomGeometryText(), m, mine(m)), true); };
     const actions = el('div', { class: 'custom-row-actions' },
-        rowButton('↑', 'Move up (a later dielectric covers an earlier one)', () => { const m = current(); applyText(moveRectInText(getCustomGeometryText(), m, mine(m), -1), true); }, { disabled: index === 0 }),
-        rowButton('↓', 'Move down', () => { const m = current(); applyText(moveRectInText(getCustomGeometryText(), m, mine(m), 1), true); }, { disabled: index === count - 1 }),
+        rowButton('↑', 'Move up (a later dielectric covers an earlier one)', edit((t, m, s) => moveRectInText(t, m, s, -1)), { disabled: index === 0 }),
+        rowButton('↓', 'Move down', edit((t, m, s) => moveRectInText(t, m, s, 1)), { disabled: index === count - 1 }),
         rowButton('⧉', 'Duplicate', () => {
             pendingFocus = { line: st.line + 1, key: null };
             applyText(insertLineInText(getCustomGeometryText(), st.line, rectStatementText(kind, fields, shape)), true);
         }),
-        rowButton('✕', 'Delete', () => { const m = current(); applyText(replaceStatementInText(getCustomGeometryText(), mine(m), null), true); }));
+        rowButton('✕', 'Delete', edit((t, m, s) => replaceStatementInText(t, s, null))));
 
     const row = el('div', { class: `custom-rect-row kind-${st.kind.replace('+', 'p').replace('-', 'n')}`, 'data-line': st.line },
         kindSel, shapeSel, ...geometryCells, mirrorBtn, ...extra, actions, ...(cornerPanel ? [cornerPanel] : []), ...(below ? [below] : []));

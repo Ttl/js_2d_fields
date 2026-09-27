@@ -265,4 +265,14 @@ function wallSpreadFactor(u) {
     return (2 / u) * acc * h / 3;
 }
 
-export { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor };
+// (1+j) coth((1+j) x) as {re, im}: the surface impedance over Rs of a slab x skin
+// depths thick with a field-free back. It is 1+j for a thick slab and tends to
+// 1/x + j 2x/3 for a thin one. Taken as 1+j past x = 20, where that holds to double
+// precision (cosh(2x) overflows past x ~ 355), and for x <= 0.
+function slabCoth(x) {
+    if (!(x > 0) || x > 20) return { re: 1, im: 1 };
+    const den = Math.cosh(2 * x) - Math.cos(2 * x);
+    return { re: (Math.sinh(2 * x) + Math.sin(2 * x)) / den, im: (Math.sinh(2 * x) - Math.sin(2 * x)) / den };
+}
+
+export { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth };

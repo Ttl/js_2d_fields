@@ -4,7 +4,7 @@
 // Loss integral: α_c = Rs · ∮(|Ht|² + |Hz|²) dl / (4P)
 
 import { csqrt, tripletsToCSR, GL3p, GL3w } from './fem_core.js';
-import { shapeContains } from '../shapes.js';
+import { shapeContains, isPolyShape } from '../shapes.js';
 import { ne1, ne2, nf1, nf2,
          lv, le, lvGrad, leGrad, triCoefficients,
          ne1Curl, ne2Curl, nf1Curl, nf2Curl,
@@ -395,7 +395,7 @@ function satCornerIntegral(C2, u, L, r0) {
     return C2 * (Math.pow(r0, u) + (Math.pow(L, u) - Math.pow(r0, u)) / u);
 }
 
-export function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossEdge, hDofs,
+function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossEdge, hDofs,
                                   condRect, hSub, epsR, satR0 = 0) {
     const { nodes, edges, tris, triEdges, nEdges, nTris, nNodes } = mesh;
     const { faceF, isCondEdge } = fm;
@@ -700,7 +700,7 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
 
     // For half-domain, signal_area from condRects is half the physical conductor
     // area. Only SIGNAL rects carry the drive current — coplanar ground rects are
-    // return path, not parallel signal metal (counting them made GCPW R_dc ~10× low).
+    // return path, not parallel signal metal.
     const sym = (condRects && condRects[0] && condRects[0].symmetry) || 1;
     let signal_area=0;
     if (condRects) for(const cr of condRects) {
@@ -750,7 +750,7 @@ export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, fr
         let inCond = false;
         if (condRects) for (const cr of condRects) {
             // A polygon's bounding box holds dielectric too (a ring's hole).
-            if (cr.shape && (cr.shape.type === 'polygon' || cr.shape.type === 'ring')) {
+            if (isPolyShape(cr.shape)) {
                 if (shapeContains(cr, xc, yc, TOL)) { inCond = true; break; }
                 continue;
             }

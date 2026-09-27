@@ -1,6 +1,6 @@
 import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
-import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor } from './surface_roughness.js';
+import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
@@ -122,8 +122,9 @@ async function solveWithWASMMulti(csr, Bs, forceLU = false) {
     }
 }
 
-async function solveWithWASM(csr, B, forceLU = false) {
-    return (await solveWithWASMMulti(csr, [B], forceLU))[0];
+// Wall names as a phrase: "top", "sides and top", "left, top and bottom".
+function wallList(parts) {
+    return parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0];
 }
 
 function isArrayLike2D(arr, ny, nx) {
@@ -387,36 +388,6 @@ export class FieldSolver2D {
         this.tand_cell = tand;
     }
 
-    /**
-     * Pre-mesh sanity check: can this geometry be meshed at fine enough detail to be
-     * resolved while keeping the mesh under the node budget?
-     *
-     * Two distinct requirements set the mesh size, and the binding one varies:
-     *   1. FEATURE resolution — the smallest geometric feature (thin trace, coating,
-     *      conductor edge) needs a few cells across it, setting the FINE cell size hFine.
-     *   2. WAVELENGTH resolution — at high frequency the field-concentration ("active")
-     *      region near the conductors must be sampled at a fraction of the in-medium
-     *      wavelength. This is a GLOBAL, ungradeable floor over that region: a graded mesh
-     *      can only be so coarse there. A genuinely electrically-large cross-section (e.g.
-     *      a 1 m structure at 100 GHz → λ≈3 mm → ~hundreds of cells per side) needs an
-     *      impossibly dense mesh. We apply this to the active region, NOT the auto-padded
-     *      air domain, and use only ~3 cells/λ (just above Nyquist), so the gate fires only
-     *      for the surely-unsolvable — never a normal mm-scale line at any frequency.
-     *
-     * The two backends pay for this differently, so the estimate is per-backend:
-     *   - Rectilinear FDM is a TENSOR grid: nodes = nx·ny, and a fine feature forces fine
-     *     graded LINES spanning the whole opposite axis. Budget = max_nodes mesh lines².
-     *   - Triangular FEM grades in 2D: a fine feature costs only a LOCAL patch (so it can't
-     *     be unsolvable on its own), and the full-wave eigensolve is ~4× heavier per entity,
-     *     so its triangle budget is max_nodes/4 (memory parity — see tri_backend.js).
-     *
-     * Throws an Error (with the dominant cause and remedies) when the geometry cannot fit
-     * the budget; returns silently when it can or when the domain isn't known yet.
-     *
-     * @param {number} maxNodes - The node budget (UI "Max Nodes"), default 20000.
-     * @param {number} [freqOverride] - Frequency to evaluate the wavelength term at
-     *     (solveModes solves at its own frequency, not this.freq).
-     */
     // Warnings for 'open' boundaries that sit too close to the conductors. The open
     // boundary conditions (the FDM open stencil, the triangular backend's first-order
     // radiating ABC) approximate an unbounded exterior, which only holds where the
@@ -498,9 +469,7 @@ export class FieldSolver2D {
             close.delete('left'); close.delete('right');
         }
         const parts = ['sides', 'left', 'right', 'top', 'bottom'].filter(n => close.has(n));
-        const list = parts.length > 1
-            ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1]
-            : parts[0];
+        const list = wallList(parts);
         const dMin = Math.min(...close.values());
         out.push(`The open boundary is too close to the conductors on the ${list}: only ${mm(dMin)} ` +
             `to the nearest conductor, less than ${OPEN_CLEARANCE}× the ${mm(h)} substrate height. ` +
@@ -595,19 +564,47 @@ export class FieldSolver2D {
             delete w.left; delete w.right;
         }
         const parts = ['sides', 'left', 'right', 'top', 'bottom'].filter(n => w[n] >= 0.2 * worst.total);
-        const list = parts.length > 1
-            ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1]
-            : parts[0];
+        const list = wallList(parts);
         return { type: 'open-boundary', mode: 'all', estimate: worst.total, walls: parts, message:
             `The field has not decayed at the open boundary on the ${list}: truncating it there is ` +
             `estimated to raise Z0 by about ${(100 * worst.total).toPrecision(2)}%. Enlarge the enclosure ` +
             `or use grounded walls there.` };
     }
 
-    // modesOpts (truthy = guarding a Modes-tab solve, which ALWAYS runs the triangular
-    // backend regardless of the Solver dropdown): {wavelengthDensity} — the Modes mesh
-    // density, because that solve wavelength-caps the bulk of the WHOLE domain (see
-    // TriBackend._wavelengthCap) rather than just the active patch.
+    /**
+     * Pre-mesh sanity check: can this geometry be meshed at fine enough detail to be
+     * resolved while keeping the mesh under the node budget?
+     *
+     * Two distinct requirements set the mesh size, and the binding one varies:
+     *   1. FEATURE resolution — the smallest geometric feature (thin trace, coating,
+     *      conductor edge) needs a few cells across it, setting the FINE cell size hFine.
+     *   2. WAVELENGTH resolution — at high frequency the field-concentration ("active")
+     *      region near the conductors must be sampled at a fraction of the in-medium
+     *      wavelength. This is a GLOBAL, ungradeable floor over that region: a graded mesh
+     *      can only be so coarse there. A genuinely electrically-large cross-section (e.g.
+     *      a 1 m structure at 100 GHz → λ≈3 mm → ~hundreds of cells per side) needs an
+     *      impossibly dense mesh. We apply this to the active region, NOT the auto-padded
+     *      air domain, and use only ~3 cells/λ (just above Nyquist), so the gate fires only
+     *      for the surely-unsolvable — never a normal mm-scale line at any frequency.
+     *
+     * The two backends pay for this differently, so the estimate is per-backend:
+     *   - Rectilinear FDM is a TENSOR grid: nodes = nx·ny, and a fine feature forces fine
+     *     graded LINES spanning the whole opposite axis. Budget = max_nodes mesh lines².
+     *   - Triangular FEM grades in 2D: a fine feature costs only a LOCAL patch (so it can't
+     *     be unsolvable on its own), and the full-wave eigensolve is ~4× heavier per entity,
+     *     so its triangle budget is max_nodes/4 (memory parity — see tri_backend.js).
+     *
+     * Throws an Error (with the dominant cause and remedies) when the geometry cannot fit
+     * the budget; returns silently when it can or when the domain isn't known yet.
+     *
+     * @param {number} maxNodes - The node budget (UI "Max Nodes"), default 20000.
+     * @param {number} [freqOverride] - Frequency to evaluate the wavelength term at
+     *     (solveModes solves at its own frequency, not this.freq).
+     * @param {object} [modesOpts] - Set when guarding a Modes-tab solve, which always runs
+     *     the triangular backend: {wavelengthDensity} is the Modes mesh density, because
+     *     that solve wavelength-caps the bulk of the whole domain (see
+     *     TriBackend._wavelengthCap) rather than just the active patch.
+     */
     _check_meshability(maxNodes = 20000, freqOverride = undefined, modesOpts = null) {
         const freq = freqOverride ?? this.freq;
         // modesOpts.domainBox: the Modes tab's shrunken open domain (see _modes_domain_box).
@@ -707,8 +704,9 @@ export class FieldSolver2D {
             // only surely-unsolvable cases; the backend's coarsen-and-rebuild loop and
             // the eigenSolveBytes guard catch anything the estimate misses, cleanly.
             let triCoarse = Math.max(Math.min(W, H) / 2, hFine);
-            let tris, triCause = cause, triRemedy = remedy;
-            if (modesOpts && freq > 0) {
+            let triCause = cause, triRemedy = remedy;
+            const modesCap = modesOpts && freq > 0;
+            if (modesCap) {
                 // Modes solve: the bulk of the WHOLE domain is wavelength-capped at the
                 // Modes mesh density (default 12 cells/λ) so cavity/higher-order modes
                 // stay resolved — coarsening below that mis-classifies them, so an
@@ -725,11 +723,9 @@ export class FieldSolver2D {
                         `(~${fmtL(triCoarse)} cells) to keep cavity/higher-order modes trustworthy`;
                     triRemedy = 'lower the Modes frequency or Mesh density, shrink the enclosure, or raise Max Nodes';
                 }
-                tris = 2 * (W / triCoarse) * (H / triCoarse);
-            } else {
-                tris = 2 * (W / triCoarse) * (H / triCoarse);     // coarse background
-                if (lambdaLimited) tris += 2 * (Lx / hWave) * (Ly / hWave);   // active wavelength patch
             }
+            let tris = 2 * (W / triCoarse) * (H / triCoarse);     // coarse background
+            if (!modesCap && lambdaLimited) tris += 2 * (Lx / hWave) * (Ly / hWave);   // active wavelength patch
             if (tris > triBudget) {
                 throw new Error(
                     `Geometry cannot be meshed for the full-wave (triangular) solver within the node budget: ` +
@@ -857,108 +853,60 @@ export class FieldSolver2D {
             }
         }
 
-        const ny = this.y.length, nx = this.x.length;
+        const nx = this.x.length;
         const dx = diff(this.x), dy = diff(this.y);
-        const N = nx * ny;
-        const idx = (i, j) => i * nx + j;
-
-        const is_cond = (i, j) => this.conductor_mask[i][j];
         // Cell-centred permittivity, the operator's material of record (see
         // FieldSolver2D._paint_cell_materials). The vacuum solve reads 1 everywhere.
         const ec = vacuum ? null : this.epsilon_cell;
         const epsC = ec ? (ci, cj) => ec[ci][cj] : () => 1.0;
         // PEC symmetry plane: the j=0 column is set to V=0 like a conductor.
         const pec = planeBC === 'pec';
-        const pinned = (i, j) => is_cond(i, j) || (pec && j === 0);
-
-        // Remove mesh nodes internal to conductors
-        // E-field inside conductors is 0.
-        const is_unknown = new Int8Array(N);
-        let N_unknown = 0;
-
-        for (let i = 0; i < ny; i++)
-            for (let j = 0; j < nx; j++) {
-                const n = idx(i, j);
-                if (!pinned(i, j)) {
-                    is_unknown[n] = 1;
-                    N_unknown++;
-                }
-            }
-
-        const full_to_red = new Int32Array(N).fill(-1);
-        const red_to_full = new Int32Array(N_unknown);
-
-        let k = 0;
-        for (let n = 0; n < N; n++) {
-            if (is_unknown[n]) {
-                full_to_red[n] = k;
-                red_to_full[k] = n;
-                k++;
-            }
-        }
-
-        // Build sparse system. The 5-point stencil gives at most 5 entries per
-        // row, and the natural (row-major) node numbering already emits them in
-        // ascending column order (down, left, self, right, up), so the CSR is
-        // written straight into typed arrays.
-        const Bs = Vs.map(() => new Float64Array(N_unknown));
-        const rowPtr = new Int32Array(N_unknown + 1);
-        const colIdx = new Int32Array(5 * N_unknown);
-        const values = new Float64Array(5 * N_unknown);
-        let nnz = 0;
-        const addA = (c, v) => {
-            colIdx[nnz] = c;
-            values[nnz] = v;
-            nnz++;
-        };
-
-        for (let i = 0; i < ny; i++) {
-            for (let j = 0; j < nx; j++) {
-                if (pinned(i, j)) continue;
-
-                const fn = idx(i, j);
-                const n = full_to_red[fn];
-
-                const [cd, cl, cr, cu] = this._stencil(i, j, dx, dy, epsC, pec);
-
-                const cc = -(cr + cl + cu + cd);
-
-                // Emit the row in ascending column order: (i-1,j), (i,j-1),
-                // (i,j), (i,j+1), (i+1,j). Row-major numbering makes that the
-                // sorted order, which is what the WASM entry point requires.
-                const handle = (ii, jj, c) => {
-                    if (!pinned(ii, jj)) {
-                        addA(full_to_red[idx(ii, jj)], c);
-                    } else {
-                        for (let m = 0; m < Vs.length; m++)
-                            Bs[m][n] -= c * Vs[m][ii][jj];
-                    }
-                };
-
-                if (i > 0) handle(i - 1, j, cd);
-                if (j > 0) handle(i, j - 1, cl);
-                addA(n, cc);
-                if (j < nx - 1) handle(i, j + 1, cr);
-                if (i < ny - 1) handle(i + 1, j, cu);
-                rowPtr[n + 1] = nnz;
-            }
-        }
-
-        const csr = { rowPtr, colIdx: colIdx.subarray(0, nnz), values: values.subarray(0, nnz) };
+        // Nodes inside conductors are pinned: the E-field there is 0.
+        const pinned = (i, j) => this.conductor_mask[i][j] || (pec && j === 0);
+        const { csr, Bs, idx } = this._laplace_system(pinned,
+            (i, j) => this._stencil(i, j, dx, dy, epsC, pec), (m, i, j) => Vs[m][i][j], Vs.length);
         const xs = await solveWithWASMMulti(csr, Bs);
 
         // Reconstruct solutions for full mesh
         for (let m = 0; m < Vs.length; m++) {
             const V = Vs[m], x = xs[m];
-            for (let k = 0; k < N_unknown; k++) {
-                const n = red_to_full[k];
-                const i = (n / nx) | 0;
-                const j = n % nx;
-                V[i][j] = x[k];
-            }
+            for (let n = 0; n < idx.length; n++) if (idx[n] >= 0) V[(n / nx) | 0][n % nx] = x[idx[n]];
         }
 
         return Vs;
+    }
+
+    // The 5-point system over the nodes not pinned(i, j), stencil(i, j) giving the
+    // _stencil coefficients. Pinned neighbours move to the right-hand sides at the
+    // values fixed(m, i, j) of each of nDrives drives. Row-major numbering emits every
+    // row in ascending column order (down, left, self, right, up), which is what the
+    // WASM entry point requires. idx maps a node to its unknown, -1 when pinned.
+    _laplace_system(pinned, stencil, fixed, nDrives) {
+        const nx = this.x.length, ny = this.y.length;
+        const idx = new Int32Array(nx * ny).fill(-1);
+        let N = 0;
+        for (let n = 0; n < nx * ny; n++) if (!pinned((n / nx) | 0, n % nx)) idx[n] = N++;
+        const Bs = Array.from({ length: nDrives }, () => new Float64Array(N));
+        const rowPtr = new Int32Array(N + 1), colIdx = new Int32Array(5 * N), values = new Float64Array(5 * N);
+        let nnz = 0;
+        for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
+            const r = idx[i * nx + j];
+            if (r < 0) continue;
+            const [cd, cl, cr, cu] = stencil(i, j);
+            const nb = (ii, jj, c) => {
+                const q = idx[ii * nx + jj];
+                if (q >= 0) { colIdx[nnz] = q; values[nnz++] = c; }
+                else for (let m = 0; m < nDrives; m++) Bs[m][r] -= c * fixed(m, ii, jj);
+            };
+            if (i > 0) nb(i - 1, j, cd);
+            if (j > 0) nb(i, j - 1, cl);
+            colIdx[nnz] = r; values[nnz++] = -(cr + cl + cu + cd);
+            if (j < nx - 1) nb(i, j + 1, cr);
+            if (i < ny - 1) nb(i + 1, j, cu);
+            rowPtr[r + 1] = nnz;
+        }
+        const csr = { rowPtr, colIdx: colIdx.subarray(0, nnz), values: values.subarray(0, nnz) };
+        return { csr, Bs, idx, N };
     }
 
     // Flux coefficients [down, left, right, up] of node (i, j) in the Laplace
@@ -1141,34 +1089,17 @@ export class FieldSolver2D {
         // density J(m, cell) (per unit mu0). Returns the full node arrays and the
         // right-hand sides.
         const solve = async (pinned, fixed, J, nDrives) => {
-            const idx = new Int32Array(nx * ny).fill(-1);
-            let N = 0;
-            for (let n = 0; n < nx * ny; n++) if (!pinned((n / nx) | 0, n % nx)) idx[n] = N++;
-            const Bs = Array.from({ length: nDrives }, () => new Float64Array(N));
-            const rowPtr = new Int32Array(N + 1), colIdx = new Int32Array(5 * N), values = new Float64Array(5 * N);
-            let nnz = 0;
+            const { csr, Bs, idx, N } = this._laplace_system(pinned, (i, j) => st[i * nx + j], fixed, nDrives);
             for (let i = 0; i < ny; i++) for (let j = 0; j < nx; j++) {
                 const r = idx[i * nx + j];
                 if (r < 0) continue;
-                const [cd, cl, cr, cu, cid, ciu, cjl, cjr, hd, hu, wl, wr] = st[i * nx + j];
+                const [, , , , cid, ciu, cjl, cjr, hd, hu, wl, wr] = st[i * nx + j];
                 const scale = this.sym_half && j > 0 ? 2 : 1;
                 for (let m = 0; m < nDrives; m++) {
                     Bs[m][r] += scale * (J(m, cid * ncx + cjl) * wl * hd + J(m, cid * ncx + cjr) * wr * hd
                         + J(m, ciu * ncx + cjl) * wl * hu + J(m, ciu * ncx + cjr) * wr * hu);
                 }
-                const nb = (ii, jj, c) => {
-                    const q = idx[ii * nx + jj];
-                    if (q >= 0) { colIdx[nnz] = q; values[nnz++] = c; }
-                    else for (let m = 0; m < nDrives; m++) Bs[m][r] -= c * fixed(m, ii, jj);
-                };
-                if (i > 0) nb(i - 1, j, cd);
-                if (j > 0) nb(i, j - 1, cl);
-                colIdx[nnz] = r; values[nnz++] = -(cd + cl + cr + cu);
-                if (j < nx - 1) nb(i, j + 1, cr);
-                if (i < ny - 1) nb(i + 1, j, cu);
-                rowPtr[r + 1] = nnz;
             }
-            const csr = { rowPtr, colIdx: colIdx.subarray(0, nnz), values: values.subarray(0, nnz) };
             const xs = await solveWithWASMMulti(csr, Bs);
             const As = xs.map((x, m) => {
                 const A = new Float64Array(nx * ny);
@@ -1227,7 +1158,7 @@ export class FieldSolver2D {
     _ground_classes() {
         const key = this.conductors;
         const dom = { x_min: -this.domain_width / 2, x_max: this.domain_width / 2,
-            y_min: this.domain_y_min ?? -this.t_gnd, y_max: this.domain_height };
+            y_min: this.domain_y_min, y_max: this.domain_height };
         const c = this._gndClasses;
         if (c && c.key === key && c.x_max === dom.x_max && c.y_min === dom.y_min && c.y_max === dom.y_max) return c;
         const cls = (this.domain_shape || !key) ? { walls: new Set(), unlimited: new Set() }
@@ -1367,13 +1298,8 @@ export class FieldSolver2D {
         // for a thin one, times the group's sheet width.
         const Y = groups.map(g => {
             const delta = Math.sqrt(2 / (omega * MU0 * g.sigma));
-            const q = new Complex(g.d / delta, g.d / delta);
-            // coth(q) = (e^2q + 1) / (e^2q - 1), capped where it is 1 to double precision.
-            const coth = q.re > 20 ? new Complex(1, 0) : (() => {
-                const e = new Complex(Math.exp(2 * q.re) * Math.cos(2 * q.im), Math.exp(2 * q.re) * Math.sin(2 * q.im));
-                return new Complex(e.re + 1, e.im).div(new Complex(e.re - 1, e.im));
-            })();
-            const Zs = new Complex(1 / (g.sigma * delta), 1 / (g.sigma * delta)).mul(coth);
+            const z = slabCoth(g.d / delta), Rs = 1 / (g.sigma * delta);
+            const Zs = new Complex(Rs * z.re, Rs * z.im);
             return new Complex(1, 0).div(Zs).mul(new Complex(g.area / g.d, 0));
         });
         // Complex symmetric LDL^T of S + j omega mu0 D, no pivoting: its real part is
@@ -1839,6 +1765,15 @@ export class FieldSolver2D {
                 this.freq, sigmaOf(ci), platingRq, cond.plating.sigma, cond.plating.thickness));
             return Z_cache.get(key);
         };
+        // Plating metal alone on a face (no bulk under it) with roughness r. With dc the
+        // layered plating over the bulk stands in, see layeredZ.
+        const platingOnlyZ = (ci, key, r, dc) => {
+            if (dc) return layeredZ(ci, r);
+            if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, this.conductors[ci].plating.sigma, r));
+            return Z_cache.get(key);
+        };
+        // Fraction w of Za, the rest Zb.
+        const blend = (w, Za, Zb) => new Complex(w * Za.re + (1 - w) * Zb.re, w * Za.im + (1 - w) * Zb.im);
         const getZsurf = (ci, direction, i, j, dl, xStart = null, dc = false) => {
             if (!this.conductors || ci < 0) return Z_surf_default;
             const Z_bare = bareZ(ci, direction);
@@ -1877,26 +1812,10 @@ export class FieldSolver2D {
                 const fraction = dl > 0 ? Math.min(overlap / dl, 1.0) : 0;
 
                 if (fraction > 0) {
-                    const key_top_side = `${ci}_top_side_plating`;
-                    let Z_plating;
-                    if (dc) {
-                        Z_plating = layeredZ(ci, cond.plating.rq);
-                    } else if (Z_cache.has(key_top_side)) {
-                        Z_plating = Z_cache.get(key_top_side);
-                    } else {
-                        Z_plating = calculate_Zrough(
-                            this.freq, cond.plating.sigma, cond.plating.rq
-                        );
-                        Z_cache.set(key_top_side, Z_plating);
-                    }
-
+                    const Z_plating = platingOnlyZ(ci, `${ci}_top_side_plating`, cond.plating.rq, dc);
                     if (fraction >= 1.0) return Z_plating;
-
                     // Weighted average with bulk side impedance for uncovered part
-                    return new Complex(
-                        fraction * Z_plating.re + (1 - fraction) * Z_bare.re,
-                        fraction * Z_plating.im + (1 - fraction) * Z_bare.im
-                    );
+                    return blend(fraction, Z_plating, Z_bare);
                 }
             }
 
@@ -1914,27 +1833,11 @@ export class FieldSolver2D {
                 const fraction = dl > 0 ? Math.min((left_overlap + right_overlap) / dl, 1.0) : 0;
 
                 if (fraction > 0) {
-                    const key_corner = `${ci}_corner_plating`;
-                    let Z_plating;
-                    if (dc) {
-                        Z_plating = layeredZ(ci, bareRq(ci));
-                    } else if (Z_cache.has(key_corner)) {
-                        Z_plating = Z_cache.get(key_corner);
-                    } else {
-                        // Side plating material with bulk surface roughness
-                        Z_plating = calculate_Zrough(
-                            this.freq, cond.plating.sigma, bareRq(ci)
-                        );
-                        Z_cache.set(key_corner, Z_plating);
-                    }
-
+                    // Side plating material with bulk surface roughness
+                    const Z_plating = platingOnlyZ(ci, `${ci}_corner_plating`, bareRq(ci), dc);
                     if (fraction >= 1.0) return Z_plating;
-
                     // Weighted average: covered part uses plating, rest uses bulk
-                    return new Complex(
-                        fraction * Z_plating.re + (1 - fraction) * Z_bare.re,
-                        fraction * Z_plating.im + (1 - fraction) * Z_bare.im
-                    );
+                    return blend(fraction, Z_plating, Z_bare);
                 }
             }
 
@@ -1947,22 +1850,9 @@ export class FieldSolver2D {
                 // Determine corner size (characteristic dimension)
                 const corner_size = Math.min(cond.width, Math.abs(cond.height)) / 10;
 
-                // Get corner plating impedance (single-layer, no bulk)
-                const key_corner = `${ci}_corner_plating`;
-                let Z_corner;
-                if (dc) {
-                    Z_corner = layeredZ(ci, bareRq(ci));
-                } else if (Z_cache.has(key_corner)) {
-                    Z_corner = Z_cache.get(key_corner);
-                } else {
-                    // At corners: single-layer with plating sigma and bulk rq
-                    // - sigma: plating material (extends from sides)
-                    // - rq: bulk surface roughness (bottom surface preparation)
-                    Z_corner = calculate_Zrough(
-                        this.freq, cond.plating.sigma, bareRq(ci)  // Use bulk rq, not plating.rq
-                    );
-                    Z_cache.set(key_corner, Z_corner);
-                }
+                // Corner plating impedance: plating sigma (it extends from the sides) and
+                // the bulk roughness (the bottom surface preparation), no bulk under it.
+                const Z_corner = platingOnlyZ(ci, `${ci}_corner_plating`, bareRq(ci), dc);
 
                 // If mesh cell is small (pure corner region), use pure corner plating impedance
                 if (dl < corner_size) {
@@ -1977,9 +1867,7 @@ export class FieldSolver2D {
                 const Z_bottom = cond.plating.bottom ? layeredZ(ci, cond.plating.rq) : Z_bare;
 
                 // Weighted average: corner region uses corner plating impedance, bulk uses bottom impedance
-                const Z_avg_re = corner_fraction * Z_corner.re + (1 - corner_fraction) * Z_bottom.re;
-                const Z_avg_im = corner_fraction * Z_corner.im + (1 - corner_fraction) * Z_bottom.im;
-                return new Complex(Z_avg_re, Z_avg_im);
+                return blend(corner_fraction, Z_corner, Z_bottom);
             }
 
             // Standard surface impedance (no corner effects)
@@ -2015,13 +1903,7 @@ export class FieldSolver2D {
         // warning below), deltaCond the one of each conductor.
         const delta = deltaOf((ownSigma || line !== null) ? sigma_sig : this.sigma_cond);
         const deltaCond = c => deltaOf(this._solid_plating(c) ? c.plating.sigma : (c.sigma > 0 ? c.sigma : this.sigma_cond));
-        const slabReactanceFactor = (d, dlt = delta) => {
-            const x = d / dlt;
-            if (!(x > 0)) return 1;
-            if (x > 20) return 1;
-            const den = Math.cosh(2 * x) - Math.cos(2 * x);
-            return (Math.sinh(2 * x) - Math.sin(2 * x)) / den;
-        };
+        const slabReactanceFactor = (d, dlt = delta) => slabCoth(d / dlt).im;
         // A block stacked on another metal of the same conductor is as thick as the stack.
         const stackH = (c, ci) => {
             let h = Math.abs(c.height);
@@ -2085,11 +1967,7 @@ export class FieldSolver2D {
         // geometric DC resistance spreads the return over the whole ground width.
         // Signal conductors keep the semi-infinite Rs: their DC limit and transition
         // are handled by R_total below.
-        const slabResistanceFactor = (d, dlt = delta) => {
-            const x = d / dlt;
-            if (!(x > 0) || x > 20) return 1;
-            return (Math.sinh(2 * x) + Math.sin(2 * x)) / (Math.cosh(2 * x) - Math.cos(2 * x));
-        };
+        const slabResistanceFactor = (d, dlt = delta) => slabCoth(d / dlt).re;
         const kR = (this.conductors || []).map((c, ci) => (c.is_signal || !vacuum_fields) ? 1 : slabResistanceFactor(
             Math.min(Math.abs(c.width), stackH(c, ci)), deltaCond(c)));
         const isGroundCond = ci => ci >= 0 && ci < kR.length && !this.conductors[ci].is_signal;
@@ -2323,17 +2201,14 @@ export class FieldSolver2D {
         // factor or the thin-sheet solve of the grounds above.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
-		// DC-skin transition correction (vacuum-field path only): against
-		// tri-MQS the sqrt(R_dc^2+R_ac^2) is consistently high, a log-normal
-		// notch in δ/t, = −7% at δ/t = 0.4, gone below δ/t = 0.12 and decaying
-		// by δ/t = 1.3 (where R_dc takes over). Calibrated on ms/sl (w/h
-		// 0.125-1.9, εr 4.4-9.8, t 17-70 µm, σ 1e6-5.8e7, f 0.25-4 GHz). A δ/t
-		// sweep (0.12-1.3) over microstrip, stripline, diff microstrip and
-		// narrow-/wide-gap GCPW showed the same ~7% bump at δ/t 0.3-0.4 in
-		// every family, so the notch applies to all line types.
-        // Alternatives measured and rejected: no
-        // notch (microstrip +10% mid-transition), and slab/p-norm blends
-        // R_dc*Re[q*coth q] or (R_dc^4+R_ac^5)^0.25.
+        // DC-skin transition correction (vacuum-field path only): against
+        // tri-MQS the sqrt(R_dc^2+R_ac^2) is consistently high, a log-normal
+        // notch in δ/t, = −7% at δ/t = 0.4, gone below δ/t = 0.12 and decaying
+        // by δ/t = 1.3 (where R_dc takes over). Calibrated on ms/sl (w/h
+        // 0.125-1.9, εr 4.4-9.8, t 17-70 µm, σ 1e6-5.8e7, f 0.25-4 GHz). A δ/t
+        // sweep (0.12-1.3) over microstrip, stripline, diff microstrip and
+        // narrow-/wide-gap GCPW showed the same ~7% bump at δ/t 0.3-0.4 in
+        // every family, so the notch applies to all line types.
         let transitionCal = 1.0;
         // Cleared unconditionally: the warning describes this call's frequency, and
         // the branch below is skipped on the legacy integrand and on solvers without
@@ -2365,12 +2240,6 @@ export class FieldSolver2D {
         return { R_ac, R_dc, R_total, L_internal };
     }
 
-    // Conductor loss for a solved mode, choosing the integrand variant:
-    // rect-based solvers (conductor_id present) use the vacuum-field integrand
-    // when the mode's vacuum fields are available.
-    // The only production caller lacking vacuum fields on a rect solver is
-    // _solve_single_mode(vacuum_first=false), whose loss output is discarded
-    // and recomputed by the caller with the cached vacuum fields.
     // Plating through the whole cross-section (at least as thick as the conductor, or
     // filling its width) makes it plating metal; the layered plating-over-bulk
     // impedance has no bulk to stand on.
@@ -2517,6 +2386,12 @@ export class FieldSolver2D {
         return this._finish_differs;
     }
 
+    // Conductor loss for a solved mode, choosing the integrand variant:
+    // rect-based solvers (conductor_id present) use the vacuum-field integrand
+    // when the mode's vacuum fields are available.
+    // The only production caller lacking vacuum fields on a rect solver is
+    // _solve_single_mode(vacuum_first=false), whose loss output is discarded
+    // and recomputed by the caller with the cached vacuum fields.
     _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode = null) {
         if (this.conductor_id && Ex0 && Ey0 && C0 > 0) {
             const Z0_vac = 1 / (CONSTANTS.C * C0);

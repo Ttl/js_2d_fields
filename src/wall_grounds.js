@@ -4,10 +4,7 @@
 // ideal return of unlimited width at DC. Absorbing a slab moves that side of the
 // domain inwards, so a slab stacked on it or a side wall standing on it is absorbed
 // next.
-function rectOf(o) {
-    if (o.xmin !== undefined) return { xmin: o.xmin, xmax: o.xmax, ymin: o.ymin, ymax: o.ymax };
-    return { xmin: o.x_min, xmax: o.x_max, ymin: o.y_min, ymax: o.y_max };
-}
+import { rectOf } from './shapes.js';
 
 // Clipped domain { X0, X1, Y0, Y1 }, the PEC walls, the metal thickness of each
 // (Infinity for a bare 'gnd' boundary; stacked slabs add up) and the indices of the

@@ -439,7 +439,8 @@ const EXCLUDED_BY_TYPE = {
         'plating_top', 'plating_sides', 'plating_bottom']),
 };
 
-function settingsToURL(settings) {
+// The settings that differ from the defaults, without the keys of other line types.
+function nonDefaultSettings(settings) {
     // Exclusions only ever SHORTEN a newly generated URL; settingsFromURL merges over
     // defaults and ignores unknown keys, so existing links are unaffected.
     const excluded = EXCLUDED_BY_TYPE[settings.tl_type];
@@ -450,7 +451,7 @@ function settingsToURL(settings) {
     }
 
     // Filter out default values (and the other types' geometry fields)
-    const nonDefaultSettings = {};
+    const out = {};
     for (const key in settings) {
         if (excluded && excluded.has(key)) continue;
         if (otherTypeKeys.has(key)) continue;
@@ -467,13 +468,16 @@ function settingsToURL(settings) {
             // Both NaN, skip (it's the default)
             continue;
         } else if (value !== defaultValue) {
-            nonDefaultSettings[key] = value;
+            out[key] = value;
         }
     }
 
-    const json = JSON.stringify(nonDefaultSettings);
-    // Use base64 encoding for URL-safe serialization
-    return btoa(encodeURIComponent(json));
+    return out;
+}
+
+// Settings as a URL-safe base64 string.
+function settingsToURL(settings) {
+    return btoa(encodeURIComponent(JSON.stringify(nonDefaultSettings(settings))));
 }
 
 /**
@@ -700,8 +704,7 @@ async function copySettingsLink() {
     let url;
     if (settings.tl_type === 'custom') {
         // Same default filtering as settingsToURL, then the compressed fragment form.
-        const filtered = JSON.parse(decodeURIComponent(atob(settingsToURL(settings))));
-        url = `${base}#params=${await encodeLongSettings(filtered)}`;
+        url = `${base}#params=${await encodeLongSettings(nonDefaultSettings(settings))}`;
         if (url.length > 8000) {
             log(`The link is ${url.length} characters long. Some applications truncate long links, ` +
                 `the geometry text file (Save file) is the safer way to share this geometry.`);
@@ -1643,7 +1646,7 @@ function updateGeometry() {
     if (buildError && !validateCustomGeometry().errors.length) log(buildError);
     // While the custom geometry text is being edited it is invalid most of the time.
     // Keep the last valid geometry on screen, the editor lists the errors.
-    const keep = !built && p.tl_type === 'custom' && solver && solver.geometry_params;
+    const keep = !built && isCustom && solver && solver.geometry_params;
     if (!keep) solver = built;
 }
 

@@ -5,11 +5,10 @@
 import { FieldSolver2D } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
 import { halfDomainSymmetry, isXSymmetric, conductorFinishKey } from './geometry_symmetry.js';
-import { parseAndEvaluate, formatErrors } from './custom_geometry_text.js';
-import { bodyDistance, translateShapeX, shapeContains } from './shapes.js';
+import { parseAndEvaluate, formatErrors, SHAPE_NAMES, WALLS } from './custom_geometry_text.js';
+import { bodyDistance, translateShapeX, bodiesOverlap } from './shapes.js';
 
 const BIG = 1e30;
-const WALLS = ['left', 'right', 'top', 'bottom'];
 
 // Gap between two rectangles given as {x0, x1, y0, y1}, 0 when they touch or overlap.
 function rectDistance(a, b) {
@@ -24,12 +23,6 @@ function bodyGap(a, b) {
     if (!a.shape && !b.shape) return rectDistance(a, b);
     const body = o => ({ xmin: o.x0, xmax: o.x1, ymin: o.y0, ymax: o.y1, shape: o.shape || null });
     return bodyDistance(body(a), body(b));
-}
-
-function overlapArea(a, b) {
-    const w = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
-    const h = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
-    return (w > 0 && h > 0) ? { w, h } : null;
 }
 
 const shift0 = (shift, tol) => (Math.abs(shift) > tol ? shift : 0);
@@ -233,19 +226,17 @@ class CustomGeometrySolver extends FieldSolver2D {
             o.x0 = o.x; o.x1 = o.x + o.w;
             o.y0 = o.h >= 0 ? o.y : o.y + o.h;
             o.y1 = o.h >= 0 ? o.y + o.h : o.y;
-            if (o.shape && (o.x0 < X0 - tol || o.x1 > X1 + tol || o.y0 < Y0 - tol || o.y1 > Y1 + tol)) {
-                const name = { rect: 'rectangle', trap: 'trapezoid', ngon: 'n-gon', ellipse: 'ellipse' }[o.shape.prim];
-                throw new Error(`line ${o.line}: the ${name} lies outside the domain.`);
-            }
+            const outside = o.x0 < X0 - tol || o.x1 > X1 + tol || o.y0 < Y0 - tol || o.y1 > Y1 + tol;
+            if (o.shape && outside) throw new Error(`line ${o.line}: the ${SHAPE_NAMES[o.shape.prim]} lies outside the domain.`);
             if (o.kind === 'diel') {
                 // Dielectrics are clipped to the domain, conductors must fit.
-                if (o.x0 < X0 - tol || o.x1 > X1 + tol || o.y0 < Y0 - tol || o.y1 > Y1 + tol) {
+                if (outside) {
                     const nx0 = Math.max(o.x0, X0), nx1 = Math.min(o.x1, X1);
                     const ny0 = Math.max(o.y0, Y0), ny1 = Math.min(o.y1, Y1);
                     if (!(nx1 - nx0 > tol) || !(ny1 - ny0 > tol)) continue;
                     Object.assign(o, { x: nx0, w: nx1 - nx0, y: ny0, h: ny1 - ny0, x0: nx0, x1: nx1, y0: ny0, y1: ny1 });
                 }
-            } else if (o.x0 < X0 - tol || o.x1 > X1 + tol || o.y0 < Y0 - tol || o.y1 > Y1 + tol) {
+            } else if (outside) {
                 throw new Error(`line ${o.line}: conductor lies outside the domain.`);
             }
             out.push(o);
@@ -365,20 +356,9 @@ class CustomGeometrySolver extends FieldSolver2D {
         for (let i = 0; i < cs.length; i++) {
             for (let j = i + 1; j < cs.length; j++) {
                 const a = cs[i], b = cs[j];
-                if (kind(a) !== kind(b) || conductorFinishKey(a) === conductorFinishKey(b)) continue;
-                const w = Math.min(a.x_max, b.x_max) - Math.max(a.x_min, b.x_min);
-                const h = Math.min(a.y_max, b.y_max) - Math.max(a.y_min, b.y_min);
-                // Touching blocks whose shared edge differs by rounding do not overlap.
-                const tol = 1e-9 * Math.max(a.x_max - a.x_min, a.y_max - a.y_min, b.x_max - b.x_min, b.y_max - b.y_min);
-                if (!(w > tol && h > tol)) continue;
-                let common = !a.shape && !b.shape;
-                // Shapes: a point of the common box inside both.
-                for (let k = 0; k < 256 && !common; k++) {
-                    const x = Math.max(a.x_min, b.x_min) + w * ((k % 16) + 0.5) / 16;
-                    const y = Math.max(a.y_min, b.y_min) + h * (Math.floor(k / 16) + 0.5) / 16;
-                    common = shapeContains(a, x, y, 0) && shapeContains(b, x, y, 0);
+                if (kind(a) === kind(b) && conductorFinishKey(a) !== conductorFinishKey(b) && bodiesOverlap(a, b)) {
+                    out.push([a.src_line, b.src_line]);
                 }
-                if (common) out.push([a.src_line, b.src_line]);
             }
         }
         return out;
@@ -414,9 +394,9 @@ class CustomGeometrySolver extends FieldSolver2D {
             for (let j = i + 1; j < ds.length; j++) {
                 const a = ds[i], c = ds[j];
                 if (same(a, c)) continue;
-                const o = overlapArea({ x0: a.x_min, x1: a.x_max, y0: a.y_min, y1: a.y_max },
-                                      { x0: c.x_min, x1: c.x_max, y0: c.y_min, y1: c.y_max });
-                if (!o || o.w <= tol || o.h <= tol) continue;
+                const w = Math.min(a.x_max, c.x_max) - Math.max(a.x_min, c.x_min);
+                const h = Math.min(a.y_max, c.y_max) - Math.max(a.y_min, c.y_min);
+                if (!(w > tol && h > tol)) continue;
                 if (partner[i] < 0 || partner[j] < 0 || partner[i] > partner[j]) return true;
             }
         }

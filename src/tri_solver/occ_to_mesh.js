@@ -24,11 +24,7 @@
 
 import { clipDomainWalls } from '../wall_grounds.js';
 import { shapeContains, shapePoly, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, shapeLoops,
-         platingCoreOf, bodyDistance, isComplement, REL_SHAPE_TOL } from '../shapes.js';
-
-// Polygon and ring shapes (custom geometry primitives), as opposed to the circles of
-// the coax model, which keep their own meshing path.
-const isPolyShape = (shape) => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
+         platingCoreOf, bodyDistance, isComplement, isPolyShape, rectOf, REL_SHAPE_TOL } from '../shapes.js';
 
 // Domain-diagonal-relative geometric tolerance. Shared with the freedom map and the
 // refinement smoother (see REL_SHAPE_TOL) so all three agree on where a boundary is.
@@ -129,10 +125,6 @@ function _readIntArray(G, ptrPtr, nPtr) {
     for (let i = 0; i < n; i++) arr[i] = G.getValue(ptr + i * 4, 'i32');
     G._gmshFree(ptr); return arr;
 }
-function _rectOf(o) {
-    if (o.xmin !== undefined) return { xmin: o.xmin, xmax: o.xmax, ymin: o.ymin, ymax: o.ymax };
-    return { xmin: o.x_min, xmax: o.x_max, ymin: o.y_min, ymax: o.y_max };
-}
 
 // Absorb full-span boundary ground slabs into wall PEC BCs + clip the meshed domain
 // (clipDomainWalls, shared with the FDM backend). Exported for tests/test_geometry.js —
@@ -144,7 +136,7 @@ export const _clipDomain = clipDomainWalls;
 // only plating that is meshed: see platingCoreOf. Thin plating stays a layered surface
 // impedance. null without thick plating, and when the plating goes through the whole
 // conductor (it is then solved as solid plating metal).
-export function platingCore(c) {
+function platingCore(c) {
     const pl = c.plating;
     if (!(pl && pl.thick_corners)) return null;
     return platingCoreOf(c, pl) || null;
@@ -200,7 +192,7 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
             cores.push(coreOf(c));
             continue;
         }
-        const r = _rectOf(c);
+        const r = rectOf(c);
         const xmin = Math.max(r.xmin, X0), xmax = Math.min(r.xmax, X1);
         const ymin = Math.max(r.ymin, Y0), ymax = Math.min(r.ymax, Y1);
         if (xmax - xmin <= tol || ymax - ymin <= tol) continue;
@@ -444,7 +436,7 @@ export function buildOccMeshFromGeometry(G, opts) {
             toolTags.push(addPolygon(shapePoly(d.shape, meshOpts))); toolCond.push(-1);
             continue;
         }
-        const r = clipToDomain(_rectOf(d));
+        const r = clipToDomain(rectOf(d));
         if (r.xmax - r.xmin > tol && r.ymax - r.ymin > tol) { toolTags.push(addRect(r)); toolCond.push(-1); }
     }
     condRects.forEach((c, ci) => {
@@ -915,16 +907,12 @@ export function buildOccMeshFromGeometry(G, opts) {
     // triangles across the interface one material (a 0.2 mm substrate, a solder
     // mask). A layer thinner than the element size is meshed as slivers spanning it,
     // which the mesh-quality metric leaves out (TriBackend.buildMesh).
-    // opts.constrainDielectrics false disables the dielectric lines;
-    // opts.minDielThickness (metres) leaves out the layers thinner than it.
-    const minDielT = opts.minDielThickness ?? 0;
-    for (const d of (opts.constrainDielectrics === false ? [] : dielectrics)) {
+    for (const d of dielectrics) {
         // A polygon's sides are held like a conductor's, whatever its thickness.
         if (isPolyShape(d.shape)) { constraintSegments.push(...shapeSegments(d, meshOpts)); continue; }
         if (d.shape) continue;
-        const r = clipToDomain(_rectOf(d));
+        const r = clipToDomain(rectOf(d));
         if (r.xmax - r.xmin <= tol || r.ymax - r.ymin <= tol) continue;
-        if (Math.min(r.xmax - r.xmin, r.ymax - r.ymin) < minDielT) continue;
         for (const y of [r.ymin, r.ymax]) if (y > Y0 + tol && y < Y1 - tol) addYR(y, r.xmin, r.xmax);
         for (const x of [r.xmin, r.xmax]) if (x > X0 + tol && x < X1 - tol) addXR(x, r.ymin, r.ymax);
     }

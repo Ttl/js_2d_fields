@@ -52,17 +52,21 @@ function rectPointLogIntegral(px, py, a) {
     return F2(px - a.x0, py - a.y0) - F2(px - a.x0, py - a.y1) - F2(px - a.x1, py - a.y0) + F2(px - a.x1, py - a.y1);
 }
 
-// int_A int_p ln|r - r'| dA dl over a rect and a panel, Gauss on the panel.
-function rectPanelLogIntegral(a, p) {
-    const cx = (a.x0 + a.x1) / 2, cy = (a.y0 + a.y1) / 2, size = Math.max(a.x1 - a.x0, a.y1 - a.y0);
-    const dx = (p.x0 + p.x1) / 2 - cx, dy = (p.y0 + p.y1) / 2 - cy;
+// int f dl along panel p by Gauss quadrature, 8 points when the source at centre
+// offset (dx, dy) with size `size` is close.
+function panelQuadrature(p, dx, dy, size, f) {
     const near = Math.hypot(dx, dy) < 2 * (p.len + size);
     let s = 0;
     for (const [t, w] of GAUSS[near ? 8 : 2]) {
-        const x = p.x0 + (p.x1 - p.x0) * (t + 1) / 2, y = p.y0 + (p.y1 - p.y0) * (t + 1) / 2;
-        s += w * rectPointLogIntegral(x, y, a);
+        s += w * f(p.x0 + (p.x1 - p.x0) * (t + 1) / 2, p.y0 + (p.y1 - p.y0) * (t + 1) / 2);
     }
     return s * p.len / 2;
+}
+
+// int_A int_p ln|r - r'| dA dl over a rect and a panel, Gauss on the panel.
+function rectPanelLogIntegral(a, p) {
+    const cx = (a.x0 + a.x1) / 2, cy = (a.y0 + a.y1) / 2, size = Math.max(a.x1 - a.x0, a.y1 - a.y0);
+    return panelQuadrature(p, (p.x0 + p.x1) / 2 - cx, (p.y0 + p.y1) / 2 - cy, size, (x, y) => rectPointLogIntegral(x, y, a));
 }
 
 // int ln|p - r'| dl' over the segment from q0 to q1.
@@ -91,14 +95,8 @@ const GAUSS = {
 // the outer one otherwise (8 points when they are close).
 function panelLogIntegral(p, q) {
     if (p === q) return p.len * p.len * (Math.log(p.len) - 1.5);
-    const dx = (p.x0 + p.x1 - q.x0 - q.x1) / 2, dy = (p.y0 + p.y1 - q.y0 - q.y1) / 2;
-    const near = Math.hypot(dx, dy) < 2 * (p.len + q.len);
-    let s = 0;
-    for (const [t, w] of GAUSS[near ? 8 : 2]) {
-        const x = p.x0 + (p.x1 - p.x0) * (t + 1) / 2, y = p.y0 + (p.y1 - p.y0) * (t + 1) / 2;
-        s += w * segLogIntegral(x, y, q.x0, q.y0, q.x1, q.y1);
-    }
-    return s * p.len / 2;
+    return panelQuadrature(p, (p.x0 + p.x1 - q.x0 - q.x1) / 2, (p.y0 + p.y1 - q.y0 - q.y1) / 2, q.len,
+        (x, y) => segLogIntegral(x, y, q.x0, q.y0, q.x1, q.y1));
 }
 
 // Dense solve of A x = b with partial pivoting (A is overwritten).
@@ -127,6 +125,9 @@ function solveDense(A, b, n) {
     }
     return x;
 }
+
+// (x, y) strictly inside the cell {x0, x1, y0, y1}.
+const inCell = (c, x, y) => x > c.x0 && x < c.x1 && y > c.y0 && y < c.y1;
 
 // Net of a conductor: 0 ground, 1 positive trace, 2 negative trace.
 const netOf = c => (!c.is_signal ? 0 : c.polarity < 0 ? 2 : 1);
@@ -163,10 +164,7 @@ function metalCells(conductors, sigmaDefault, ideal, absorbed) {
     };
     const X = lines(pieces.flatMap(p => [p.x0, p.x1])), Y = lines(pieces.flatMap(p => [p.y0, p.y1]));
     const at = (x, y) => {
-        for (let k = pieces.length - 1; k >= 0; k--) {
-            const p = pieces[k];
-            if (x > p.x0 && x < p.x1 && y > p.y0 && y < p.y1) return p;
-        }
+        for (let k = pieces.length - 1; k >= 0; k--) if (inCell(pieces[k], x, y)) return pieces[k];
         return null;
     };
     // Runs along x in each band, then bands with the same runs stacked.
@@ -198,7 +196,7 @@ function metalCells(conductors, sigmaDefault, ideal, absorbed) {
 // { net, dir, at, a, b } merged along their lines.
 function outlineSegments(cells) {
     const netAt = (x, y) => {
-        for (const c of cells) if (x > c.x0 && x < c.x1 && y > c.y0 && y < c.y1) return c.net;
+        for (const c of cells) if (inCell(c, x, y)) return c.net;
         return -1;
     };
     const raw = [];
@@ -248,7 +246,7 @@ function idealSlabIntegral(cells, panels, K, carrying, J, box, tol) {
         for (let i = 0; i < carrying.length; i++) s += J[i] * rectPointLogIntegral(x, y, carrying[i]);
         return s;
     };
-    const inCell = (x, y) => cells.find(c => x > c.x0 && x < c.x1 && y > c.y0 && y < c.y1);
+    const cellAt = (x, y) => cells.find(c => inCell(c, x, y));
     const onBox = (x, y) => box && (Math.abs(x - box.x0) < tol || Math.abs(x - box.x1) < tol
         || Math.abs(y - box.y0) < tol || Math.abs(y - box.y1) < tol);
     // Signed surface current at (x, y) on a face with outward normal (nx, ny).
@@ -262,8 +260,8 @@ function idealSlabIntegral(cells, panels, K, carrying, J, box, tol) {
         if (onBox(mx, my)) continue;
         const horiz = p.y0 === p.y1, probe = 1e-6 * p.len;
         let nx = 0, ny = 0;
-        if (horiz) ny = inCell(mx, my + probe) ? -1 : 1; else nx = inCell(mx + probe, my) ? -1 : 1;
-        const c = inCell(mx - nx * probe, my - ny * probe);
+        if (horiz) ny = cellAt(mx, my + probe) ? -1 : 1; else nx = cellAt(mx + probe, my) ? -1 : 1;
+        const c = cellAt(mx - nx * probe, my - ny * probe);
         if (!c) continue;
         const thin = Math.min(c.x1 - c.x0, c.y1 - c.y0), d = c.d ?? thin;
         const e = 0.02 * Math.min(p.len, thin);
@@ -342,7 +340,7 @@ function modeCurrents(mode) {
 
 // DC line parameters of conductors [{ x_min, x_max, y_min, y_max, is_signal, polarity,
 // sigma?, plating?, shape? }] for mode 'single', 'odd' or 'even' (per trace):
-// { R, L, Lpec, Lint, Lslab } in ohm/m and H/m (Lslab: the wall slab part of L), or null for shaped conductors, a missing net
+// { R, L, Lpec, Lint } in ohm/m and H/m, or null for shaped conductors, a missing net
 // or a failed solve. `unlimited` holds the indices of the grounds of unlimited width,
 // `walls` those of them absorbed into the domain walls, `box` the domain
 // { x_min, x_max, y_min, y_max } (faces on its edge carry no slab term), `alpha` sets
@@ -410,5 +408,5 @@ export function dcLineParameters(conductors, mode, { sigmaDefault = 5.8e7, unlim
     nets.forEach((k, i) => { Ep += sol.Lambda[i] * I[k]; });
     const Lpec = -MU0 / (2 * Math.PI) * Ep / n;
     if (!Number.isFinite(L) || !Number.isFinite(Lpec)) return null;
-    return { R, L, Lpec, Lint: L - Lpec, Lslab: MU0 * Eslab / n, panels: panels.length };
+    return { R, L, Lpec, Lint: L - Lpec };
 }

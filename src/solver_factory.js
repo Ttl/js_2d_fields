@@ -17,7 +17,7 @@ import { CustomGeometrySolver } from './custom_geometry.js';
 // Solver-dropdown lock (separate script scope).
 export const FULLWAVE_ONLY_TYPES = new Set(['coax', 'rect_waveguide']);
 
-export function solverModeConfig(mode) {
+function solverModeConfig(mode) {
     switch (mode) {
         case 'fullwave_pert':
             return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'perturbation' } };

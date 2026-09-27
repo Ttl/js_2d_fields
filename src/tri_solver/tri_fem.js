@@ -570,7 +570,7 @@ export function buildTriFreedomMap(mesh, condRect, abc) {
 // edge 01, the ne2 DOF of an edge bubble is -2(ψ_p+ψ_q)+4ψ_pq (the dual of
 // staticToEdgeDofs' formula), and the face bubbles carry the second-order part
 // of the gradient. Verified as Wtt^(-1)*Dzt^T on random triangles to 1e-10.
-export const P2_GRAD_T = [
+const P2_GRAD_T = [
     [-1, 1, 0, 0, 0, 0], [0, -1, 1, 0, 0, 0], [1, 0, -1, 0, 0, 0],
     [0, 2, -2, -4, 0, 4],
     [-2, -2, 0, 4, 0, 0], [0, -2, -2, 0, 4, 0], [-2, 0, -2, 0, 0, 4],

@@ -48,40 +48,43 @@
 // parseGeometryText keeps the expressions, evaluateGeometry turns them into metres.
 // Parameter overrides go to evaluateGeometry, which is what parameter sweeps use.
 
-import { isMirrorShape, mirrorShapeX } from './shapes.js';
+import { isMirrorShape, mirrorShapeX, polyRadiusForArea, shapeBBox } from './shapes.js';
 
 export const LENGTH_UNITS = {
     m: 1, cm: 1e-2, mm: 1e-3, um: 1e-6, 'µm': 1e-6, nm: 1e-9, mil: 25.4e-6, in: 25.4e-3,
 };
 
-export const RECT_KINDS = ['diel', 'gnd', 'sig+', 'sig-'];
+const RECT_KINDS = ['diel', 'gnd', 'sig+', 'sig-'];
 const BOUND_VALUES = ['open', 'gnd'];
+// Order of the bounds values.
+export const WALLS = ['left', 'right', 'top', 'bottom'];
 const RESERVED = new Set(['inf', 'auto', 'min', 'max', 'abs', 'sqrt']);
 const FUNCTIONS = {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
 };
 // Shape words after the kind. A rectangle has none ('rect' may be written).
-export const SHAPES = ['rect', 'trap', 'ngon', 'ellipse'];
-const RECT_KEYS = new Set(['x', 'y', 'w', 'h', 'r', 'r_in', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot', 'angle', 'angle2',
-    'radius', 'radius_bottom', 'wall', 'er', 'tand', 'thin',
-    'sigma', 'rq', 'plating', 'plating_sigma', 'plating_t', 'plating_rq', 'mirror']);
+const SHAPES = ['rect', 'trap', 'ngon', 'ellipse'];
 const RECT_KEY_ORDER = ['x', 'w', 'y', 'h', 'r', 'r_in', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot', 'angle', 'angle2',
     'radius', 'radius_bottom', 'wall', 'er', 'tand', 'thin',
     'sigma', 'rq', 'plating', 'plating_sigma', 'plating_t', 'plating_rq', 'mirror'];
+const RECT_KEYS = new Set(RECT_KEY_ORDER);
+// Keys only a conductor takes.
+export const CONDUCTOR_KEYS = ['plating', 'sigma', 'rq', 'plating_sigma', 'plating_t', 'plating_rq'];
+// Shapes described by a centre and radii, and the keys of each.
+export const ROUND_KEYS = { ngon: ['x', 'y', 'r', 'r_in', 'n', 'rot'], ellipse: ['x', 'y', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot'] };
 // Geometry keys each shape takes.
 const SHAPE_KEYS = {
     rect: ['x', 'y', 'w', 'h', 'radius', 'radius_bottom', 'wall'],
     trap: ['x', 'y', 'w', 'h', 'angle', 'angle2', 'radius', 'radius_bottom', 'wall'],
-    ngon: ['x', 'y', 'r', 'r_in', 'n', 'rot'],
-    ellipse: ['x', 'y', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot'],
+    ...ROUND_KEYS,
 };
 const GEOMETRY_KEYS = new Set(Object.values(SHAPE_KEYS).flat());
-const SHAPE_NAMES = { rect: 'rectangle', trap: 'trapezoid', ngon: 'n-gon', ellipse: 'ellipse' };
+export const SHAPE_NAMES = { rect: 'rectangle', trap: 'trapezoid', ngon: 'n-gon', ellipse: 'ellipse' };
 // Arc segments per quarter turn of a rounded corner.
 const CORNER_SEGMENTS = 8;
 const MIRROR_KIND = { 'sig+': 'sig-', 'sig-': 'sig+', gnd: 'gnd', diel: 'diel' };
 const PLATING_KEYS = new Set(['sigma', 't', 'rq']);
-const PLATING_FACES = ['top', 'sides', 'bottom'];
+export const PLATING_FACES = ['top', 'sides', 'bottom'];
 
 // --- Expressions ------------------------------------------------------------------
 
@@ -345,41 +348,55 @@ function splitComment(line) {
     return hash >= 0 ? [line.slice(0, hash), line.slice(hash)] : [line, ''];
 }
 
-// Replaces the expression of parameter `name`. Returns the text unchanged when the
-// parameter is not defined.
-export function setParamInText(text, name, expr) {
+// Rewrites the text line by line: edit(parts, comment, i) gets the ';' separated
+// statement sources of line i (its comment split off) and returns true when it changed
+// them in place. With `first` the walk stops at the first change. Returns the new
+// text, null when nothing changed.
+function editStatements(text, edit, first = false) {
     const lines = String(text ?? '').split(/\r?\n/);
-    const re = new RegExp(`^(\\s*${name}\\s*=\\s*)(.*?)(\\s*)$`);
+    let changed = false;
     for (let i = 0; i < lines.length; i++) {
         const [code, comment] = splitComment(lines[i]);
         const parts = code.split(';');
-        for (let k = 0; k < parts.length; k++) {
-            const m = re.exec(parts[k]);
-            if (!m) continue;
-            parts[k] = m[1] + expr + m[3];
-            lines[i] = parts.join(';') + comment;
-            return lines.join('\n');
-        }
+        if (!edit(parts, comment, i)) continue;
+        lines[i] = parts.join(';') + comment;
+        changed = true;
+        if (first) break;
     }
-    return text;
+    return changed ? lines.join('\n') : null;
+}
+
+// Index in `parts` of the statement the parser numbered `part`: it counts only the
+// non-empty ones. -1 when there is none.
+function partIndex(parts, part) {
+    let seen = -1;
+    return parts.findIndex(p => p.trim().length > 0 && ++seen === part);
+}
+
+// Replaces the expression of parameter `name`. Returns the text unchanged when the
+// parameter is not defined.
+export function setParamInText(text, name, expr) {
+    const re = new RegExp(`^(\\s*${name}\\s*=\\s*)(.*?)(\\s*)$`);
+    return editStatements(text, parts => parts.some((p, k) => {
+        const m = re.exec(p);
+        if (m) parts[k] = m[1] + expr + m[3];
+        return !!m;
+    }), true) ?? text;
 }
 
 // Renames parameter `from` to `to`: its definition and every expression that uses it.
 // Field keys (the w of w=...) and comments are left alone.
 export function renameParamInText(text, from, to) {
-    const lines = String(text ?? '').split(/\r?\n/);
     const ident = new RegExp(`(?<![A-Za-z_0-9.])${from}(?![A-Za-z_0-9])`, 'g');
     const keyed = new RegExp(`(?<![A-Za-z_0-9.])${from}(?![A-Za-z_0-9])(?!\\s*=)`, 'g');
-    for (let i = 0; i < lines.length; i++) {
-        const [code, comment] = splitComment(lines[i]);
-        const parts = code.split(';').map(part => {
+    return editStatements(text, parts => {
+        parts.forEach((part, k) => {
             // A parameter definition has a bare name left of the first '='.
             const isParam = /^\s*[A-Za-z_][A-Za-z_0-9]*\s*=/.test(part);
-            return part.replace(isParam ? ident : keyed, to);
+            parts[k] = part.replace(isParam ? ident : keyed, to);
         });
-        lines[i] = parts.join(';') + comment;
-    }
-    return lines.join('\n');
+        return true;
+    });
 }
 
 // Statement text for a rectangle or shape, the inverse of the parser for one statement.
@@ -395,12 +412,7 @@ export function replaceStatementInText(text, st, code) {
     if (i < 0 || i >= lines.length) return text;
     const [src, comment] = splitComment(lines[i]);
     const parts = src.split(';');
-    // st.part counts non-empty statements, the split keeps the empty ones.
-    let seen = -1, k = -1;
-    for (let j = 0; j < parts.length; j++) {
-        if (parts[j].trim().length === 0) continue;
-        if (++seen === st.part) { k = j; break; }
-    }
+    const k = partIndex(parts, st.part);
     if (k < 0) return text;
     if (code === null) parts.splice(k, 1);
     else parts[k] = (k > 0 ? ' ' : '') + code;
@@ -436,21 +448,19 @@ export function moveRectInText(text, model, st, dir) {
 // Replaces the first statement starting with `keyword` (bounds, domain, units, plating)
 // by `statement`, or inserts it after the units line (at the top without one).
 export function setStatementInText(text, keyword, statement) {
-    const lines = String(text ?? '').split(/\r?\n/);
     const starts = s => s.trim() === keyword || s.trim().startsWith(keyword + ' ');
     let unitsLine = -1;
-    for (let i = 0; i < lines.length; i++) {
-        const [code, comment] = splitComment(lines[i]);
-        const parts = code.split(';');
+    const out = editStatements(text, (parts, comment, i) => {
         const k = parts.findIndex(starts);
-        if (k >= 0) {
-            const lead = /^\s*/.exec(parts[k])[0];
-            parts[k] = lead + statement + (k < parts.length - 1 || !comment ? '' : '  ');
-            lines[i] = parts.join(';') + comment;
-            return lines.join('\n');
+        if (k < 0) {
+            if (unitsLine < 0 && parts.some(s => s.trim().startsWith('units '))) unitsLine = i;
+            return false;
         }
-        if (unitsLine < 0 && parts.some(s => s.trim().startsWith('units '))) unitsLine = i;
-    }
+        parts[k] = /^\s*/.exec(parts[k])[0] + statement + (k < parts.length - 1 || !comment ? '' : '  ');
+        return true;
+    }, true);
+    if (out !== null) return out;
+    const lines = String(text ?? '').split(/\r?\n/);
     lines.splice(unitsLine + 1, 0, statement);
     return lines.join('\n');
 }
@@ -577,14 +587,15 @@ function roundPolygon(poly, faces, radii) {
     const n = poly.length >> 1;
     const P = i => [poly[2 * ((i + n) % n)], poly[2 * ((i + n) % n) + 1]];
     const unit = (x, y) => { const l = Math.hypot(x, y); return [x / l, y / l]; };
-    // Distance from each corner to its tangent points.
-    const cut = radii.map((R, i) => {
-        if (!(R > 0)) return 0;
+    // Unit vectors along the two edges of each rounded corner and the angle between them.
+    const corner = radii.map((R, i) => {
+        if (!(R > 0)) return null;
         const [px, py] = P(i), [ax, ay] = P(i - 1), [bx, by] = P(i + 1);
         const u1 = unit(ax - px, ay - py), u2 = unit(bx - px, by - py);
-        const th = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1])));
-        return R / Math.tan(th / 2);
+        return { u1, u2, th: Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1]))) };
     });
+    // Distance from each corner to its tangent points.
+    const cut = corner.map((c, i) => (c ? radii[i] / Math.tan(c.th / 2) : 0));
     const scale = Math.max(...Array.from(poly).map(Math.abs));
     for (let i = 0; i < n; i++) {
         const [ax, ay] = P(i), [bx, by] = P(i + 1);
@@ -600,10 +611,8 @@ function roundPolygon(poly, faces, radii) {
         const fin = faces[(i + n - 1) % n], fout = faces[i];
         if (!(radii[i] > 0)) { pts.push({ x: px, y: py, face: fout }); continue; }
         const R = radii[i];
-        const [ax, ay] = P(i - 1), [bx, by] = P(i + 1);
-        const u1 = unit(ax - px, ay - py), u2 = unit(bx - px, by - py);
+        const { u1, u2, th } = corner[i];
         const bis = unit(u1[0] + u2[0], u1[1] + u2[1]);
-        const th = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1])));
         const cx = px + bis[0] * R / Math.sin(th / 2), cy = py + bis[1] * R / Math.sin(th / 2);
         const t1x = px + u1[0] * cut[i], t1y = py + u1[1] * cut[i];
         const span = Math.PI - th;
@@ -625,13 +634,6 @@ function roundPolygon(poly, faces, radii) {
         return Math.hypot(q.x - p.x, q.y - p.y) > tol;
     });
     return { poly: new Float64Array(kept.flatMap(p => [p.x, p.y])), faces: kept.map(p => p.face) };
-}
-
-// Vertices of a regular n-gon of vertex radius r centred on (cx, cy), vertex 0 at the
-// top turned by rot degrees counterclockwise, CCW. Without rotation the vertices come
-// in exact mirror pairs about x = cx, so a centred n-gon is mirror symmetric to the bit.
-export function ngonPolygon(cx, cy, r, n, rot = 0) {
-    return ellipsePolygon(cx, cy, r, r, n, rot);
 }
 
 // n vertices on the ellipse of semi-axes rx, ry centred on (cx, cy), at equal steps of
@@ -662,11 +664,7 @@ export function ellipsePolygon(cx, cy, rx, ry, n, rot = 0) {
 }
 
 function bboxAxes(poly) {
-    let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
-    for (let i = 0; i < poly.length; i += 2) {
-        xmin = Math.min(xmin, poly[i]); xmax = Math.max(xmax, poly[i]);
-        ymin = Math.min(ymin, poly[i + 1]); ymax = Math.max(ymax, poly[i + 1]);
-    }
+    const { xmin, xmax, ymin, ymax } = shapeBBox({ type: 'polygon', poly });
     return { x: { pos: xmin, size: xmax - xmin, min: xmin, max: xmax, flipped: false },
              y: { pos: ymin, size: ymax - ymin, min: ymin, max: ymax, flipped: false } };
 }
@@ -735,6 +733,12 @@ function evalShape(st, f, len, num, xAxis = null) {
         if (rx === ry && ix === iy) shape.radial = { cx, cy, rIn: rx * cosn, rOut: rx, holeIn: ix * cosn, holeOut: ix };
     }
     return { ...bboxAxes(poly), shape };
+}
+
+// The x axis symmetric about x=0 that covers `ax`, which touches or crosses x=0.
+function symmetricAxis(ax) {
+    const m = Math.max(-ax.min, ax.max);
+    return { pos: -m, size: 2 * m, min: -m, max: m };
 }
 
 // Mirror image of an x axis about x=0.
@@ -834,7 +838,7 @@ export function evaluateGeometry(model, overrides = {}) {
             } else { r.x = evalAxis(f, 'x', 'w', len, false); r.y = evalAxis(f, 'y', 'h', len, true); }
             if (s.kind === 'diel') {
                 if (f.er === undefined) throw new Error('diel needs er');
-                if (['plating', 'sigma', 'rq', 'plating_sigma', 'plating_t', 'plating_rq'].some(k => f[k] !== undefined)) {
+                if (CONDUCTOR_KEYS.some(k => f[k] !== undefined)) {
                     throw new Error('sigma, rq and plating apply to conductors only');
                 }
                 r.er = num(f.er);
@@ -884,18 +888,18 @@ export function evaluateGeometry(model, overrides = {}) {
                 }
             }
             r.image = false;
+            const mirror = f.mirror !== undefined && num(f.mirror) !== 0;
             // A rounded or hollow rectangle touching or crossing x=0 widens to one
             // symmetric about it, like a plain rectangle.
-            if (f.mirror !== undefined && num(f.mirror) !== 0 && r.shape && !s.shape) {
+            if (mirror && r.shape && !s.shape) {
                 const ax = evalAxis(f, 'x', 'w', len, false);
                 if (ax.min <= 0 && ax.max >= 0) {
-                    const m = Math.max(-ax.min, ax.max);
-                    Object.assign(r, evalShape(s, f, len, num, { pos: -m, size: 2 * m, min: -m, max: m, flipped: false }));
+                    Object.assign(r, evalShape(s, f, len, num, { ...symmetricAxis(ax), flipped: false }));
                     rects.push(r);
                     continue;
                 }
             }
-            if (f.mirror !== undefined && num(f.mirror) !== 0 && r.shape) {
+            if (mirror && r.shape) {
                 // A shape crossing x=0 has to be its own image; one touching it from
                 // one side (twinax insulations meeting in the middle) gets an image.
                 const tol = (r.x.max - r.x.min) * 1e-9;
@@ -909,11 +913,9 @@ export function evaluateGeometry(model, overrides = {}) {
                 }
                 continue;
             }
-            if (f.mirror !== undefined && num(f.mirror) !== 0) {
+            if (mirror) {
                 if (r.x.min <= 0 && r.x.max >= 0) {
-                    const m = Math.max(-r.x.min, r.x.max);
-                    r.x = m === Infinity ? { pos: -Infinity, size: Infinity, min: -Infinity, max: Infinity }
-                        : { pos: -m, size: 2 * m, min: -m, max: m };
+                    r.x = symmetricAxis(r.x);
                     rects.push(r);
                 } else {
                     rects.push(r, { ...r, kind: MIRROR_KIND[r.kind], x: mirrorAxis(r.x), image: true });
@@ -1021,8 +1023,7 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     // material carries its own keys.
     const pl = (solver.conductors || []).map(c => c.plating).find(p => p && p.sigma > 0 && p.thickness > 0);
     if (pl) {
-        lines.push(`plating sigma=${pl.sigma} t=${fmtSmall(pl.thickness)} rq=${fmtSmall(pl.rq ?? 0)}` +
-            '');
+        lines.push(`plating sigma=${pl.sigma} t=${fmtSmall(pl.thickness)} rq=${fmtSmall(pl.rq ?? 0)}`);
     }
     lines.push('');
     for (const d of (solver.dielectrics || [])) {
@@ -1052,7 +1053,7 @@ function coaxToGeometryText(solver, units) {
     const scale = LENGTH_UNITS[units];
     const fmt = v => String(Number((v / scale).toPrecision(12)));
     // Vertex radius of the n-gon with the area of a circle of radius r.
-    const R = (r, n) => r * Math.sqrt((2 * Math.PI / n) / Math.sin(2 * Math.PI / n));
+    const R = polyRadiusForArea;
     const { a, b, n_inner: ni, n_outer: no } = solver;
     const c = b + solver.shield_thickness;
     // Six digits keep the area within 1e-6 of the circle's.
@@ -1218,25 +1219,17 @@ function scaleStatement(src, st, f, to, degreeOf) {
 }
 
 function rewriteUnits(text, model, f, to, degreeOf) {
-    const lines = String(text ?? '').split(/\r?\n/);
     let hasUnits = false;
-    for (let li = 0; li < lines.length; li++) {
+    const out = editStatements(text, (parts, comment, li) => {
         const sts = model.statements.filter(s => s.line === li + 1 && s.part !== undefined);
-        if (!sts.length) continue;
-        const [code, comment] = splitComment(lines[li]);
-        const parts = code.split(';');
-        let seen = -1;
-        for (let k = 0; k < parts.length; k++) {
-            if (!parts[k].trim()) continue;
-            seen++;
-            const st = sts.find(s => s.part === seen);
-            if (!st) continue;
+        for (const st of sts) {
+            const k = partIndex(parts, st.part);
+            if (k < 0) continue;
             if (st.type === 'units') hasUnits = true;
             parts[k] = scaleStatement(parts[k], st, f, to, degreeOf);
         }
-        lines[li] = parts.join(';') + comment;
-    }
-    const out = lines.join('\n');
+        return sts.length > 0;
+    }) ?? String(text ?? '');
     return hasUnits ? out : setStatementInText(out, 'units', `units ${to}`);
 }
 

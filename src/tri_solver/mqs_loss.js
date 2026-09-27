@@ -42,10 +42,16 @@
 import { tripletsToCSRMulti, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
          triP2Stiffness, P2_MASS, P2_LOAD, refineTriMesh } from './tri_fem.js';
-import { calculate_Zrough, wallSpreadFactor } from '../surface_roughness.js';
+import { calculate_Zrough, wallSpreadFactor, slabCoth } from '../surface_roughness.js';
 import { shapeContains, shapeSignedDist, shapeFaceAt, insideRingHole } from '../shapes.js';
 
 const MU0 = 4 * Math.PI * 1e-7;
+// Thin dimension of a conductor entry: the smaller side of a rect, the thickness a
+// shape declares (a ring's wall), else the smaller side of its bounding box.
+export function condThinDim(r) {
+    if (r.shape && r.shape.thickness > 0) return r.shape.thickness;
+    return Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+}
 const edgeVerts = [[0,1],[1,2],[2,0]];
 // P2 shape functions at the quadrature points, P2_AT_Q[6*q + k]: vertices 2λ^2 - λ,
 // edges (edgeVerts) 4 λ_p λ_q. Constant on every straight-sided triangle.
@@ -58,13 +64,6 @@ const P2_AT_Q = (() => {
     }
     return out;
 })();
-
-function inAnyRect(rects, x, y, tol) {
-    for (const r of rects) {
-        if (x > r.xmin - tol && x < r.xmax + tol && y > r.ymin - tol && y < r.ymax + tol) return true;
-    }
-    return false;
-}
 
 // Refine triangles near any conductor surface (inside or outside, within `band`
 // skin depths) up to `passes` times. A triangle is marked when any of its
@@ -299,7 +298,7 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const xc = (nodes[2*v0]+nodes[2*v1]+nodes[2*v2])/3;
         const yc = (nodes[2*v0+1]+nodes[2*v1+1]+nodes[2*v2+1])/3;
-        // Same containment test as inAnyRect, but keeping the matching rect's
+        // Containment in a signal rect (or shape), keeping the matching rect's
         // index so the triangle lands in its polarity group. Where rects of one kind
         // overlap the later one wins, as for dielectrics.
         let si = -1;
@@ -440,6 +439,17 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
     };
 }
 
+// mqsPrecompute through the caller's cache (opts.cache), reused while the mesh
+// (identity), the symmetry mode and the ideal-ground set match.
+function cachedPrecompute(mesh, condRect, opts) {
+    const cc = opts.cache;
+    const idealKey = opts.idealRects ? Array.from(opts.idealRects, v => (v ? 1 : 0)).join('') : '';
+    if (cc && cc.mesh === mesh && cc.odd === !!opts.oddSymmetry && (cc.ideal ?? '') === idealKey) return cc.pre;
+    const pre = mqsPrecompute(mesh, condRect, opts);
+    if (cc) { cc.mesh = mesh; cc.odd = !!opts.oddSymmetry; cc.ideal = idealKey; cc.pre = pre; }
+    return pre;
+}
+
 // Loop inductance of the same problem with every conductor perfect, on the same
 // mesh with the same walls and drive convention. L_loop(f) minus this is the
 // internal inductance: the volume skin/proximity part plus the excess of the
@@ -464,13 +474,7 @@ export function mqsPecInductance(mesh, condRect, solveSparseMulti, opts = {}) {
     const rects = condRect.rects || [condRect];
     const roles = condRect.rectRoles || null;
     const sym = condRect.symmetry > 1 ? 2 : 1;
-    const cc = opts.cache;
-    const idealKey = opts.idealRects ? Array.from(opts.idealRects, v => (v ? 1 : 0)).join('') : '';
-    let pre = (cc && cc.mesh === mesh && cc.odd === !!opts.oddSymmetry && (cc.ideal ?? '') === idealKey) ? cc.pre : null;
-    if (!pre) {
-        pre = mqsPrecompute(mesh, condRect, opts);
-        if (cc) { cc.mesh = mesh; cc.odd = !!opts.oddSymmetry; cc.ideal = idealKey; cc.pre = pre; }
-    }
+    const pre = cachedPrecompute(mesh, condRect, opts);
     const { isCondTri, dofOf, nF, triGroup, rowPtr, colIdx, valS } = pre;
     const nG = pre.groups.length;
     // Metal DOF classes: 1 + group for signal metal, -1 for passive ground metal,
@@ -591,15 +595,10 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     const ymax_d = condRect.ymax_domain;
     const ymin_d = condRect.ymin_domain ?? 0;
 
-    // Frequency-invariant assembly: reuse the caller's cache when it matches
-    // this exact mesh (identity) and symmetry mode; else recompute (and store).
+    // Frequency-invariant assembly, and the per-frequency unit solves below, through
+    // the caller's cache.
     const cc = opts.cache;
-    const idealKey = opts.idealRects ? Array.from(opts.idealRects, v => (v ? 1 : 0)).join('') : '';
-    let pre = (cc && cc.mesh === mesh && cc.odd === !!opts.oddSymmetry && (cc.ideal ?? '') === idealKey) ? cc.pre : null;
-    if (!pre) {
-        pre = mqsPrecompute(mesh, condRect, opts);
-        if (cc) { cc.mesh = mesh; cc.odd = !!opts.oddSymmetry; cc.ideal = idealKey; cc.pre = pre; }
-    }
+    const pre = cachedPrecompute(mesh, condRect, opts);
     const { isCondTri, dofOf, nF, Nb, Fc, condArea, edgeToTri, triGroup } = pre;
     const lg = new Int32Array(6);
 
@@ -770,15 +769,38 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     const zWall = {}, wS1 = {}, wS2 = {};
     for (const w of ['bottom', 'top', 'left', 'right']) {
         wS1[w] = 0; wS2[w] = 0;
-        const d = wt[w] ?? Infinity;
-        if (!(d < Infinity)) { zWall[w] = { re: RsW, im: RsW }; continue; }
-        // coth((1+j)x) is 1 to double precision past x ~ 20, and cosh(2x) overflows
-        // past x ~ 355.
-        const x = d / deltaW;
-        if (x > 20) { zWall[w] = { re: RsW, im: RsW }; continue; }
-        const den = Math.cosh(2 * x) - Math.cos(2 * x);
-        const cr = Math.sinh(2 * x) / den, ci = -Math.sin(2 * x) / den;
-        zWall[w] = { re: RsW * (cr - ci), im: RsW * (cr + ci) };
+        const z = slabCoth((wt[w] ?? Infinity) / deltaW);
+        zWall[w] = { re: RsW * z.re, im: RsW * z.im };
+    }
+    // |dA/dn|^2 at the 3 Gauss points of the edge (x0, y0)-(x1, y1), from the P2 field
+    // of triangle t beside it; comp is the gradient component along the edge normal
+    // (1 on a horizontal edge, 0 on a vertical one).
+    const lge = new Int32Array(6), g2 = new Float64Array(3);
+    const edgeGrad2 = (t, x0, y0, x1, y1, comp) => {
+        const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
+        const { coeff } = triCoefficients(nodes, v0, v1, v2);
+        lge[0] = dofOf[v0]; lge[1] = dofOf[v1]; lge[2] = dofOf[v2];
+        for (let k = 0; k < 3; k++) lge[3+k] = dofOf[nNodes + triEdges[3*t+k]];
+        for (let q = 0; q < 3; q++) {
+            const xq = x0 + GL3p[q] * (x1 - x0), yq = y0 + GL3p[q] * (y1 - y0);
+            let gR = 0, gI = 0;
+            for (let k = 0; k < 6; k++) {
+                const g = lge[k]; if (g < 0) continue;
+                const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
+                gR += gr[comp] * sol[g]; gI += gr[comp] * sol[nF + g];
+            }
+            g2[q] = gR*gR + gI*gI;
+        }
+        return g2;
+    };
+    // The two triangles of each interior edge, eA[2e] and eA[2e+1] (-1 on the boundary).
+    let eA = null;
+    if (opts.idealRects || opts.surfaceZs) {
+        eA = new Int32Array(2 * nEdges).fill(-1);
+        for (let t = 0; t < nTris; t++) for (let k = 0; k < 3; k++) {
+            const e = triEdges[3*t+k];
+            if (eA[2*e] < 0) eA[2*e] = t; else eA[2*e+1] = t;
+        }
     }
     for (let e = 0; e < nEdges; e++) {
         const n0 = edges[2*e], n1 = edges[2*e+1];
@@ -793,28 +815,17 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         // triangle is metal, so ∂A/∂n is an interior gradient, not the exterior H.
         // That segment's dissipation belongs to the volume eddy term, not here.
         if (adj < 0 || isCondTri[adj]) continue;
-        const v0 = tris[3*adj], v1 = tris[3*adj+1], v2 = tris[3*adj+2];
-        const { coeff } = triCoefficients(nodes, v0, v1, v2);
-        lg[0] = dofOf[v0]; lg[1] = dofOf[v1]; lg[2] = dofOf[v2];
-        for (let k = 0; k < 3; k++) lg[3+k] = dofOf[nNodes + triEdges[3*adj+k]];
         const L = Math.hypot(x1 - x0, y1 - y0);
         // Tangential H comes from the gradient component along the wall normal.
-        const comp = orient === 'h' ? 1 : 0;
+        const G2 = edgeGrad2(adj, x0, y0, x1, y1, orient === 'h' ? 1 : 0);
         // Walls are bare metal (never plated). Evaluate Zs once at the edge midpoint.
         const Zg = opts.surfaceZs ? opts.surfaceZs((x0 + x1) / 2, (y0 + y1) / 2, orient) : null;
         for (let q = 0; q < 3; q++) {
-            const xq = x0 + GL3p[q] * (x1 - x0), yq = y0 + GL3p[q] * (y1 - y0);
-            let gR = 0, gI = 0;
-            for (let k = 0; k < 6; k++) {
-                const g = lg[k]; if (g < 0) continue;
-                const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
-                gR += gr[comp] * sol[g]; gI += gr[comp] * sol[nF + g];
-            }
-            const K2 = Cmag2 * (gR*gR + gI*gI) / (MU0*MU0);
+            const K2 = Cmag2 * G2[q] / (MU0*MU0);
             wS1[wall] += Math.sqrt(K2) * GL3w[q] * L;
             wS2[wall] += K2 * GL3w[q] * L;
             if (Zg) {
-                const Sseg = (gR*gR + gI*gI) * GL3w[q] * L;   // ∝ |K|² (global factors cancel in the ratio)
+                const Sseg = G2[q] * GL3w[q] * L;   // ∝ |K|² (global factors cancel in the ratio)
                 gndS += Sseg; gndZreS += Zg.re * Sseg; gndZimS += Zg.im * Sseg;
             }
         }
@@ -849,12 +860,6 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     let uIdeal = 0;
     if (opts.idealRects) {
         const nR = rects.length, iS1 = new Float64Array(nR), iS2 = new Float64Array(nR);
-        const eA = new Int32Array(2 * nEdges).fill(-1);
-        for (let t = 0; t < nTris; t++) for (let k = 0; k < 3; k++) {
-            const e = triEdges[3*t+k];
-            if (eA[2*e] < 0) eA[2*e] = t; else eA[2*e+1] = t;
-        }
-        const lge = new Int32Array(6);
         for (let e = 0; e < nEdges; e++) {
             const ta = eA[2*e], tb = eA[2*e+1];
             if (ta < 0 || tb < 0) continue;
@@ -865,26 +870,15 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             const n0 = edges[2*e], n1 = edges[2*e+1];
             const x0 = nodes[2*n0], y0 = nodes[2*n0+1], x1 = nodes[2*n1], y1 = nodes[2*n1+1];
             const horiz = Math.abs(y1 - y0) < Math.abs(x1 - x0);
-            const v0 = tris[3*ext], v1 = tris[3*ext+1], v2 = tris[3*ext+2];
-            const { coeff } = triCoefficients(nodes, v0, v1, v2);
-            lge[0] = dofOf[v0]; lge[1] = dofOf[v1]; lge[2] = dofOf[v2];
-            for (let k = 0; k < 3; k++) lge[3+k] = dofOf[nNodes + triEdges[3*ext+k]];
             const L = Math.hypot(x1 - x0, y1 - y0);
             const ri = pre.triRect[cnd];
+            const G2 = edgeGrad2(ext, x0, y0, x1, y1, horiz ? 1 : 0);
             let Sseg = 0;
             for (let q = 0; q < 3; q++) {
-                const xq = x0 + GL3p[q]*(x1-x0), yq = y0 + GL3p[q]*(y1-y0);
-                let gR = 0, gI = 0;
-                for (let k = 0; k < 6; k++) {
-                    const g = lge[k]; if (g < 0) continue;
-                    const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
-                    const comp = horiz ? gr[1] : gr[0];
-                    gR += comp * sol[g]; gI += comp * sol[nF + g];
-                }
-                const K2 = Cmag2 * (gR*gR + gI*gI) / (MU0*MU0);
+                const K2 = Cmag2 * G2[q] / (MU0*MU0);
                 iS1[ri] += Math.sqrt(K2) * GL3w[q] * L;
                 iS2[ri] += K2 * GL3w[q] * L;
-                Sseg += (gR*gR + gI*gI) * GL3w[q] * L;
+                Sseg += G2[q] * GL3w[q] * L;
             }
             if (opts.surfaceZs) {
                 // Weighted against the wall metal like the walls: Zs relative to the rect's own Rs.
@@ -901,13 +895,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             const sigmaR = sigma * (pre.sRelRect ? pre.sRelRect[ri] : 1);
             const deltaR = Math.sqrt(2 / (omega * MU0 * sigmaR)), RsR = 1 / (sigmaR * deltaR);
             const d = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
-            const x = d / deltaR;
-            let zr = RsR, zi = RsR;
-            if (x <= 20) {
-                const den = Math.cosh(2 * x) - Math.cos(2 * x);
-                const cr = Math.sinh(2 * x) / den, ci = -Math.sin(2 * x) / den;
-                zr = RsR * (cr - ci); zi = RsR * (cr + ci);
-            }
+            const z = slabCoth(d / deltaR), zr = RsR * z.re, zi = RsR * z.im;
             // A rect on the symmetry plane is seen by half.
             const straddles = sym === 2 && r.xmin <= xmin_d + 1e-12;
             const Wk = (straddles ? 2 : 1) * iS1[ri] * iS1[ri] / S2;
@@ -931,12 +919,6 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     const rS = new Float64Array(rects.length), rZreS = new Float64Array(rects.length),
         rZimS = new Float64Array(rects.length);
     if (opts.surfaceZs) {
-        const eA = new Int32Array(2 * nEdges).fill(-1);
-        for (let t = 0; t < nTris; t++) for (let k = 0; k < 3; k++) {
-            const e = triEdges[3*t+k];
-            if (eA[2*e] < 0) eA[2*e] = t; else eA[2*e+1] = t;
-        }
-        const lge = new Int32Array(6);
         for (let e = 0; e < nEdges; e++) {
             const ta = eA[2*e], tb = eA[2*e+1];
             if (ta < 0 || tb < 0) continue;          // boundary edge, not a cond/dielectric interface
@@ -972,23 +954,11 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 break;
             }
             const Zs = opts.surfaceZs(qx, qy, horiz ? 'h' : 'v');
-            const v0 = tris[3*ext], v1 = tris[3*ext+1], v2 = tris[3*ext+2];
-            const { coeff } = triCoefficients(nodes, v0, v1, v2);
-            lge[0] = dofOf[v0]; lge[1] = dofOf[v1]; lge[2] = dofOf[v2];
-            for (let k = 0; k < 3; k++) lge[3+k] = dofOf[nNodes + triEdges[3*ext+k]];
             const L = Math.hypot(x1 - x0, y1 - y0);
+            // The tangential-H-producing gradient component.
+            const G2 = edgeGrad2(ext, x0, y0, x1, y1, horiz ? 1 : 0);
             let Sseg = 0;
-            for (let q = 0; q < 3; q++) {
-                const xq = x0 + GL3p[q]*(x1-x0), yq = y0 + GL3p[q]*(y1-y0);
-                let gR = 0, gI = 0;
-                for (let k = 0; k < 6; k++) {
-                    const g = lge[k]; if (g < 0) continue;
-                    const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
-                    const comp = horiz ? gr[1] : gr[0];   // tangential-H-producing gradient component
-                    gR += comp * sol[g]; gI += comp * sol[nF + g];
-                }
-                Sseg += (gR*gR + gI*gI) * GL3w[q] * L;
-            }
+            for (let q = 0; q < 3; q++) Sseg += G2[q] * GL3w[q] * L;
             if (isCondTri[cnd] === 1) { trS += Sseg; trZreS += Zs.re * Sseg; trZimS += Zs.im * Sseg; }
             else { grS += Sseg; grZreS += Zs.re * Sseg; grZimS += Zs.im * Sseg; }
             const ri = pre.triRect[cnd];
@@ -1043,17 +1013,11 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // trace carries current on both faces, so each face sees half the thickness;
     // ground rects are one-sided slabs. The walls and ideal grounds add the same
     // increment, (Zs - Zs_smooth) * |K|^2 (wallS2), to their slab reactance.
-    const slabR = (d) => {
-        const x = d / delta;
-        if (!(x > 0) || x > 20) return 1;
-        return (Math.sinh(2*x) + Math.sin(2*x)) / (Math.cosh(2*x) - Math.cos(2*x));
-    };
+    const slabR = d => slabCoth(d / delta).re;
     const rolesX = condRect.rectRoles || null;
     let dSig = Infinity, dGr = Infinity;
-    // Thin dimension: a shape's declared thickness (a ring's wall), else the smaller side.
-    const thinOf = r => ((r.shape && r.shape.thickness > 0) ? r.shape.thickness : Math.min(r.xmax - r.xmin, r.ymax - r.ymin));
     rects.forEach((r, i) => {
-        const d = thinOf(r);
+        const d = condThinDim(r);
         if (!rolesX || rolesX[i].is_signal) dSig = Math.min(dSig, d / 2); else dGr = Math.min(dGr, d);
     });
     const kTrace = 1 / slabR(dSig), kGr = 1 / slabR(dGr);
@@ -1075,10 +1039,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 const Zs = calculate_Zrough(freq, sigma * sRel[i], Rq);
                 psiR = Zs.re / RsI; psiX = Zs.im / RsI;
             }
-            const d = thinOf(r);
-            const x = (isSig ? d / 2 : d) / deltaI;
-            const k = (!(x > 0) || x > 20) ? 1
-                : (Math.cosh(2*x) - Math.cos(2*x)) / (Math.sinh(2*x) + Math.sin(2*x));
+            const d = condThinDim(r);
+            const k = 1 / slabCoth((isSig ? d / 2 : d) / deltaI).re;
             const Xi = Ri * (1 + k * (psiX - 1));
             if (isSig) { R_trace += Ri * psiR; X_trace += Xi; sigS += Ri; sigPsi += Ri * psiR; }
             else { R_gr += Ri * psiR; X_gr += Xi; }
