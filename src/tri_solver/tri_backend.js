@@ -25,8 +25,8 @@ import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
          groundBodyCount } from './occ_to_mesh.js';
-import { shapeArea, shapeBBox, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance, visibleAreas,
-         platedThrough, platingArea, insideRingHole, isComplement, isPolyShape } from '../shapes.js';
+import { shapeBBox, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance,
+         platedThrough, insideRingHole, isComplement, isPolyShape } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
@@ -42,7 +42,8 @@ import { checkMeshQuality } from './tri_mesh.js';
 // for the dispersive effective permittivity, anchored to the static solve at
 // this frequency (see TriBackend._eigenBias) so the two agree at the switch.
 const F_STATIC_MAX = 100e6;
-import { calculate_Zrough, calculate_Zrough_layered, slabCoth } from '../surface_roughness.js';
+import { calculate_Zrough, calculate_Zrough_layered, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
+    spreadWidthFloor } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
 import { Complex } from '../complex.js';
 import { dcLineParameters } from '../dc_inductance.js';
@@ -2418,14 +2419,14 @@ export class TriBackend {
         // Skip the ideal solve while u cannot reach the blend range: W_K is at least a
         // quarter of the narrowest trace.
         const traces = s.conductors.filter(c => c.is_signal).map(c => Math.abs(c.x_max - c.x_min));
-        const wLo = 0.25 * Math.min(...traces);
+        const wLo = spreadWidthFloor(traces);
         const omega = 2 * Math.PI * f;
         const uMax = Math.max(...cr.rects.map((r, i) => {
             if (!ideal[i]) return 0;
             const sg = roles[i].sigma || s.sigma_cond || sigma;
             return 2 / (omega * MU0 * sg) / Math.min(r.xmax - r.xmin, r.ymax - r.ymin) / wLo;
         }));
-        if (!(uMax > 0.02)) return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
+        if (!(uMax > SPREAD_U_MIN)) return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
         let b;
         try {
             b = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, { ...opts, idealRects: ideal, cache: idealCache });
@@ -2436,7 +2437,7 @@ export class TriBackend {
                 `finite conductors of the domain width instead: R and L near DC depend on the domain size.` });
             return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
         }
-        const w = Math.min(1, Math.max(0, Math.log10(b.uIdeal / 0.02)));
+        const w = spreadBlendWeight(b.uIdeal);
         if (w >= 1) return b;
         const a = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
         const mix = k => w * b[k] + (1 - w) * a[k];
@@ -2483,8 +2484,6 @@ export class TriBackend {
         // current by its own impedance), so plating doesn't force perturbation.
         const mqsOk = cr.rects.length > 0 && !cr.rects.some(r => r.shape && !isPolyShape(r.shape))
             && cr.rectRoles.some(r => r.is_signal);
-        // A conductor of another metal: the eddy solve takes a conductivity per rect.
-        const ownSigma = cr.rectRoles.some(r => r.sigma && r.sigma !== (s.sigma_cond ?? 5.8e7));
         // Refuse a forced 'mqs' override where it cannot apply (with a warning)
         // rather than produce garbage.
         if (lossMethod === 'mqs' && !mqsOk) {
@@ -2999,56 +2998,9 @@ export class TriBackend {
         // The crossover (δ/t ≈ 0.08–0.15) is where the two agree, so the blend is
         // continuous. 'static' forces
         // the static estimator everywhere.
-        // DC resistance from the geometry lists — the SAME convention as the FDM
-        // backend (field_solver.calculate_conductor_loss): current flows through the
-        // signal cross-section and returns through the ground cross-section in
-        // series. cr.rects can NOT be used for this: it contains coplanar ground
-        // rects (which are return path, not parallel signal metal) and omits
-        // wall-absorbed grounds entirely.
-        // Per-unit-length DC conductance of the signal and ground metal. Solid
-        // plating (plating at least as thick as the conductor) conducts at the
-        // plating sigma.
-        const sigmaDC = s.sigma_cond ?? 5.8e7;
-        let sigArea = 0, gndArea = 0, sigCond = 0, gndCond = 0, posCond = 0, negCond = 0;
-        // Conductors of one kind that overlap count the shared area once, at the later one's metal.
-        const visible = visibleAreas(s.conductors);
-        for (const [ci, c] of s.conductors.entries()) {
-            // shapeArea is the bbox product for a plain rect (unchanged) but
-            // the true cross-section for a shaped one. A complement shell
-            // returns 0: the coax shield is modelled as infinitely thick, so it
-            // carries no DC resistance.
-            const a = shapeArea(c);
-            const bulk = c.sigma > 0 ? c.sigma : sigmaDC;
-            const sg = solidPlated(c, c.plating) ? c.plating.sigma : bulk;
-            // A thinner plating replaces the outer layer of the bulk and conducts at
-            // its own sigma.
-            const ap = solidPlated(c, c.plating) ? 0 : platingArea(c);
-            // An overlapped conductor contributes its visible area, its plating included.
-            const av = visible && visible.has(ci) ? visible.get(ci) : a;
-            const g = sg * Math.max(av - ap, 0) + (ap > 0 ? c.plating.sigma * Math.min(ap, av) : 0);
-            if (c.is_signal) {
-                sigArea += a; sigCond += g;
-                if (c.polarity < 0) negCond += g; else posCond += g;
-            } else { gndArea += a; gndCond += g; }
-        }
-        // Mode-aware per-line convention for a differential pair (mirrors
-        // field_solver.calculate_conductor_loss): sigArea sums both traces, the odd
-        // mode's DC return is the partner trace (no net ground current), the even
-        // mode returns 2I through the ground.
-        // A ground of unlimited width is an ideal return: with one, the return current
-        // has no DC resistance and the other grounds carry none of it.
-        if (s._unlimited_grounds && s._unlimited_grounds().size) gndArea = 0;
-        let R_dc;
-        if (s.is_differential && (mode === 'odd' || mode === 'even')) {
-            // Traces of different metals: the per-line value is the mean of the two.
-            const R_trace = !(sigArea > 0) ? 0
-                : (ownSigma && posCond > 0 && negCond > 0) ? 0.5 * (1 / posCond + 1 / negCond) : 2 / sigCond;
-            R_dc = mode === 'odd' ? R_trace
-                 : R_trace + (gndArea > 0 ? 2 / gndCond : 0);
-        } else {
-            R_dc = (sigArea > 0 ? 1 / sigCond : 0)
-                 + (gndArea > 0 ? 1 / gndCond : 0);
-        }
+        // DC resistance from the conductor list, shared with the quasi-static backend
+        // (cr.rects holds coplanar grounds as rects and omits wall-absorbed grounds).
+        const dc = s._dc_resistance(mode), R_dc = dc.sig + dc.gnd;
         if (f === 0) {
             // DC point: R is the geometric DC resistance, L_internal the low-frequency
             // plateau of the loss solve (current uniform across every conductor).

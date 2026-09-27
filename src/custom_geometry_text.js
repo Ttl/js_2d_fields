@@ -115,42 +115,32 @@ function tokenize(src) {
     return tokens;
 }
 
-// Recursive-descent evaluation. `vars` maps parameter names to numbers, `unitScale`
-// is the declared unit in metres (a suffixed number is converted to it).
-export function evaluateExpression(src, vars = {}, unitScale = 1) {
+// Recursive-descent parser. `build` makes the result bottom-up as the parse goes:
+// num(tk), id(name), fn(name, args), neg(node), prod(factors) and sum(terms), the
+// last two as [{ op, node }] with op '*' or '+' on the first.
+function parseExpression(src, build) {
     const tokens = tokenize(src);
     let i = 0;
-    const peek = () => tokens[i];
-    const isOp = v => peek() && peek().type === 'op' && peek().value === v;
-
+    const isOp = v => tokens[i] && tokens[i].type === 'op' && tokens[i].value === v;
     function primary() {
         const tk = tokens[i++];
         if (!tk) throw new Error('unexpected end of expression');
         if (tk.type === 'num') {
-            if (tk.unit === undefined) return tk.value;
-            const scale = LENGTH_UNITS[tk.unit];
-            if (scale === undefined) throw new Error(`unknown unit '${tk.unit}'`);
-            return tk.value * scale / unitScale;
+            if (tk.unit !== undefined && LENGTH_UNITS[tk.unit] === undefined) throw new Error(`unknown unit '${tk.unit}'`);
+            return build.num(tk);
         }
         if (tk.type === 'id') {
-            if (isOp('(')) {
-                const fn = FUNCTIONS[tk.value];
-                if (!fn) throw new Error(`unknown function '${tk.value}'`);
-                i++;
-                const args = [expr()];
-                while (isOp(',')) { i++; args.push(expr()); }
-                if (!isOp(')')) throw new Error("expected ')'");
-                i++;
-                return fn(...args);
-            }
-            if (tk.value === 'inf') return Infinity;
-            if (!Object.prototype.hasOwnProperty.call(vars, tk.value)) {
-                throw new Error(`unknown parameter '${tk.value}'`);
-            }
-            return vars[tk.value];
+            if (!isOp('(')) return build.id(tk.value);
+            if (!FUNCTIONS[tk.value]) throw new Error(`unknown function '${tk.value}'`);
+            i++;
+            const args = [sum()];
+            while (isOp(',')) { i++; args.push(sum()); }
+            if (!isOp(')')) throw new Error("expected ')'");
+            i++;
+            return build.fn(tk.value, args);
         }
         if (tk.value === '(') {
-            const v = expr();
+            const v = sum();
             if (!isOp(')')) throw new Error("expected ')'");
             i++;
             return v;
@@ -158,31 +148,39 @@ export function evaluateExpression(src, vars = {}, unitScale = 1) {
         throw new Error(`unexpected '${tk.value}'`);
     }
     function unary() {
-        if (isOp('-')) { i++; return -unary(); }
+        if (isOp('-')) { i++; return build.neg(unary()); }
         if (isOp('+')) { i++; return unary(); }
         return primary();
     }
-    function term() {
-        let v = unary();
-        while (isOp('*') || isOp('/')) {
-            const op = tokens[i++].value;
-            const r = unary();
-            v = op === '*' ? v * r : v / r;
-        }
-        return v;
+    function chain(next, ops, first, make) {
+        const items = [{ op: first, node: next() }];
+        while (ops.some(isOp)) { const op = tokens[i++].value; items.push({ op, node: next() }); }
+        return items.length === 1 ? items[0].node : make(items);
     }
-    function expr() {
-        let v = term();
-        while (isOp('+') || isOp('-')) {
-            const op = tokens[i++].value;
-            const r = term();
-            v = op === '+' ? v + r : v - r;
-        }
-        return v;
-    }
-
-    const v = expr();
+    const product = () => chain(unary, ['*', '/'], '*', build.prod);
+    const sum = () => chain(product, ['+', '-'], '+', build.sum);
+    const out = sum();
     if (i < tokens.length) throw new Error(`unexpected '${tokens[i].value}'`);
+    return out;
+}
+
+// Evaluates `src`. `vars` maps parameter names to numbers, `unitScale` is the declared
+// unit in metres (a suffixed number is converted to it).
+export function evaluateExpression(src, vars = {}, unitScale = 1) {
+    const fold = items => items.slice(1).reduce((v, { op, node }) => (
+        op === '*' ? v * node : op === '/' ? v / node : op === '+' ? v + node : v - node), items[0].node);
+    const v = parseExpression(src, {
+        num: tk => (tk.unit === undefined ? tk.value : tk.value * LENGTH_UNITS[tk.unit] / unitScale),
+        id: name => {
+            if (name === 'inf') return Infinity;
+            if (!Object.prototype.hasOwnProperty.call(vars, name)) throw new Error(`unknown parameter '${name}'`);
+            return vars[name];
+        },
+        fn: (name, args) => FUNCTIONS[name](...args),
+        neg: x => -x,
+        prod: fold,
+        sum: fold,
+    });
     if (Number.isNaN(v)) throw new Error('expression is not a number');
     return v;
 }
@@ -1086,49 +1084,14 @@ function coaxToGeometryText(solver, units) {
 // text evaluates to the same geometry. Numbers with their own unit stay as written.
 
 // Expression tree: num (with its token), id, neg, sum, prod (factors with op), fn.
-function expressionTree(src) {
-    const tokens = tokenize(src);
-    let i = 0;
-    const isOp = v => tokens[i] && tokens[i].type === 'op' && tokens[i].value === v;
-    function primary() {
-        const tk = tokens[i++];
-        if (!tk) throw new Error('unexpected end of expression');
-        if (tk.type === 'num') return { type: 'num', tk };
-        if (tk.type === 'id') {
-            if (!isOp('(')) return { type: 'id', name: tk.value };
-            i++;
-            const args = [sum()];
-            while (isOp(',')) { i++; args.push(sum()); }
-            if (!isOp(')')) throw new Error("expected ')'");
-            i++;
-            return { type: 'fn', name: tk.value, args };
-        }
-        if (tk.value === '(') {
-            const v = sum();
-            if (!isOp(')')) throw new Error("expected ')'");
-            i++;
-            return v;
-        }
-        throw new Error(`unexpected '${tk.value}'`);
-    }
-    function unary() {
-        if (isOp('-') || isOp('+')) { i++; return { type: 'neg', node: unary() }; }
-        return primary();
-    }
-    function product() {
-        const factors = [{ op: '*', node: unary() }];
-        while (isOp('*') || isOp('/')) { const op = tokens[i++].value; factors.push({ op, node: unary() }); }
-        return factors.length === 1 ? factors[0].node : { type: 'prod', factors };
-    }
-    function sum() {
-        const items = [product()];
-        while (isOp('+') || isOp('-')) { i++; items.push(product()); }
-        return items.length === 1 ? items[0] : { type: 'sum', items };
-    }
-    const tree = sum();
-    if (i < tokens.length) throw new Error(`unexpected '${tokens[i].value}'`);
-    return tree;
-}
+const expressionTree = src => parseExpression(src, {
+    num: tk => ({ type: 'num', tk }),
+    id: name => ({ type: 'id', name }),
+    fn: (name, args) => ({ type: 'fn', name, args }),
+    neg: node => ({ type: 'neg', node }),
+    prod: factors => ({ type: 'prod', factors }),
+    sum: terms => ({ type: 'sum', items: terms.map(t => t.node) }),
+});
 
 // Length degree of a node from its parameters, null when only its numbers could say.
 function naturalDegree(node, degreeOf) {

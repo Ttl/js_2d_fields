@@ -265,6 +265,20 @@ function wallSpreadFactor(u) {
     return (2 / u) * acc * h / 3;
 }
 
+// Blend range of the spreading parameter u = delta^2 / (d W_K) of a ground: below
+// SPREAD_U_MIN the confined surface model holds, a decade above it the spread-current
+// model (the thin-sheet ground solve, the ideal-ground MQS solve) holds alone, and in
+// between the two are blended on log10(u) with this weight of the spreading model.
+const SPREAD_U_MIN = 0.02;
+function spreadBlendWeight(u) {
+    return Math.min(1, Math.max(0, Math.log10(u / SPREAD_U_MIN)));
+}
+
+// Lower bound on the return width W_K of the grounds: a quarter of the narrowest trace.
+function spreadWidthFloor(traceWidths) {
+    return 0.25 * Math.min(...traceWidths);
+}
+
 // (1+j) coth((1+j) x) as {re, im}: the surface impedance over Rs of a slab x skin
 // depths thick with a field-free back. It is 1+j for a thick slab and tends to
 // 1/x + j 2x/3 for a thin one. Taken as 1+j past x = 20, where that holds to double
@@ -275,4 +289,5 @@ function slabCoth(x) {
     return { re: (Math.sinh(2 * x) + Math.sin(2 * x)) / den, im: (Math.sinh(2 * x) - Math.sin(2 * x)) / den };
 }
 
-export { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth };
+export { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
+    spreadWidthFloor };

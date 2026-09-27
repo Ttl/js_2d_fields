@@ -1,10 +1,11 @@
 import createWASMModule from './wasm_solver/solver.js';
 import { Complex } from "./complex.js";
-import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth } from './surface_roughness.js';
+import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
+    spreadWidthFloor } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
-import { visibleAreas, platedThrough, platingArea, insideRingHole, bodyDistance } from './shapes.js';
+import { visibleAreas, platedThrough, platingArea, insideRingHole, bodyDistance, shapeArea } from './shapes.js';
 import { unlimitedGrounds } from './wall_grounds.js';
 
 export const CONSTANTS = {
@@ -1026,13 +1027,13 @@ export class FieldSolver2D {
     _ground_may_spread() {
         if (!(this.freq > 0)) return true;
         const sig = (this.conductors || []).filter(c => c.is_signal);
-        const wLo = 0.25 * Math.min(...sig.map(c => Math.abs(c.width)));
+        const wLo = spreadWidthFloor(sig.map(c => Math.abs(c.width)));
         const omega = 2 * Math.PI * this.freq;
         const ideal = this._unlimited_grounds();
         return (this.conductors || []).some((c, ci) => {
             if (c.is_signal || ideal.has(ci)) return false;
             const d = Math.min(Math.abs(c.width), Math.abs(c.height));
-            return 2 / (omega * CONSTANTS.MU0 * this._bulk_sigma(c)) / d / wLo > 0.02;
+            return 2 / (omega * CONSTANTS.MU0 * this._bulk_sigma(c)) / d / wLo > SPREAD_U_MIN;
         });
     }
 
@@ -1529,38 +1530,6 @@ export class FieldSolver2D {
     }
 
     /**
-     * Calculate conductor cross-sectional area from conductor dimensions.
-     * Uses the Conductor class dimensions directly (width * height) rather than
-     * summing mesh elements for accurate DC resistance calculation.
-     *
-     * For differential mode, includes both signal traces in signal_area.
-     * Ground area includes all ground conductors (bottom, top, sides, vias).
-     *
-     * @returns {{signal_area: number, ground_area: number}} - Cross-sectional areas in m^2
-     */
-    _calculate_conductor_area() {
-        if (!this.conductors) {
-            throw new Error("Conductors array not available");
-        }
-
-        let signal_area = 0;
-        let ground_area = 0;
-        // Overlapping conductors of one kind count the shared area once.
-        const visible = visibleAreas(this.conductors);
-
-        for (const [i, cond] of this.conductors.entries()) {
-            const area = visible && visible.has(i) ? visible.get(i) : Math.abs(cond.width * cond.height);
-            if (cond.is_signal) {
-                signal_area += area;
-            } else {
-                ground_area += area;
-            }
-        }
-
-        return { signal_area, ground_area };
-    }
-
-    /**
      * Calculate conductor losses including both DC and AC (skin effect) contributions.
      *
      * Signal and ground are conductors in series: R_total = R_signal + R_ground.
@@ -1599,49 +1568,10 @@ export class FieldSolver2D {
     calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false, mode = null, line = null) {
         if (!this.solution_valid) throw new Error("Fields invalid");
 
-        const { signal_area, ground_area } = this._calculate_conductor_area();
-
-        // DC resistance per unit length, in the same per-line convention as the AC
-        // integral (power_factor below). For a differential pair signal_area sums
-        // both traces, and the two modes have different DC return paths:
-        //   odd  - current returns through the partner trace, the ground carries no
-        //          net current at DC: R_dc = R_one_trace = 2/(σ*signal_area).
-        //   even - both traces carry I, the ground returns 2I:
-        //          P = 2I^2*R_even = 2I^2*R_one_trace + (2I)^2*R_gnd
-        //          => R_dc = R_one_trace + 2*R_gnd.
-        // The mode-blind form 1/(σ*signal_area) + 1/(σ*ground_area) is ~2x low
-        // per line.
-        // Signal metal is the plating metal when the plating is at least as thick
-        // as the trace (the whole cross-section is plating).
+        // Signal metal: the plating metal when every signal conductor is solid plating.
         const sigma_sig = this._signal_sigma(line === 2 ? null : line);
         const ownSigma = this._own_sigma();
-        // Per-conductor conductivities: conductances add within the positive traces,
-        // the negative traces and the grounds.
-        // Per-conductor conductances also when a plating layer conducts beside the bulk.
-        const thinPlated = (this.conductors || []).some(c => platingArea(c) > 0 && !this._solid_plating(c));
-        const dcG = (ownSigma || thinPlated) ? this._dc_conductances() : null;
-        // A ground of unlimited width is an ideal return: with one, the return current
-        // has no DC resistance and the other grounds carry none of it.
-        const R_gnd0 = this._unlimited_grounds().size ? 0
-            : dcG ? (dcG.gnd > 0 ? 1.0 / dcG.gnd : 0)
-            : ground_area > 0 ? 1.0 / (this.sigma_cond * ground_area) : 0;
-        // Signal and ground are separate conductors in series, so each keeps its own
-        // DC term and the two resistances add.
-        let R_dc_sig, R_dc_gnd;
-        if (line !== null) {
-            const g = this._dc_conductances();
-            // Both traces driven: the two trace resistances add and the ground returns 2 I.
-            R_dc_sig = line === 2 ? 1.0 / g.pos + 1.0 / g.neg : 1.0 / (line === 0 ? g.pos : g.neg);
-            R_dc_gnd = line === 2 ? 4.0 * R_gnd0 : R_gnd0;
-        } else if (this.is_differential && (mode === 'odd' || mode === 'even')) {
-            // Both modes put the same current magnitude through each trace, so the
-            // per-line value is the mean of the two trace resistances.
-            R_dc_sig = dcG ? 0.5 * (1.0 / dcG.pos + 1.0 / dcG.neg) : 2.0 / (sigma_sig * signal_area);
-            R_dc_gnd = mode === 'odd' ? 0 : 2.0 * R_gnd0;
-        } else {
-            R_dc_sig = dcG ? 1.0 / (dcG.pos + dcG.neg) : 1.0 / (sigma_sig * signal_area);
-            R_dc_gnd = R_gnd0;
-        }
+        const { sig: R_dc_sig, gnd: R_dc_gnd } = this._dc_resistance(mode, line);
         const R_dc = R_dc_sig + R_dc_gnd;
 
         if (this.freq === 0) {
@@ -2176,7 +2106,7 @@ export class FieldSolver2D {
         // resistance and inductance of the grounds that are not walls (_wall_grounds) from
         // the surface model: fully above 0.2, blended on log(spread) down to 0.02, where
         // the two agree to a few tenths of a percent.
-        const wSheet = Math.min(1, Math.max(0, Math.log10(spread / 0.02)));
+        const wSheet = spreadBlendWeight(spread);
         const sheetZ = vacuum_fields && omega > 0 && wSheet > 0
             ? this._ground_sheet_cached(line === null ? mode : null) : null;
         if (vacuum_fields && omega > 0 && wSheet > 0 && !sheetZ) {
@@ -2306,18 +2236,48 @@ export class FieldSolver2D {
     }
 
     // Per-unit-length DC conductance of the positive traces, the negative traces and
-    // the grounds.
+    // the grounds. Conductors of one kind that overlap count the shared area once, at
+    // the later one's metal. A complement shape (the native coax shield) has no area:
+    // it is semi-infinite metal without DC resistance.
     _dc_conductances() {
         const g = { pos: 0, neg: 0, gnd: 0 };
         const visible = visibleAreas(this.conductors || []);
         for (const [i, c] of (this.conductors || []).entries()) {
             // A plating layer inside the outline conducts at its own sigma.
-            const a = visible && visible.has(i) ? visible.get(i) : Math.abs(c.width * c.height);
+            const a = visible && visible.has(i) ? visible.get(i) : shapeArea(c);
             const ap = this._solid_plating(c) ? 0 : Math.min(platingArea(c), a);
             const v = this._bulk_sigma(c) * (a - ap) + (ap > 0 ? c.plating.sigma * ap : 0);
             if (!c.is_signal) g.gnd += v; else if (c.polarity < 0) g.neg += v; else g.pos += v;
         }
         return g;
+    }
+
+    // Per-unit-length DC resistance of the signal and of the ground in the per-line
+    // convention of the loss integral, { sig, gnd }. The two are separate conductors in
+    // series, so their resistances add. A differential pair has a different DC return
+    // path per mode:
+    //   odd  - the current returns through the partner trace, the ground carries none
+    //   even - both traces carry I and the ground returns 2 I:
+    //          P = 2 I^2 R_even = I^2 (R_pos + R_neg) + (2 I)^2 R_gnd
+    // Both modes put the same current through each trace, so the trace part is the mean
+    // of the two trace resistances. A ground of unlimited width is an ideal return: with
+    // one, the return current has no DC resistance and the other grounds carry none.
+    // line (0 = positive trace, 1 = negative trace, 2 = both) gives I^T R I for unit
+    // current in that trace or in both (see _line_asymmetry).
+    _dc_resistance(mode = null, line = null) {
+        const g = this._dc_conductances();
+        const R_gnd = this._unlimited_grounds().size || !(g.gnd > 0) ? 0 : 1 / g.gnd;
+        if (line !== null) {
+            if (line === 2) return { sig: 1 / g.pos + 1 / g.neg, gnd: 4 * R_gnd };
+            return { sig: 1 / (line === 0 ? g.pos : g.neg), gnd: R_gnd };
+        }
+        const G = g.pos + g.neg;
+        if (!(G > 0)) return { sig: 0, gnd: R_gnd };
+        if (this.is_differential && (mode === 'odd' || mode === 'even')) {
+            const sig = g.pos > 0 && g.neg > 0 ? 0.5 * (1 / g.pos + 1 / g.neg) : 2 / G;
+            return { sig, gnd: mode === 'odd' ? 0 : 2 * R_gnd };
+        }
+        return { sig: 1 / G, gnd: R_gnd };
     }
 
     // Internal inductance at DC: the surface integral evaluated where the skin depth
