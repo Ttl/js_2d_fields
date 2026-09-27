@@ -1315,8 +1315,8 @@ export class FieldSolver2D {
             }
             return v;
         });
-        // S -= C^T K_aa^-1 C, in chunks of right-hand sides (each call refactors, which
-        // costs about one Laplace solve), keeping only the rows C touches.
+        // S -= C^T K_aa^-1 C, in chunks of right-hand sides (the solver keeps the factor
+        // of the matrix across the chunks), keeping only the rows C touches.
         const colEntries = Array.from({ length: m }, () => []);
         for (const e of cEntries) colEntries[e[1]].push(e);
         const chunk = Math.max(1, Math.min(m, Math.floor(4e6 / dc.N)));
@@ -3086,7 +3086,7 @@ export class FieldSolver2D {
         return 0.5 * (Cp + Cn);
     }
 
-    async _solve_single_mode(mode, vacuum_first = true) {
+    async _solve_single_mode(mode, vacuum_first = true, withLoss = true) {
         /**
          * Solve a single mode and return full results.
          *
@@ -3094,6 +3094,8 @@ export class FieldSolver2D {
          * -----------
          * mode : string - 'single', 'odd', or 'even'
          * vacuum_first : boolean - Whether to solve vacuum case first for C0 calculation
+         * withLoss : boolean - false returns the fields, C, C0 and Z0 only
+         *                      (_mode_loss_results completes them)
          *
          * Returns:
          * --------
@@ -3127,15 +3129,19 @@ export class FieldSolver2D {
         const { Ex, Ey } = this.compute_fields(V, planeBC);
 
         // Calculate impedance
-        let eps_eff, Z0;
-        if (C0 !== undefined) {
-            eps_eff = C / C0;
-            Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
-        }
+        let Z0;
+        if (C0 !== undefined) Z0 = 1 / (CONSTANTS.C * Math.sqrt(C * C0));
 
+        const r = { mode, Z0, C, C0, V, Ex, Ey, V0, Ex0, Ey0 };
+        return withLoss ? this._mode_loss_results(r) : r;
+    }
+
+    // Losses, RLGC and the reported parameters of a mode solved by _solve_single_mode.
+    async _mode_loss_results(r) {
+        const { mode, Z0, C, C0, V, Ex, Ey, V0, Ex0, Ey0 } = r;
         // Calculate conductor losses with surface roughness and DC resistance
-        await this._ensure_dc_signal_inductance(planeBC);
-        const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
+        await this._ensure_dc_signal_inductance(this._plane_bc(mode));
+        const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
         // Calculate dielectric loss (returns alpha in dB/m)
         const alpha_d = this.calculate_dielectric_loss(V, Z0);
@@ -3638,10 +3644,12 @@ export class FieldSolver2D {
         let modeResults = null;
 
         for (let it = 0; it < max_iters; it++) {
-            // Solve all modes
+            // Solve all modes. Refinement and its convergence gate need the fields,
+            // C, C0 and Z0 only: the losses, with the DC trace solve and the ground
+            // sheet setup of each grid, follow once on the final grid.
             modeResults = [];
             for (const modeName of modeNames) {
-                const result = await this._solve_single_mode(modeName, true);
+                const result = await this._solve_single_mode(modeName, true, false);
                 modeResults.push(result);
             }
 
@@ -3759,6 +3767,8 @@ export class FieldSolver2D {
                 this._repaint_geometry();
             }
         }
+
+        for (let i = 0; i < modeResults.length; i++) modeResults[i] = await this._mode_loss_results(modeResults[i]);
 
         // V0 is only needed by the refinement metrics above. Ex0/Ey0 are what
         // the conductor-loss calculation reuses across the frequency sweep.

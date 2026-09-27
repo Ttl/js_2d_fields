@@ -27,13 +27,15 @@ namespace {
 // full) and evicted LRU. Two slots is the working set of one adaptive pass. A
 // half-domain differential solve alternates a PEC and a PMC pattern, each used
 // twice back to back. A cached entry holds a numeric factor, so the cap stays
-// small.
+// small. It also keeps the values that factor was computed from: a call with the
+// same matrix again (right-hand sides fed in chunks) reuses the factor as is.
 struct SparsePatternCache {
     int N = 0;
     std::vector<int> rowPtr, colIdx;   // the pattern this entry serves
     std::vector<int> transposeIdx;     // index of entry (j,i) for each entry k=(i,j)
     bool patternSymmetric = false;
     SimplicialLDLT<RSpMat>* ldlt = nullptr;   // analyzePattern() already done
+    std::vector<double> factoredValues;       // values of the current numeric factor
     unsigned long lastUse = 0;
     ~SparsePatternCache() { delete ldlt; }
 };
@@ -150,6 +152,18 @@ int solve_sparse_multi(
             }
         }
 
+        // The same symmetric matrix as the cached factor: triangular solves only.
+        if (symmetric && pc->ldlt && pc->factoredValues.size() == (size_t)nnz
+            && std::equal(values, values + nnz, pc->factoredValues.begin())) {
+            for (int r = 0; r < nRhs; r++) {
+                Map<VectorXd> b_vec(b + (size_t)r * N, N);
+                Map<VectorXd> x_vec(x_out + (size_t)r * N, N);
+                x_vec = pc->ldlt->solve(b_vec);
+                if (pc->ldlt->info() != Success) return 4;
+            }
+            return 0;
+        }
+
         // Build Eigen sparse matrix from CSR format
         RSpMat A(N, N);
         {
@@ -169,8 +183,10 @@ int solve_sparse_multi(
                 pc->ldlt = new SimplicialLDLT<RSpMat>();
                 pc->ldlt->analyzePattern(A);
             }
+            pc->factoredValues.clear();
             pc->ldlt->factorize(A);
             if (pc->ldlt->info() == Success) {
+                pc->factoredValues.assign(values, values + nnz);
                 for (int r = 0; r < nRhs; r++) {
                     Map<VectorXd> b_vec(b + (size_t)r * N, N);
                     Map<VectorXd> x_vec(x_out + (size_t)r * N, N);
