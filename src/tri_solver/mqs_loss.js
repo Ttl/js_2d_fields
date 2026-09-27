@@ -131,9 +131,22 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     // on every pass, is rejected on four comparisons per rect instead of the
     // distance evaluations below.
     const grown = rects.map(r => ({ x0: r.xmin - bw, x1: r.xmax + bw, y0: r.ymin - bw, y1: r.ymax + bw }));
+    // Distance of a point to the nearest conductor surface.
+    function surfDist(x, y) {
+        let d = Infinity;
+        for (const r of rects) d = Math.min(d, Math.abs(distToRectBoundary(r, x, y)));
+        return d;
+    }
     for (let p = 0; ; p++) {
         const marked = new Uint8Array(mesh.nTris);
         let any = false, nMarked = 0;
+        // Vertex distances, evaluated once per node on first use (NaN = not yet).
+        const nodeDist = new Float64Array(mesh.nNodes).fill(NaN);
+        const vertDist = (v) => {
+            let d = nodeDist[v];
+            if (d !== d) d = nodeDist[v] = surfDist(mesh.nodes[2*v], mesh.nodes[2*v+1]);
+            return d;
+        };
         for (let t = 0; t < mesh.nTris; t++) {
             const v0 = mesh.tris[3*t], v1 = mesh.tris[3*t+1], v2 = mesh.tris[3*t+2];
             const x0 = mesh.nodes[2*v0], y0 = mesh.nodes[2*v0+1];
@@ -152,13 +165,7 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
             // metal. Within the band iff dS < bw (the former per-point nearSurface
             // test, evaluated once), a triangle straddling the surface must get the
             // surface target.
-            let dS = Infinity;
-            for (const r of rects) {
-                dS = Math.min(dS, Math.abs(distToRectBoundary(r, xc, yc)),
-                                  Math.abs(distToRectBoundary(r, x0, y0)),
-                                  Math.abs(distToRectBoundary(r, x1, y1)),
-                                  Math.abs(distToRectBoundary(r, x2, y2)));
-            }
+            const dS = Math.min(surfDist(xc, yc), vertDist(v0), vertDist(v1), vertDist(v2));
             if (!(dS < bw)) continue;
             let tgt = grading ? targetAt(xc, yc) : targetH;
             if (depthSlope > 0 && targetH > 0) tgt = Math.max(tgt, depthTarget(dS));

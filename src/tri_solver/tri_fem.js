@@ -1480,6 +1480,40 @@ export function refineTriMeshNested(mesh) {
     };
 }
 
+// Vertex-to-triangle adjacency as CSR: the triangles of node n are
+// vt[start[n]..start[n+1]), in ascending order.
+function vertexTris(tris, nTris, nNodes) {
+    const start = new Int32Array(nNodes + 1);
+    for (let i = 0; i < 3*nTris; i++) start[tris[i] + 1]++;
+    for (let n = 0; n < nNodes; n++) start[n+1] += start[n];
+    const fill = start.slice(0, nNodes);
+    const vt = new Int32Array(3*nTris);
+    for (let t = 0; t < nTris; t++) {
+        vt[fill[tris[3*t]]++] = t; vt[fill[tris[3*t+1]]++] = t; vt[fill[tris[3*t+2]]++] = t;
+    }
+    return { start, vt };
+}
+
+// Triangle across local edge le (0-1, 1-2, 2-0) of triangle t, -1 on the boundary.
+function neighbourAcross(tris, start, vt, t, le) {
+    const a = tris[3*t+le], b = tris[3*t + (le === 2 ? 0 : le + 1)];
+    for (let i = start[a]; i < start[a+1]; i++) {
+        const u = vt[i];
+        if (u === t) continue;
+        if (tris[3*u] === b || tris[3*u+1] === b || tris[3*u+2] === b) return u;
+    }
+    return -1;
+}
+
+// Local index of the edge (a, b) in triangle u, either orientation.
+function localEdgeOf(tris, u, a, b) {
+    for (let k = 0; k < 3; k++) {
+        const p = tris[3*u+k], q = tris[3*u + (k === 2 ? 0 : k + 1)];
+        if ((p === a && q === b) || (p === b && q === a)) return k;
+    }
+    return -1;
+}
+
 // Longest-edge bisection with green closure (Rivara-style).
 // Marked triangles get their longest edge bisected. Propagation ensures
 // conformity: if a triangle has a marked non-longest edge, its longest
@@ -1522,41 +1556,47 @@ export function refineTriMesh(mesh, marked) {
     // Longest-edge propagation: if a triangle has a marked non-longest edge,
     // also mark its longest edge. This ensures every green-closure triangle
     // has its longest edge bisected, preventing degenerate sub-triangles.
-    let propChanged = true;
-    while (propChanged) {
-        propChanged = false;
-        for (let t = 0; t < nTris; t++) {
-            const e0m = edgeMarked[triEdges[3*t]];
-            const e1m = edgeMarked[triEdges[3*t+1]];
-            const e2m = edgeMarked[triEdges[3*t+2]];
-            if (!e0m && !e1m && !e2m) continue; // no marked edges
+    // Worklist over the (at most two) triangles of each newly marked edge.
+    const edgeTri = new Int32Array(2*nEdges).fill(-1);
+    for (let t = 0; t < nTris; t++) {
+        for (let k = 0; k < 3; k++) {
+            const e = triEdges[3*t+k];
+            edgeTri[edgeTri[2*e] < 0 ? 2*e : 2*e+1] = t;
+        }
+    }
+    const work = new Int32Array(nEdges);
+    let nWork = 0;
+    for (let e = 0; e < nEdges; e++) if (edgeMarked[e]) work[nWork++] = e;
+    while (nWork > 0) {
+        const e = work[--nWork];
+        for (let s = 0; s < 2; s++) {
+            const t = edgeTri[2*e+s];
+            if (t < 0) continue;
             const longestE = triEdges[3*t + triLongest[t]];
-            if (edgeMarked[longestE]) continue; // longest already marked
-            if (edgeLen2[longestE] > minEdgeLen2) {
-                edgeMarked[longestE] = 1;
-                propChanged = true;
-            }
+            if (edgeMarked[longestE] || !(edgeLen2[longestE] > minEdgeLen2)) continue;
+            edgeMarked[longestE] = 1;
+            work[nWork++] = longestE;
         }
     }
 
     // Create midpoint nodes for marked edges
     const edgeMidNode = new Int32Array(nEdges).fill(-1);
     let newNodeCount = nNodes;
-    const newNodeCoords = [];
-    for (let e = 0; e < nEdges; e++) {
-        if (!edgeMarked[e]) continue;
-        const n0 = edges[2*e], n1 = edges[2*e+1];
-        edgeMidNode[e] = newNodeCount++;
-        newNodeCoords.push((nodes[2*n0]+nodes[2*n1])/2, (nodes[2*n0+1]+nodes[2*n1+1])/2);
-    }
-
-    // Build new nodes array
+    for (let e = 0; e < nEdges; e++) if (edgeMarked[e]) edgeMidNode[e] = newNodeCount++;
     const newNodes = new Float64Array(2*newNodeCount);
     newNodes.set(nodes);
-    for (let i = 0; i < newNodeCoords.length; i++) newNodes[2*nNodes+i] = newNodeCoords[i];
+    for (let e = 0; e < nEdges; e++) {
+        const m = edgeMidNode[e];
+        if (m < 0) continue;
+        const n0 = edges[2*e], n1 = edges[2*e+1];
+        newNodes[2*m] = (nodes[2*n0]+nodes[2*n1])/2;
+        newNodes[2*m+1] = (nodes[2*n0+1]+nodes[2*n1+1])/2;
+    }
 
     // Subdivide triangles
-    const newTris = [];
+    const triBuf = new Int32Array(12*nTris);
+    let nTriBuf = 0;
+    const pushTri = (a, b, c) => { triBuf[nTriBuf++] = a; triBuf[nTriBuf++] = b; triBuf[nTriBuf++] = c; };
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const e0 = triEdges[3*t], e1 = triEdges[3*t+1], e2 = triEdges[3*t+2];
@@ -1565,44 +1605,44 @@ export function refineTriMesh(mesh, marked) {
         const nBisected = (m0>=0?1:0) + (m1>=0?1:0) + (m2>=0?1:0);
         if (nBisected === 3) {
             // Red: 4 sub-triangles
-            newTris.push(v0, m0, m2);
-            newTris.push(m0, v1, m1);
-            newTris.push(m2, m1, v2);
-            newTris.push(m0, m1, m2);
+            pushTri(v0, m0, m2);
+            pushTri(m0, v1, m1);
+            pushTri(m2, m1, v2);
+            pushTri(m0, m1, m2);
         } else if (nBisected === 2) {
             // Green closure: 3 sub-triangles
             if (m0 < 0) {
-                newTris.push(v0, v1, m1);
-                newTris.push(v0, m1, m2);
-                newTris.push(m1, v2, m2);
+                pushTri(v0, v1, m1);
+                pushTri(v0, m1, m2);
+                pushTri(m1, v2, m2);
             } else if (m1 < 0) {
-                newTris.push(v0, m0, m2);
-                newTris.push(m0, v1, v2);
-                newTris.push(m0, v2, m2);
+                pushTri(v0, m0, m2);
+                pushTri(m0, v1, v2);
+                pushTri(m0, v2, m2);
             } else {
-                newTris.push(v0, m0, v2);
-                newTris.push(m0, v1, m1);
-                newTris.push(m0, m1, v2);
+                pushTri(v0, m0, v2);
+                pushTri(m0, v1, m1);
+                pushTri(m0, m1, v2);
             }
         } else if (nBisected === 1) {
             // Bisect into 2 sub-triangles
             if (m0 >= 0) {
-                newTris.push(v0, m0, v2);
-                newTris.push(m0, v1, v2);
+                pushTri(v0, m0, v2);
+                pushTri(m0, v1, v2);
             } else if (m1 >= 0) {
-                newTris.push(v0, v1, m1);
-                newTris.push(v0, m1, v2);
+                pushTri(v0, v1, m1);
+                pushTri(v0, m1, v2);
             } else {
-                newTris.push(v0, v1, m2);
-                newTris.push(m2, v1, v2);
+                pushTri(v0, v1, m2);
+                pushTri(m2, v1, v2);
             }
         } else {
-            newTris.push(v0, v1, v2);
+            pushTri(v0, v1, v2);
         }
     }
 
-    const nNewTris = newTris.length / 3;
-    const newTriArr = new Int32Array(newTris);
+    const nNewTris = nTriBuf / 3;
+    const newTriArr = triBuf.slice(0, nTriBuf);
 
     // Ensure CCW winding
     for (let t = 0; t < nNewTris; t++) {
@@ -1620,27 +1660,35 @@ export function refineTriMesh(mesh, marked) {
     // Phase 2: quality-targeted smoothing of old vertices adjacent to slivers.
     const cyRanges = mesh.constraintYRanges || {};
     const cxRanges = mesh.constraintXRanges || null;
-    const constraintYs = Object.keys(cyRanges).map(Number);
-    const constraintXs = cxRanges ? Object.keys(cxRanges).map(Number) : (mesh.constraintXs || []);
     // A point is on a constraint line only within the line's extent (a conductor
     // side wall constrains only over the conductor's height, not the whole
     // domain column at that x). Ranges absent → whole line (legacy meshes).
-    const onYLine = (x, y) => {
-        for (const cy of constraintYs) {
-            if (Math.abs(y - cy) >= 1e-10) continue;
-            const r = cyRanges[cy];
-            if (!r || (x >= r[0] - 1e-10 && x <= r[1] + 1e-10)) return true;
+    // Lines are sorted by coordinate with their ranges alongside, so a query
+    // binary-searches a window slightly wider than the tolerance and applies the
+    // exact test only inside it.
+    function lineTable(coords, ranges) {
+        const c = Float64Array.from(coords).sort();
+        const lo = new Float64Array(c.length).fill(-Infinity), hi = new Float64Array(c.length).fill(Infinity);
+        for (let i = 0; i < c.length; i++) {
+            const r = ranges ? ranges[c[i]] : null;
+            if (r) { lo[i] = r[0] - 1e-10; hi[i] = r[1] + 1e-10; }
+        }
+        return { c, lo, hi };
+    }
+    function onLine(L, v, w) {
+        const c = L.c;
+        let a = 0, b = c.length;
+        while (a < b) { const m = (a + b) >> 1; if (c[m] < v - 2e-10) a = m + 1; else b = m; }
+        for (let i = a; i < c.length && c[i] <= v + 2e-10; i++) {
+            if (Math.abs(v - c[i]) >= 1e-10) continue;
+            if (w >= L.lo[i] && w <= L.hi[i]) return true;
         }
         return false;
-    };
-    const onXLine = (x, y) => {
-        for (const cx of constraintXs) {
-            if (Math.abs(x - cx) >= 1e-10) continue;
-            const r = cxRanges ? cxRanges[cx] : null;
-            if (!r || (y >= r[0] - 1e-10 && y <= r[1] + 1e-10)) return true;
-        }
-        return false;
-    };
+    }
+    const yLines = lineTable(Object.keys(cyRanges).map(Number), cyRanges);
+    const xLines = lineTable(cxRanges ? Object.keys(cxRanges).map(Number) : (mesh.constraintXs || []), cxRanges);
+    const onYLine = (x, y) => onLine(yLines, y, x);
+    const onXLine = (x, y) => onLine(xLines, x, y);
     // Domain bounds
     let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
     for (let n = 0; n < newNodeCount; n++) {
@@ -1736,13 +1784,16 @@ export function refineTriMesh(mesh, marked) {
         else if (onX) canMove[n] = 2;
         else canMove[n] = 1;
     }
-    // Build vertex-to-triangle adjacency
-    const vtAdj = new Array(newNodeCount);
-    for (let n = 0; n < newNodeCount; n++) vtAdj[n] = [];
-    for (let t = 0; t < nNewTris; t++) {
-        vtAdj[newTriArr[3*t]].push(t);
-        vtAdj[newTriArr[3*t+1]].push(t);
-        vtAdj[newTriArr[3*t+2]].push(t);
+    // Vertex-to-triangle adjacency (CSR: triangles of n are vtList[vtStart[n]..vtStart[n+1]))
+    let { start: vtStart, vt: vtList } = vertexTris(newTriArr, nNewTris, newNodeCount);
+    // Triangle quality cache, recomputed for triangles flagged stale: a swap or a
+    // moved vertex flags them.
+    const qTri = new Float64Array(nNewTris);
+    const qStale = new Uint8Array(nNewTris).fill(1);
+    function refreshQ() {
+        for (let t = 0; t < nNewTris; t++) {
+            if (qStale[t]) { qTri[t] = triQuality(t); qStale[t] = 0; }
+        }
     }
 
     function triQuality(t) {
@@ -1772,10 +1823,13 @@ export function refineTriMesh(mesh, marked) {
             for (let t = 0; t < nNewTris; t++) {
                 if (!touch[t]) continue;
                 const va = newTriArr[3*t], vb = newTriArr[3*t+1], vc = newTriArr[3*t+2];
-                for (const [p, q] of [[va,vb],[va,vc],[vb,vc]]) {
-                    sumX[p] += newNodes[2*q]; sumY[p] += newNodes[2*q+1]; cnt[p]++;
-                    sumX[q] += newNodes[2*p]; sumY[q] += newNodes[2*p+1]; cnt[q]++;
-                }
+                const xa = newNodes[2*va], ya = newNodes[2*va+1];
+                const xb = newNodes[2*vb], yb = newNodes[2*vb+1];
+                const xc = newNodes[2*vc], yc = newNodes[2*vc+1];
+                sumX[va] += xb; sumY[va] += yb; sumX[vb] += xa; sumY[vb] += ya;
+                sumX[va] += xc; sumY[va] += yc; sumX[vc] += xa; sumY[vc] += ya;
+                sumX[vb] += xc; sumY[vb] += yc; sumX[vc] += xb; sumY[vc] += yb;
+                cnt[va] += 2; cnt[vb] += 2; cnt[vc] += 2;
             }
             let nMoved = 0;
             for (let n = 0; n < newNodeCount; n++) {
@@ -1805,9 +1859,8 @@ export function refineTriMesh(mesh, marked) {
                 }
                 // Check all adjacent triangles remain positive area
                 let valid = true;
-                const adj = vtAdj[n];
-                for (let i = 0; i < adj.length && valid; i++) {
-                    const t = adj[i];
+                for (let i = vtStart[n]; i < vtStart[n+1] && valid; i++) {
+                    const t = vtList[i];
                     const va = newTriArr[3*t], vb = newTriArr[3*t+1], vc = newTriArr[3*t+2];
                     const ox = newNodes[2*n], oy = newNodes[2*n+1];
                     newNodes[2*n] = nx; newNodes[2*n+1] = ny;
@@ -1816,7 +1869,10 @@ export function refineTriMesh(mesh, marked) {
                     newNodes[2*n] = ox; newNodes[2*n+1] = oy;
                     if (area <= 0) valid = false;
                 }
-                if (valid) { newNodes[2*n] = nx; newNodes[2*n+1] = ny; nMoved++; }
+                if (valid) {
+                    newNodes[2*n] = nx; newNodes[2*n+1] = ny; nMoved++;
+                    for (let i = vtStart[n]; i < vtStart[n+1]; i++) qStale[vtList[i]] = 1;
+                }
             }
             if (nMoved === 0) break;
         }
@@ -1845,41 +1901,60 @@ export function refineTriMesh(mesh, marked) {
         return false;
     }
 
-    // Triangles worth swapping around: only an edge with a sliver (q >= Q_SWAP)
-    // on at least one side can be improved by a flip. Computed first so a mesh
-    // with no slivers (common case after a band refinement) never pays for the
-    // edge map below (3 map ops per triangle, up to 20 passes per refinement).
-    const Q_SWAP = 10;
-    function anySliverTri() {
-        for (let t = 0; t < nNewTris; t++) if (triQuality(t) >= Q_SWAP) return true;
-        return false;
+    // Neighbour table (triangle across each local edge, -1 on the boundary), kept
+    // current through the swaps below.
+    const nbr = new Int32Array(3*nNewTris);
+    for (let t = 0; t < nNewTris; t++) {
+        for (let le = 0; le < 3; le++) nbr[3*t+le] = neighbourAcross(newTriArr, vtStart, vtList, t, le);
+    }
+    const nbrOf = (t, a, b) => nbr[3*t + localEdgeOf(newTriArr, t, a, b)];
+    // Point the edge (a, b) of t at u, and u's side of it back at t.
+    function link(t, k, u, a, b) {
+        nbr[3*t+k] = u;
+        if (u >= 0) nbr[3*u + localEdgeOf(newTriArr, u, a, b)] = t;
     }
 
+    // Only an edge with a sliver (q >= Q_SWAP) on at least one side can be
+    // improved by a flip. A triangle keeps its cached quality until it is swapped,
+    // and swapped triangles are skipped for the rest of the pass.
+    const Q_SWAP = 10;
+
     function edgeSwapPass() {
-        if (!anySliverTri()) return 0;
-        const tmpEdgeMap = new Map();
+        refreshQ();
+        let any = false;
+        for (let t = 0; t < nNewTris; t++) if (qTri[t] >= Q_SWAP) { any = true; break; }
+        if (!any) return 0;
+        // Candidate edges are the interior edges of the slivers, keyed by
+        // 3*t0 + le in their lower-numbered triangle t0 and visited in key order.
+        // The triangle t1 across each is taken now, before any swap of this pass.
+        const cand = [], across = new Map();
         for (let t = 0; t < nNewTris; t++) {
-            const localE = [[0,1],[1,2],[2,0]];
+            if (!(qTri[t] >= Q_SWAP)) continue;
             for (let le = 0; le < 3; le++) {
-                const na = newTriArr[3*t+localE[le][0]], nb = newTriArr[3*t+localE[le][1]];
-                const n0 = Math.min(na, nb), n1 = Math.max(na, nb);
-                const key = n0 * newNodeCount + n1;
-                const entry = tmpEdgeMap.get(key);
-                if (entry) entry.push(t);
-                else tmpEdgeMap.set(key, [t]);
+                const u = nbr[3*t+le];
+                if (u < 0) continue;
+                if (u > t) { cand.push(3*t + le); across.set(3*t + le, u); continue; }
+                if (qTri[u] >= Q_SWAP) continue;   // listed from u
+                const na = newTriArr[3*t+le], nb = newTriArr[3*t + (le === 2 ? 0 : le + 1)];
+                const key = 3*u + localEdgeOf(newTriArr, u, na, nb);
+                cand.push(key); across.set(key, t);
             }
         }
+        cand.sort((a, b) => a - b);
         let nSwaps = 0;
-        // A swap changes BOTH triangles' edge sets, so map entries built at pass
-        // start go stale: a later entry referencing a swapped triangle would
-        // rewrite triangles that no longer share the edge (mesh corruption).
-        // Skip entries touching swapped triangles; the next pass rebuilds the map.
+        // A swap changes BOTH triangles' edge sets, so candidates listed at pass
+        // start go stale: a later edge referencing a swapped triangle would rewrite
+        // triangles that no longer share it (mesh corruption). Skip edges touching
+        // swapped triangles; the next pass lists them afresh.
         const dirty = new Uint8Array(nNewTris);
-        for (const [key, tris2] of tmpEdgeMap) {
-            if (tris2.length !== 2) continue;
-            const [t0, t1] = tris2;
-            if (dirty[t0] || dirty[t1]) continue;
-            const n0 = Math.floor(key / newNodeCount), n1 = key % newNodeCount;
+        for (const key of cand) {
+            const t0 = (key / 3) | 0, le = key - 3*t0;
+            if (dirty[t0]) continue;
+            const t1 = across.get(key);
+            if (dirty[t1]) continue;
+            const qBefore = Math.max(qTri[t0], qTri[t1]);
+            const na = newTriArr[3*t0+le], nb = newTriArr[3*t0 + (le === 2 ? 0 : le + 1)];
+            const n0 = Math.min(na, nb), n1 = Math.max(na, nb);
             if (isOnConstraint(n0, n1)) continue;
             let opp0 = -1, opp1 = -1;
             for (let k = 0; k < 3; k++) {
@@ -1887,17 +1962,18 @@ export function refineTriMesh(mesh, marked) {
                 if (newTriArr[3*t1+k] !== n0 && newTriArr[3*t1+k] !== n1) opp1 = newTriArr[3*t1+k];
             }
             if (opp0 < 0 || opp1 < 0 || opp0 === opp1) continue;
-            const qBefore = Math.max(triQuality(t0), triQuality(t1));
-            if (qBefore < Q_SWAP) continue; // only target actual slivers
             // Convexity check: n0 and n1 must be on opposite sides of opp0-opp1
             const cross0 = (newNodes[2*opp1]-newNodes[2*opp0])*(newNodes[2*n0+1]-newNodes[2*opp0+1])
                          - (newNodes[2*n0]-newNodes[2*opp0])*(newNodes[2*opp1+1]-newNodes[2*opp0+1]);
             const cross1 = (newNodes[2*opp1]-newNodes[2*opp0])*(newNodes[2*n1+1]-newNodes[2*opp0+1])
                          - (newNodes[2*n1]-newNodes[2*opp0])*(newNodes[2*opp1+1]-newNodes[2*opp0+1]);
             if (cross0 * cross1 >= 0) continue; // not convex
+            // Outer neighbours of the quad before the swap: (opp0,n0), (opp0,n1) of
+            // t0 and (opp1,n0), (opp1,n1) of t1.
+            const outer = [nbrOf(t0, opp0, n0), nbrOf(t0, opp0, n1), nbrOf(t1, opp1, n0), nbrOf(t1, opp1, n1)];
             // Assign CCW winding based on which side each vertex is on
-            const s0 = [newTriArr[3*t0], newTriArr[3*t0+1], newTriArr[3*t0+2]];
-            const s1 = [newTriArr[3*t1], newTriArr[3*t1+1], newTriArr[3*t1+2]];
+            const s00 = newTriArr[3*t0], s01 = newTriArr[3*t0+1], s02 = newTriArr[3*t0+2];
+            const s10 = newTriArr[3*t1], s11 = newTriArr[3*t1+1], s12 = newTriArr[3*t1+2];
             if (cross0 > 0) {
                 // n0 left of opp0→opp1: [opp0, opp1, n0] is CCW
                 newTriArr[3*t0] = opp0; newTriArr[3*t0+1] = opp1; newTriArr[3*t0+2] = n0;
@@ -1909,14 +1985,27 @@ export function refineTriMesh(mesh, marked) {
                 // n1 left: [opp0, opp1, n1] is CCW
                 newTriArr[3*t1] = opp0; newTriArr[3*t1+1] = opp1; newTriArr[3*t1+2] = n1;
             }
-            const qAfter = Math.max(triQuality(t0), triQuality(t1));
-            if (qAfter >= qBefore) {
+            const qa0 = triQuality(t0), qa1 = triQuality(t1);
+            if (Math.max(qa0, qa1) >= qBefore) {
                 // Revert
-                newTriArr[3*t0] = s0[0]; newTriArr[3*t0+1] = s0[1]; newTriArr[3*t0+2] = s0[2];
-                newTriArr[3*t1] = s1[0]; newTriArr[3*t1+1] = s1[1]; newTriArr[3*t1+2] = s1[2];
+                newTriArr[3*t0] = s00; newTriArr[3*t0+1] = s01; newTriArr[3*t0+2] = s02;
+                newTriArr[3*t1] = s10; newTriArr[3*t1+1] = s11; newTriArr[3*t1+2] = s12;
             } else {
                 nSwaps++;
                 dirty[t0] = dirty[t1] = 1;
+                qTri[t0] = qa0; qTri[t1] = qa1;
+                // Relink the quad: each new triangle keeps the diagonal plus one
+                // outer edge from each of the old two.
+                for (const t of [t0, t1]) {
+                    for (let k = 0; k < 3; k++) {
+                        const a = newTriArr[3*t+k], b = newTriArr[3*t + (k === 2 ? 0 : k + 1)];
+                        const hasOpp0 = a === opp0 || b === opp0, hasOpp1 = a === opp1 || b === opp1;
+                        if (hasOpp0 && hasOpp1) { nbr[3*t+k] = t === t0 ? t1 : t0; continue; }
+                        const tri = hasOpp0 ? 0 : 1;
+                        const other = a === (hasOpp0 ? opp0 : opp1) ? b : a;
+                        link(t, k, outer[2*tri + (other === n0 ? 0 : 1)], a, b);
+                    }
+                }
             }
         }
         return nSwaps;
@@ -1927,13 +2016,14 @@ export function refineTriMesh(mesh, marked) {
         // Edge swaps
         for (let sp = 0; sp < 5; sp++) { if (edgeSwapPass() === 0) break; }
         // Quality-targeted smoothing of vertices near slivers. Determined
-        // before the vtAdj rebuild so a mesh with no slivers left leaves the
-        // loop without paying for it (vtAdj is not read after this loop).
+        // before the adjacency rebuild so a mesh with no slivers left leaves the
+        // loop without paying for it (the adjacency is not read after this loop).
         const Q_THRESH = 10;
+        refreshQ();
         const sliverAdj = new Uint8Array(newNodeCount);
         let anySliver = false;
         for (let t = 0; t < nNewTris; t++) {
-            if (triQuality(t) > Q_THRESH) {
+            if (qTri[t] > Q_THRESH) {
                 for (let k = 0; k < 3; k++) {
                     const v = newTriArr[3*t+k];
                     if (canMove[v] >= 1) { sliverAdj[v] = 1; anySliver = true; }
@@ -1941,13 +2031,8 @@ export function refineTriMesh(mesh, marked) {
             }
         }
         if (!anySliver) break;
-        // Rebuild vtAdj after swaps
-        for (let n = 0; n < newNodeCount; n++) vtAdj[n] = [];
-        for (let t = 0; t < nNewTris; t++) {
-            vtAdj[newTriArr[3*t]].push(t);
-            vtAdj[newTriArr[3*t+1]].push(t);
-            vtAdj[newTriArr[3*t+2]].push(t);
-        }
+        // Rebuild the vertex adjacency after swaps
+        ({ start: vtStart, vt: vtList } = vertexTris(newTriArr, nNewTris, newNodeCount));
         // Build constraint-line neighbor bounds for constrained vertices
         // canMove=2: on X boundary, moves along Y; canMove=3: on Y boundary, moves along X
         const clampLo = new Float64Array(newNodeCount).fill(-Infinity);
@@ -1956,7 +2041,8 @@ export function refineTriMesh(mesh, marked) {
             if (!sliverAdj[n] || canMove[n] < 2) continue;
             const mx = newNodes[2*n], my = newNodes[2*n+1];
             // Find neighbors on same constraint line via mesh edges
-            for (const t of vtAdj[n]) {
+            for (let i = vtStart[n]; i < vtStart[n+1]; i++) {
+                const t = vtList[i];
                 for (let k = 0; k < 3; k++) {
                     const nb = newTriArr[3*t+k];
                     if (nb === n) continue;
@@ -1983,36 +2069,29 @@ export function refineTriMesh(mesh, marked) {
     for (let sp = 0; sp < 5; sp++) { if (edgeSwapPass() === 0) break; }
 
     // --- Rebuild edge list and tri-edge mapping ---
-    const edgeMap2 = new Map();
-    const edgeList2 = [];
+    // Edges are numbered in order of first appearance (triangle-major, local edge
+    // minor): an edge is new at t unless its neighbour across it comes earlier,
+    // in which case it takes that neighbour's number.
+    const edgeBuf = new Int32Array(6*nNewTris);
     const newTriEdges = new Int32Array(3*nNewTris);
     const newTriSigns = new Int8Array(3*nNewTris);
-
+    let nNewEdges = 0;
     for (let t = 0; t < nNewTris; t++) {
-        const localEdges = [[0,1],[1,2],[2,0]];
         for (let le = 0; le < 3; le++) {
-            const na = newTriArr[3*t+localEdges[le][0]];
-            const nb = newTriArr[3*t+localEdges[le][1]];
+            const na = newTriArr[3*t+le], nb = newTriArr[3*t + (le === 2 ? 0 : le + 1)];
             const n0 = Math.min(na,nb), n1 = Math.max(na,nb);
-            const key = n0 * newNodeCount + n1;
-            let eIdx;
-            if (edgeMap2.has(key)) {
-                eIdx = edgeMap2.get(key);
-            } else {
-                eIdx = edgeList2.length;
-                edgeList2.push([n0,n1]);
-                edgeMap2.set(key, eIdx);
+            const u = nbr[3*t+le];
+            let eIdx = -1;
+            if (u >= 0 && u < t) eIdx = newTriEdges[3*u + localEdgeOf(newTriArr, u, na, nb)];
+            if (eIdx < 0) {
+                eIdx = nNewEdges++;
+                edgeBuf[2*eIdx] = n0; edgeBuf[2*eIdx+1] = n1;
             }
             newTriEdges[3*t+le] = eIdx;
             newTriSigns[3*t+le] = (na === n0) ? 1 : -1;
         }
     }
-
-    const nNewEdges = edgeList2.length;
-    const newEdgeArr = new Int32Array(2*nNewEdges);
-    for (let e = 0; e < nNewEdges; e++) {
-        newEdgeArr[2*e] = edgeList2[e][0]; newEdgeArr[2*e+1] = edgeList2[e][1];
-    }
+    const newEdgeArr = edgeBuf.slice(0, 2*nNewEdges);
 
     return {
         nodes: newNodes, tris: newTriArr, edges: newEdgeArr,
