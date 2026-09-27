@@ -74,6 +74,13 @@ console.log(`   eps_eff = ${mode_67ghz_c.eps_eff.toFixed(6)} (should be ~3.89)`)
 console.log(`   C = ${(mode_67ghz_c.C * 1e12).toFixed(6)} pF/m`);
 console.log(`   Z0 = ${mode_67ghz_c.Z0.toFixed(6)} Ω`);
 
+// Back to nominal materials on the same solver: the causal state must not linger in
+// the materials or in any per-frequency cache.
+console.log('\n3b. Computing at 67 GHz WITHOUT causal materials again...');
+solver.use_causal_materials = false;
+const mode_67ghz_nc2 = (await solver.computeAtFrequency(67e9, result_1ghz)).modes[0];
+console.log(`   eps_eff = ${mode_67ghz_nc2.eps_eff.toFixed(6)} (must match step 2)`);
+
 // Compare
 console.log('\n4. Comparison:');
 console.log(`   Δeps_eff = ${(mode_67ghz_nc.eps_eff - mode_67ghz_c.eps_eff).toFixed(6)}`);
@@ -115,6 +122,9 @@ check('non-causal eps_eff ≈ 4.1', Math.abs(mode_67ghz_nc.eps_eff - 4.1) < 4.1 
 check('causal eps_eff ≈ 3.89', Math.abs(mode_67ghz_c.eps_eff - 3.89) < 3.89 * 0.03);
 check('causal eps_eff < non-causal eps_eff', mode_67ghz_c.eps_eff < mode_67ghz_nc.eps_eff);
 check('causal C < non-causal C', mode_67ghz_c.C < mode_67ghz_nc.C);
+check('switching causal off again restores the nominal eps_eff and C',
+      Math.abs(mode_67ghz_nc2.eps_eff - mode_67ghz_nc.eps_eff) < 1e-4 * mode_67ghz_nc.eps_eff &&
+      Math.abs(mode_67ghz_nc2.C - mode_67ghz_nc.C) < 1e-4 * mode_67ghz_nc.C);
 const reduction = 1 - mode_67ghz_c.eps_eff / mode_67ghz_nc.eps_eff;
 check('eps_eff reduction in 3%–8% band', reduction > 0.03 && reduction < 0.08);
 // The regression guard: a direct single-frequency solve must land on the causal

@@ -42,7 +42,7 @@
 //     false: measured -2.05% on eps and +0.72% on alpha_d at 5 GHz, on both backends,
 //     which would fail the gates below by 2x. The er = 1 microstrip is NOT affected —
 //     both backends skip the model when |er - 1| < 1e-6 or tand == 0 (djordjevic_sarkar.js
-//     applyDjordjevicSarkar, tri_backend.js _applyCausal), and that case trips both
+//     applyDjordjevicSarkar, tri_backend.js _applyMaterials), and that case trips both
 //     guards, so causal on/off is bit-identical there. The flag is set uniformly anyway,
 //     so the er = 1 geometry stays safe if its materials are ever edited.
 //   • The reported eps_eff is c^2*L*C with the INTERNAL inductance included, so it sits

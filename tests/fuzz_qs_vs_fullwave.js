@@ -355,7 +355,7 @@ async function solveOn(spec, backend) {
         // computeAtFrequency when use_causal_materials is set) — re-evaluate at the solve
         // frequency to apply the Djordjevic-Sarkar model. This applies the SAME er(f) shift to
         // both backends (rectilinear re-solves Laplace with the causal er; triangular re-runs
-        // solveAt → _applyCausal), keeping the cross-backend comparison fair.
+        // solveAt → _applyMaterials), keeping the cross-backend comparison fair.
         if (spec.use_causal) r = await s.computeAtFrequency(s.freq, r);
         // Compare every mode the backend returns: single-ended → [single]; differential →
         // [odd, even], in that fixed order from the shared FieldSolver2D path on both backends.

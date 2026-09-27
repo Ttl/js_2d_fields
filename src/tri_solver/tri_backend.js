@@ -1568,6 +1568,7 @@ export class TriBackend {
         if (meshErrors.length)
             throw new Error('Full-wave mesh validation failed:\n' + meshErrors.map(e => ' - ' + e).join('\n'));
         if (this._isWG) this._prepareWaveguide(); else this._prepareStatic();
+        this._materialKey = 'nominal';
         return mesh;
     }
 
@@ -1946,7 +1947,7 @@ export class TriBackend {
         const grid = buildGridFromMesh(mesh, this.domain, {
             resolution: this.opts.resolution, forcedX, forcedY, mirrorX: this.symmetry,
         });
-        // Cached for the per-frequency causal-materials rebuild (_applyCausal), which re-runs
+        // Cached for the per-frequency causal-materials rebuild (_applyMaterials), which re-runs
         // the same static preparation under the updated permittivity.
         this._staticGrid = grid;
         // Conductor rects in full-domain coordinates for the resampler's E-baseline
@@ -1987,7 +1988,7 @@ export class TriBackend {
             const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
             // With causal materials the first solveAt immediately re-solves the statics
             // under eps(f) and resamples again, so resampling here would be thrown away.
-            // _applyCausal fills st.fields in whenever it is still missing.
+            // _applyMaterials fills st.fields in whenever it is still missing.
             const fields = s.use_causal_materials ? null : resampleStatic(mesh, phiEps, this.domain,
                 { resolution: this.opts.resolution, parity, grid, rects: this._plotRects });
             this._static[mode] = {
@@ -2012,8 +2013,8 @@ export class TriBackend {
     // so the downstream result assembly is unchanged. For a symmetric pair the eigenvectors
     // come out as [1,∓1], reproducing the existing odd/even basis exactly.
     // fieldsMode: 'build' resamples the plot fields, 'defer' leaves them null (the
-    // causal re-solve in _applyCausal supersedes them immediately), 'reuse' keeps the
-    // ones already there (mid-sweep: nothing displays them, see _applyCausal).
+    // causal re-solve in _applyMaterials supersedes them immediately), 'reuse' keeps the
+    // ones already there (mid-sweep: nothing displays them, see _applyMaterials).
     _prepareStaticModal(grid, fieldsMode = 'build') {
         const { mesh } = this;
         const s = this.solver;
@@ -3094,14 +3095,31 @@ export class TriBackend {
         };
     }
 
-    // Public: solve at one frequency, return the unified result object and write
-    // grid fields + triangle mesh back onto the solver for plotting/export.
-    // Apply the Djordjevic–Sarkar causal dielectric model at frequency f: rebuild the
-    // per-triangle eps/loss maps from the frequency-dependent permittivity and re-solve
-    // the static field so eps_eff (below F_STATIC_MAX), the full-wave eigensolve (which
-    // reads mesh.epsMap), C, and the dielectric-loss energy W_loss all track the causal
-    // model. The k2 eigensolve cache is bypassed separately in _modeAtFreq.
-    _applyCausal(f, skipFields = false) {
+    // Bring the materials to the state the solver asks for at frequency f. The
+    // per-frequency caches (dispersion, MQS R/L and line-asymmetry anchors) hold values
+    // of one material state, nominal or causal with a given f_ref, and are dropped when
+    // it changes. Leaving causal materials restores the nominal maps and statics.
+    _syncMaterials(f, skipFields = false) {
+        const causal = !!this.solver.use_causal_materials;
+        const key = causal ? `causal ${this.opts.causalFref ?? 1e9}` : 'nominal';
+        if (key !== this._materialKey) {
+            for (const st of Object.values(this._static || {})) {
+                if (st) { st.disp = null; st.mqsR = null; st.mqsL = null; }
+            }
+            this._lineCache = null;
+            if (!causal) this._applyMaterials(f, false, skipFields);
+            this._materialKey = key;
+        }
+        if (causal) this._applyMaterials(f, true, skipFields);
+    }
+
+    // Apply the Djordjevic–Sarkar causal dielectric model at frequency f (or the
+    // nominal materials when `causal` is false): rebuild the per-triangle eps/loss maps
+    // and re-solve the static field so eps_eff (below F_STATIC_MAX), the full-wave
+    // eigensolve (which reads mesh.epsMap), C, and the dielectric-loss energy W_loss
+    // all track the material model. The k2 eigensolve cache is bypassed separately in
+    // _modeAtFreq.
+    _applyMaterials(f, causal, skipFields = false) {
         const s = this.solver;
         const fref = this.opts.causalFref ?? 1e9;
         let causalInvalid = null;
@@ -3111,7 +3129,7 @@ export class TriBackend {
             // bounding box, and the causal re-tag would label everything outside the
             // real body (the polygon's vertex "horns") as air.
             const rect = { x_min: d.x_min, x_max: d.x_max, y_min: d.y_min, y_max: d.y_max, shape: d.shape || null };
-            if (Math.abs(er - 1) < 1e-6 || Math.abs(td) < 1e-10) return { ...rect, epsilon_r: er, tan_delta: td };
+            if (!causal || Math.abs(er - 1) < 1e-6 || Math.abs(td) < 1e-10) return { ...rect, epsilon_r: er, tan_delta: td };
             const { eps_real, tand_actual, valid } = djordjevic_sarkar(f, er, td, fref);
             if (!valid && !causalInvalid) causalInvalid = { er, td };
             return { ...rect, epsilon_r: eps_real, tan_delta: tand_actual };
@@ -3156,10 +3174,12 @@ export class TriBackend {
         }
     }
 
+    // Public: solve at one frequency, return the unified result object and write
+    // grid fields + triangle mesh back onto the solver for plotting/export.
     solveAt(f, opts = {}) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         this._modeWarnings = [];
-        if (this.solver.use_causal_materials) this._applyCausal(f, opts.skipFieldResample === true);
+        this._syncMaterials(f, opts.skipFieldResample === true);
         // Surface the buildMesh-time accuracy warning (failed verification certificate)
         // through the same per-solve channel as the mode warnings, so the UI logs it.
         if (this._certWarn) this._modeWarnings.push(this._certWarn);
@@ -3260,7 +3280,7 @@ export class TriBackend {
     // propagating modes (γ²<0), null otherwise.
     solveModes(f, nev = 4) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
-        if (this.solver.use_causal_materials) this._applyCausal(f);
+        this._syncMaterials(f);
         const s = this.solver, cr = this.condRect, mesh = this.mesh;
         const st = this._static[this.modeNames[0]];   // any cached static solve seeds the shift
         const { fm, phiEps, eps_eff_static } = st;
