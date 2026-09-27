@@ -12,17 +12,8 @@
 // substrate. Runs with causal materials on, away from the 1 GHz reference, on a fresh
 // solver each time (the Djordjevic-Sarkar correction mutates the painted arrays).
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
+import { check, quiet, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log;
-    console.log = () => {};
-    try { return await fn(); } finally { console.log = log; }
-}
 
 // Coordinates are integer multiples of u = 2^-13 m (0.122 mm), so every edge, sum and
 // difference is an exact double and the two descriptions share their grid lines exactly.
@@ -152,5 +143,4 @@ for (const [name, g] of [['inset', INSET], ['crossing block', CROSS]]) {
         `G ${qo[4].toExponential(3)} vs ${ro[4].toExponential(3)}`);
 }
 
-console.log(failures === 0 ? '\nALL DIELECTRIC OVERLAP TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

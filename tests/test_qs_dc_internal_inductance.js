@@ -7,25 +7,14 @@
 // current). Also: the DC limit of a stripline trace, whose faces carry equal fields,
 // and the differential modes on the half domain.
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
+import { check, quiet, relErr as rel, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const rel = (a, b) => Math.abs(a - b) / Math.abs(b);
 
-const SOLVE = { max_iters: 12, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+const SOLVE = { ...APP, max_iters: 12 };
 // Internal inductance per mode (nH/m) at each frequency.
 async function lint(text, freqs, tri) {
     const s = new CustomGeometrySolver({ text, sigma_cond: 1e6, freq: Math.max(...freqs), nx: 30, ny: 30,
         ...(tri ? { mesh_backend: 'triangular' } : {}) });
-    if (tri) s.tri_opts = { lossMethod: 'auto' };
     return quiet(async () => {
         const r0 = await s.solve_adaptive(SOLVE);
         const out = [];
@@ -73,7 +62,6 @@ async function lintMs(opts, freqs, tri) {
     const s = new MicrostripSolver({ trace_width: 0.35e-3, substrate_height: 0.21e-3, trace_thickness: 35e-6,
         gnd_thickness: 35e-6, epsilon_r: 4.4, tan_delta: 0.02, sigma_cond: 5.8e7, freq: 1e9, rq: 0,
         boundaries: ['open', 'open', 'open', 'gnd'], nx: 30, ny: 30, ...opts, ...(tri ? { mesh_backend: 'triangular' } : {}) });
-    if (tri) s.tri_opts = { lossMethod: 'auto' };
     return quiet(async () => {
         const r0 = await s.solve_adaptive(SOLVE);
         const out = [];
@@ -105,7 +93,7 @@ for (const [name, plating] of [['thick corners', { ...PLATING, thick_corners: tr
     const text = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.21 er=4.4\n' +
         'sig+ x=-0.175 w=0.35 y=0.21 h=0.031 sigma=5.8e7\nsig+ x=-0.175 w=0.35 y=0.241 h=0.004 sigma=1e7';
     const run = tri => { const s = new CustomGeometrySolver({ text, sigma_cond: 5.8e7, freq: 1e9, nx: 30, ny: 30,
-        ...(tri ? { mesh_backend: 'triangular' } : {}) }); if (tri) s.tri_opts = { lossMethod: 'auto' }; return s; };
+        ...(tri ? { mesh_backend: 'triangular' } : {}) }); return s; };
     const at = async (s, freqs) => quiet(async () => {
         const r0 = await s.solve_adaptive(SOLVE);
         const out = [];
@@ -119,5 +107,6 @@ for (const [name, plating] of [['thick corners', { ...PLATING, thick_corners: tr
         `${q[1].toFixed(2)} vs ${t[0].toFixed(2)} nH/m`);
 }
 
-if (failures) { console.log(`\n${failures} CHECK(S) FAILED`); process.exit(1); }
+done();
+
 console.log('\nALL CHECKS PASSED');

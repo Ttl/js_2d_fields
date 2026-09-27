@@ -11,12 +11,7 @@
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
-
-let pass = 0, fail = 0;
-function check(name, cond, detail = '') {
-    console.log(`  ${cond ? 'PASS' : 'FAIL'}: ${name}${detail && !cond ? ` — ${detail}` : ''}`);
-    cond ? pass++ : fail++;
-}
+import { check, quiet, APP, done } from './helpers.js';
 
 const h = 0.5e-3;
 function ms(opts = {}) {
@@ -130,14 +125,7 @@ const filled = (backend) => new CustomGeometrySolver({ text: filledText, nx: 30,
 check('dielectric fill to the open top: no geometric warning', filled('rectilinear').openBoundaryWarnings().length === 0);
 
 // Measured check.
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
 async function solved(s) {
-    if (s.mesh_backend === 'triangular') s.tri_opts = { lossMethod: 'auto' };
     const r = await quiet(() => s.solve_adaptive({ ...APP }));
     return { Z0: r.modes[0].Z0.re ?? r.modes[0].Z0, w: (r.warnings || []).find(v => v.type === 'open-boundary') };
 }
@@ -188,5 +176,4 @@ gnd   x=s/2      y=0   w=w     h=t
         `FDM ${(100 * est.rectilinear).toFixed(1)} %, full-wave ${(100 * est.triangular).toFixed(1)} %`);
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+done();

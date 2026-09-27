@@ -1,6 +1,6 @@
 // Modes viewer: solve the full-wave eigenproblem for several modes via the FieldSolver2D
 // public API (solveModes/getModeField), and verify classification + field resampling.
-import { MicrostripSolver } from '../../microstrip.js';
+import { MicrostripSolver } from '../src/microstrip.js';
 
 const s = new MicrostripSolver({ trace_width: 0.35e-3, substrate_height: 0.21e-3,
     trace_thickness: 35e-6, epsilon_r: 4.4, tan_delta: 0.02, freq: 20e9 });

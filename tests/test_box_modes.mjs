@@ -16,15 +16,11 @@
 // Above cutoff, (m,n) with m,n ≥ 1 contributes TWO modes (TE + TM, degenerate in
 // the empty box); (m,0)/(0,n) only TE.
 //
-// Run: node src/tri_solver/tests/box_modes_test.mjs
-import { MicrostripSolver } from '../../microstrip.js';
+// Run: node tests/test_box_modes.mjs
+import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, done } from './helpers.js';
 
 const C0 = 299792458;
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 
 // Analytic mode list of an a×b PEC box, uniform fill eps_r, at frequency f.
 // minEps skips modes too close to cutoff to assert robustly (trace perturbation).
@@ -52,10 +48,6 @@ function makeSolver(opts) {
     return s;
 }
 
-const quiet = async (fn) => {
-    const log = console.log; console.log = () => {};
-    try { return await fn(); } finally { console.log = log; }
-};
 
 // ---------- 1. Air-filled box + tiny trace: exact truth, count AND values ----------
 {
@@ -143,5 +135,4 @@ const quiet = async (fn) => {
         prop.every(m => m.eps_eff < 4.4 * 1.02));
 }
 
-console.log(failures === 0 ? '\nBOX MODES OK' : `\nBOX MODES: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+done();

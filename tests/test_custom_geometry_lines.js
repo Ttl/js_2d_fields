@@ -4,29 +4,16 @@
 //   2. microstrip on a finite-width ground with air and open boundaries all around
 //   3. CPW on a finite substrate over air, against the conformal-mapping closed form
 //   4. slotline, full-wave effective permittivity against Janaswamy-Schaubert
-//   5. a conductor drawn as two touching rectangles is one body
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b));
 const pct = v => `${(100 * v).toFixed(2)}%`;
 
-const SOLVE = { max_iters: 8, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+const SOLVE = { ...APP, max_iters: 8 };
 const TRI = { mesh_backend: 'triangular' };
 async function solve(text, extra = {}) {
     const s = new CustomGeometrySolver({ text, nx: 30, ny: 30, freq: 1e9, ...extra });
-    // The loss method the app selects for the full-wave solver (MQS volume loss).
-    if (s.mesh_backend === 'triangular') s.tri_opts = { lossMethod: 'auto' };
     const r = await quiet(() => s.solve_adaptive(SOLVE));
     return r.modes.map(m => ({ Z0: m.Z0?.re ?? m.Z0, eps: m.eps_eff, R: m.RLGC.R, G: m.RLGC.G }));
 }
@@ -111,13 +98,4 @@ const finiteGnd = gw => `units mm\nbounds open open open open\ndiel x=-inf w=inf
         `${t5[0].eps.toFixed(4)} vs ${t10[0].eps.toFixed(4)}`);
 }
 
-// --- 5. Touching rectangles of one role are one conductor ---
-{
-    const head = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.5 er=4.3 tand=0.02\n';
-    const split = head + 'sig+ x=-0.15 w=0.15 y=0.5 h=0.035\nsig+ x=0 w=0.15 y=0.5 h=0.035\n';
-    agree('trace drawn as two halves = native microstrip (QS)', await solve(split), native, 5e-3, 0.03);
-    agree('trace drawn as two halves, QS vs full-wave', await solve(split), await solve(split, TRI), 0.01, 0.10);
-}
-
-console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY LINE TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

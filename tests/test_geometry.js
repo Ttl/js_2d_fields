@@ -20,12 +20,8 @@ import { buildSolverFromParams } from '../src/solver_factory.js';
 import { _clipDomain, condRectsOf, groundBodyCount } from '../src/tri_solver/occ_to_mesh.js';
 import { polyRadiusForArea, circlePolygon, shapePoly, shapeArea, shapeContains,
          shapeSegments, shapeSignedDist, isComplement } from '../src/shapes.js';
+import { check, done } from './helpers.js';
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const near = (x, y, tol = 1e-12) => Math.abs(x - y) < tol;
 const signals = (s) => s.conductors.filter(c => c.is_signal);
 const grounds = (s) => s.conductors.filter(c => !c.is_signal);
@@ -504,5 +500,4 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
     rejects({ mesh_backend: 'rectilinear' }, 'the quasi-static backend');
 }
 
-console.log(failures === 0 ? '\nGEOMETRY OK' : `\nGEOMETRY: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+done();

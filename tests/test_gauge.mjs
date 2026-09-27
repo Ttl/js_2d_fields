@@ -22,17 +22,13 @@
 //      one does not, with the 1 GHz eigenvalue (dispersion ~3e-5);
 //   5. end to end: TriBackend._eigenPick returns the quasi-TEM at 1 MHz.
 //
-// Run: node src/tri_solver/tests/gauge_test.mjs
-import { MicrostripSolver } from '../../microstrip.js';
+// Run: node tests/test_gauge.mjs
+import { MicrostripSolver } from '../src/microstrip.js';
 import { buildTriFreedomMap, assembleTriFEMDecomposed, femFromDecomposition, staticToEdgeDofs,
-         buildTriGauge, gaugeExpand, gaugeSeed } from '../tri_fem.js';
+         buildTriGauge, gaugeExpand, gaugeSeed } from '../src/tri_solver/tri_fem.js';
+import { check, done } from './helpers.js';
 
 const c0 = 299792458;
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const silence = async fn => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
 const matvec = (M, val, x) => {
     const y = new Float64Array(x.length);
@@ -161,5 +157,4 @@ for (const [name, geo] of Object.entries(CASES)) {
     }
 }
 
-console.log(failures ? `\n${failures} check(s) FAILED` : '\nAll checks passed');
-process.exit(failures ? 1 : 0);
+done();

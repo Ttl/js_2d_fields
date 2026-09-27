@@ -1,15 +1,9 @@
 // Browser end-to-end for the Modes tab: load the app, open the Modes tab, solve the
 // eigenmodes, confirm the mode list + field plot render, and clicking a mode replots —
 // all with no console errors.
-import { chromium } from 'playwright-core';
+import { launch, URL, printErrors, finish } from './e2e_helpers.mjs';
 
-const URL = 'http://localhost:8731/field_solver.html';
-const browser = await chromium.launch({ executablePath: '/snap/bin/chromium', args: ['--no-sandbox'] });
-const page = await browser.newPage();
-const errors = [];
-page.on('console', m => { if (m.type() === 'error' && !/Failed to load resource/i.test(m.text())) errors.push(m.text()); });
-page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
-page.on('response', r => { if (r.status() === 404 && !/favicon/.test(r.url())) errors.push('404 ' + r.url()); });
+const { browser, page, errors } = await launch();
 
 await page.goto(URL, { waitUntil: 'networkidle' });
 console.log('page loaded');
@@ -55,10 +49,5 @@ if (nRows > 1) {
 }
 console.log('clicking a mode selects it:', clickOk);
 
-console.log('--- console errors:', errors.length, '---');
-errors.slice(0, 10).forEach(e => console.log('  ERR:', e.slice(0, 200)));
-
-const pass = ok && nRows > 0 && hasPlot >= 1 && nSelected === 1 && (nRows <= 1 || clickOk) && errors.length === 0;
-await browser.close();
-console.log(pass ? '\nMODES E2E PASS' : '\nMODES E2E NEEDS REVIEW');
-process.exit(pass ? 0 : 1);
+printErrors(errors);
+await finish(browser, ok && nRows > 0 && hasPlot >= 1 && nSelected === 1 && (nRows <= 1 || clickOk) && errors.length === 0);

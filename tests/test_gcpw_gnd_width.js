@@ -11,20 +11,9 @@
 // Run: node tests/test_gcpw_gnd_width.js
 import { MicrostripSolver } from '../src/microstrip.js';
 import { buildSolverFromParams } from '../src/solver_factory.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const near = (x, y, tol = 1e-12) => Math.abs(x - y) < tol;
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
 
 const W = 0.35e-3, H = 0.21e-3, T = 35e-6, GAP = 0.1e-3, VIA_GAP = 0.1e-3;
 const BASE = {
@@ -205,7 +194,6 @@ for (const [label, o] of [['omitted', {}], ["'full'", { coplanar_gnd_width: 'ful
     const rq = await quiet(() => qs.solve_adaptive({ ...APP }));
     const tri = build({ ...o, mesh_backend: 'triangular' });
     tri.use_causal_materials = false;
-    tri.tri_opts = { lossMethod: 'auto' };
     let rt = null, err = '';
     try { rt = await quiet(() => tri.solve_adaptive({ ...APP })); } catch (e) { err = e.message; }
     check('tri: finite-ground GCPW meshes and solves', !!rt, err);
@@ -219,5 +207,4 @@ for (const [label, o] of [['omitted', {}], ["'full'", { coplanar_gnd_width: 'ful
     }
 }
 
-console.log(failures === 0 ? '\nALL GCPW GROUND WIDTH TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

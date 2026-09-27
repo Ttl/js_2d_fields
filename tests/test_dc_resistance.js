@@ -17,18 +17,8 @@
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { MicrostripSolver } from '../src/microstrip.js';
 import { dcLineParameters } from '../src/dc_inductance.js';
+import { check, quiet, relErr as rel, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const rel = (a, b) => Math.abs(a - b) / Math.abs(b);
 
 const MS = { trace_thickness: 35e-6, gnd_thickness: 35e-6, epsilon_r: 4.5, tan_delta: 0, sigma_cond: 5.8e7, freq: 1e6, nx: 10, ny: 10 };
 const MS_B = ['open', 'open', 'open', 'gnd'];
@@ -73,11 +63,10 @@ const cases = {
         `${gnds.length} grounds, walls [${[...s._wall_grounds()]}], domain bottom ${(s.domain_y_min * 1e3).toFixed(3)} mm`);
 }
 
-const SOLVE = { max_iters: 12, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+const SOLVE = { ...APP, max_iters: 12 };
 
 async function run(mk, tri, freqs) {
     const s = mk(tri ? { mesh_backend: 'triangular' } : {});
-    if (tri) s.tri_opts = { lossMethod: 'auto' };
     return quiet(async () => {
         const r0 = await s.solve_adaptive(SOLVE);
         const at = [];
@@ -126,5 +115,6 @@ for (const [name, mk] of Object.entries(cases)) {
     });
 }
 
-if (failures) { console.log(`\n${failures} CHECK(S) FAILED`); process.exit(1); }
+done();
+
 console.log('\nALL CHECKS PASSED');

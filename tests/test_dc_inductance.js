@@ -9,13 +9,8 @@
 //   4. the DC resistance: the traces in series with the grounds, which drop out when
 //      a wall ground is there
 import { rectLogIntegral, dcLineParameters } from '../src/dc_inductance.js';
+import { check, relErr as rel, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-const rel = (a, b) => Math.abs(a - b) / Math.abs(b);
 const MU = 2e-7;
 
 // 1. Closed form.
@@ -93,5 +88,6 @@ for (const [name, w] of [['wall ground', walls], ['finite ground', new Set()]]) 
     check('differential pair, even mode: the ground returns 2I', rel(even.R, Rp + 2 * Rg) < 1e-12, `${even.R.toFixed(6)} ohm/m`);
 }
 
-if (failures) { console.log(`\n${failures} CHECK(S) FAILED`); process.exit(1); }
+done();
+
 console.log('\nALL CHECKS PASSED');

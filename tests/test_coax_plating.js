@@ -17,15 +17,11 @@
 //
 // Run: node tests/test_coax_plating.js
 import { CoaxSolver } from '../src/coax.js';
+import { check, done } from './helpers.js';
 
 const D_IN = 0.92e-3, D_OUT = 2.95e-3, ER = 2.1, TAND = 2e-4, SIG = 5.8e7;
 const a = D_IN / 2, b = D_OUT / 2;
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '\u2713 PASS' : '\u2717 FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const pct = (a_, b_) => ((a_ - b_) / b_ * 100).toFixed(3) + '%';
 function near(name, got, want, tolPct) {
     check(name, Math.abs(got / want - 1) * 100 <= tolPct,
@@ -149,5 +145,4 @@ const platingOf = (sel) => ({ sigma: AG, thickness: 4e-6, rq: 0, ...sel });
 }
 
 
-console.log(`\n${failures === 0 ? 'ALL TESTS PASSED' : failures + ' TEST(S) FAILED'}`);
-process.exit(failures === 0 ? 0 : 1);
+done();

@@ -3,11 +3,10 @@
 //  - geometries that need an impossibly dense mesh (large domain + high frequency,
 //    or an absurd feature/domain ratio) are rejected with a clear error.
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check as checkOk, done } from './helpers.js';
 
-let pass = 0, fail = 0;
 function check(name, fn) {
-    try { fn(); console.log(`  PASS: ${name}`); pass++; }
-    catch (e) { console.log(`  FAIL: ${name}\n        ${e.message}`); fail++; }
+    try { fn(); checkOk(name, true); } catch (e) { checkOk(name, false, e.message); }
 }
 
 // A normal microstrip should be meshable on both backends and at high frequency.
@@ -100,5 +99,4 @@ check('electrically large box: triangular main guard passes it (premise)',
 check('…but the modes guard rejects it @ 100 GHz (rectilinear selected)',
     () => modesReject(bigBox('rectilinear'), 100e9, 'bigbox-modes'));
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+done();

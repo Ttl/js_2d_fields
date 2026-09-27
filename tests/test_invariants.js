@@ -58,27 +58,18 @@
 import { MicrostripSolver } from '../src/microstrip.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential,
          computeSParamsDifferentialMTL, buildPhysicalRLGC } from '../src/sparameters.js';
+import { check, quiet, done } from './helpers.js';
 
 const EPS0 = 8.854187817e-12, MU0 = 4e-7 * Math.PI;
 const C0 = 1 / Math.sqrt(EPS0 * MU0);
 const NP_TO_DB = 8.685889638;
 const SIG = 5.8e7;
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const pct = (got, want) => ((got - want) / want * 100).toFixed(4) + '%';
 function near(name, got, want, tolPct) {
     check(name, Math.abs(got / want - 1) * 100 <= tolPct,
         `${got.toExponential(6)} vs ${want.toExponential(6)}, ${pct(got, want)}, tol ${tolPct}%`);
 }
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
 
 // One solve, returning the whole result so differential callers can reach both modes and
 // the physical matrix. `hints` overrides the triangular mesher's element sizes, which is
@@ -461,5 +452,4 @@ console.log('\n=== E. MTL matrices: [L][C] == mu0*eps0*er*I for a homogeneous fi
     near('round-trip: L11 + L12 == L_even', L[0][0] + L[0][1], even.L_external, 1e-6);
 }
 
-console.log(`\n${failures === 0 ? 'ALL TESTS PASSED' : failures + ' CHECK(S) FAILED'}`);
-process.exit(failures === 0 ? 0 : 1);
+done();

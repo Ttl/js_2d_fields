@@ -13,12 +13,8 @@
 // The ±10% band catches the gate regression (13.6% pre-fix) without pinning that
 // separate bias tighter than it deserves.
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 
 const MU0 = 4e-7 * Math.PI;
 const SIGMA = 5.8e7, T = 35e-6, W = 0.3e-3;
@@ -53,5 +49,4 @@ const rel = Math.abs(rW - rMs) / rMs;
 check('wide-gap GCPW R → microstrip R at δ/t = 0.3 (±10%)', rel < 0.10,
     `gcpw ${rW.toFixed(2)} vs microstrip ${rMs.toFixed(2)} Ω/m, ${(100 * rel).toFixed(1)}%`);
 
-console.log(failures === 0 ? '\nALL QS GCPW CONTINUITY TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

@@ -16,13 +16,9 @@
 import { MicrostripSolver } from '../src/microstrip.js';
 import { initTriBackend, TriBackend } from '../src/tri_solver/tri_backend.js';
 import { mqsConductorLoss } from '../src/tri_solver/mqs_loss.js';
+import { check, done } from './helpers.js';
 
 const ctx = await initTriBackend();
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-30);
 
 const SIGMA = 5.8e7;
@@ -123,5 +119,4 @@ async function tri(opts, triOpts = {}) {
     }
 }
 
-console.log(failures === 0 ? '\nALL GCPW MQS TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

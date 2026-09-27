@@ -1,7 +1,7 @@
 // Per-face plating: verify the full-wave backend applies plating per selected
 // face (top/sides/bottom) and tracks the FDM backend across configurations.
-import { MicrostripSolver } from '../../microstrip.js';
-import { initTriBackend, TriBackend } from '../tri_backend.js';
+import { MicrostripSolver } from '../src/microstrip.js';
+import { initTriBackend, TriBackend } from '../src/tri_solver/tri_backend.js';
 
 const ctx = await initTriBackend();
 const F = 20e9;

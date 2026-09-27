@@ -24,18 +24,9 @@
 // the half-domain MQS answer, not return the silently ~4×-low parallel-drive
 // answer the single shared drive used to produce.
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
 
 const FAMILIES = [
     {
@@ -157,5 +148,4 @@ for (const fam of FAMILIES) {
         `${fullM.modes[0].RLGC.R.toFixed(2)} vs ${half.modes[0].RLGC.R.toFixed(2)} Ω/m`);
 }
 
-console.log(failures === 0 ? '\nALL HALF≡FULL IDENTITY TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

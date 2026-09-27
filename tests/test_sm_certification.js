@@ -12,12 +12,8 @@
 //      budget/tolerance,
 //   3. the FDM answer agrees with the triangular backend on C.
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 
 const base = {
     trace_width: 0.35e-3, substrate_height: 0.21e-3, trace_thickness: 35e-6,
@@ -25,14 +21,14 @@ const base = {
     nx: 30, ny: 30, boundaries: ['open', 'open', 'open', 'gnd'],
 };
 const sm = { use_sm: true, sm_t_sub: 20e-6, sm_t_trace: 20e-6, sm_t_side: 20e-6, sm_er: 3.5, sm_tand: 0.02 };
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2, certify: true };
+const CERT = { ...APP, certify: true };
 
 async function solve(opts, backend = 'rectilinear') {
     const s = new MicrostripSolver({ ...base, ...opts, mesh_backend: backend });
     const log = console.log;
     console.log = () => {};
     try {
-        const r = await s.solve_adaptive({ ...APP });
+        const r = await s.solve_adaptive({ ...CERT });
         return { s, m: r.modes[0], cert: s.certification };
     } finally {
         console.log = log;
@@ -54,5 +50,4 @@ const dC = Math.abs(fdm.m.RLGC.C - tri.m.RLGC.C) / tri.m.RLGC.C;
 check('FDM solder-mask C matches triangular backend (±1%)', dC < 0.01,
     `fdm ${(fdm.m.RLGC.C * 1e12).toFixed(3)} vs tri ${(tri.m.RLGC.C * 1e12).toFixed(3)} pF/m, ${(100 * dC).toFixed(2)}%`);
 
-console.log(failures === 0 ? '\nALL SM CERTIFICATION TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

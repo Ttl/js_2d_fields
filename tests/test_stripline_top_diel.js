@@ -16,19 +16,8 @@
 //
 // Run: node tests/test_stripline_top_diel.js
 import { buildSolverFromParams } from '../src/solver_factory.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let pass = 0, fail = 0;
-function check(name, cond, detail = '') {
-    console.log(`  ${cond ? 'PASS' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`);
-    cond ? pass++ : fail++;
-}
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
 
 const ER = 4.4, H = 0.3e-3, H_TOP = 0.3e-3, T = 35e-6;
 const P = { tl_type: 'stripline', w: 0.2e-3, h: H, t: T, er: ER, tand: 0.02, er_top: ER, tand_top: 0.02,
@@ -105,5 +94,4 @@ const solve = async (over, backend) => (await solveAll(over, backend)).modes[0];
     check('no floating-grounds warning with enclosure side walls', !(modesBoxed.warnings || []).some(w => w.type === 'floating-grounds'));
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+done();

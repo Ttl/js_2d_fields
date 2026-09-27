@@ -15,13 +15,9 @@
 import { MicrostripSolver } from '../src/microstrip.js';
 import { initTriBackend, TriBackend } from '../src/tri_solver/tri_backend.js';
 import { buildTriFreedomMap, assembleTriFEM } from '../src/tri_solver/tri_fem.js';
+import { check, done } from './helpers.js';
 
 const ctx = await initTriBackend();
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-30);
 
 async function tri(opts, triOpts = {}) {
@@ -184,5 +180,4 @@ function expectedRdc(s) {
         fm.condNodeGroup[0] === 1 && fm.condNodeGroup[1] === 2);
 }
 
-console.log(failures === 0 ? '\nALL CORRECTNESS TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

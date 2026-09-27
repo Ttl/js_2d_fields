@@ -17,18 +17,9 @@
 //   3. even mode agrees too (it was never broken — guards against a fix that
 //      trades one mode for the other)
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
 
 // Mask side strips (14 µm) meet exactly at x = 0 between the traces (28 µm apart).
 const GEOM = {
@@ -61,5 +52,4 @@ check('tri odd C == FDM odd C (±4%)', relDiff(half.odd, fdm.odd) < 0.04,
 check('even mode still agrees across backends (±3%)', relDiff(half.even, fdm.even) < 0.03,
     `tri ${(half.even * 1e12).toFixed(2)} vs fdm ${(fdm.even * 1e12).toFixed(2)} pF/m`);
 
-console.log(failures === 0 ? '\nALL SYMMETRY-PLANE MASK TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

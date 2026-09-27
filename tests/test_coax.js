@@ -31,6 +31,7 @@
 //
 // Run: node tests/test_coax.js
 import { CoaxSolver } from '../src/coax.js';
+import { check, done } from './helpers.js';
 
 const EPS0 = 8.854187817e-12, MU0 = 4e-7 * Math.PI;
 const C0 = 1 / Math.sqrt(EPS0 * MU0), ETA0 = Math.sqrt(MU0 / EPS0);
@@ -56,11 +57,6 @@ const alphaC_x = (f) => {
 const R_x = (f) => 2 * (alphaC_x(f) / NP_TO_DB) * Z0_x;
 const Zc_x = (f) => Math.sqrt((L_x + R_x(f) / (2 * Math.PI * f)) / C_x);
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const pct = (a_, b_) => ((a_ - b_) / b_ * 100).toFixed(3) + '%';
 function near(name, got, want, tolPct) {
     check(name, Math.abs(got / want - 1) * 100 <= tolPct,
@@ -160,5 +156,4 @@ console.log('\n=== half-domain symmetry ===');
     near('half vs full: alpha_d', h.alpha_d, fu.alpha_d, 1.0);
 }
 
-console.log(`\n${failures === 0 ? 'ALL TESTS PASSED' : failures + ' TEST(S) FAILED'}`);
-process.exit(failures === 0 ? 0 : 1);
+done();

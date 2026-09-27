@@ -21,6 +21,7 @@
 //
 // Run: node tests/test_certification.js
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, done } from './helpers.js';
 
 const GEOM = {
     trace_width: 0.35e-3, substrate_height: 0.21e-3, trace_thickness: 35e-6,
@@ -31,7 +32,7 @@ const GEOM = {
 
 async function solveTol(tol, { maxIters = 12, maxNodes = 40000, triOpts = {} } = {}) {
     const s = new MicrostripSolver(GEOM);
-    s.tri_opts = { lossMethod: 'auto', ...triOpts };
+    s.tri_opts = { ...triOpts };
     const log = console.log;
     console.log = () => {};
     let r;
@@ -43,11 +44,6 @@ async function solveTol(tol, { maxIters = 12, maxNodes = 40000, triOpts = {} } =
     return { s, r, m: r.modes[0] };
 }
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 
 // 1+2: honest tolerance + certificate exposed
 const coarse = await solveTol(0.01);
@@ -137,5 +133,4 @@ for (const metric of ['jump', 'intensity']) {
         `dC=${(100 * dC).toFixed(3)}%`);
 }
 
-console.log(failures ? `\n${failures} FAILURE(S)` : '\nAll certification tests passed.');
-process.exit(failures ? 1 : 0);
+done();

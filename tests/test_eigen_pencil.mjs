@@ -11,15 +11,11 @@
 // pairs, not just the near-shift ones a single 20-vector Krylov pass converges —
 // with the strict residual gate, that requires the ncvMax subspace growth.
 //
-// Run: node src/tri_solver/tests/eigen_pencil_test.mjs
-import createModule from '../../wasm_solver/eigen_solver.js';
-import { createWasmHelpers } from '../fem_core.js';
+// Run: node tests/test_eigen_pencil.mjs
+import createModule from '../src/wasm_solver/eigen_solver.js';
+import { createWasmHelpers } from '../src/tri_solver/fem_core.js';
+import { check, done } from './helpers.js';
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 
 const NPROB = 400;
 const SIGMA = [-3.4e6, 0];          // like -k²·eps_static in the mode viewer
@@ -165,5 +161,4 @@ runCase(helpers, 'complex, eigenvector seed', 0.02, true, NCV_MAX);
         `nconv=${res.nconv}, max rel res=${maxRes.toExponential(1)}`);
 }
 
-console.log(failures === 0 ? '\nEIGEN PENCIL OK' : `\nEIGEN PENCIL: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+done();

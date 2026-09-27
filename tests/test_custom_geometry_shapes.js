@@ -12,24 +12,13 @@
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { buildSolverFromParams } from '../src/solver_factory.js';
 import { solverToGeometryText } from '../src/custom_geometry_text.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b));
 const pct = v => `${(100 * v).toFixed(2)}%`;
-const SOLVE = { max_iters: 8, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+const SOLVE = { ...APP, max_iters: 8 };
 const modes = r => r.modes.map(m => ({ Z0: m.Z0?.re ?? m.Z0, eps: m.eps_eff, R: m.RLGC.R, L: m.RLGC.L, lossVia: m.lossVia }));
 async function solve(text, extra = {}) {
     const s = new CustomGeometrySolver({ text, freq: 1e9, mesh_backend: 'triangular', ...extra });
-    s.tri_opts = { lossMethod: 'auto' };
     const r = await quiet(() => s.solve_adaptive(SOLVE));
     return { m: modes(r), warnings: [...(r.warnings || []), ...(s.modeWarnings || [])] };
 }
@@ -139,5 +128,4 @@ const rect = await solve(MS('sig+ x=-0.15 y=0.2 w=0.3 h=0.035'));
     check('twinax: about 100 ohm differential', half.m[0].Z0 > 45 && half.m[0].Z0 < 55, `Z_odd ${half.m[0].Z0.toFixed(2)}`);
 }
 
-console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
-process.exit(failures ? 1 : 0);
+done();

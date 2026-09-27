@@ -18,18 +18,9 @@
 // not merely a converging approximation of it.
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { check, quiet, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
 
 const FAMILIES = [
     {
@@ -245,5 +236,4 @@ for (const fam of FAMILIES) {
         pair.sym_half === true && pair._sym_signal_straddles === false);
 }
 
-console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PASS');
-process.exit(failures ? 1 : 0);
+done();

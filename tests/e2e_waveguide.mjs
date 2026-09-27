@@ -7,34 +7,11 @@
 // Results traces, and below-cutoff points dropped from the S-parameters.
 //
 // Needs the dev server on localhost:8731 (see tests/run.mjs e2e tier).
-import { chromium } from 'playwright-core';
+import { launch, URL } from './e2e_helpers.mjs';
+import { check, done } from './helpers.js';
 
-const URL = 'http://localhost:8731/field_solver.html';
-const browser = await chromium.launch({ executablePath: '/snap/bin/chromium', args: ['--no-sandbox'] });
-const page = await browser.newPage();
-// The copy-link round-trip below needs the URL the button builds. Capture it by stubbing
-// clipboard.writeText rather than granting clipboard permissions: headless Chromium
-// rejects the real write, which sends copySettingsLink() into its prompt() fallback — and
-// a modal prompt blocks the page forever. This still exercises the real settingsToURL path,
-// which is the part under test.
-await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { writeText: (t) => { window.__copiedURL = t; return Promise.resolve(); } },
-    });
-});
-const errors = [];
-page.on('console', m => {
-    if (m.type() === 'error' && !/Failed to load resource/i.test(m.text())) errors.push(m.text());
-});
-page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
-page.on('response', r => { if (r.status() === 404 && !/favicon/.test(r.url())) errors.push('404 ' + r.url()); });
-
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
+// The copy-link round-trip below reads the URL the button builds from window.__copiedURL.
+const { browser, page, errors } = await launch({ clipboard: '__copiedURL' });
 
 await page.goto(URL, { waitUntil: 'networkidle' });
 await page.selectOption('#tl_type', 'rect_waveguide');
@@ -196,5 +173,4 @@ check('the view frames the whole cross-section including the walls',
 
 check('no console errors', errors.length === 0, errors.join(' | '));
 await browser.close();
-console.log(failures === 0 ? '\nWAVEGUIDE E2E OK' : `\nWAVEGUIDE E2E: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+done();

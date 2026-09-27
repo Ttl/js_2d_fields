@@ -79,8 +79,6 @@ cp src/.htaccess dist/.htaccess
 TRI_STAGE=dist/.tri-stage
 mkdir -p "$TRI_STAGE/wasm_solver"
 cp -r src/tri_solver "$TRI_STAGE/tri_solver"
-# dev-only tests (node/playwright) are not shipped
-rm -rf "$TRI_STAGE/tri_solver/tests"
 rm -f "$TRI_STAGE/tri_solver/_smoke_test.mjs"
 # Shared src modules imported as `../*.js` from tri_solver/*.js — keep this list
 # in sync with those imports. (They are also inlined into the app bundle; the

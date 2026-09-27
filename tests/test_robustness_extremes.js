@@ -24,19 +24,8 @@ import { computeSParamsSingleEnded, computeSParamsDifferentialMTL } from '../src
 import { Complex } from '../src/complex.js';
 import { calculate_Zrough, calculate_Zrough_layered } from '../src/surface_roughness.js';
 import { djordjevic_sarkar } from '../src/djordjevic_sarkar.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let pass = 0, fail = 0;
-function check(name, cond, detail = '') {
-    console.log(`  ${cond ? 'PASS' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`);
-    cond ? pass++ : fail++;
-}
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
 const fin = z => z && Number.isFinite(z.re) && Number.isFinite(z.im);
 
 const MS = {
@@ -47,7 +36,6 @@ const MS = {
 function ms(opts, backend = 'rectilinear', causal = false) {
     const s = new MicrostripSolver({ ...MS, ...opts, mesh_backend: backend });
     s.use_causal_materials = causal;
-    if (backend === 'triangular') s.tri_opts = { lossMethod: 'auto' };
     return s;
 }
 async function solved(s) { const r = await quiet(() => s.solve_adaptive({ ...APP })); return { s, r }; }
@@ -131,5 +119,4 @@ for (const backend of ['rectilinear', 'triangular']) {
         && d1.eps_real > 1 && Math.abs(d1.eps_real - d2.eps_real) < 0.1, `${JSON.stringify(d1)} vs ${JSON.stringify(d2)}`);
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+done();

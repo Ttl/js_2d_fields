@@ -7,18 +7,8 @@
 //      eddy-current solve meshes the block and is the reference; the quasi-static
 //      surface integral takes the layered impedance for it.
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
+import { check, quiet, rel, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b));
 
 const HEAD = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.2 er=4.3 tand=0.02\n';
 const S = (x, w, y, h, e = '') => `sig+ x=${x} w=${w} y=${y} h=${h} ${e}\n`;
@@ -30,7 +20,6 @@ const topBlock = (t, e) => S(-0.15, 0.3, 0.2, 0.035 - t) + S(-0.15, 0.3, 0.235 -
 const SOLVE = { max_iters: 8, energy_tol: 0.005, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
 async function solve(body, backend) {
     const s = new CustomGeometrySolver({ text: HEAD + body, nx: 30, ny: 30, freq: 5e9, mesh_backend: backend });
-    if (backend === 'triangular') s.tri_opts = { lossMethod: 'auto' };
     const m = (await quiet(() => s.solve_adaptive(SOLVE))).modes[0];
     return { R: m.RLGC.R, Li: m.L_internal, Z0: m.Z0 };
 }
@@ -75,5 +64,4 @@ for (const t of [0.001, 0.005]) {
     check('plating= on a block that touches another block of its conductor is rejected', /plating/i.test(msg), msg);
 }
 
-console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY BLOCK TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

@@ -377,7 +377,7 @@ sig+ x=-1.5  w=3  y=1.6    h=0.035
 `,
         sigma_cond: 1e7, freq: 1e3, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
     });
-    solver.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
+    if (_triOpts) solver.tri_opts = _triOpts;
 
     const results = await solver.solve_adaptive();
     const mode = results.modes[0];
@@ -1214,7 +1214,7 @@ gnd  x=0.15  w=1 y=0 h=0.05
 `,
         sigma_cond: 5.8e7, freq: 1e9, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
     });
-    s.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
+    if (_triOpts) s.tri_opts = _triOpts;
     return s;
 }
 
@@ -1276,7 +1276,7 @@ gnd  x=-0.25  w=0.5  y=-0.035 h=0.035
 `,
         sigma_cond: 5.8e7, freq: 1e9, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
     });
-    s.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
+    if (_triOpts) s.tri_opts = _triOpts;
     const results = await s.solve_adaptive({ energy_tol: 0.001 });
     const mode = results.modes[0];
     // C from the lossless run, eps_eff and Z0 recomputed from it, see above. The total
@@ -1312,7 +1312,7 @@ sig- x=0.25  w=0.35 y=0.2104 h=0.05 sigma=3.8e7
 `,
         sigma_cond: 5.8e7, freq: 2e9, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
     });
-    s.tri_opts = _triOpts ?? (MESH_BACKEND === 'triangular' ? { lossMethod: 'auto' } : null);
+    if (_triOpts) s.tri_opts = _triOpts;
     s.use_causal_materials = true;
     const results = await s.solve_adaptive({ energy_tol: 0.001 });
     const odd = results.modes.find(m => m.mode === 'odd');

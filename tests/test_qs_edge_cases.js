@@ -21,19 +21,8 @@
 // Run: node tests/test_qs_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let pass = 0, fail = 0;
-function check(name, cond, detail = '') {
-    console.log(`  ${cond ? 'PASS' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`);
-    cond ? pass++ : fail++;
-}
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
 
 const BASE = {
     trace_width: 0.2e-3, substrate_height: 0.3e-3, trace_thickness: 35e-6, gnd_thickness: 35e-6,
@@ -42,7 +31,6 @@ const BASE = {
 };
 function make(opts, backend = 'rectilinear') {
     const s = new MicrostripSolver({ ...BASE, ...opts, mesh_backend: backend });
-    if (backend === 'triangular') s.tri_opts = { lossMethod: 'auto' };
     return s;
 }
 async function solve(opts, backend) {
@@ -168,5 +156,4 @@ async function solve(opts, backend) {
         has(top + off) && has(top - off) && has(bot + off) && has(bot - off));
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+done();

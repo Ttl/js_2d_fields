@@ -24,19 +24,8 @@
 // Run: node tests/test_fullwave_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
 import { CoaxSolver } from '../src/coax.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let pass = 0, fail = 0;
-function check(name, cond, detail = '') {
-    console.log(`  ${cond ? 'PASS' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`);
-    cond ? pass++ : fail++;
-}
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
 const MU0 = 4 * Math.PI * 1e-7;
 
 const MS = {
@@ -44,7 +33,7 @@ const MS = {
     epsilon_r: 4, tan_delta: 0.01, sigma_cond: 5.8e7, freq: 1e9, rq: 0, nx: 30, ny: 30,
     boundaries: ['open', 'open', 'open', 'gnd'],
 };
-function ms(opts, backend = 'triangular', tri = { lossMethod: 'auto' }) {
+function ms(opts, backend = 'triangular', tri = {}) {
     const s = new MicrostripSolver({ ...MS, ...opts, mesh_backend: backend });
     s.use_causal_materials = false;
     if (backend === 'triangular') s.tri_opts = tri;
@@ -187,5 +176,4 @@ for (const backend of ['rectilinear', 'triangular']) {
     }
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+done();

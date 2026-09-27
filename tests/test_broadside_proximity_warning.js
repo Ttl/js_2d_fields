@@ -7,17 +7,8 @@
 // (recommending the full-wave backend); weakly coupled pairs and the triangular
 // backend must stay clean. See docs/backend_agreement_handover.md issue 1.
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { check, quiet, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
 
 const base = {
     trace_thickness: 17e-6, gnd_thickness: 35e-6,
@@ -73,5 +64,4 @@ async function solveQS(o) {
         (r.warnings || []).map(w => w.type).join(',') || 'no warnings');
 }
 
-console.log(failures === 0 ? '\nALL BROADSIDE PROXIMITY WARNING TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

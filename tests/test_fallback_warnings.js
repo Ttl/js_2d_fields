@@ -6,18 +6,9 @@
 // The failures are forced by replacing the failing step on a real solver.
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const SOLVE = { max_iters: 12, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+const SOLVE = { ...APP, max_iters: 12 };
 const kinds = r => (r.warnings || []).map(w => w.reason || w.type);
 // Warnings that report a fallback of the loss model.
 const FALLBACKS = ['dc-inductance-failed', 'ground-sheet-failed', 'mqs-perturbation', 'sibc-failed', 'wg-loss-failed',
@@ -49,7 +40,6 @@ const open = B => new CustomGeometrySolver({ text: OPEN, sigma_cond: 5.8e7, freq
     const s = new MicrostripSolver({ trace_width: 0.3e-3, substrate_height: 0.2e-3, trace_thickness: 35e-6, gnd_thickness: 35e-6,
         epsilon_r: 4.4, tan_delta: 0, sigma_cond: 5.8e7, freq: 1e9, nx: 10, ny: 10, use_coplanar_gnd: true, gap: 0.2e-3,
         via_gap: 0.5e-3, use_vias: true, boundaries: ['open', 'open', 'open', 'gnd'], mesh_backend: 'triangular' });
-    s.tri_opts = { lossMethod: 'auto' };
     const r0 = await quiet(() => s.solve_adaptive(SOLVE));
     // Fail the ideal-ground variant only: its assembly cache throws on first use.
     const tri = s._triBackend, solve = tri._mqsSolve.bind(tri);
@@ -73,7 +63,6 @@ const plain = {
 for (const [name, mk] of Object.entries(plain)) {
     for (const tri of [false, true]) {
         const s = mk(tri ? { mesh_backend: 'triangular' } : {});
-        if (tri) s.tri_opts = { lossMethod: 'auto' };
         const r0 = await quiet(() => s.solve_adaptive(SOLVE));
         const got = [];
         for (const f of [0, 1e3, 1e6, 1e9]) got.push(...kinds(await quiet(() => s.computeAtFrequency(f, r0))));
@@ -82,5 +71,6 @@ for (const [name, mk] of Object.entries(plain)) {
     }
 }
 
-if (failures) { console.log(`\n${failures} CHECK(S) FAILED`); process.exit(1); }
+done();
+
 console.log('\nALL CHECKS PASSED');

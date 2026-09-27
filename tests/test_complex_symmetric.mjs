@@ -1,3 +1,4 @@
+import { check, done } from './helpers.js';
 // Complex-symmetric direct solver unit test — no FEM, no mesh: drives
 // solveComplexSymmetric (solve_complex_symmetric in eigen_solver.cpp, the
 // unpivoted LDLᵀ on Eigen's SimplicialLDLT with the "fake-real" csym scalar) on
@@ -8,16 +9,11 @@
 // SparseLU fallback (rc = 1), and a singular / malformed system is an error,
 // never a silent garbage vector.
 //
-// Run: node src/tri_solver/tests/complex_symmetric_test.mjs
+// Run: node tests/test_complex_symmetric.mjs
 process.env.TRI_STATS = process.env.TRI_STATS || '1';   // read at fem_core import time
-const { default: createModule } = await import('../../wasm_solver/eigen_solver.js');
-const { createWasmHelpers } = await import('../fem_core.js');
+const { default: createModule } = await import('../src/wasm_solver/eigen_solver.js');
+const { createWasmHelpers } = await import('../src/tri_solver/fem_core.js');
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 
 // CSR from a Map of "i,j" -> {re, im}; both triangles stored, rows sorted.
 function toCSR(N, entries) {
@@ -136,5 +132,4 @@ const lastLin = () => stats.lin[stats.lin.length - 1];
     check('RHS of the wrong length (not 2N) throws', threw);
 }
 
-console.log(failures === 0 ? '\nAll complex-symmetric solver checks passed.' : `\n${failures} check(s) FAILED.`);
-process.exit(failures === 0 ? 0 : 1);
+done();

@@ -8,22 +8,10 @@
 // far below the ~5 s at which browsers start complaining.
 //
 // Needs the dev server on localhost:8731 (see tests/run.mjs e2e tier) and chromium.
-import { chromium } from 'playwright-core';
+import { launch, URL } from './e2e_helpers.mjs';
+import { check, done } from './helpers.js';
 
-const URL = 'http://localhost:8731/field_solver.html';
-const browser = await chromium.launch({ executablePath: '/snap/bin/chromium', args: ['--no-sandbox'] });
-const page = await browser.newPage();
-const errors = [];
-page.on('console', m => {
-    if (m.type() === 'error' && !/Failed to load resource/i.test(m.text())) errors.push(m.text());
-});
-page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
-
-let failures = 0;
-const check = (name, ok, detail = '') => {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-};
+const { browser, page, errors } = await launch();
 
 await page.goto(URL, { waitUntil: 'networkidle' });
 
@@ -147,5 +135,4 @@ check('parameter sweep kept the UI responsive', sweepProbe.frames > 20 && sweepG
 check('no console/page errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 
 await browser.close();
-console.log(failures === 0 ? '\nALL RESPONSIVENESS TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

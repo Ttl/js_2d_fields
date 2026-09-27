@@ -90,7 +90,6 @@ const fmtMismatch = w => `${w.q} ${(w.d * 100).toFixed(2)}% (gate ${(w.gate * 10
 // Typical use: adaptive solve + InterpolatingSweep, read results off the splines.
 async function solveTypical(spec, fStop, compareFs) {
     const s = buildSolver(spec, BACKEND);
-    s.tri_opts = { lossMethod: 'auto' };
     const r = await s.solve_adaptive({ ...ADAPTIVE });
     // The quasi-static computeAtFrequency re-weights the adaptive solve's cached
     // fields, so it needs that result (as the worker passes it); the triangular
@@ -107,7 +106,6 @@ async function solveReference(spec, fStop, compareFs) {
     const tAbs = Math.max(Math.abs(s.t ?? 35e-6), 1e-9);
     const wRef = Math.max(s.w ?? s.domain_width / 10, 1e-9);
     s.tri_opts = {
-        lossMethod: 'auto',
         dispTol: 0, mqsInterpTol: 0,                  // anchor caches off → every point exact
         hFine: Math.min(tAbs, wRef / 4) * 1.5,        // pre-2026-07-25 thickness sizing
         mqsBandDelta: 0.5, mqsBand: 2,                // pre-tuning skin band (finer, wider)
@@ -124,7 +122,7 @@ async function solveReference(spec, fStop, compareFs) {
 // cachesOff makes every point an exact solve on the same mesh.
 async function solveList(spec, listFs, cachesOff) {
     const s = buildSolver(spec, BACKEND);
-    s.tri_opts = cachesOff ? { lossMethod: 'auto', dispTol: 0, mqsInterpTol: 0 } : { lossMethod: 'auto' };
+    s.tri_opts = cachesOff ? { dispTol: 0, mqsInterpTol: 0 } : {};
     const r = await s.solve_sweep({ frequencies: listFs, energy_tol: ADAPTIVE.energy_tol, max_nodes: ADAPTIVE.max_nodes });
     return listFs.map((_, i) => r.modes.map(m => ({
         mode: m.mode, R: m.RLGC.R[i], L: m.RLGC.L[i], G: m.RLGC.G[i], C: m.RLGC.C[i],

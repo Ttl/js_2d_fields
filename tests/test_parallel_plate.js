@@ -27,17 +27,12 @@
 //
 // Run: node tests/test_parallel_plate.js
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, relErr, done } from './helpers.js';
 
 const EPS0 = 8.8541878128e-12, MU0 = 4e-7 * Math.PI;
 const H = 0.1e-3, W = 5e-3, T = 35e-6, TG = 35e-6;
 const ER = 4.0, TAND = 0.02, SIG = 5.8e7;
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
-const relErr = (a, b) => Math.abs(a - b) / Math.abs(b);
 const pct = (a, b) => ((a - b) / b * 100).toFixed(2) + '%';
 
 // Exact slab internal impedance (1+j)/(σδ)·coth((1+j)·d/δ) → [Re, Im]
@@ -114,5 +109,4 @@ check('R increases with frequency, L decreases (skin effect direction)',
         `${(m.RLGC.L * 1e9).toFixed(3)} vs ${((Lx + ex.Lint) * 1e9).toFixed(3)} nH/m, ${pct(m.RLGC.L, Lx + ex.Lint)}`);
 }
 
-console.log(failures === 0 ? '\nPARALLEL PLATE OK' : `\nPARALLEL PLATE: ${failures} FAILURE(S)`);
-process.exit(failures === 0 ? 0 : 1);
+done();

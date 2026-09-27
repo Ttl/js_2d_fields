@@ -32,6 +32,7 @@
 import { RectWaveguideSolver } from '../src/rect_waveguide.js';
 import { calculate_Zrough, calculate_Zrough_layered } from '../src/surface_roughness.js';
 import { computeSParamsSingleEnded, sParamTodB } from '../src/sparameters.js';
+import { check, quiet, done } from './helpers.js';
 
 const EPS0 = 8.854187817e-12, MU0 = 4e-7 * Math.PI;
 const C0 = 1 / Math.sqrt(EPS0 * MU0), ETA0 = Math.sqrt(MU0 / EPS0);
@@ -41,11 +42,6 @@ const NP_TO_DB = 8.685889638;
 const A = 22.86e-3, B = 10.16e-3, SIG = 5.8e7;
 const KAPPA = 2 * B / A;                     // Zpv / Z_TE
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const pct = (a_, b_) => ((a_ - b_) / b_ * 100).toFixed(4) + '%';
 function near(name, got, want, tolPct) {
     check(name, Math.abs(got / want - 1) * 100 <= tolPct,
@@ -73,10 +69,6 @@ const forms = (er, tand) => {
     };
 };
 
-const quiet = async (fn) => {
-    const log = console.log; console.log = () => {};
-    try { return await fn(); } finally { console.log = log; }
-};
 
 async function build(opts = {}, hScale = 1) {
     const s = new RectWaveguideSolver({ width: A, height: B, sigma_cond: SIG, freq: 10e9, ...opts });
@@ -275,5 +267,4 @@ console.log('\n=== b > a (fundamental is TE01) ===');
     near('Zpv matches (kappa = 2*min/max either way)', m.Zc.re, KAPPA * air.ZTE(f), 0.5);
 }
 
-console.log(`\n${failures === 0 ? 'ALL TESTS PASSED' : failures + ' TEST(S) FAILED'}`);
-process.exit(failures === 0 ? 0 : 1);
+done();

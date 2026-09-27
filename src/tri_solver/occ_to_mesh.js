@@ -137,7 +137,7 @@ function _rectOf(o) {
 // Absorb full-span boundary ground slabs into wall PEC BCs + clip the meshed domain
 // (clipDomainWalls, shared with the FDM backend). Exported for tests/test_geometry.js —
 // the wall-absorption rule defines the effective cavity that the analytic mode tests
-// (box_modes_test.mjs) compute their truth from.
+// (tests/test_box_modes.mjs) compute their truth from.
 export const _clipDomain = clipDomainWalls;
 
 // Inside of a conductor's plating layer when the plating is thick (thick_corners), the

@@ -8,22 +8,11 @@
 //   4. a ground plane on the domain edge is a wall on both backends: no spreading
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, relErr as rel, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const rel = (a, b) => Math.abs(a - b) / Math.abs(b);
 
 // R (ohm/m) and L (nH/m) per mode at each frequency.
 async function sweep(solver, freqs, tri) {
-    if (tri) solver.tri_opts = { lossMethod: 'auto' };
     return quiet(async () => {
         const r0 = await solver.solve_adaptive();
         const out = [];
@@ -95,5 +84,6 @@ sig+ x=-1.5 w=3 y=1.6 h=0.035`;
         `${q[0].single.L.toFixed(1)} vs ${t[0].single.L.toFixed(1)} nH/m`);
 }
 
-if (failures) { console.log(`\n${failures} CHECK(S) FAILED`); process.exit(1); }
+done();
+
 console.log('\nALL CHECKS PASSED');

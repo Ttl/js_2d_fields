@@ -45,6 +45,7 @@ import { CoaxSolver } from '../src/coax.js';
 import { MicrostripSolver } from '../src/microstrip.js';
 import { RectWaveguideSolver } from '../src/rect_waveguide.js';
 import { calculate_Zrough, calculate_Zrough_layered } from '../src/surface_roughness.js';
+import { check, quiet, done } from './helpers.js';
 
 const SIG = 5.8e7;
 const D_IN = 0.92e-3, D_OUT = 2.95e-3;
@@ -57,22 +58,12 @@ const FREQS = [1e9, 1e10];
 // WR-90 cuts off at 6.56 GHz; below that the guide reports NaN for everything but alpha.
 const WG_FREQS = [1e10, 1.2e10];
 
-let failures = 0;
-function check(name, cond, detail = '') {
-    console.log(`${cond ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!cond) failures++;
-}
 const pct = (got, want) => ((got - want) / want * 100).toFixed(3) + '%';
 function near(name, got, want, tolPct) {
     check(name, Math.abs(got / want - 1) * 100 <= tolPct,
         `${got.toExponential(5)} vs ${want.toExponential(5)}, ${pct(got, want)}, tol ${tolPct}%`);
 }
 
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
 
 // L_internal at each frequency of interest, keyed by frequency.
 async function internalL(solver, freqs = FREQS) {
@@ -222,5 +213,4 @@ checkRatio('WR-90 rough 1um', await internalL(waveguide(), WG_FREQS),
     await internalL(waveguide({ rq: RQ }), WG_FREQS),
     (f) => calculate_Zrough(f, SIG, RQ), WG_FREQS);
 
-console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

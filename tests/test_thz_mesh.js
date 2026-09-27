@@ -21,19 +21,8 @@
 //
 // Run: node tests/test_thz_mesh.js
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, rel, APP, done } from './helpers.js';
 
-let pass = 0, fail = 0;
-function check(name, cond, detail = '') {
-    console.log(`  ${cond ? 'PASS' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`);
-    cond ? pass++ : fail++;
-}
-const quiet = async (fn) => {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-};
-const APP = { max_iters: 10, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
-const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
 const MS = {
     trace_width: 0.35e-3, substrate_height: 0.21e-3, trace_thickness: 35e-6, gnd_thickness: 35e-6,
     epsilon_r: 4.4, tan_delta: 0.02, sigma_cond: 5.8e7, rq: 0, nx: 30, ny: 30,
@@ -42,7 +31,7 @@ const MS = {
 function ms(opts, tri = {}) {
     const s = new MicrostripSolver({ ...MS, ...opts, mesh_backend: 'triangular' });
     s.use_causal_materials = false;
-    s.tri_opts = { lossMethod: 'auto', ...tri };
+    s.tri_opts = { ...tri };
     return s;
 }
 async function main(opts, tri = {}) {
@@ -151,5 +140,4 @@ const THIN = { trace_width: 0.15e-3, substrate_height: 0.1e-3, tan_delta: 0.002 
     if (tem) check('its eps_eff is well above the static value', tem.eps_eff > 3.8, tem.eps_eff.toFixed(4));
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+done();

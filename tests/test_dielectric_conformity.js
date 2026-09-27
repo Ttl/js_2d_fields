@@ -6,18 +6,9 @@
 // whose mask slivers must not trip the mesh-quality warning (Q > 100).
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { MicrostripSolver } from '../src/microstrip.js';
+import { check, quiet, APP, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
-const SOLVE = { max_iters: 12, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 };
+const SOLVE = { ...APP, max_iters: 12 };
 
 // Triangles with vertices strictly on both sides of a dielectric rect's face, over the face's extent.
 function crossing(mesh, dielectrics) {
@@ -37,7 +28,6 @@ const SLOT = 'units mm\nw = 1; s = 0.3; t = 0.05; h = 0.2104; wsub = 4\nbounds o
     'diel x=-wsub/2 y=-h w=wsub h=h er=4.4 tand=0.02\nsig+ x=-s/2-w y=0 w=w h=t\ngnd x=s/2 y=0 w=w h=t\n';
 {
     const s = new CustomGeometrySolver({ text: SLOT, sigma_cond: 5.8e7, freq: 1e9, nx: 10, ny: 10, mesh_backend: 'triangular' });
-    s.tri_opts = { lossMethod: 'auto' };
     await quiet(() => s.solve_adaptive(SOLVE));
     const tb = s._triBackend;
     check('slotline on a thin substrate: main mesh follows the dielectric faces', crossing(tb.mesh, s.dielectrics) === 0,
@@ -54,12 +44,12 @@ const B = { trace_thickness: 35e-6, gnd_thickness: 35e-6, epsilon_r: 4.4, tan_de
 for (const [name, o] of [['solder-masked microstrip', B],
     ['solder-masked GCPW', { ...B, trace_width: 0.3e-3, use_coplanar_gnd: true, gap: 0.2e-3, via_gap: 0.5e-3, use_vias: true }]]) {
     const s = new MicrostripSolver(o);
-    s.tri_opts = { lossMethod: 'auto' };
     await quiet(() => s.solve_adaptive(SOLVE));
     const tb = s._triBackend, n = crossing(tb.mesh, s.dielectrics);
     check(`${name}: mesh follows the mask faces, no quality warning`, n === 0 && tb.meshQuality.maxQ < 100,
         `${n} of ${tb.mesh.nTris} triangles cross a face, max Q ${tb.meshQuality.maxQ.toFixed(1)}`);
 }
 
-if (failures) { console.log(`\n${failures} CHECK(S) FAILED`); process.exit(1); }
+done();
+
 console.log('\nALL CHECKS PASSED');

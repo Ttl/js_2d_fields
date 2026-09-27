@@ -18,17 +18,8 @@
 // must both match the hollow trace. So must the drawing that overlaps a poor core onto
 // a copper trace: where conductors of one kind overlap, the later line's metal wins.
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
+import { check, quiet, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-async function quiet(fn) {
-    const log = console.log, warn = console.warn;
-    console.log = () => {}; console.warn = () => {};
-    try { return await fn(); } finally { console.log = log; console.warn = warn; }
-}
 
 const SIGMA = 5.8e7, WALL = 5e-6, T = 35e-6;
 const F = x => (Math.sinh(2 * x) + Math.sin(2 * x)) / (Math.cosh(2 * x) - Math.cos(2 * x));
@@ -42,7 +33,6 @@ const BASE = `units um\nw = 1200; t = 35; b = 400; tw = 5\nbounds open open gnd 
 const TRACE = 'x=-w/2 w=w y=b/2-t/2 h=t';
 async function rSweep(trace, freqs = FREQS, extra = {}) {
     const s = new CustomGeometrySolver({ text: BASE + trace, freq: 1e9, mesh_backend: 'triangular', sigma_cond: SIGMA * 1e4, ...extra });
-    s.tri_opts = { lossMethod: 'auto' };
     await quiet(() => s.solve_adaptive({ max_iters: 8, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 }));
     const out = [];
     for (const f of freqs) {
@@ -98,7 +88,6 @@ check('copper trace drawn over the core = solid trace', Math.abs(under[0].R / so
 {
     const s = new CustomGeometrySolver({ text: BASE + `plating sigma=${SIGMA} t=tw\nsig+ ${TRACE} sigma=${SIGMA / 1000} plating=all`,
         freq: 1e9, mesh_backend: 'triangular', sigma_cond: SIGMA * 1e4 });
-    s.tri_opts = { lossMethod: 'auto' };
     await quiet(() => s.solve_adaptive({ max_iters: 8, energy_tol: 0.01, param_tol: 0.05, max_nodes: 20000, min_converged_passes: 2 }));
     const r = await quiet(() => s.computeAtFrequency(fDip));
     const w = [...(r.warnings || []), ...(s.modeWarnings || [])].find(x => x.reason === 'plating-transition');
@@ -109,5 +98,4 @@ check('copper trace drawn over the core = solid trace', Math.abs(under[0].R / so
 const dip = hollow[2].R / solid[2].R;
 check('a wall of pi/2 skin depths loses less than solid metal', dip < 0.95, `ratio ${dip.toFixed(4)}, theory ${F(Math.PI / 2).toFixed(4)}`);
 
-console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
-process.exit(failures ? 1 : 0);
+done();

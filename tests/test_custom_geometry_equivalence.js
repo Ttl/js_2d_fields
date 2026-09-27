@@ -13,12 +13,8 @@ import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { solverToGeometryText } from '../src/custom_geometry_text.js';
+import { check, quiet, done } from './helpers.js';
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
 
 const base = {
     trace_width: 0.3e-3, substrate_height: 0.254e-3, trace_thickness: 35e-6,
@@ -57,11 +53,6 @@ const CASES = [
 
 const SOLVE = { max_iters: 4, energy_tol: 0.01, param_tol: 0.05, max_nodes: 6000, min_converged_passes: 2 };
 
-async function quiet(fn) {
-    const log = console.log;
-    console.log = () => {};
-    try { return await fn(); } finally { console.log = log; }
-}
 
 function rectKey(o) {
     return [o.x, o.y, o.width, o.height, o.epsilon_r, o.tan_delta, o.is_signal, o.polarity,
@@ -130,5 +121,4 @@ if (process.env.TRI) {
     }
 }
 
-console.log(failures === 0 ? '\nALL CUSTOM GEOMETRY EQUIVALENCE TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+done();

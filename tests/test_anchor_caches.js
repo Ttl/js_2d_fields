@@ -1,3 +1,4 @@
+import { check, quiet, done } from './helpers.js';
 // Full-wave anchor caches vs exact solves on the same mesh.
 //
 // On a sweep the triangular backend interpolates three per-mode scalars between
@@ -53,12 +54,6 @@ const CASES = [
     { name: 'diff microstrip 35 um', o: { trace_width: 0.2e-3, trace_spacing: 0.15e-3, trace_thickness: 35e-6 }, expectHits: true },
 ];
 
-let failures = 0;
-function check(name, ok, detail = '') {
-    console.log(`${ok ? '✓ PASS' : '✗ FAIL'}  ${name}${detail ? '  (' + detail + ')' : ''}`);
-    if (!ok) failures++;
-}
-const quiet = async fn => { const log = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = log; } };
 const mk = (o, cachesOff) => {
     const s = new MicrostripSolver({ ...BASE, ...o });
     s.tri_opts = cachesOff ? { dispTol: 0, mqsInterpTol: 0 } : {};
@@ -148,5 +143,4 @@ for (const c of CASES) {
         `cached ${cached.map(f => (f / 1e6).toFixed(0) + ' MHz').join(', ')}, bias ${bias}`);
 }
 
-console.log(`\n${failures === 0 ? 'ALL PASSED' : `${failures} FAILED`}`);
-process.exit(failures === 0 ? 0 : 1);
+done();
