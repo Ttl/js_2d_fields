@@ -44,7 +44,8 @@ import { checkMeshQuality } from './tri_mesh.js';
 const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
     spreadWidthFloor } from '../surface_roughness.js';
-import { resampleStatic, resampleModeField, buildGridFromMesh } from './resample.js';
+import { resampleStatic, resampleModeField, buildGridFromMesh, surfaceCurrentPoints, sampleMqsCurrent,
+    mqsSurfaceCurrent } from './resample.js';
 import { Complex } from '../complex.js';
 import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
@@ -2012,7 +2013,7 @@ export class TriBackend {
             const fields = s.use_causal_materials ? null : resampleStatic(mesh, phiEps, this.domain,
                 { resolution: this.opts.resolution, parity, grid, rects: this._plotRects });
             this._static[mode] = {
-                fm, abc, kC, phiEps, C0, W_loss, eps_eff_static,
+                fm, abc, kC, phiEps, phiAir, C0, W_loss, eps_eff_static,
                 Z_static: 1 / (c0 * Math.sqrt(C0 * eps_eff_static * C0)),
                 fields,
                 // Closed-pick pencil decomposition from the pass (fullwaveMode's own
@@ -2093,7 +2094,7 @@ export class TriBackend {
                 : resampleStatic(mesh, phiEps, this.domain,
                     { resolution: this.opts.resolution, parity: null, grid, rects: this._plotRects });
             this._static[label] = {
-                fm, abc, kC, phiEps, C0, W_loss: computeTriEnergy(phiEps, mesh, mesh.lossMap),
+                fm, abc, kC, phiEps, phiAir, C0, W_loss: computeTriEnergy(phiEps, mesh, mesh.lossMap),
                 eps_eff_static,
                 Z_static: 1 / (c0 * Math.sqrt(C0 * eps_eff_static * C0)),
                 fields, modalVec: v,
@@ -2427,9 +2428,15 @@ export class TriBackend {
             return 2 / (omega * MU0 * sg) / Math.min(r.xmax - r.xmin, r.ymax - r.ymin) / wLo;
         }));
         if (!(uMax > SPREAD_U_MIN)) return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
+        // A plot takes the field of the ground model with the larger blend weight.
+        const idealField = opts.fieldOut ? {} : undefined;
+        const useIdealField = () => {
+            for (const k of Object.keys(opts.fieldOut)) delete opts.fieldOut[k];
+            Object.assign(opts.fieldOut, idealField, { idealGrounds: true });
+        };
         let b;
         try {
-            b = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, { ...opts, idealRects: ideal, cache: idealCache });
+            b = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, { ...opts, idealRects: ideal, cache: idealCache, fieldOut: idealField });
         } catch (e) {
             this._warnOnce({ type: 'ideal-ground-failed', freq: f, message:
                 `The low-frequency loss solve with the grounds reaching the domain edge as ideal returns ` +
@@ -2438,8 +2445,12 @@ export class TriBackend {
             return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
         }
         const w = spreadBlendWeight(b.uIdeal);
-        if (w >= 1) return b;
+        if (w >= 1) {
+            if (idealField) useIdealField();
+            return b;
+        }
         const a = mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
+        if (idealField && w >= 0.5) useIdealField();
         const mix = k => w * b[k] + (1 - w) * a[k];
         return { ...a, R_total: mix('R_total'), X_total: mix('X_total'), L_loop: mix('L_loop'), L_wall: mix('L_wall'),
                  L_surface: mix('L_surface'), R_trace: mix('R_trace'), R_gnd: mix('R_gnd') };
@@ -2930,7 +2941,8 @@ export class TriBackend {
                 : (st.mqsL = { mesh: mqsMesh, xs: [], ys: [], log: true });
             const rInterp = dispersionInterp(rc, f, rTol);
             const lInterp = dispersionInterp(lc, f, rTol);
-            if (rInterp !== null && rInterp > 0 && lInterp !== null && lInterp > 0) {
+            // A current density plot (_jCapture) needs the solved field, not the anchors.
+            if (!this._jCapture && rInterp !== null && rInterp > 0 && lInterp !== null && lInterp > 0) {
                 R_total = rInterp;
                 L_internal = lInterp;
                 lossVia = 'mqs';                      // interpolated MQS anchors
@@ -2943,6 +2955,7 @@ export class TriBackend {
             const mqsOpts = mqsOptsWith({ oddSymmetry: this.symmetry && mode === 'odd',
                 diffPair: !!s.is_differential, cache: mqsCache });
             if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st);
+            if (this._jCapture) mqsOpts.fieldOut = {};
             let mqs = null;
             try {
                 mqs = this._mqsSolve(mqsMesh, crM, f, mqsSigma, mqsOpts, idealCache);
@@ -2984,6 +2997,7 @@ export class TriBackend {
                 }
                 L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
                 st.mqsSurface = { f, L: mqs.L_surface };
+                if (this._jCapture) this._jCapture[mode] = { field: mqsOpts.fieldOut, cr: crM };
                 dispersionInsert(rc, f, R_total);
                 dispersionInsert(lc, f, L_internal);
             }
@@ -3227,6 +3241,120 @@ export class TriBackend {
                     { resolution: this.opts.resolution, parity, grid: this._staticGrid, rects: this._plotRects });
             }
         }
+    }
+
+    // Plot fields at frequency f, written onto the solver like solveAt does: the static
+    // potential at the materials of f, the transverse E of the full-wave quasi-TEM mode
+    // from F_STATIC_MAX up (the static E below, or when the eigensolve finds no mode),
+    // and the perfect-conductor surface current per ampere.
+    plotFieldsAt(f) {
+        if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
+        const s = this.solver;
+        // A waveguide's mode pattern is geometric, the same at every frequency.
+        if (this._isWG) { s.fieldFreq = f; s.fieldKind = 'fullwave'; return; }
+        this._syncMaterials(f, false);
+        const modes = this.modeNames.map(mode => this._plotMode(mode, f));
+        const f0 = this._static[this.modeNames[0]].fields;
+        s.x = f0.x;
+        s.y = f0.y;
+        s.V = modes.map(m => m.V);
+        s.Ex = modes.map(m => m.Ex);
+        s.Ey = modes.map(m => m.Ey);
+        s.plotNote = null;
+        // Surface current from the MQS solve at f where it runs, else the perfect-conductor
+        // limit of the static solve.
+        const cur = this._plotCurrents(f);
+        s.currentJ = cur ? cur.J : null;
+        s.surfaceK = modes.map((m, i) => (cur && cur.K[i]) || m.K);
+        s.surfaceKSource = modes.map((m, i) => (cur && cur.K[i]) ? 'mqs' : 'pec');
+        s.idealGrounds = cur ? cur.ideal : null;
+        s.fieldFreq = f;
+        s.fieldKind = modes.every(m => m.fullwave) ? 'fullwave' : 'static';
+        s.triMesh = { nodes: this.mesh.nodes, tris: this.mesh.tris, nTris: this.mesh.nTris };
+        s.solution_valid = true;
+        s.mesh_generated = true;
+    }
+
+    // Current plots from the MQS solve at f, per mode: |J| in the meshed conductors and
+    // the integrated surface current |K| ({ J, K, ideal }, ideal: the grounds reaching
+    // the domain edge were held as ideal returns), or null where the loss does not come
+    // from that solve (perturbation method, f = 0). Why an MQS solve gave no plot goes
+    // to solver.plotNote.
+    _plotCurrents(f) {
+        if (!(f > 0)) return null;
+        const prevWarnings = this._modeWarnings;
+        this._jCapture = {};
+        this._modeWarnings = [];
+        let cap, vias = [];
+        try {
+            vias = this.modeNames.map(mode => this._modeAtFreq(mode, f).lossVia);
+        } catch (e) {
+            this.solver.plotNote = `Current density plot failed: ${(e && e.message) || e}`;
+        } finally {
+            cap = this._jCapture;
+            this._jCapture = null;
+            this._modeWarnings = prevWarnings;
+        }
+        const d = this.domain;
+        const maxLen = Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000;
+        const J = [], K = [], ideal = [];
+        for (const mode of this.modeNames) {
+            const c = cap && cap[mode];
+            const ok = c && c.field.sol;
+            const symX = this.symmetry ? this.condRect.xmin_domain : null;
+            J.push(ok ? sampleMqsCurrent(c.field, c.cr.rects, 160, symX) : null);
+            K.push(ok ? mqsSurfaceCurrent(c.field, this.condRect.rects, maxLen, symX) : null);
+            ideal.push(!!(ok && c.field.idealGrounds));
+        }
+        if (!J.some(Boolean)) {
+            if (vias.includes('mqs') && !this.solver.plotNote) {
+                this.solver.plotNote = 'Current density plot unavailable: the MQS loss solve returned no field.';
+            }
+            return null;
+        }
+        return { J, K, ideal };
+    }
+
+    _plotMode(mode, f) {
+        const st = this._static[mode];
+        const { V, Ex, Ey } = st.fields;
+        const d = this.domain;
+        const symX = this.symmetry ? this.condRect.xmin_domain : null;
+        // Nets at the driving potential: both traces of an even drive on the full domain.
+        const pot = drivePotentials(this.condRect, mode, this.symmetry);
+        const pMax = Math.max(...pot);
+        const nets = st.modalVec ? 1 : new Set(this.condRect.rectRoles
+            .filter((r, i) => r.is_signal && pot[i] === pMax).map(r => (r.polarity || 1) < 0)).size || 1;
+        const K = st.phiAir ? surfaceCurrentPoints(this.mesh, st.fm, st.phiAir,
+            buildLossEdges(this.mesh, st.fm, this.condRect), Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000,
+            symX, nets) : null;
+        if (!(f >= F_STATIC_MAX)) return { V, Ex, Ey, K, fullwave: false };
+        let fw = null;
+        try {
+            ({ fw } = this._eigenPick(st, f, st.phiEps, st.eps_eff_static, st.disp ? dispersionNearest(st.disp, f) : null));
+        } catch { fw = null; }
+        if (!fw) return { V, Ex, Ey, K, fullwave: false };
+        const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
+        const m = resampleModeField(this.mesh, st.fm, fw.vRe, fw.vIm, this.domain, { grid: this._staticGrid, parity });
+        // The eigenvector has an arbitrary complex scale: fit it to the static field of the
+        // same drive by least squares, area weighted on the graded grid.
+        const { x, y } = m;
+        let nr = 0, ni = 0, den = 0;
+        for (let j = 1; j < y.length - 1; j++) {
+            const hy = y[j + 1] - y[j - 1];
+            for (let i = 1; i < x.length - 1; i++) {
+                const a = (x[i + 1] - x[i - 1]) * hy;
+                const xr = m.Ex[j][i], xi = m.ExIm[j][i], yr = m.Ey[j][i], yi = m.EyIm[j][i];
+                nr += a * (Ex[j][i] * xr + Ey[j][i] * yr);
+                ni -= a * (Ex[j][i] * xi + Ey[j][i] * yi);
+                den += a * (xr * xr + xi * xi + yr * yr + yi * yi);
+            }
+        }
+        if (!(den > 0)) return { V, Ex, Ey, K, fullwave: false };
+        const sr = nr / den, si = ni / den;
+        const ExF = m.Ex.map((row, j) => row.map((v, i) => sr * v - si * m.ExIm[j][i]));
+        const EyF = m.Ey.map((row, j) => row.map((v, i) => sr * v - si * m.EyIm[j][i]));
+        return { V, Ex: ExF, Ey: EyF, K, fullwave: true };
     }
 
     // Public: solve at one frequency, return the unified result object and write

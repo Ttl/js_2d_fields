@@ -37,6 +37,7 @@ const TIERS = {
         { file: 'tests/test_box_modes.mjs', cost: 16 },
         { file: 'tests/test_parallel_plate.js', cost: 28 },
         { file: 'tests/test_coax.js', cost: 11 },
+        { file: 'tests/test_plot_fields.js', cost: 60 },
         { file: 'tests/test_rect_waveguide.js', cost: 7 },
         { file: 'tests/test_djordjevic_sarkar.js', cost: 1 },
         { file: 'tests/test_meshability.js', cost: 1 },

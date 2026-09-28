@@ -8,7 +8,7 @@
 // eigenvector. The triangle mesh itself is also returned for the mesh overlay.
 
 import { triCoefficients } from './tri_fem.js';
-import { shapeContains, distToShapeBoundary } from '../shapes.js';
+import { shapeContains, distToShapeBoundary, isComplement } from '../shapes.js';
 import { evalFieldsAtPoint } from './tri_ms_solver.js';
 
 
@@ -479,26 +479,36 @@ function recoverNodalModeField(mesh, fm, vRe, vIm) {
 // Resample a full-wave eigenmode's transverse E-field onto a regular grid.
 // The Lee–Jin eigenvector stores e_t = γ·Et, so the spatial pattern of |e_t| is the
 // transverse field pattern (the constant γ only scales the whole map), which is what a
-// mode plot shows. Returns { x, y, E[ny][nx], Ex[ny][nx], Ey[ny][nx] }: E is the
-// transverse magnitude |Et| (for the heatmap); Ex/Ey are the real-part components (for
-// an optional quiver/streamline overlay). Points outside the mesh are left at 0.
+// mode plot shows. Returns { x, y, E[ny][nx], Ex[ny][nx], Ey[ny][nx], ExIm, EyIm }: E is
+// the transverse magnitude |Et| (for the heatmap); Ex/Ey are the real-part components (for
+// an optional quiver/streamline overlay), ExIm/EyIm the imaginary parts. Points outside
+// the mesh are left at 0. opts.parity mirrors a half-domain solve onto x < 0 as in
+// resampleStatic: 'even' (V even) flips Ex, 'odd' flips Ey.
 export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
     const { x, y } = makeGrid(domain, opts);
     const nx = x.length, ny = y.length;
     const { locate, coeffOf } = buildLocator(mesh);
     const nodal = recoverNodalModeField(mesh, fm, vRe, vIm);   // continuous field
     const { tris } = mesh;
+    const parity = opts.parity || null;
     const E = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ex = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ey = Array.from({ length: ny }, () => new Float64Array(nx));
+    const ExIm = Array.from({ length: ny }, () => new Float64Array(nx));
+    const EyIm = Array.from({ length: ny }, () => new Float64Array(nx));
     for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
-            const t = locate(x[i], y[j]);
+            let qx = x[i], sx = 1, sy = 1;
+            if (parity && qx < 0) {
+                qx = -qx;
+                if (parity === 'odd') sy = -1; else sx = -1;
+            }
+            const t = locate(qx, y[j]);
             if (t < 0) continue;
             const coeff = coeffOf(t);
-            const l0 = coeff[0][0] + coeff[0][1] * x[i] + coeff[0][2] * y[j];
-            const l1 = coeff[1][0] + coeff[1][1] * x[i] + coeff[1][2] * y[j];
-            const l2 = coeff[2][0] + coeff[2][1] * x[i] + coeff[2][2] * y[j];
+            const l0 = coeff[0][0] + coeff[0][1] * qx + coeff[0][2] * y[j];
+            const l1 = coeff[1][0] + coeff[1][1] * qx + coeff[1][2] * y[j];
+            const l2 = coeff[2][0] + coeff[2][1] * qx + coeff[2][2] * y[j];
             // Barycentric interpolation of the recovered nodal field, reading the nodal
             // slots of the containing triangle's material region → continuous within a
             // region, sharp at interfaces.
@@ -509,8 +519,254 @@ export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
             const eyr = l0 * nodal.eyr[s0] + l1 * nodal.eyr[s1] + l2 * nodal.eyr[s2];
             const eyi = l0 * nodal.eyi[s0] + l1 * nodal.eyi[s1] + l2 * nodal.eyi[s2];
             E[j][i] = Math.hypot(Math.hypot(exr, exi), Math.hypot(eyr, eyi));
-            Ex[j][i] = exr; Ey[j][i] = eyr;
+            Ex[j][i] = sx * exr; Ey[j][i] = sy * eyr;
+            ExIm[j][i] = sx * exi; EyIm[j][i] = sy * eyi;
         }
     }
-    return { x, y, E, Ex, Ey };
+    return { x, y, E, Ex, Ey, ExIm, EyIm };
+}
+
+// |J| of an MQS eddy-current solve (mqsConductorLoss opts.fieldOut, per 1 A in each
+// trace) sampled on a graded grid over each conductor of `rects` (solve coordinates):
+// grid lines follow the skin-refined mesh nodes inside the conductor, n per axis at
+// most, the faces sampled just inside the metal. symX mirrors a half-domain solve
+// (|J| is even about the plane in either mode). Returns one { x, y, J[ny][nx] } per
+// conductor carrying current, null outside the metal.
+export function sampleMqsCurrent(F, rects, n = 160, symX = null) {
+    const { nodes, nNodes } = F.mesh;
+    const ev = mqsFieldEval(F);
+    const evalJ = (x, y) => {
+        const J = ev.J(ev.locate(x, y), x, y);
+        return J ? Math.hypot(J[0], J[1]) : null;
+    };
+    const out = [];
+    for (const r of rects) {
+        if (r.shape && isComplement(r.shape)) continue;   // a shell with no cross-section
+        const xs = [], ys = [];
+        for (let i = 0; i < nNodes; i++) {
+            const x = nodes[2 * i], y = nodes[2 * i + 1];
+            if (x >= r.xmin && x <= r.xmax && y >= r.ymin && y <= r.ymax) { xs.push(x); ys.push(y); }
+        }
+        const gx = quantileAxis(Float64Array.from(xs), r.xmin, r.xmax, n, []);
+        const gy = quantileAxis(Float64Array.from(ys), r.ymin, r.ymax, n, []);
+        // Samples on a face would land in the dielectric beside it.
+        const ex = 1e-6 * (r.xmax - r.xmin), ey = 1e-6 * (r.ymax - r.ymin);
+        const J = Array.from(gy, y => Array.from(gx, x =>
+            evalJ(Math.min(Math.max(x, r.xmin + ex), r.xmax - ex), Math.min(Math.max(y, r.ymin + ey), r.ymax - ey))));
+        // No current in it (an ideal ground): the plot keeps its metal fill.
+        if (!J.some(row => row.some(v => v !== null))) continue;
+        out.push({ x: gx, y: gy, J });
+        if (symX !== null && r.xmax > symX + ex) {
+            out.push({ x: Float64Array.from(gx, x => 2 * symX - x).reverse(), y: gy, J: J.map(row => row.slice().reverse()) });
+        }
+    }
+    return out;
+}
+
+// Point evaluation of an MQS solve (mqsConductorLoss opts.fieldOut): the complex J in a
+// conductor triangle, null elsewhere, and the complex gradient of A in any triangle.
+function mqsFieldEval(F) {
+    const { mesh, sol, nF, dofOf, isCondTri, triGroup, triRect, sRel, sigma, omega, Cr, Ci, CgR, CgI } = F;
+    const { nodes, tris, triEdges, nNodes } = mesh;
+    const { locate, coeffOf } = buildLocator(mesh);
+    const dofs = t => [dofOf[tris[3 * t]], dofOf[tris[3 * t + 1]], dofOf[tris[3 * t + 2]],
+        dofOf[nNodes + triEdges[3 * t]], dofOf[nNodes + triEdges[3 * t + 1]], dofOf[nNodes + triEdges[3 * t + 2]]];
+    const bary = (t, x, y) => { const c = coeffOf(t); return [c, [0, 1, 2].map(k => c[k][0] + c[k][1] * x + c[k][2] * y)]; };
+    const J = (t, x, y) => {
+        if (t < 0) return null;
+        const cls = isCondTri[t];
+        if (cls !== 1 && cls !== 2) return null;
+        const [, l] = bary(t, x, y);
+        const N = [2 * l[0] * l[0] - l[0], 2 * l[1] * l[1] - l[1], 2 * l[2] * l[2] - l[2],
+            4 * l[0] * l[1], 4 * l[1] * l[2], 4 * l[2] * l[0]];
+        const g = dofs(t);
+        let aR = 0, aI = 0;
+        for (let k = 0; k < 6; k++) if (g[k] >= 0) { aR += N[k] * sol[g[k]]; aI += N[k] * sol[nF + g[k]]; }
+        let dR = 0, dI = 0;
+        if (cls === 1) { if (CgR) { dR = CgR[triGroup[t]]; dI = CgI[triGroup[t]]; } else dR = 1; }
+        const uR = dR + omega * aI, uI = dI - omega * aR;
+        const s = sigma * (sRel ? sRel[triRect[t]] : 1);
+        return [s * (Cr * uR - Ci * uI), s * (Cr * uI + Ci * uR)];
+    };
+    // [dA/dx, dA/dy] as [re, im] pairs.
+    const gradA = (t, x, y) => {
+        const [c, l] = bary(t, x, y);
+        const g = dofs(t);
+        const out = [0, 0, 0, 0];
+        for (let a = 0; a < 3; a++) {
+            const b = (a + 1) % 3;
+            const wv = 4 * l[a] - 1;
+            const bases = [[g[a], wv * c[a][1], wv * c[a][2]],
+                [g[3 + a], 4 * (l[a] * c[b][1] + l[b] * c[a][1]), 4 * (l[a] * c[b][2] + l[b] * c[a][2])]];
+            for (const [dof, dx, dy] of bases) {
+                if (dof < 0) continue;
+                out[0] += dx * sol[dof]; out[1] += dx * sol[nF + dof];
+                out[2] += dy * sol[dof]; out[3] += dy * sol[nF + dof];
+            }
+        }
+        return out;
+    };
+    return { locate, J, gradA, isCondTri };
+}
+
+// Surface current density per 1 A in each trace from an MQS solve (mqsConductorLoss
+// opts.fieldOut). On a meshed conductor it is the current flowing between the surface
+// and the conductor's midline, integral of J along the inward normal, every point of
+// the metal counted once for its nearest face: the perfect-conductor K in the skin
+// regime, J times the depth to the midline once the current fills the metal. `bodies`
+// (solve coordinates) are the conductor outlines, rects and round wires; a polygon or
+// a ring and the perfect conductors of the solve (metal walls, ideal grounds, A = 0)
+// take the surface field |dA/dn| / mu0 times the drive. symX mirrors a half-domain
+// solve. Returns segments { x0, y0, x1, y1, K }.
+export function mqsSurfaceCurrent(F, bodies, maxLen, symX = null) {
+    const MU0 = 4 * Math.PI * 1e-7;
+    const { mesh, Cr, Ci } = F;
+    const { nodes, tris, edges, triEdges, nTris, nEdges } = mesh;
+    const ev = mqsFieldEval(F);
+    const cls = ev.isCondTri;
+    const edgeTris = new Int32Array(2 * nEdges).fill(-1);
+    for (let t = 0; t < nTris; t++) for (let k = 0; k < 3; k++) {
+        const e = triEdges[3 * t + k];
+        if (edgeTris[2 * e] < 0) edgeTris[2 * e] = t; else edgeTris[2 * e + 1] = t;
+    }
+    const TOL = 1e-12;
+    // Full extents of a body: one cut by the symmetry plane continues past it.
+    const full = bodies.map(b => ({ ...b, xmin: symX !== null && Math.abs(b.xmin - symX) < 1e-9 * (b.xmax - b.xmin) ? 2 * symX - b.xmax : b.xmin }));
+    const bodyAt = (x, y) => full.find(b => b.shape ? shapeContains(b, x, y, 1e-9 * (b.xmax - b.xmin))
+        : x > b.xmin - TOL && x < b.xmax + TOL && y > b.ymin - TOL && y < b.ymax + TOL) || null;
+    // Inward unit normal and depth to the midline at surface point (x, y) of body b.
+    const inward = (b, x, y) => {
+        if (b.shape) {
+            if (b.shape.type !== 'circle') return null;
+            const dx = b.shape.cx - x, dy = b.shape.cy - y, r = Math.hypot(dx, dy);
+            return r > 0 ? { nx: dx / r, ny: dy / r, depth: r } : null;
+        }
+        const W = b.xmax - b.xmin, H = b.ymax - b.ymin;
+        const faces = [[y - b.ymin, 0, 1, Math.min(x - b.xmin, b.xmax - x, H / 2)],
+            [b.ymax - y, 0, -1, Math.min(x - b.xmin, b.xmax - x, H / 2)],
+            [x - b.xmin, 1, 0, Math.min(y - b.ymin, b.ymax - y, W / 2)],
+            [b.xmax - x, -1, 0, Math.min(y - b.ymin, b.ymax - y, W / 2)]];
+        faces.sort((p, q) => p[0] - q[0]);
+        const [, nx, ny, depth] = faces[0];
+        return depth > 0 ? { nx, ny, depth } : null;
+    };
+    const NQ = 64;
+    const integrated = (t, x, y, geo) => {
+        let sr = 0, si = 0, prev = null, dPrev = 0;
+        for (let k = 0; k <= NQ; k++) {
+            const d = geo.depth * Math.max((k / NQ) ** 2, 1e-7);
+            const px = x + geo.nx * d, py = y + geo.ny * d;
+            const tt = k === 0 ? t : ev.locate(px, py);
+            const J = ev.J(tt, px, py) || [0, 0];
+            if (prev) { sr += (J[0] + prev[0]) / 2 * (d - dPrev); si += (J[1] + prev[1]) / 2 * (d - dPrev); }
+            prev = J; dPrev = d;
+        }
+        return Math.hypot(sr, si);
+    };
+    const Cmag = Math.hypot(Cr, Ci);
+    const surfaceH = (t, x, y) => {
+        const g = ev.gradA(t, x, y);
+        return Cmag * Math.hypot(g[0], g[1], g[2], g[3]) / MU0;
+    };
+    // A boundary edge with A = 0 on all its unknowns is metal (a wall, a coax shield),
+    // except on the symmetry plane of an odd mode.
+    const { dofOf } = F, nNodes = mesh.nNodes;
+    const metalBoundary = (e, n0, n1) => dofOf[n0] < 0 && dofOf[n1] < 0 && dofOf[nNodes + e] < 0
+        && !(symX !== null && Math.abs(nodes[2 * n0] - symX) < 1e-12 && Math.abs(nodes[2 * n1] - symX) < 1e-12);
+    const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
+    const push = (xa, ya, xb, yb, K) => { seg.x0.push(xa); seg.y0.push(ya); seg.x1.push(xb); seg.y1.push(yb); seg.K.push(K); };
+    for (let e = 0; e < nEdges; e++) {
+        const ta = edgeTris[2 * e], tb = edgeTris[2 * e + 1];
+        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1], dx = nodes[2 * n1] - x0, dy = nodes[2 * n1 + 1] - y0;
+        // The metal triangle (driven, return or ideal) and the dielectric one beside it.
+        let tm = -1, td = -1;
+        if (tb < 0) {
+            if (cls[ta] === 0 && metalBoundary(e, n0, n1)) td = ta;
+            else continue;
+        } else if (cls[ta] && !cls[tb]) { tm = ta; td = tb; }
+        else if (cls[tb] && !cls[ta]) { tm = tb; td = ta; }
+        else continue;
+        const n = Math.max(1, Math.ceil(Math.hypot(dx, dy) / maxLen));
+        for (let k = 0; k < n; k++) {
+            const px = x0 + dx * (k + 0.5) / n, py = y0 + dy * (k + 0.5) / n;
+            let K;
+            const geo = tm >= 0 && cls[tm] !== 3 ? (b => b && inward(b, px, py))(bodyAt(px, py)) : null;
+            if (geo) K = integrated(tm, px, py, geo);
+            else K = surfaceH(td, px, py);
+            const xa = x0 + dx * k / n, ya = y0 + dy * k / n, xb = x0 + dx * (k + 1) / n, yb = y0 + dy * (k + 1) / n;
+            push(xa, ya, xb, yb, K);
+            if (symX !== null && px > symX + TOL) push(2 * symX - xa, ya, 2 * symX - xb, yb, K);
+        }
+    }
+    const out = {};
+    for (const k of ['x0', 'y0', 'x1', 'y1', 'K']) out[k] = Float64Array.from(seg[k]);
+    return out;
+}
+
+// Surface current density of the perfect-conductor limit on the conductor surfaces and
+// metal walls (the loss edges), per ampere of signal current. The vacuum static solve
+// phiAir has the surface charge distribution of the TEM mode in the lossless limit, and
+// K = |H_t| is proportional to the normal field on the surface, so normalizing by the
+// charge on the driven conductor gives K / I. Each edge is sampled every maxLen at most.
+// symX mirrors a half-domain solve onto x < symX; a driven conductor cut by the plane
+// carries twice the half-domain current. nets: the number of separate nets at the
+// driving potential (the current is per net). Returns segments { x0, y0, x1, y1, K }.
+export function surfaceCurrentPoints(mesh, fm, phi, lossMask, maxLen, symX = null, nets = 1) {
+    const { nodes, tris, edges, triEdges, nTris, nEdges } = mesh;
+    const pv = phi.phiVertex, pe = phi.phiEdge;
+    const edgeTri = new Int32Array(nEdges).fill(-1);
+    for (let t = 0; t < nTris; t++) {
+        if (fm.faceF && fm.faceF[2 * t] < 0) continue;   // conductor interior
+        for (let k = 0; k < 3; k++) edgeTri[triEdges[3 * t + k]] = t;
+    }
+    let pMax = -Infinity;
+    for (let e = 0; e < nEdges; e++) {
+        if (!lossMask[e]) continue;
+        pMax = Math.max(pMax, pv[edges[2 * e]], pv[edges[2 * e + 1]]);
+    }
+    if (!(pMax > 0)) return null;
+    const onDriven = (n) => Math.abs(pv[n] - pMax) < 1e-9 * pMax;
+    const TOL = 1e-12;
+    const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
+    const push = (xa, ya, xb, yb, K) => { seg.x0.push(xa); seg.y0.push(ya); seg.x1.push(xb); seg.y1.push(yb); seg.K.push(K); };
+    let I = 0, cutByPlane = false;
+    for (let e = 0; e < nEdges; e++) {
+        const t = lossMask[e] ? edgeTri[e] : -1;
+        if (t < 0) continue;
+        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1];
+        const dx = nodes[2 * n1] - x0, dy = nodes[2 * n1 + 1] - y0;
+        const L = Math.hypot(dx, dy);
+        const driven = onDriven(n0) && onDriven(n1);
+        if (driven && symX !== null && (Math.abs(x0 - symX) < TOL || Math.abs(x0 + dx - symX) < TOL)) cutByPlane = true;
+        const c = triCoefficients(nodes, tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]).coeff;
+        const v = [pv[tris[3 * t]], pv[tris[3 * t + 1]], pv[tris[3 * t + 2]]];
+        const ev = [pe[triEdges[3 * t]], pe[triEdges[3 * t + 1]], pe[triEdges[3 * t + 2]]];
+        const n = Math.max(1, Math.ceil(L / maxLen));
+        for (let k = 0; k < n; k++) {
+            const px = x0 + dx * (k + 0.5) / n, py = y0 + dy * (k + 0.5) / n;
+            const l = [0, 1, 2].map(a => c[a][0] + c[a][1] * px + c[a][2] * py);
+            let gx = 0, gy = 0;
+            for (let a = 0; a < 3; a++) {
+                const b = (a + 1) % 3;
+                const fv = v[a] * (4 * l[a] - 1);
+                gx += fv * c[a][1]; gy += fv * c[a][2];
+                gx += 4 * ev[a] * (l[a] * c[b][1] + l[b] * c[a][1]);
+                gy += 4 * ev[a] * (l[a] * c[b][2] + l[b] * c[a][2]);
+            }
+            const E = Math.hypot(gx, gy);
+            if (driven) I += E * L / n;
+            const xa = x0 + dx * k / n, ya = y0 + dy * k / n, xb = x0 + dx * (k + 1) / n, yb = y0 + dy * (k + 1) / n;
+            push(xa, ya, xb, yb, E);
+            if (symX !== null && px > symX + TOL) push(2 * symX - xa, ya, 2 * symX - xb, yb, E);
+        }
+    }
+    if (cutByPlane) I *= 2;
+    I /= nets;
+    if (!(I > 0)) return null;
+    const out = {};
+    for (const k of ['x0', 'y0', 'x1', 'y1']) out[k] = Float64Array.from(seg[k]);
+    out.K = Float64Array.from(seg.K, v => v / I);
+    return out;
 }

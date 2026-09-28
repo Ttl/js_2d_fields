@@ -3794,8 +3794,12 @@ export class FieldSolver2D {
     //   V(-x) = sV * V(x) with sV = -1 for 'odd' (electric wall) else +1
     //   Ex(-x) = -sV * Ex(x). Ey(-x) = sV * Ey(x).
     getPlotFields() {
+        const extra = { surfaceK: this.surfaceK || null, currentJ: this.currentJ || null,
+                        surfaceKSource: this.surfaceKSource || null, idealGrounds: this.idealGrounds || null,
+                        fieldFreq: this.fieldFreq ?? null,
+                        fieldKind: this.fieldKind || 'static' };
         const base = { x: this.x, y: this.y, V: this.V, Ex: this.Ex, Ey: this.Ey,
-                       triMesh: this.triMesh || null };
+                       triMesh: this.triMesh || null, ...extra };
         // Mirror only a genuine half grid (x[0] === 0). Fields grafted by the
         // triangular backend already span the full domain (x[0] < 0).
         if (!this.sym_half || !this.V || !this.x || this.x.length < 2 || this.x[0] < 0)
@@ -3818,7 +3822,78 @@ export class FieldSolver2D {
             Ex.push(mirror(this.Ex[m], -sV));
             Ey.push(mirror(this.Ey[m], sV));
         }
-        return { x: xs, y: this.y, V, Ex, Ey, triMesh: this.triMesh || null };
+        return { x: xs, y: this.y, V, Ex, Ey, triMesh: this.triMesh || null, ...extra };
+    }
+
+    // Plot fields at frequency f: the fields of the solve at f (the static solve at the
+    // causal permittivity of f, the full-wave quasi-TEM mode field on the triangular
+    // backend) and the surface current per ampere, left on the solver for getPlotFields.
+    async plotFieldsAt(f, cachedResults) {
+        if (this.mesh_backend === 'triangular') {
+            const tri = await this._ensureTriBackend();
+            tri.plotFieldsAt(f);
+            return;
+        }
+        const r = await this.computeAtFrequency(f, cachedResults);
+        this.V = r.modes.map(m => m.V);
+        this.Ex = r.modes.map(m => m.Ex);
+        this.Ey = r.modes.map(m => m.Ey);
+        this._plotModes = r.modes.map(m => m.mode);
+        this.surfaceK = r.modes.map(m => this.surface_current(m.Ex0, m.Ey0));
+        this.surfaceKSource = r.modes.map(() => 'pec');
+        this.fieldFreq = f;
+        this.fieldKind = 'static';
+    }
+
+    // Surface current density of the perfect-conductor limit per ampere, from the vacuum
+    // field at the dielectric node next to each conductor face (the conductor-loss
+    // integrand). Normalized by the current of the driven net, the larger of the two
+    // polarities. Returns full-domain face segments { x0, y0, x1, y1, K } or null.
+    surface_current(Ex0, Ey0) {
+        if (!Ex0 || !Ey0 || !this.conductor_id) return null;
+        const x = this.x, y = this.y, nx = x.length, ny = y.length;
+        const isCond = (i, j) => this.signal_mask[i][j] || this.ground_mask[i][j];
+        // Span of the face at node k: halfway to each neighbouring grid line.
+        const span = (a, k) => [(a[Math.max(k - 1, 0)] + a[k]) / 2, (a[k] + a[Math.min(k + 1, a.length - 1)]) / 2];
+        const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
+        const push = (xa, ya, xb, yb, K) => { seg.x0.push(xa); seg.y0.push(ya); seg.x1.push(xb); seg.y1.push(yb); seg.K.push(K); };
+        const net = [0, 0];
+        const straddles = [false, false];
+        const mirror = !!this.sym_half && x[0] === 0;
+        for (let i = 1; i < ny - 1; i++) {
+            for (let j = mirror ? 0 : 1; j < nx - 1; j++) {
+                if (isCond(i, j)) continue;
+                for (const [ni, nj, dir] of [[i, j + 1, 'r'], [i, j - 1, 'l'], [i + 1, j, 'u'], [i - 1, j, 'd']]) {
+                    if (nj < 0 || !isCond(ni, nj)) continue;
+                    const horiz = dir === 'u' || dir === 'd';
+                    const E = horiz ? Ey0[i][j] : Ex0[i][j];
+                    const Eout = dir === 'r' || dir === 'u' ? -E : E;
+                    // The face lies on the conductor node's grid line.
+                    const [a, b] = horiz ? span(x, j) : span(y, i);
+                    const w = b - a;
+                    if (horiz) {
+                        // A face on the symmetry plane is drawn whole, its mirror half included.
+                        push(mirror && j === 0 ? -b : a, y[ni], b, y[ni], Math.abs(E));
+                        if (mirror && j > 0) push(-b, y[ni], -a, y[ni], Math.abs(E));
+                    } else {
+                        push(x[nj], a, x[nj], b, Math.abs(E));
+                        if (mirror) push(-x[nj], a, -x[nj], b, Math.abs(E));
+                    }
+                    const c = this.conductors[this.conductor_id[ni][nj]];
+                    if (c && c.is_signal) {
+                        const k = this.is_differential && c.polarity < 0 ? 1 : 0;
+                        net[k] += Eout * w;
+                        if (mirror && c.x_min < 0 && c.x_max > 0) straddles[k] = true;
+                    }
+                }
+            }
+        }
+        const I = Math.max(Math.abs(net[0]) * (straddles[0] ? 2 : 1), Math.abs(net[1]) * (straddles[1] ? 2 : 1));
+        if (!(I > 0)) return null;
+        const out = {};
+        for (const k of ['x0', 'y0', 'x1', 'y1']) out[k] = Float64Array.from(seg[k]);
+        out.K = Float64Array.from(seg.K, v => v / I);
+        return out;
     }
 
     /**

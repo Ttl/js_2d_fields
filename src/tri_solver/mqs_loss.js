@@ -683,6 +683,12 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         Cr = I_mesh * dR / dMag2; Ci = -I_mesh * dI / dMag2;
     }
     const Cmag2 = Cr*Cr + Ci*Ci;
+    // The solved field for a current density plot (sampleMqsCurrent): J/σ = C(u − jωA)
+    // with the drive u of the triangle's class and group.
+    if (opts.fieldOut) Object.assign(opts.fieldOut, {
+        mesh, sol, nF, dofOf, isCondTri, triGroup, triRect: pre.triRect, sRel: pre.sRelRect,
+        sigma, omega, Cr, Ci, CgR, CgI,
+    });
 
     // Conductor dissipation: J/σ = C*(u - jωA1) with the drive u = 1 in the
     // signal (class 1) and u = 0 in passive ground rects (class 2, pure eddy /

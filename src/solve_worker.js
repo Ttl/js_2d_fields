@@ -17,6 +17,7 @@
 //   { id, type: 'modes'     , params, freq, nev, refineOpts }
 //   { id, type: 'modeField' , idx }          (after a 'modes' job, same worker)
 //   { id, type: 'paramSweep', points, freqHz, opts }
+//   { id, type: 'plotFields', freq }         (after a 'simulate' job, same worker)
 //   {     type: 'stop' }                     (no id: cancels whatever is running)
 // worker to main:
 //   { id, type: 'log'     , msg }
@@ -34,6 +35,8 @@ import { InterpolatingSweep } from './interpolating_sweep.js';
 let stopRequested = false;
 let currentId = null;
 let modesSolver = null;   // retained between 'modes' and its follow-up 'modeField' calls
+// The last simulate job's solver and converged solve, retained for 'plotFields'.
+let simSolver = null, simCached = null;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const log = (msg) => post({ id: currentId, type: 'log', msg });
@@ -81,7 +84,21 @@ function fieldPayload(solver) {
         x: solver.x, y: solver.y,
         V: solver.V, Ex: solver.Ex, Ey: solver.Ey,
         triMesh: solver.triMesh || null,
+        surfaceK: solver.surfaceK || null, currentJ: solver.currentJ || null,
+        surfaceKSource: solver.surfaceKSource || null, idealGrounds: solver.idealGrounds || null,
+        fieldFreq: solver.fieldFreq ?? null,
+        fieldKind: solver.fieldKind || 'static',
     };
+}
+
+// Plot fields of `solver` at frequency f. A failure keeps the fields it had.
+async function plotFields(solver, cached, f) {
+    try {
+        await solver.plotFieldsAt(f, cached);
+        if (solver.plotNote) log(solver.plotNote);
+    } catch (e) {
+        log(`Plot fields at ${(f / 1e9).toFixed(3)} GHz failed: ${(e && e.message) || e}`);
+    }
 }
 
 // The accuracy notes the main thread cannot derive from its own (never-solved) view
@@ -110,6 +127,7 @@ const MESH_FRACTION = (EST_MESH_PASSES * MESH_PASS_COST) /
     (EST_MESH_PASSES * MESH_PASS_COST + EST_SWEEP_POINTS);
 
 async function jobSimulate({ params, frequencies, opts }) {
+    simSolver = null; simCached = null;
     const solver = makeSolver(params);
     const p = params;
 
@@ -163,6 +181,7 @@ async function jobSimulate({ params, frequencies, opts }) {
 
     // First plottable state: the converged mesh solve. Ship the fields now so the
     // geometry tab paints its E-field overlay while the sweep is still running.
+    solver.fieldFreq = maxFreq;
     post({ id: currentId, type: 'partial', fields: fieldPayload(solver),
            sweepResults: stripSweep(sweepResults) });
 
@@ -272,6 +291,10 @@ async function jobSimulate({ params, frequencies, opts }) {
     }
 
     sweepResults.sort((a, b) => a.freq - b.freq);
+    if (!stopRequested) {
+        await plotFields(solver, cachedResults, opts.plotFreq ?? maxFreq);
+        simSolver = solver; simCached = cachedResults;
+    }
     return {
         stopped: stopRequested,
         sweepResults: stripSweep(sweepResults),
@@ -300,6 +323,12 @@ async function jobModes({ params, freq, nev, refineOpts }) {
     // eagerly resampling and shipping every one of them would cost far more than the
     // handful the user actually clicks on.
     return { result };
+}
+
+async function jobPlotFields({ freq }) {
+    if (!simSolver) return { fields: null };
+    await plotFields(simSolver, simCached, freq);
+    return { fields: fieldPayload(simSolver) };
 }
 
 function jobModeField({ idx }) {
@@ -360,6 +389,7 @@ const JOBS = {
     modes: jobModes,
     modeField: jobModeField,
     paramSweep: jobParamSweep,
+    plotFields: jobPlotFields,
 };
 
 async function runJob(msg) {

@@ -33,6 +33,11 @@ let lastSweepDisplayUnit = null; // Display unit used during last sweep
 
 // Modes tab state
 let isSolvingModes = false;
+// Field plot state: the view-model solver whose fields the worker's retained solve
+// belongs to, and the highest frequency of that solve (the default plot frequency).
+let plotFieldsSolver = null;
+let plotFieldsMaxFreq = null;
+let plotFieldsBusy = false, plotFieldsPending = false;
 let modesResult = null;          // last solveModes() summary { modes, nconv, ... }
 let modesSelectedIdx = -1;       // index into modesResult.modes of the plotted mode
 let modesFieldCache = new Map(); // mode index, field grid fetched from the worker
@@ -950,9 +955,50 @@ function applyFields(target, fields) {
     target.V = fields.V;
     target.Ex = fields.Ex;
     target.Ey = fields.Ey;
+    target.surfaceK = fields.surfaceK || null;
+    target.currentJ = fields.currentJ || null;
+    target.surfaceKSource = fields.surfaceKSource || null;
+    target.idealGrounds = fields.idealGrounds || null;
+    target.fieldFreq = fields.fieldFreq ?? null;
+    target.fieldKind = fields.fieldKind || 'static';
     if (fields.triMesh) target.triMesh = fields.triMesh;
     target.solution_valid = true;
     target.mesh_generated = true;
+}
+
+// Field plot frequency in Hz from Plot Options, null when empty (the highest solved).
+function plotFrequency() {
+    const el = document.getElementById('plot-freq');
+    if (!el || !el.value.trim()) return null;
+    const f = getInputValue('plot-freq');
+    return isFinite(f) && f >= 0 ? f : null;
+}
+
+// Re-solve the plot fields of the last solve at the Plot Options frequency. Needs the
+// worker's retained solve of the current geometry; requests arriving while one runs
+// collapse into one more run after it.
+async function updatePlotFields() {
+    if (!solver || solver !== plotFieldsSolver || !solver.solution_valid) return;
+    if (isSimulating || isSweeping || isSolvingModes) return;
+    if (plotFieldsBusy) { plotFieldsPending = true; return; }
+    plotFieldsBusy = true;
+    try {
+        do {
+            plotFieldsPending = false;
+            const f = plotFrequency() ?? plotFieldsMaxFreq;
+            if (f === solver.fieldFreq) continue;
+            const target = solver;
+            const { fields } = await workerJob('plotFields', { freq: f });
+            if (fields && target === solver && target === plotFieldsSolver) {
+                applyFields(target, fields);
+                draw();
+            }
+        } while (plotFieldsPending);
+    } catch (e) {
+        log('Plot field update failed: ' + (e.message || e));
+    } finally {
+        plotFieldsBusy = false;
+    }
 }
 
 function getFrequencies() {
@@ -1630,7 +1676,6 @@ function getParams() {
 
 // Helper function to add common optional geometry parameters
 function updateGeometry() {
-    setCurrentView("geometry");
 
     const pbar = document.getElementById('progress_bar');
     pbar.style.width = "0%";
@@ -1778,6 +1823,7 @@ async function runSimulation() {
             opts: {
                 useInterpolation: !!document.getElementById('chk_interp_sweep')?.checked,
                 interpTolerance: interpTolerance(),
+                plotFreq: plotFrequency(),
             },
         }, {
             progress: (m) => {
@@ -1811,6 +1857,10 @@ async function runSimulation() {
         });
 
         if (solver === solvedSolver) applyFields(solver, out.fields);
+        if (!out.stopped) {
+            plotFieldsSolver = solvedSolver;
+            plotFieldsMaxFreq = Math.max(...frequencies);
+        }
         logModeWarnings(out.sweepWarnings);
 
         if (out.stopped) {
@@ -2695,6 +2745,8 @@ function bindEvents() {
             }
         });
     }
+    const plotFreqEl = document.getElementById('plot-freq');
+    if (plotFreqEl) plotFreqEl.addEventListener('change', updatePlotFields);
     const plotEfieldDbEl = document.getElementById('plot-efield-db');
     if (plotEfieldDbEl) {
         // dB and linear keep separate scales, so the dialog reloads the new one.
@@ -2728,6 +2780,10 @@ const scaleRanges = {
     potential: { min: null, max: null },
     efield: { min: null, max: null },
     efield_db: { min: null, max: null },
+    current: { min: null, max: null },
+    current_db: { min: null, max: null },
+    density: { min: null, max: null },
+    density_db: { min: null, max: null },
     geometry: { min: null, max: null }
 };
 
@@ -2743,6 +2799,8 @@ let scaleDialogOpen = false;
 function getViewType(view) {
     if (view.startsWith('potential')) return 'potential';
     if (view.startsWith('efield')) return view.endsWith('_db') ? 'efield_db' : 'efield';
+    if (view.startsWith('current')) return view.endsWith('_db') ? 'current_db' : 'current';
+    if (view.startsWith('density')) return view.endsWith('_db') ? 'density_db' : 'density';
     return 'geometry';
 }
 
@@ -2818,7 +2876,7 @@ function openScaleDialog() {
     const scaleInfo = getScaleRange();
     const viewType = getViewType(scaleInfo.view);
     const dbRow = document.getElementById("efieldDbRow");
-    if (dbRow) dbRow.style.display = viewType.startsWith('efield') ? 'block' : 'none';
+    if (dbRow) dbRow.style.display = /^(efield|current|density)/.test(viewType) ? 'block' : 'none';
 
     // Get actual data range (before any user scaling)
     const actualDataRange = getActualDataRange();
@@ -2852,7 +2910,7 @@ function openScaleDialog() {
         const isPotentialOddMode = actualMin < -0.1;
         sliderMinBound = isPotentialOddMode ? -1.0 : 0.0;
         sliderMaxBound = 1.0;
-    } else if (viewType === 'efield_db') {
+    } else if (viewType.endsWith('_db')) {
         sliderMinBound = actualMin - 40;
         sliderMaxBound = actualMax + 20;
     } else {

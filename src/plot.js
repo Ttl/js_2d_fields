@@ -34,6 +34,8 @@ const getPlotly = () => window.Plotly;
 
 let showMesh = false;
 let currentView = "geometry";
+// The view the user picked. currentView is it while its data exists, else the geometry.
+let wantedView = "geometry";
 let zMin = null;
 let zMax = null;
 // Store actual data range (before any user scaling)
@@ -411,9 +413,10 @@ function getScaleRange() {
     return { min: zMin, max: zMax, view: scaleView() };
 }
 
-// The E-field view in dB is a separate scale: its range is in dB, not V/m.
+// The E-field and surface current views in dB are separate scales: their range is in dB.
 function isDbView() {
-    return currentView.startsWith("efield") && getPlotOptions().efieldDb;
+    return (currentView.startsWith("efield") || currentView === "current" || currentView === "density")
+        && getPlotOptions().efieldDb;
 }
 function scaleView() {
     return isDbView() ? currentView + "_db" : currentView;
@@ -427,6 +430,8 @@ function getActualDataRange() {
 function setScaleRange(min, max) {
     zMin = min;
     zMax = max;
+    // The surface current colors are binned by value, so a new range redraws them.
+    if (currentView === "current" || currentView === "density") { draw(); return; }
 
     const container = document.getElementById('sim_canvas');
     const Plotly = getPlotly();
@@ -461,10 +466,179 @@ function setScaleRange(min, max) {
     }
 }
 
+// The solver's plot grid in mm, for the mesh overlay of the views with no field grid
+// of their own (|K|, |J|).
+function solverGridMM(solver) {
+    if (!solver.x || !solver.y) return { xMM: [0, 1], yMM: [0, 1], nx: 0, nyDisplay: 0 };
+    return { xMM: Array.from(solver.x, v => v * 1000), yMM: Array.from(solver.y, v => v * 1000),
+             nx: solver.x.length, nyDisplay: solver.y.length };
+}
+
+// Title suffix naming the frequency and kind of the plotted fields.
+function fieldFreqLabel(solver) {
+    const f = solver.fieldFreq;
+    if (typeof f !== "number" || !(f >= 0)) return "";
+    const fs = f >= 1e9 ? `${+(f / 1e9).toPrecision(4)} GHz` : f >= 1e6 ? `${+(f / 1e6).toPrecision(4)} MHz`
+        : f >= 1e3 ? `${+(f / 1e3).toPrecision(4)} kHz` : `${+f.toPrecision(4)} Hz`;
+    // Below a waveguide cutoff the mode keeps its transverse pattern but decays along z.
+    const evanescent = solver.fc > 0 && f <= solver.fc ? ", below cutoff (evanescent)" : "";
+    return ` at ${fs}` + (solver.fieldKind === 'fullwave' && currentView.startsWith("efield") ? ", full-wave mode" : "") + evanescent;
+}
+
+// Surface current segments of the displayed mode, or null.
+function getSurfaceK() {
+    const solver = get.solver();
+    const K = solver && solver.surfaceK;
+    if (!K) return null;
+    return K[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
+}
+
+// Current density blocks of the displayed mode, or null.
+function getCurrentJ() {
+    const solver = get.solver();
+    const J = solver && solver.currentJ;
+    if (!J) return null;
+    return J[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
+}
+
+// Conductor shapes of the |J| view. A conductor under a current density block gets only
+// an outline above the heatmap: its fill (and plating edges) below would show through
+// at the block edges as a false hot rim. Metal without a block (walls, wall grounds)
+// keeps its fill.
+function densityConductorShapes(solver, blocks, maxY) {
+    const bb = blocks.map(b => ({ x0: Math.min(b.x[0], b.x[b.x.length - 1]), x1: Math.max(b.x[0], b.x[b.x.length - 1]),
+                                  y0: b.y[0], y1: b.y[b.y.length - 1] }));
+    const covered = c => bb.some(b => Math.min(b.x1, c.x_max) > Math.max(b.x0, c.x_min)
+        && Math.min(b.y1, c.y_max) > Math.max(b.y0, c.y_min));
+    const conductors = solver.conductors || [];
+    const rest = Object.create(solver);
+    rest.conductors = conductors.filter(c => !covered(c));
+    const out = conductorFillShapes(rest, maxY).map(sh => ({ ...sh, layer: 'below' }));
+    const OUTLINE = { fillcolor: 'rgba(0,0,0,0)', line: { color: 'rgba(255, 255, 255, 0.5)', width: 1 }, layer: 'above' };
+    for (const c of conductors.filter(covered)) {
+        const sh = c.shape;
+        if (sh && !isPolyShape(sh)) {
+            if (isComplement(sh)) continue;
+            const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
+            out.push({ type: 'circle', xref: 'x', yref: 'y', x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r, ...OUTLINE });
+        } else {
+            out.push(bodyShape(c, maxY, OUTLINE));
+        }
+    }
+    return out;
+}
+
+// A |J| block extended by a hair past each face with copies of its edge samples, so the
+// heatmap reaches the conductor outline without an antialiasing seam.
+function padBlock(b) {
+    const w = Math.abs(b.x[b.x.length - 1] - b.x[0]), h = b.y[b.y.length - 1] - b.y[0];
+    const pad = 2e-3 * Math.min(w, h);
+    const dir = b.x[b.x.length - 1] >= b.x[0] ? 1 : -1;
+    const x = [b.x[0] - dir * pad, ...b.x, b.x[b.x.length - 1] + dir * pad];
+    const y = [b.y[0] - pad, ...b.y, b.y[b.y.length - 1] + pad];
+    const rows = b.J.map(row => [row[0], ...row, row[row.length - 1]]);
+    return { x, y, J: [rows[0], ...rows, rows[rows.length - 1]] };
+}
+
+// Autoscale of |J|: the linear max is the level 95 % of the current flows below (the
+// corner current is singular; weighting by current, not area, keeps wide ground pours
+// with little current from pulling it down), dB spans the peak down 40 dB.
+function densityAutoscale(blocks, db) {
+    const pts = [];
+    for (const b of blocks) {
+        const nx = b.x.length, ny = b.y.length;
+        for (let j = 0; j < ny; j++) {
+            const dy = (b.y[Math.min(j + 1, ny - 1)] - b.y[Math.max(j - 1, 0)]) / 2;
+            for (let i = 0; i < nx; i++) {
+                const v = b.J[j][i];
+                if (v > 0) pts.push([v, dy * (b.x[Math.min(i + 1, nx - 1)] - b.x[Math.max(i - 1, 0)]) / 2]);
+            }
+        }
+    }
+    if (!pts.length) return { min: 0, max: 1, peak: 1 };
+    pts.sort((a, b) => a[0] - b[0]);
+    const peak = pts[pts.length - 1][0];
+    if (db) { const max = Math.ceil(20 * Math.log10(peak)); return { min: max - 40, max, peak: max }; }
+    let total = 0;
+    for (const p of pts) total += p[0] * p[1];
+    let acc = 0, q = peak;
+    for (const p of pts) { acc += p[0] * p[1]; if (acc >= 0.95 * total) { q = p[0]; break; } }
+    return { min: 0, max: q, peak };
+}
+
+// Viridis, sampled for the binned segment colors (the colorbar uses the same stops).
+const VIRIDIS = ['#440154', '#482878', '#3e4989', '#31688e', '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b', '#fde725'];
+const VIRIDIS_SCALE = VIRIDIS.map((c, i) => [i / (VIRIDIS.length - 1), c]);
+function viridisAt(u) {
+    const t = Math.min(1, Math.max(0, u)) * (VIRIDIS.length - 1);
+    const i = Math.min(VIRIDIS.length - 2, Math.floor(t)), f = t - i;
+    const a = VIRIDIS[i], b = VIRIDIS[i + 1];
+    const ch = (c, k) => parseInt(c.slice(1 + 2 * k, 3 + 2 * k), 16);
+    return `rgb(${[0, 1, 2].map(k => Math.round(ch(a, k) + f * (ch(b, k) - ch(a, k)))).join(',')})`;
+}
+
+// Autoscale of the surface current: the linear max is the length-weighted 99th
+// percentile (the corner current is singular), dB spans the peak down 40 dB.
+function currentAutoscale(K, db) {
+    const n = K.K.length;
+    const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => K.K[a] - K.K[b]);
+    const len = i => Math.hypot(K.x1[i] - K.x0[i], K.y1[i] - K.y0[i]);
+    let total = 0;
+    for (let i = 0; i < n; i++) total += len(i);
+    let acc = 0, q99 = K.K[idx[n - 1]];
+    for (const i of idx) { acc += len(i); if (acc >= 0.99 * total) { q99 = K.K[i]; break; } }
+    const peak = K.K[idx[n - 1]];
+    if (!db) return { min: 0, max: q99, peak };
+    const max = Math.ceil(20 * Math.log10(peak));
+    return { min: max - 40, max, peak: max };
+}
+
+// Surface current traces: the segments binned by color into one line trace per bin,
+// plus invisible midpoint markers carrying the hover text and the colorbar.
+function surfaceCurrentTraces(K, zmin, zmax, db) {
+    const NB = 48;
+    const bins = Array.from({ length: NB }, () => ({ x: [], y: [] }));
+    const mx = [], my = [], mv = [];
+    const span = zmax - zmin || 1;
+    for (let i = 0; i < K.K.length; i++) {
+        const v = db ? 20 * Math.log10(Math.max(K.K[i], 1e-30)) : K.K[i];
+        const b = bins[Math.min(NB - 1, Math.max(0, Math.floor((v - zmin) / span * NB)))];
+        b.x.push(K.x0[i] * 1000, K.x1[i] * 1000, null);
+        b.y.push(K.y0[i] * 1000, K.y1[i] * 1000, null);
+        mx.push((K.x0[i] + K.x1[i]) * 500); my.push((K.y0[i] + K.y1[i]) * 500); mv.push(v);
+    }
+    const traces = bins.map((b, k) => ({
+        type: "scattergl", mode: "lines", x: b.x, y: b.y,
+        line: { width: 5, color: viridisAt((k + 0.5) / NB) },
+        hoverinfo: "skip", showlegend: false,
+    })).filter(t => t.x.length);
+    traces.push({
+        type: "scattergl", mode: "markers", x: mx, y: my,
+        marker: { size: 6, opacity: 0, color: mv, cmin: zmin, cmax: zmax, colorscale: VIRIDIS_SCALE,
+                  showscale: true, colorbar: { title: db ? "dB(A/m)" : "A/m", len: 0.8 } },
+        hovertemplate: `x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>|K|: %{marker.color:${db ? ".1f} dB(A/m)" : ".4g} A/m"}<extra></extra>`,
+        showlegend: false,
+    });
+    return traces;
+}
+
+// Whether `view` has data to show: a new geometry or a solve still in progress shows
+// the geometry until its fields arrive.
+function viewAvailable(view, solver) {
+    if (view === "geometry") return true;
+    if (!solver.solution_valid) return false;
+    if (view.startsWith("potential")) return solver.has_potential !== false && !!solver.V;
+    if (view.startsWith("efield")) return !!solver.Ex;
+    if (view === "current") return !!getSurfaceK();
+    if (view === "density") return !!getCurrentJ();
+    return false;
+}
+
 function draw(resetZoom = false) {
     const solver = get.solver();
     const Plotly = getPlotly();
     if (!solver || !Plotly) return;
+    currentView = viewAvailable(wantedView, solver) ? wantedView : "geometry";
 
     const container = document.getElementById('sim_canvas');
     const plotOptions = getPlotOptions();
@@ -575,7 +749,7 @@ function draw(resetZoom = false) {
         } else if (currentView === "potential_even") {
             modeLabel = " (Even Mode)";
         }
-        title = `Electric Potential${modeLabel} (V)`;
+        title = `Electric Potential${modeLabel} (V)${fieldFreqLabel(solver)}`;
         zTitle = "Volts";
 
         const V = getPotential();
@@ -617,7 +791,7 @@ function draw(resetZoom = false) {
             modeLabel = " (Even Mode)";
         }
         const db = plotOptions.efieldDb;
-        title = `|E| Field Magnitude${modeLabel} (${db ? "dB V/m" : "V/m"})`;
+        title = `|E| Field Magnitude${modeLabel} (${db ? "dB V/m" : "V/m"})${fieldFreqLabel(solver)}`;
         zTitle = db ? "dB(V/m)" : "V/m";
 
         const { Ex, Ey } = getFields();
@@ -649,6 +823,49 @@ function draw(resetZoom = false) {
         shapes.push(...conductorFillShapes(solver, yArr[nyDisplay - 1]));
     }
 
+    else if (currentView === "density" && solver.solution_valid && getCurrentJ()) {
+        const maxY = displayTop(solver);
+        if (!currentXRange || resetZoom) {
+            const view = computeGeometryView(solver, maxY);
+            if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
+        }
+        const db = plotOptions.efieldDb;
+        let modeLabel = "";
+        if (isDifferentialMode()) modeLabel = getSelectedModeIndex() === 1 ? " (Even Mode)" : " (Odd Mode)";
+        const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+        const ideal = solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "";
+        title = `Current Density |J| per 1 A${modeLabel} (${db ? "dB A/m²" : "A/m²"})${fieldFreqLabel(solver)}${ideal}`;
+        shapes.push(...dielectricFillShapes(solver, maxY).map(s => ({ ...s, layer: 'below' })));
+        shapes.push(...densityConductorShapes(solver, getCurrentJ(), maxY));
+        const auto = densityAutoscale(getCurrentJ(), db);
+        zMin = auto.min; zMax = auto.max;
+        actualDataMin = zMin; actualDataMax = zMax; actualDataPeak = auto.peak;
+        ({ xMM, yMM, nx, nyDisplay } = solverGridMM(solver));
+    }
+
+    else if (currentView === "current" && solver.solution_valid && getSurfaceK()) {
+        const maxY = displayTop(solver);
+        if (!currentXRange || resetZoom) {
+            const view = computeGeometryView(solver, maxY);
+            if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
+        }
+        const db = plotOptions.efieldDb;
+        let modeLabel = "";
+        if (isDifferentialMode()) modeLabel = getSelectedModeIndex() === 1 ? " (Even Mode)" : " (Odd Mode)";
+        const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+        const fromMqs = solver.surfaceKSource && solver.surfaceKSource[mi] === 'mqs';
+        const ideal = fromMqs && solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "";
+        title = `Surface Current |K| per 1 A${modeLabel} (${db ? "dB A/m" : "A/m"})` +
+            (fromMqs ? `${fieldFreqLabel(solver)}, MQS${ideal}` : ", perfect-conductor limit");
+        const below = s => ({ ...s, layer: 'below' });
+        shapes.push(...dielectricFillShapes(solver, maxY).map(below));
+        shapes.push(...conductorFillShapes(solver, maxY).map(below));
+        const auto = currentAutoscale(getSurfaceK(), db);
+        zMin = auto.min; zMax = auto.max;
+        actualDataMin = zMin; actualDataMax = zMax; actualDataPeak = auto.peak;
+        ({ xMM, yMM, nx, nyDisplay } = solverGridMM(solver));
+    }
+
     else {
         title = "No Data Available";
         // Create minimal dummy data
@@ -665,7 +882,30 @@ function draw(resetZoom = false) {
     // Main field trace
     let traces = [];
 
-    if (currentView === "geometry" && zData.length > 0) {
+    let colorAxis = null;
+    if (currentView === "density" && getCurrentJ()) {
+        if (window.getStoredScale) {
+            const override = window.getStoredScale(scaleView());
+            if (override) { zMin = override.min; zMax = override.max; }
+        }
+        const db = plotOptions.efieldDb;
+        colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale,
+                      colorbar: { title: db ? "dB(A/m²)" : "A/m²", len: 0.8 } };
+        for (const b of getCurrentJ().map(padBlock)) {
+            traces.push({
+                type: "heatmap", coloraxis: "coloraxis", zsmooth: "best",
+                x: Array.from(b.x, v => v * 1000), y: Array.from(b.y, v => v * 1000),
+                z: db ? b.J.map(row => row.map(v => v > 0 ? 20 * Math.log10(v) : null)) : b.J,
+                hovertemplate: `x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>|J|: %{z:${db ? ".1f} dB(A/m²)" : ".4g} A/m²"}<extra></extra>`,
+            });
+        }
+    } else if (currentView === "current" && getSurfaceK()) {
+        if (window.getStoredScale) {
+            const override = window.getStoredScale(scaleView());
+            if (override) { zMin = override.min; zMax = override.max; }
+        }
+        traces.push(...surfaceCurrentTraces(getSurfaceK(), zMin, zMax, plotOptions.efieldDb));
+    } else if (currentView === "geometry" && zData.length > 0) {
         const { Ex, Ey } = getFields();
 
         let eMax = zMax;
@@ -856,6 +1096,7 @@ function draw(resetZoom = false) {
         plot_bgcolor: '#1a1a1a',
         font: { color: '#fff' },
         shapes: shapes,  // Add vector shapes for geometry
+        ...(colorAxis ? { coloraxis: colorAxis } : {}),
 
         updatemenus: (() => {
             const menus = [];
@@ -870,13 +1111,21 @@ function draw(resetZoom = false) {
                     viewButtons.push({ label: "Potential", method: "skip", args: [] });
                 }
                 viewButtons.push({ label: "|E| Field", method: "skip", args: [] });
+                if (solver.surfaceK && solver.surfaceK.some(Boolean)) {
+                    viewButtons.push({ label: "|K| Current", method: "skip", args: [] });
+                }
+                if (solver.currentJ && solver.currentJ.some(Boolean)) {
+                    viewButtons.push({ label: "|J| Density", method: "skip", args: [] });
+                }
             }
             // Both the highlighted button and the click handler key off the LABEL, never a
             // fixed index, with Potential absent, "|E| Field" is at index 1, not 2.
             // Prefix match so the differential "_odd"/"_even" view variants land on their
             // own button rather than falling through to the first one.
             const activeLabel = currentView.startsWith("geometry") ? "Geometry"
-                : currentView.startsWith("potential") ? "Potential" : "|E| Field";
+                : currentView.startsWith("potential") ? "Potential"
+                : currentView === "current" ? "|K| Current"
+                : currentView === "density" ? "|J| Density" : "|E| Field";
             menus.push({
                 x: 0.01,
                 y: 1.15,
@@ -955,7 +1204,9 @@ function draw(resetZoom = false) {
                 const btn = event.menu.buttons[event.menu.active];
                 const label = btn && btn.label;
                 setCurrentView(label === "Geometry" ? "geometry"
-                    : label === "Potential" ? "potential" : "efield");
+                    : label === "Potential" ? "potential"
+                    : label === "|K| Current" ? "current"
+                    : label === "|J| Density" ? "density" : "efield");
             } else {
                 // Mode selector clicked (differential lines only)
                 const plotModeEl = document.getElementById('plot-mode');
@@ -1526,6 +1777,7 @@ function getPlotOptions() {
 // Function to set current view
 function setCurrentView(view) {
     currentView = view;
+    wantedView = view;
     // Notify app.js that view changed so it can restore the appropriate scale
     if (window.onViewChanged) {
         window.onViewChanged(view);
