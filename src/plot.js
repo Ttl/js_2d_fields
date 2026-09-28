@@ -39,6 +39,10 @@ let zMax = null;
 // Store actual data range (before any user scaling)
 let actualDataMin = null;
 let actualDataMax = null;
+// Largest sample, above the autoscale max when a corner singularity is clipped
+let actualDataPeak = null;
+// Lower |E| bound for the log-spaced contours (smallest field outside the conductors)
+let contourFloor = 0;
 
 // Geometry view zoom constants
 const SIGNAL_CONDUCTOR_VIEW_FRACTION = 1/3;  // Signal conductors take up this fraction of X-axis view
@@ -79,6 +83,59 @@ function contourScaledB(min, max, n) {
     eMax = Math.max(eMin + 0.1, eMax);
     const logStep = n === 0 ? 1 : Math.abs((eMax - eMin)) / n;
     return [eMin, eMax, logStep];
+}
+
+// Contour levels in log10(|E|) for a dB color range, one per n-th of the range.
+function contourLimitsDb(minDb, maxDb, n) {
+    const lo = minDb / 20, hi = Math.max(maxDb / 20, lo + 0.005);
+    return [lo, hi, n === 0 ? 1 : (hi - lo) / n];
+}
+
+// Area-weighted quantiles of the nonzero |E| samples. The plot grid is graded, dense at
+// conductor corners, so plain sample quantiles over-weight the singular corner field.
+function fieldQuantiles(zData, xMM, yMM, qs) {
+    const pts = [];
+    const nyz = zData.length, nxz = xMM.length;
+    for (let i = 0; i < nyz; i++) {
+        const row = zData[i];
+        if (!row || !row.length) continue;
+        const dy = (yMM[Math.min(i + 1, nyz - 1)] - yMM[Math.max(i - 1, 0)]) / 2;
+        for (let j = 0; j < nxz; j++) {
+            const v = row[j];
+            if (!(v > 0)) continue;
+            const dx = (xMM[Math.min(j + 1, nxz - 1)] - xMM[Math.max(j - 1, 0)]) / 2;
+            pts.push([v, dx * dy]);
+        }
+    }
+    if (!pts.length) return qs.map(() => 0);
+    pts.sort((a, b) => a[0] - b[0]);
+    let total = 0;
+    for (const p of pts) total += p[1];
+    const out = [];
+    let k = 0, acc = 0;
+    for (const q of qs) {
+        while (k < pts.length - 1 && acc + pts[k][1] < q * total) acc += pts[k++][1];
+        out.push(pts[k][0]);
+    }
+    return out;
+}
+
+// Autoscale of an |E| grid: the linear max is the area-weighted 99.99th percentile so a
+// singular corner does not leave the rest of the plot dark; peak is the true maximum.
+function efieldAutoscale(zData, xMM, yMM) {
+    const [floor, max] = fieldQuantiles(zData, xMM, yMM, [0.001, 0.9999]);
+    let peak = 0;
+    for (const row of zData) for (const v of row) if (v > peak) peak = v;
+    return { floor, max: max || peak, peak };
+}
+
+const toDb = (v) => 20 * Math.log10(v);
+
+// dB color range: from the peak down to the weakest field, at most 60 dB.
+function efieldDbRange(auto) {
+    const max = Math.ceil(toDb(auto.peak || 1));
+    const min = Math.floor(Math.max(max - 60, auto.floor > 0 ? toDb(auto.floor) : max - 60));
+    return { min, max: Math.max(max, min + 1) };
 }
 
 // Closed rectangular loop as an SVG path, in mm. Two of these in one path with the evenodd
@@ -336,8 +393,7 @@ function computeGeometryView(solver, maxY, fraction = SIGNAL_CONDUCTOR_VIEW_FRAC
 // the |E| field view so their contours are identical. z = log10(|E|) with log-spaced levels keeps
 // the lines evenly spaced instead of crowding at the singular trace corners. Named "E-field
 // contours" so setScaleRange can rescale it live in either view.
-function efieldContourTrace(xMM, yMM, zData, eMin, eMax, n) {
-    const limits = contourScaledB(eMin, eMax, n);
+function efieldContourTrace(xMM, yMM, zData, limits) {
     return {
         type: "contour",
         x: xMM, y: yMM,
@@ -352,12 +408,20 @@ function efieldContourTrace(xMM, yMM, zData, eMin, eMax, n) {
 
 // Export functions to get/set scale range for current view
 function getScaleRange() {
-    return { min: zMin, max: zMax, view: currentView };
+    return { min: zMin, max: zMax, view: scaleView() };
+}
+
+// The E-field view in dB is a separate scale: its range is in dB, not V/m.
+function isDbView() {
+    return currentView.startsWith("efield") && getPlotOptions().efieldDb;
+}
+function scaleView() {
+    return isDbView() ? currentView + "_db" : currentView;
 }
 
 // Get actual data range (before any user scaling)
 function getActualDataRange() {
-    return { min: actualDataMin, max: actualDataMax };
+    return { min: actualDataMin, max: actualDataMax, peak: actualDataPeak };
 }
 
 function setScaleRange(min, max) {
@@ -374,7 +438,7 @@ function setScaleRange(min, max) {
     // and the |E| field view — rescale its log levels identically wherever it is.
     const cIdx = container.data.findIndex(t => t.type === 'contour' && t.name === 'E-field contours');
     if (cIdx !== -1 && n > 0) {
-        const limits = contourScaledB(min, max, n);
+        const limits = isDbView() ? contourLimitsDb(min, max, n) : contourScaledB(min, max, n);
         Plotly.restyle(container, {
             'contours.start': limits[0], 'contours.end': limits[1], 'contours.size': limits[2]
         }, [cIdx]);
@@ -472,12 +536,13 @@ function draw(resetZoom = false) {
                 }
             }
             if (zData.length > 0) {
-                const flatZ = zData.flat();
-                zMin = Math.min(...flatZ);
-                zMax = Math.max(...flatZ);
-                // Store actual data range for geometry view
+                const auto = efieldAutoscale(zData, xMM, yMM);
+                zMin = 0;
+                zMax = auto.max;
+                contourFloor = auto.floor;
                 actualDataMin = zMin;
                 actualDataMax = zMax;
+                actualDataPeak = auto.peak;
             }
         } else {
             // No solution - just axis scaling
@@ -551,8 +616,9 @@ function draw(resetZoom = false) {
         } else if (currentView === "efield_even") {
             modeLabel = " (Even Mode)";
         }
-        title = `|E| Field Magnitude${modeLabel} (V/m)`;
-        zTitle = "V/m";
+        const db = plotOptions.efieldDb;
+        title = `|E| Field Magnitude${modeLabel} (${db ? "dB V/m" : "V/m"})`;
+        zTitle = db ? "dB(V/m)" : "V/m";
 
         const { Ex, Ey } = getFields();
         if (Ex && Ey && Ex.length >= nyDisplay) {
@@ -566,10 +632,16 @@ function draw(resetZoom = false) {
                 zData.push(row);
             }
         }
-        const flatZ = zData.flat();
-        zMin = Math.min(...flatZ);
-        zMax = Math.max(...flatZ);
-        // Store actual data range for efield view
+        const auto = efieldAutoscale(zData, xMM, yMM);
+        contourFloor = auto.floor;
+        if (db) {
+            ({ min: zMin, max: zMax } = efieldDbRange(auto));
+            actualDataPeak = zMax;
+        } else {
+            zMin = 0;
+            zMax = auto.max;
+            actualDataPeak = auto.peak;
+        }
         actualDataMin = zMin;
         actualDataMax = zMax;
         // Mask the conductor interior (field is 0 inside the PEC) so the heatmap/contour bleed
@@ -596,12 +668,12 @@ function draw(resetZoom = false) {
     if (currentView === "geometry" && zData.length > 0) {
         const { Ex, Ey } = getFields();
 
-        let eMax = Math.max(...zData.flat());
-        let eMin = Math.min(...zData.flat());
+        let eMax = zMax;
+        let eMin = contourFloor;
 
         // Check if there's a user-defined scale override
         if (window.getStoredScale) {
-            const override = window.getStoredScale(currentView);
+            const override = window.getStoredScale(scaleView());
             if (override) {
                 eMin = override.min;
                 eMax = override.max;
@@ -612,7 +684,7 @@ function draw(resetZoom = false) {
 
         // Add E-field contours if requested (shared with the |E| field view)
         if (n > 0) {
-            traces.push(efieldContourTrace(xMM, yMM, zData, eMin, eMax, n));
+            traces.push(efieldContourTrace(xMM, yMM, zData, contourScaledB(eMin, eMax, n)));
         }
 
         // Add streamlines if requested via plot options
@@ -648,11 +720,13 @@ function draw(resetZoom = false) {
         // Field views. Heatmap with optional contour lines.
 
         // Check if there's a user-defined scale override
+        let autoscaled = true;
         if (window.getStoredScale) {
-            const override = window.getStoredScale(currentView);
+            const override = window.getStoredScale(scaleView());
             if (override) {
                 zMin = override.min;
                 zMax = override.max;
+                autoscaled = false;
             }
         }
 
@@ -660,19 +734,24 @@ function draw(resetZoom = false) {
         const hoverTpl = "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.3e}<extra></extra>";
 
         if (currentView.startsWith("efield")) {
-            // |E| heatmap (linear) for the color + colorbar...
+            const db = plotOptions.efieldDb;
+            // |E| heatmap (linear or dB) for the color + colorbar...
             traces.push({
                 type: "heatmap",
                 zsmooth: "best",
-                x: xMM, y: yMM, z: zData,
+                x: xMM, y: yMM,
+                z: db ? zData.map(row => row.map(v => v > 0 ? toDb(v) : null)) : zData,
                 zmin: zMin, zmax: zMax,
                 colorscale: colorscale,
                 colorbar: { title: zTitle, len: 0.8 },
-                hovertemplate: hoverTpl
+                hovertemplate: db ? "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.1f} dB(V/m)<extra></extra>" : hoverTpl
             });
-            // ...overlaid with the SAME log-spaced contour-line trace the geometry view uses.
+            // ...overlaid with log-spaced contour lines: the geometry view's in linear, one per
+            // n-th of the color range in dB.
             if (n > 0) {
-                traces.push(efieldContourTrace(xMM, yMM, zData, Math.max(zMin, 0), zMax, n));
+                const limits = db ? contourLimitsDb(zMin, zMax, n)
+                    : contourScaledB(autoscaled ? contourFloor : Math.max(zMin, 0), zMax, n);
+                traces.push(efieldContourTrace(xMM, yMM, zData, limits));
             }
         } else {
             // Potential (and any other field view): linear heatmap + linear contour lines.
@@ -843,6 +922,7 @@ function draw(resetZoom = false) {
         responsive: true,
         displayModeBar: true,
         scrollZoom: true,
+        modeBarButtonsToRemove: ["select2d", "lasso2d"],
         modeBarButtonsToAdd: [
             {
                 name: "Toggle Mesh",
@@ -1438,7 +1518,8 @@ function getPlotOptions() {
 
     return {
         streamlines: streamlinesVal === '' ? 0 : parseInt(streamlinesVal) || 0,
-        contours: contoursVal === '' ? 0 : parseInt(contoursVal) || 0
+        contours: contoursVal === '' ? 0 : parseInt(contoursVal) || 0,
+        efieldDb: !!document.getElementById('plot-efield-db')?.checked
     };
 }
 

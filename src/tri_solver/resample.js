@@ -187,6 +187,16 @@ function evalPhiValue(phi, mesh, coeff, t, x, y) {
     return val;
 }
 
+// -dV/dx on the non-uniform grid stencil (vm, v0, vp at spacings dl, dr). A neighbor
+// outside the mesh (an unmeshed conductor interior) holds no potential, so the
+// difference goes one-sided away from it; with both neighbors outside it is 0.
+function gridDiff(vm, v0, vp, dl, dr, okM, okP) {
+    if (okM && okP) return -((dl / (dr * (dl + dr))) * vp + ((dr - dl) / (dl * dr)) * v0 - (dr / (dl * (dl + dr))) * vm);
+    if (okP) return -(vp - v0) / dr;
+    if (okM) return -(v0 - vm) / dl;
+    return 0;
+}
+
 // Resample a static solution onto a regular grid spanning `domain`.
 // Returns { x:Float64Array(nx), y:Float64Array(ny), V, Ex, Ey } with V/Ex/Ey as
 // [ny][nx] arrays (row index = y, matching plot.js / streamlines.js). Points
@@ -383,21 +393,13 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
                 isFinite(e = -(sampleX(px + bx) - sampleX(px - bx)) / (2 * bx))) {
                 Ex[j][i] = e;
             } else {
-                Ex[j][i] = -(
-                    (dxl / (dxr * (dxl + dxr))) * V[j][i + 1] +
-                    ((dxr - dxl) / (dxl * dxr)) * V[j][i] -
-                    (dxr / (dxl * (dxl + dxr))) * V[j][i - 1]
-                );
+                Ex[j][i] = gridDiff(V[j][i - 1], V[j][i], V[j][i + 1], dxl, dxr, hT[j][i - 1] > 0, hT[j][i + 1] > 0);
             }
             if (by > 0.5 * Math.min(dyd, dyu) &&
                 isFinite(e = -(sampleY(py + by) - sampleY(py - by)) / (2 * by))) {
                 Ey[j][i] = e;
             } else {
-                Ey[j][i] = -(
-                    (dyd / (dyu * (dyd + dyu))) * V[j + 1][i] +
-                    ((dyu - dyd) / (dyd * dyu)) * V[j][i] -
-                    (dyu / (dyd * (dyd + dyu))) * V[j - 1][i]
-                );
+                Ey[j][i] = gridDiff(V[j - 1][i], V[j][i], V[j + 1][i], dyd, dyu, hT[j - 1][i] > 0, hT[j + 1][i] > 0);
             }
         }
     }

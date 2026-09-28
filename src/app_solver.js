@@ -1716,6 +1716,7 @@ async function runSimulation() {
     // cross-section. Identity is the exact test: updateGeometry() always
     // assigns a fresh object.
     const solvedSolver = solver;
+    clearStoredScales();
 
     const btn = document.getElementById('btn_solve');
     const pbar = document.getElementById('progress_bar');
@@ -2694,6 +2695,14 @@ function bindEvents() {
             }
         });
     }
+    const plotEfieldDbEl = document.getElementById('plot-efield-db');
+    if (plotEfieldDbEl) {
+        // dB and linear keep separate scales, so the dialog reloads the new one.
+        plotEfieldDbEl.addEventListener('change', () => {
+            if (solver && solver.solution_valid) draw();
+            if (scaleDialogOpen) openScaleDialog();
+        });
+    }
     if (plotContoursEl) {
         plotContoursEl.addEventListener('change', () => {
             if (solver && solver.solution_valid) {
@@ -2718,14 +2727,22 @@ function bindEvents() {
 const scaleRanges = {
     potential: { min: null, max: null },
     efield: { min: null, max: null },
+    efield_db: { min: null, max: null },
     geometry: { min: null, max: null }
 };
+
+// A new solve autoscales every view: the field range of the previous geometry means
+// nothing for the next one.
+function clearStoredScales() {
+    for (const r of Object.values(scaleRanges)) { r.min = null; r.max = null; }
+    closeScaleDialog();
+}
 
 let scaleDialogOpen = false;
 
 function getViewType(view) {
-    if (view === 'potential') return 'potential';
-    if (view.startsWith('efield')) return 'efield';
+    if (view.startsWith('potential')) return 'potential';
+    if (view.startsWith('efield')) return view.endsWith('_db') ? 'efield_db' : 'efield';
     return 'geometry';
 }
 
@@ -2800,6 +2817,8 @@ function openScaleDialog() {
 
     const scaleInfo = getScaleRange();
     const viewType = getViewType(scaleInfo.view);
+    const dbRow = document.getElementById("efieldDbRow");
+    if (dbRow) dbRow.style.display = viewType.startsWith('efield') ? 'block' : 'none';
 
     // Get actual data range (before any user scaling)
     const actualDataRange = getActualDataRange();
@@ -2833,10 +2852,13 @@ function openScaleDialog() {
         const isPotentialOddMode = actualMin < -0.1;
         sliderMinBound = isPotentialOddMode ? -1.0 : 0.0;
         sliderMaxBound = 1.0;
+    } else if (viewType === 'efield_db') {
+        sliderMinBound = actualMin - 40;
+        sliderMaxBound = actualMax + 20;
     } else {
-        // For E-field and geometry, use 1.5x actual data range for margin
+        // For E-field and geometry, 1.5x the autoscale range, reaching the true peak
         sliderMinBound = actualMin < -0.1 ? actualMin * 1.5 : 0.0;
-        sliderMaxBound = actualMax * 1.5;
+        sliderMaxBound = Math.max(actualMax * 1.5, actualDataRange.peak || 0);
     }
 
     if (minSlider) {
