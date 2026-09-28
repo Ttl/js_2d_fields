@@ -134,6 +134,20 @@ for (const backend of ['rectilinear', 'triangular']) {
         check(`${label} E_y jumps by er across the substrate top`, Math.abs(ratio / MS.epsilon_r - 1) < 0.05,
             `${ratio.toFixed(3)} at y ${(pf.y[jb] * 1e3).toFixed(4)} / ${(pf.y[ja] * 1e3).toFixed(4)} mm`);
     }
+    // At 100 GHz the mode differs strongly from the static field: the grid row on the
+    // substrate top must read the same (air) side for both parts, and the outermost
+    // columns, where the static field has no sample, the mode itself.
+    await quiet(() => s.plotFieldsAt(100e9, cached));
+    const vh = s.getPlotFields();
+    const E = (j, i) => Math.hypot(vh.Ex[0][j][i], vh.Ey[0][j][i]);
+    const iC = vh.x.findIndex(v => v > 0.45e-3);
+    const jI = vh.y.findIndex(v => v >= MS.substrate_height);
+    const rowRatio = E(jI, iC) / E(jI + 1, iC);
+    check('full-wave E at 100 GHz: the interface row continues the air side', Math.abs(rowRatio - 1) < 0.05, rowRatio.toFixed(3));
+    const nx = vh.x.length, jM = vh.y.findIndex(v => v > 0.4e-3);
+    const edge = E(jM, nx - 1), inner = E(jM, nx - 2);
+    check('full-wave E at 100 GHz: no spike on the open side wall', edge <= 2 * inner + 1e-9 * E(jI, iC),
+        `${edge.toFixed(2)} vs ${inner.toFixed(2)} V/m`);
     // The mode does change: the field pulls into the substrate at 20 GHz.
     const dHi = relDiff(hi, st);
     check('full-wave E at 20 GHz differs from the static field', dHi > 0.02, `${(dHi * 100).toFixed(2)} %`);

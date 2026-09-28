@@ -539,6 +539,9 @@ export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
     const nodal = recoverNodalModeField(mesh, fm, vRe, vIm);   // continuous field
     const { tris } = mesh;
     const parity = opts.parity || null;
+    // A sample on a mesh line reads the triangle to its NE, the side resampleStatic reads:
+    // the full-wave plot adds the two, and on an interface row the sides differ.
+    const eps = 1e-9 * Math.hypot((domain.x_max ?? 0) - (domain.x_min ?? 0), (domain.y_max ?? 0) - (domain.y_min ?? 0)) || 1e-15;
     const E = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ex = Array.from({ length: ny }, () => new Float64Array(nx));
     const Ey = Array.from({ length: ny }, () => new Float64Array(nx));
@@ -551,7 +554,8 @@ export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
                 qx = -qx;
                 if (parity === 'odd') sy = -1; else sx = -1;
             }
-            const t = locate(qx, y[j]);
+            let t = locate(qx + eps, y[j] + eps);
+            if (t < 0) t = locate(qx, y[j]);
             if (t < 0) continue;
             const coeff = coeffOf(t);
             const l0 = coeff[0][0] + coeff[0][1] * qx + coeff[0][2] * y[j];

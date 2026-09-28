@@ -3396,11 +3396,14 @@ export class TriBackend {
         // because it is differenced from the continuous potential. So the plot is the
         // static field plus the change of the mode from F_STATIC_MAX, where it is the
         // static field up to discretization: the jumps cancel in the difference.
+        // Where the static field has no sample (the outermost rows and columns, the
+        // metal), the mode field itself.
         const r = slot.fwRef ? fitted(slot.fwRef) : null;
         if (!r) return { x, y, V, Ex: m.Ex, Ey: m.Ey, K, fullwave: true };
+        const none = (j, i) => Ex[j][i] === 0 && Ey[j][i] === 0;
         return { x, y, V, K, fullwave: true,
-                 Ex: m.Ex.map((row, j) => row.map((v, i) => Ex[j][i] + v - r.Ex[j][i])),
-                 Ey: m.Ey.map((row, j) => row.map((v, i) => Ey[j][i] + v - r.Ey[j][i])) };
+                 Ex: m.Ex.map((row, j) => row.map((v, i) => none(j, i) ? v : Ex[j][i] + v - r.Ex[j][i])),
+                 Ey: m.Ey.map((row, j) => row.map((v, i) => none(j, i) ? v : Ey[j][i] + v - r.Ey[j][i])) };
     }
 
     // Public: solve at one frequency, return the unified result object and write
