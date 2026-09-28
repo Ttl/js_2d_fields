@@ -253,6 +253,14 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
         const l2 = c[2][0] + c[2][1] * qx + c[2][2] * qy;
         return l0 * nodeH[tris[3 * t]] + l1 * nodeH[tris[3 * t + 1]] + l2 * nodeH[tris[3 * t + 2]];
     };
+    // Material region of the point (buildTriRegions), -1 outside the mesh.
+    const { regionOf, condRegion } = buildTriRegions(mesh);
+    const regionAt = (qx, qy) => {
+        if (parity && qx < 0) qx = -qx;
+        let t = locate(qx + eps, qy + eps);
+        if (t < 0) t = locate(qx, qy);
+        return t < 0 ? -1 : regionOf[t];
+    };
     // Point sample of V anywhere in the (mirrored) domain; NaN outside the mesh.
     const sampleV = (qx, qy) => {
         let s = 1;
@@ -316,6 +324,26 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
         }
     }
     const tolC = eps;
+    // The end of the stencil from p toward q, pulled back to the first point where the
+    // line leaves dielectric region reg for another dielectric, and with toMetal also
+    // for a conductor or the edge of the mesh (a shaped conductor, a shield): a scan in
+    // eight steps, then bisection.
+    const interfaceToward = (regionOn, p, q, reg, toMetal) => {
+        const other = r => r !== reg && (toMetal || (r >= 0 && r !== condRegion));
+        let a = p;
+        for (let k = 1; k <= 8; k++) {
+            let b = p + (q - p) * k / 8;
+            if (other(regionOn(b))) {
+                for (let it = 0; it < 30; it++) {
+                    const m = (a + b) / 2;
+                    if (other(regionOn(m))) b = m; else a = m;
+                }
+                return a;
+            }
+            a = b;
+        }
+        return q;
+    };
     for (let j = 1; j < ny - 1; j++) {
         const dyd = y[j] - y[j - 1], dyu = y[j + 1] - y[j];
         for (let i = 1; i < nx - 1; i++) {
@@ -388,15 +416,35 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
                 }
                 return sampleV(px, qy);
             };
+            // The normal E jumps at a dielectric interface, so the baseline must not blend
+            // the two sides: an end in another dielectric is pulled back to the interface
+            // (V is continuous there) and the derivative taken from the quadratic through
+            // the two ends and their midpoint, all on the sample's own side. An end in a
+            // conductor with no mirror plane (a curved or slanted surface) is pulled back
+            // to its surface the same way, the metal's constant V would bias E low.
+            const reg = inside ? -1 : regionAt(px, py);
+            const derivative = (sample, p, b, at, pitch, mirrored) => {
+                let lo = p - b, hi = p + b;
+                if (reg >= 0 && reg !== condRegion) {
+                    lo = interfaceToward(at, p, lo, reg, !mirrored);
+                    hi = interfaceToward(at, p, hi, reg, !mirrored);
+                }
+                if (lo === p - b && hi === p + b) return -(sample(hi) - sample(lo)) / (2 * b);
+                if (hi - lo < 0.5 * pitch) return NaN;
+                const m = (lo + hi) / 2;
+                return -(sample(lo) * (2 * p - m - hi) / ((lo - m) * (lo - hi))
+                    + sample(m) * (2 * p - lo - hi) / ((m - lo) * (m - hi))
+                    + sample(hi) * (2 * p - lo - m) / ((hi - lo) * (hi - m)));
+            };
             let e;
             if (bx > 0.5 * Math.min(dxl, dxr) &&
-                isFinite(e = -(sampleX(px + bx) - sampleX(px - bx)) / (2 * bx))) {
+                isFinite(e = derivative(sampleX, px, bx, q => regionAt(q, py), Math.min(dxl, dxr), mxPlane !== null))) {
                 Ex[j][i] = e;
             } else {
                 Ex[j][i] = gridDiff(V[j][i - 1], V[j][i], V[j][i + 1], dxl, dxr, hT[j][i - 1] > 0, hT[j][i + 1] > 0);
             }
             if (by > 0.5 * Math.min(dyd, dyu) &&
-                isFinite(e = -(sampleY(py + by) - sampleY(py - by)) / (2 * by))) {
+                isFinite(e = derivative(sampleY, py, by, q => regionAt(px, q), Math.min(dyd, dyu), myPlane !== null))) {
                 Ey[j][i] = e;
             } else {
                 Ey[j][i] = gridDiff(V[j - 1][i], V[j][i], V[j + 1][i], dyd, dyu, hT[j - 1][i] > 0, hT[j + 1][i] > 0);
@@ -416,7 +464,7 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
 function buildTriRegions(mesh) {
     const { nodes, tris, nTris, epsMap, condRect } = mesh;
     const regionOf = new Int32Array(nTris);
-    if (!epsMap || epsMap.length !== nTris) return { regionOf, nRegions: 1 };
+    if (!epsMap || epsMap.length !== nTris) return { regionOf, nRegions: 1, condRegion: -1 };
     const rects = (condRect && condRect.rects) || [];
     const ids = new Map();
     for (let t = 0; t < nTris; t++) {
@@ -436,7 +484,7 @@ function buildTriRegions(mesh) {
         if (id === undefined) { id = ids.size; ids.set(key, id); }
         regionOf[t] = id;
     }
-    return { regionOf, nRegions: ids.size };
+    return { regionOf, nRegions: ids.size, condRegion: ids.has('cond') ? ids.get('cond') : -1 };
 }
 
 // Recover a nodal transverse field, CONTINUOUS within each material region, by
@@ -527,39 +575,71 @@ export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
 }
 
 // |J| of an MQS eddy-current solve (mqsConductorLoss opts.fieldOut, per 1 A in each
-// trace) sampled on a graded grid over each conductor of `rects` (solve coordinates):
-// grid lines follow the skin-refined mesh nodes inside the conductor, n per axis at
-// most, the faces sampled just inside the metal. symX mirrors a half-domain solve
-// (|J| is even about the plane in either mode). Returns one { x, y, J[ny][nx] } per
-// conductor carrying current, null outside the metal.
+// trace), one block per conductor of `rects` (solve coordinates) carrying current. A
+// rectangle is sampled on a graded grid whose lines follow the skin-refined mesh nodes
+// inside it, n per axis at most, the faces sampled just inside the metal:
+// { x, y, J[ny][nx] }, null outside the metal. A shaped conductor (polygon, circle,
+// ring) is its own triangles with |J| at each centroid and each vertex, { tris: [x0, y0,
+// x1, y1, x2, y2, ...], J, Jv: [J0, J1, J2, ...] }: a grid cannot follow a slanted or
+// curved skin layer. symX mirrors a
+// half-domain solve (|J| is even about the plane in either mode).
 export function sampleMqsCurrent(F, rects, n = 160, symX = null) {
-    const { nodes, nNodes } = F.mesh;
+    const { nodes, tris, nTris } = F.mesh;
     const ev = mqsFieldEval(F);
-    const evalJ = (x, y) => {
-        const J = ev.J(ev.locate(x, y), x, y);
+    // |J| of conductor k at (x, y), null outside its metal. The bounding box of a ring
+    // holds the conductors inside it, which have their own blocks.
+    const evalJ = (k, x, y) => {
+        const t = ev.locate(x, y);
+        if (t < 0 || F.triRect[t] !== k) return null;
+        const J = ev.J(t, x, y);
         return J ? Math.hypot(J[0], J[1]) : null;
     };
     const out = [];
-    for (const r of rects) {
-        if (r.shape && isComplement(r.shape)) continue;   // a shell with no cross-section
-        const xs = [], ys = [];
-        for (let i = 0; i < nNodes; i++) {
-            const x = nodes[2 * i], y = nodes[2 * i + 1];
-            if (x >= r.xmin && x <= r.xmax && y >= r.ymin && y <= r.ymax) { xs.push(x); ys.push(y); }
+    rects.forEach((r, k) => {
+        if (r.shape && isComplement(r.shape)) return;   // a shell with no cross-section
+        if (r.shape) {
+            const xy = [], Jt = [], Jv = [];
+            const mag = (t, x, y) => { const J = ev.J(t, x, y); return J ? Math.hypot(J[0], J[1]) : 0; };
+            for (let t = 0; t < nTris; t++) {
+                if (F.triRect[t] !== k) continue;
+                let cx = 0, cy = 0;
+                for (let a = 0; a < 3; a++) {
+                    const v = tris[3 * t + a], x = nodes[2 * v], y = nodes[2 * v + 1];
+                    xy.push(x, y);
+                    Jv.push(mag(t, x, y));
+                    cx += x / 3; cy += y / 3;
+                }
+                Jt.push(mag(t, cx, cy));
+            }
+            if (!Jt.some(v => v > 0)) return;
+            const block = { tris: Float64Array.from(xy), J: Float64Array.from(Jt), Jv: Float64Array.from(Jv) };
+            out.push(block);
+            if (symX !== null) out.push({ ...block, tris: Float64Array.from(xy, (v, i) => i % 2 ? v : 2 * symX - v) });
+            return;
         }
-        const gx = quantileAxis(Float64Array.from(xs), r.xmin, r.xmax, n, []);
+        // The solved part of the box: a half-domain solve holds x >= symX only.
+        const xmin = symX !== null ? Math.max(r.xmin, symX) : r.xmin;
+        if (!(r.xmax > xmin)) return;
+        // Grid lines follow the nodes of the conductor's own triangles.
+        const xs = [], ys = [];
+        for (let t = 0; t < nTris; t++) {
+            if (F.triRect[t] !== k) continue;
+            for (let a = 0; a < 3; a++) { const v = tris[3 * t + a]; xs.push(nodes[2 * v]); ys.push(nodes[2 * v + 1]); }
+        }
+        if (!xs.length) return;
+        const gx = quantileAxis(Float64Array.from(xs), xmin, r.xmax, n, []);
         const gy = quantileAxis(Float64Array.from(ys), r.ymin, r.ymax, n, []);
         // Samples on a face would land in the dielectric beside it.
-        const ex = 1e-6 * (r.xmax - r.xmin), ey = 1e-6 * (r.ymax - r.ymin);
+        const ex = 1e-6 * (r.xmax - xmin), ey = 1e-6 * (r.ymax - r.ymin);
         const J = Array.from(gy, y => Array.from(gx, x =>
-            evalJ(Math.min(Math.max(x, r.xmin + ex), r.xmax - ex), Math.min(Math.max(y, r.ymin + ey), r.ymax - ey))));
+            evalJ(k, Math.min(Math.max(x, xmin + ex), r.xmax - ex), Math.min(Math.max(y, r.ymin + ey), r.ymax - ey))));
         // No current in it (an ideal ground): the plot keeps its metal fill.
-        if (!J.some(row => row.some(v => v !== null))) continue;
+        if (!J.some(row => row.some(v => v !== null))) return;
         out.push({ x: gx, y: gy, J });
-        if (symX !== null && r.xmax > symX + ex) {
+        if (symX !== null) {
             out.push({ x: Float64Array.from(gx, x => 2 * symX - x).reverse(), y: gy, J: J.map(row => row.slice().reverse()) });
         }
-    }
+    });
     return out;
 }
 
@@ -610,18 +690,16 @@ function mqsFieldEval(F) {
 }
 
 // Surface current density per 1 A in each trace from an MQS solve (mqsConductorLoss
-// opts.fieldOut). On a meshed conductor it is the current flowing between the surface
-// and the conductor's midline, integral of J along the inward normal, every point of
-// the metal counted once for its nearest face: the perfect-conductor K in the skin
-// regime, J times the depth to the midline once the current fills the metal. `bodies`
-// (solve coordinates) are the conductor outlines, rects and round wires; a polygon or
-// a ring and the perfect conductors of the solve (metal walls, ideal grounds, A = 0)
-// take the surface field |dA/dn| / mu0 times the drive. symX mirrors a half-domain
-// solve. Returns segments { x0, y0, x1, y1, K }.
-export function mqsSurfaceCurrent(F, bodies, maxLen, symX = null) {
+// opts.fieldOut): the tangential magnetic field |n x H| = |dA/dn| / mu0 on every metal
+// surface, conductor faces and the perfect conductors of the solve (metal walls, ideal
+// grounds, A = 0) alike. It is the surface current K in the skin regime and its
+// contour integral around a conductor is the conductor's current at any frequency; once
+// the current fills the metal it is the surface field, not a current sheet. symX
+// mirrors a half-domain solve. Returns segments { x0, y0, x1, y1, K }.
+export function mqsSurfaceCurrent(F, maxLen, symX = null) {
     const MU0 = 4 * Math.PI * 1e-7;
     const { mesh, Cr, Ci } = F;
-    const { nodes, tris, edges, triEdges, nTris, nEdges } = mesh;
+    const { nodes, edges, triEdges, nTris, nEdges } = mesh;
     const ev = mqsFieldEval(F);
     const cls = ev.isCondTri;
     const edgeTris = new Int32Array(2 * nEdges).fill(-1);
@@ -630,43 +708,12 @@ export function mqsSurfaceCurrent(F, bodies, maxLen, symX = null) {
         if (edgeTris[2 * e] < 0) edgeTris[2 * e] = t; else edgeTris[2 * e + 1] = t;
     }
     const TOL = 1e-12;
-    // Full extents of a body: one cut by the symmetry plane continues past it.
-    const full = bodies.map(b => ({ ...b, xmin: symX !== null && Math.abs(b.xmin - symX) < 1e-9 * (b.xmax - b.xmin) ? 2 * symX - b.xmax : b.xmin }));
-    const bodyAt = (x, y) => full.find(b => b.shape ? shapeContains(b, x, y, 1e-9 * (b.xmax - b.xmin))
-        : x > b.xmin - TOL && x < b.xmax + TOL && y > b.ymin - TOL && y < b.ymax + TOL) || null;
-    // Inward unit normal and depth to the midline at surface point (x, y) of body b.
-    const inward = (b, x, y) => {
-        if (b.shape) {
-            if (b.shape.type !== 'circle') return null;
-            const dx = b.shape.cx - x, dy = b.shape.cy - y, r = Math.hypot(dx, dy);
-            return r > 0 ? { nx: dx / r, ny: dy / r, depth: r } : null;
-        }
-        const W = b.xmax - b.xmin, H = b.ymax - b.ymin;
-        const faces = [[y - b.ymin, 0, 1, Math.min(x - b.xmin, b.xmax - x, H / 2)],
-            [b.ymax - y, 0, -1, Math.min(x - b.xmin, b.xmax - x, H / 2)],
-            [x - b.xmin, 1, 0, Math.min(y - b.ymin, b.ymax - y, W / 2)],
-            [b.xmax - x, -1, 0, Math.min(y - b.ymin, b.ymax - y, W / 2)]];
-        faces.sort((p, q) => p[0] - q[0]);
-        const [, nx, ny, depth] = faces[0];
-        return depth > 0 ? { nx, ny, depth } : null;
-    };
-    const NQ = 64;
-    const integrated = (t, x, y, geo) => {
-        let sr = 0, si = 0, prev = null, dPrev = 0;
-        for (let k = 0; k <= NQ; k++) {
-            const d = geo.depth * Math.max((k / NQ) ** 2, 1e-7);
-            const px = x + geo.nx * d, py = y + geo.ny * d;
-            const tt = k === 0 ? t : ev.locate(px, py);
-            const J = ev.J(tt, px, py) || [0, 0];
-            if (prev) { sr += (J[0] + prev[0]) / 2 * (d - dPrev); si += (J[1] + prev[1]) / 2 * (d - dPrev); }
-            prev = J; dPrev = d;
-        }
-        return Math.hypot(sr, si);
-    };
     const Cmag = Math.hypot(Cr, Ci);
-    const surfaceH = (t, x, y) => {
+    // |dA/dn| / mu0 times the drive, (nx, ny) the unit normal of the face. Evaluated in
+    // the dielectric triangle: the metal side of a perfect conductor has no field.
+    const surfaceH = (t, x, y, nx, ny) => {
         const g = ev.gradA(t, x, y);
-        return Cmag * Math.hypot(g[0], g[1], g[2], g[3]) / MU0;
+        return Cmag * Math.hypot(g[0] * nx + g[2] * ny, g[1] * nx + g[3] * ny) / MU0;
     };
     // A boundary edge with A = 0 on all its unknowns is metal (a wall, a coax shield),
     // except on the symmetry plane of an odd mode.
@@ -679,21 +726,19 @@ export function mqsSurfaceCurrent(F, bodies, maxLen, symX = null) {
         const ta = edgeTris[2 * e], tb = edgeTris[2 * e + 1];
         const n0 = edges[2 * e], n1 = edges[2 * e + 1];
         const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1], dx = nodes[2 * n1] - x0, dy = nodes[2 * n1 + 1] - y0;
-        // The metal triangle (driven, return or ideal) and the dielectric one beside it.
-        let tm = -1, td = -1;
+        // The dielectric triangle beside a metal face (driven, return or ideal metal).
+        let td;
         if (tb < 0) {
             if (cls[ta] === 0 && metalBoundary(e, n0, n1)) td = ta;
             else continue;
-        } else if (cls[ta] && !cls[tb]) { tm = ta; td = tb; }
-        else if (cls[tb] && !cls[ta]) { tm = tb; td = ta; }
+        } else if (cls[ta] && !cls[tb]) td = tb;
+        else if (cls[tb] && !cls[ta]) td = ta;
         else continue;
-        const n = Math.max(1, Math.ceil(Math.hypot(dx, dy) / maxLen));
+        const L = Math.hypot(dx, dy);
+        const n = Math.max(1, Math.ceil(L / maxLen));
         for (let k = 0; k < n; k++) {
             const px = x0 + dx * (k + 0.5) / n, py = y0 + dy * (k + 0.5) / n;
-            let K;
-            const geo = tm >= 0 && cls[tm] !== 3 ? (b => b && inward(b, px, py))(bodyAt(px, py)) : null;
-            if (geo) K = integrated(tm, px, py, geo);
-            else K = surfaceH(td, px, py);
+            const K = surfaceH(td, px, py, dy / L, -dx / L);
             const xa = x0 + dx * k / n, ya = y0 + dy * k / n, xb = x0 + dx * (k + 1) / n, yb = y0 + dy * (k + 1) / n;
             push(xa, ya, xb, yb, K);
             if (symX !== null && px > symX + TOL) push(2 * symX - xa, ya, 2 * symX - xb, yb, K);

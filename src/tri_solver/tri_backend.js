@@ -955,6 +955,10 @@ export class TriBackend {
         this.fm = null;
         this.domain = null;
         this._static = null;   // per-mode cached static solve + resampled fields
+        // Plot data of the solve at the plot frequency (solver.plot_freq_target), per mode:
+        // the static fields at the materials of f, the eigenmode and the MQS field, so
+        // plotFieldsAt at that frequency repeats none of the solves. See _plotSlot.
+        this._plotCache = null;
         // Source-free waveguide medium: no driven conductor, so no static solve exists.
         // Every stage that would normally consume _prepareStatic takes a waveguide branch.
         this._isWG = !!(solver && solver.mode_type === 'waveguide');
@@ -1937,6 +1941,7 @@ export class TriBackend {
         const { mesh } = this;
         const s = this.solver;
         this._static = {};
+        this._plotCache = null;
         // Resample fields onto a graded grid derived from the triangle mesh itself:
         // grid-line density follows the adaptively refined mesh (fine at corners,
         // surfaces and gaps — exactly where the solution needed resolution), with the
@@ -2470,6 +2475,10 @@ export class TriBackend {
         const st = this._static[mode];
         const { fm, kC, phiEps, C0, eps_eff_static, W_loss } = st;
         const omega = 2 * Math.PI * f;
+        // At the plot frequency the solves below keep their fields for plotFieldsAt, once:
+        // a repeat of the frequency may take the anchors and the fields it kept.
+        const slot = this._plotSlot(mode, f);
+        if (slot && !slot.fields) { slot.st = st; slot.fields = st.fields; }
 
         // Full-wave eigenmode above 100 MHz (dispersive eps + the mode field used
         // for the perturbation conductor loss); static solve near DC.
@@ -2598,7 +2607,7 @@ export class TriBackend {
             // projection), so it never interpolates.
             const dispTol = this.opts.dispTol ?? 1e-3;
             const dc = useMQS ? (st.disp || (st.disp = { xs: [], ys: [] })) : null;
-            const epsI = dc ? dispersionInterp(dc, f, dispTol) : null;
+            const epsI = dc && !(slot && !('fw' in slot)) ? dispersionInterp(dc, f, dispTol) : null;
             // Raw eigenvalue (exact or interpolated); anchored to the static solve below.
             let haveEigen = false;
             if (epsI !== null) {
@@ -2609,6 +2618,15 @@ export class TriBackend {
             if (fw && fw.eps > 0) {
                 eps_d = fw.eps; haveEigen = true;
                 if (dc) dispersionInsert(dc, f, fw.eps);
+            }
+            if (slot) {
+                slot.fw = fw;
+                // The same mode at F_STATIC_MAX with the same materials: the plot takes
+                // the change of the mode field from there, see _plotMode.
+                slot.fwRef = null;
+                if (fw && f > F_STATIC_MAX) {
+                    try { slot.fwRef = this._eigenPick(st, F_STATIC_MAX, phiEps, eps_eff_static).fw; } catch { slot.fwRef = null; }
+                }
             }
             // The eigensolve failed (or converged to no physical quasi-TEM) at this
             // frequency: the point silently degrades to the quasi-static ε, which
@@ -2941,8 +2959,9 @@ export class TriBackend {
                 : (st.mqsL = { mesh: mqsMesh, xs: [], ys: [], log: true });
             const rInterp = dispersionInterp(rc, f, rTol);
             const lInterp = dispersionInterp(lc, f, rTol);
-            // A current density plot (_jCapture) needs the solved field, not the anchors.
-            if (!this._jCapture && rInterp !== null && rInterp > 0 && lInterp !== null && lInterp > 0) {
+            // A current plot at the plot frequency needs the solved field, not the anchors.
+            const keepField = !!slot && !slot.mqs;
+            if (!keepField && rInterp !== null && rInterp > 0 && lInterp !== null && lInterp > 0) {
                 R_total = rInterp;
                 L_internal = lInterp;
                 lossVia = 'mqs';                      // interpolated MQS anchors
@@ -2955,7 +2974,7 @@ export class TriBackend {
             const mqsOpts = mqsOptsWith({ oddSymmetry: this.symmetry && mode === 'odd',
                 diffPair: !!s.is_differential, cache: mqsCache });
             if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st);
-            if (this._jCapture) mqsOpts.fieldOut = {};
+            if (keepField) mqsOpts.fieldOut = {};
             let mqs = null;
             try {
                 mqs = this._mqsSolve(mqsMesh, crM, f, mqsSigma, mqsOpts, idealCache);
@@ -2997,7 +3016,7 @@ export class TriBackend {
                 }
                 L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
                 st.mqsSurface = { f, L: mqs.L_surface };
-                if (this._jCapture) this._jCapture[mode] = { field: mqsOpts.fieldOut, cr: crM };
+                if (keepField) slot.mqs = { field: mqsOpts.fieldOut, cr: crM };
                 dispersionInsert(rc, f, R_total);
                 dispersionInsert(lc, f, L_internal);
             }
@@ -3243,28 +3262,62 @@ export class TriBackend {
         }
     }
 
+    // Whether f is the plot frequency, whose solve keeps its fields (_plotSlot).
+    _isPlotTarget(f) {
+        const t = this.solver && this.solver.plot_freq_target;
+        return typeof t === 'number' && f === t;
+    }
+
+    // Plot data slot of `mode` at the plot frequency f, null at any other frequency.
+    // Filled by _modeAtFreq: st (the static solve it ran on), fields (the static plot
+    // fields at the materials of f), fw (the eigenmode), mqs (the MQS field and its
+    // conductors); done once solveAt has run every mode.
+    _plotSlot(mode, f) {
+        if (!this.mesh || !this._isPlotTarget(f)) return null;
+        const c = this._plotCache;
+        if (!c || c.f !== f || c.mesh !== this.mesh) this._plotCache = { f, mesh: this.mesh, modes: {} };
+        const m = this._plotCache.modes;
+        return m[mode] || (m[mode] = {});
+    }
+
     // Plot fields at frequency f, written onto the solver like solveAt does: the static
     // potential at the materials of f, the transverse E of the full-wave quasi-TEM mode
     // from F_STATIC_MAX up (the static E below, or when the eigensolve finds no mode),
-    // and the perfect-conductor surface current per ampere.
+    // and the surface current per ampere. The solve at the plot frequency kept its
+    // fields, so only another frequency solves anything.
     plotFieldsAt(f) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         const s = this.solver;
         // A waveguide's mode pattern is geometric, the same at every frequency.
         if (this._isWG) { s.fieldFreq = f; s.fieldKind = 'fullwave'; return; }
-        this._syncMaterials(f, false);
-        const modes = this.modeNames.map(mode => this._plotMode(mode, f));
-        const f0 = this._static[this.modeNames[0]].fields;
-        s.x = f0.x;
-        s.y = f0.y;
+        s.plot_freq_target = f;
+        s.plotNote = null;
+        let slots = this.modeNames.map(mode => this._plotSlot(mode, f));
+        if (!slots.every(sl => sl.done)) {
+            const prevWarnings = this._modeWarnings;
+            this._modeWarnings = [];
+            try {
+                this._syncMaterials(f, false);
+                for (const mode of this.modeNames) this._modeAtFreq(mode, f);
+            } catch (e) {
+                s.plotNote = `Plot field solve at ${(f / 1e9).toFixed(3)} GHz failed: ${(e && e.message) || e}`;
+            } finally {
+                this._modeWarnings = prevWarnings;
+            }
+            slots = this.modeNames.map(mode => this._plotSlot(mode, f));
+            for (const sl of slots) sl.done = true;
+        }
+        const modes = this.modeNames.map((mode, i) => this._plotMode(mode, f, slots[i]));
+        s.x = modes[0].x;
+        s.y = modes[0].y;
         s.V = modes.map(m => m.V);
         s.Ex = modes.map(m => m.Ex);
         s.Ey = modes.map(m => m.Ey);
-        s.plotNote = null;
-        // Surface current from the MQS solve at f where it runs, else the perfect-conductor
+        // Surface current from the MQS solve at f where it ran, else the perfect-conductor
         // limit of the static solve.
-        const cur = this._plotCurrents(f);
+        const cur = this._plotCurrents(f, slots);
         s.currentJ = cur ? cur.J : null;
+        s.currentMesh = cur ? cur.mesh : null;
         s.surfaceK = modes.map((m, i) => (cur && cur.K[i]) || m.K);
         s.surfaceKSource = modes.map((m, i) => (cur && cur.K[i]) ? 'mqs' : 'pec');
         s.idealGrounds = cur ? cur.ideal : null;
@@ -3275,49 +3328,34 @@ export class TriBackend {
         s.mesh_generated = true;
     }
 
-    // Current plots from the MQS solve at f, per mode: |J| in the meshed conductors and
-    // the integrated surface current |K| ({ J, K, ideal }, ideal: the grounds reaching
-    // the domain edge were held as ideal returns), or null where the loss does not come
-    // from that solve (perturbation method, f = 0). Why an MQS solve gave no plot goes
-    // to solver.plotNote.
-    _plotCurrents(f) {
+    // Current plots from the MQS solves kept in the plot slots, per mode: |J| in the
+    // meshed conductors, the surface current |K| and the skin mesh they were solved on
+    // ({ J, K, mesh, ideal }, ideal: the grounds reaching the domain edge were held as
+    // ideal returns), or null where the loss did not come from that solve (perturbation
+    // method, f = 0).
+    _plotCurrents(f, slots) {
         if (!(f > 0)) return null;
-        const prevWarnings = this._modeWarnings;
-        this._jCapture = {};
-        this._modeWarnings = [];
-        let cap, vias = [];
-        try {
-            vias = this.modeNames.map(mode => this._modeAtFreq(mode, f).lossVia);
-        } catch (e) {
-            this.solver.plotNote = `Current density plot failed: ${(e && e.message) || e}`;
-        } finally {
-            cap = this._jCapture;
-            this._jCapture = null;
-            this._modeWarnings = prevWarnings;
-        }
         const d = this.domain;
         const maxLen = Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000;
-        const J = [], K = [], ideal = [];
-        for (const mode of this.modeNames) {
-            const c = cap && cap[mode];
+        const symX = this.symmetry ? this.condRect.xmin_domain : null;
+        const J = [], K = [], mesh = [], ideal = [];
+        for (const sl of slots) {
+            const c = sl.mqs;
             const ok = c && c.field.sol;
-            const symX = this.symmetry ? this.condRect.xmin_domain : null;
             J.push(ok ? sampleMqsCurrent(c.field, c.cr.rects, 160, symX) : null);
-            K.push(ok ? mqsSurfaceCurrent(c.field, this.condRect.rects, maxLen, symX) : null);
+            K.push(ok ? mqsSurfaceCurrent(c.field, maxLen, symX) : null);
+            const m = ok && c.field.mesh;
+            mesh.push(m ? { nodes: m.nodes, tris: m.tris, nTris: m.nTris } : null);
             ideal.push(!!(ok && c.field.idealGrounds));
         }
-        if (!J.some(Boolean)) {
-            if (vias.includes('mqs') && !this.solver.plotNote) {
-                this.solver.plotNote = 'Current density plot unavailable: the MQS loss solve returned no field.';
-            }
-            return null;
-        }
-        return { J, K, ideal };
+        return J.some(Boolean) ? { J, K, mesh, ideal } : null;
     }
 
-    _plotMode(mode, f) {
-        const st = this._static[mode];
-        const { V, Ex, Ey } = st.fields;
+    // Plot fields of one mode from its plot slot (the static solve, fields and eigenmode
+    // at f), falling back to the current static solve where the slot has none.
+    _plotMode(mode, f, slot) {
+        const st = (slot && slot.st) || this._static[mode];
+        const { x, y, V, Ex, Ey } = (slot && slot.fields) || st.fields;
         const d = this.domain;
         const symX = this.symmetry ? this.condRect.xmin_domain : null;
         // Nets at the driving potential: both traces of an even drive on the full domain.
@@ -3328,33 +3366,41 @@ export class TriBackend {
         const K = st.phiAir ? surfaceCurrentPoints(this.mesh, st.fm, st.phiAir,
             buildLossEdges(this.mesh, st.fm, this.condRect), Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000,
             symX, nets) : null;
-        if (!(f >= F_STATIC_MAX)) return { V, Ex, Ey, K, fullwave: false };
-        let fw = null;
-        try {
-            ({ fw } = this._eigenPick(st, f, st.phiEps, st.eps_eff_static, st.disp ? dispersionNearest(st.disp, f) : null));
-        } catch { fw = null; }
-        if (!fw) return { V, Ex, Ey, K, fullwave: false };
+        const fw = f >= F_STATIC_MAX && slot ? slot.fw : null;
+        if (!fw) return { x, y, V, Ex, Ey, K, fullwave: false };
         const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
-        const m = resampleModeField(this.mesh, st.fm, fw.vRe, fw.vIm, this.domain, { grid: this._staticGrid, parity });
-        // The eigenvector has an arbitrary complex scale: fit it to the static field of the
-        // same drive by least squares, area weighted on the graded grid.
-        const { x, y } = m;
-        let nr = 0, ni = 0, den = 0;
-        for (let j = 1; j < y.length - 1; j++) {
-            const hy = y[j + 1] - y[j - 1];
-            for (let i = 1; i < x.length - 1; i++) {
-                const a = (x[i + 1] - x[i - 1]) * hy;
-                const xr = m.Ex[j][i], xi = m.ExIm[j][i], yr = m.Ey[j][i], yi = m.EyIm[j][i];
-                nr += a * (Ex[j][i] * xr + Ey[j][i] * yr);
-                ni -= a * (Ex[j][i] * xi + Ey[j][i] * yi);
-                den += a * (xr * xr + xi * xi + yr * yr + yi * yi);
+        // An eigenvector has an arbitrary complex scale: fit it to the static field of
+        // the same drive by least squares, area weighted on the graded grid.
+        const fitted = (w) => {
+            const m = resampleModeField(this.mesh, st.fm, w.vRe, w.vIm, this.domain, { grid: this._staticGrid, parity });
+            let nr = 0, ni = 0, den = 0;
+            for (let j = 1; j < y.length - 1; j++) {
+                const hy = y[j + 1] - y[j - 1];
+                for (let i = 1; i < x.length - 1; i++) {
+                    const a = (x[i + 1] - x[i - 1]) * hy;
+                    const xr = m.Ex[j][i], xi = m.ExIm[j][i], yr = m.Ey[j][i], yi = m.EyIm[j][i];
+                    nr += a * (Ex[j][i] * xr + Ey[j][i] * yr);
+                    ni -= a * (Ex[j][i] * xi + Ey[j][i] * yi);
+                    den += a * (xr * xr + xi * xi + yr * yr + yi * yi);
+                }
             }
-        }
-        if (!(den > 0)) return { V, Ex, Ey, K, fullwave: false };
-        const sr = nr / den, si = ni / den;
-        const ExF = m.Ex.map((row, j) => row.map((v, i) => sr * v - si * m.ExIm[j][i]));
-        const EyF = m.Ey.map((row, j) => row.map((v, i) => sr * v - si * m.EyIm[j][i]));
-        return { V, Ex: ExF, Ey: EyF, K, fullwave: true };
+            if (!(den > 0)) return null;
+            const sr = nr / den, si = ni / den;
+            return { Ex: m.Ex.map((row, j) => row.map((v, i) => sr * v - si * m.ExIm[j][i])),
+                     Ey: m.Ey.map((row, j) => row.map((v, i) => sr * v - si * m.EyIm[j][i])) };
+        };
+        const m = fitted(fw);
+        if (!m) return { x, y, V, Ex, Ey, K, fullwave: false };
+        // The mode field sampled per element keeps the jumps of its normal component
+        // between elements, which kink the |E| contours; the static field is smooth
+        // because it is differenced from the continuous potential. So the plot is the
+        // static field plus the change of the mode from F_STATIC_MAX, where it is the
+        // static field up to discretization: the jumps cancel in the difference.
+        const r = slot.fwRef ? fitted(slot.fwRef) : null;
+        if (!r) return { x, y, V, Ex: m.Ex, Ey: m.Ey, K, fullwave: true };
+        return { x, y, V, K, fullwave: true,
+                 Ex: m.Ex.map((row, j) => row.map((v, i) => Ex[j][i] + v - r.Ex[j][i])),
+                 Ey: m.Ey.map((row, j) => row.map((v, i) => Ey[j][i] + v - r.Ey[j][i])) };
     }
 
     // Public: solve at one frequency, return the unified result object and write
@@ -3362,7 +3408,8 @@ export class TriBackend {
     solveAt(f, opts = {}) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         this._modeWarnings = [];
-        this._syncMaterials(f, opts.skipFieldResample === true);
+        const slot0 = this._isWG ? null : this._plotSlot(this.modeNames[0], f);
+        this._syncMaterials(f, opts.skipFieldResample === true && !(slot0 && !slot0.fields));
         // Surface the buildMesh-time accuracy warning (failed verification certificate)
         // through the same per-solve channel as the mode warnings, so the UI logs it.
         if (this._certWarn) this._modeWarnings.push(this._certWarn);
@@ -3381,6 +3428,8 @@ export class TriBackend {
                 for (const m of this.modeNames) {
                     const st = this._static && this._static[m];
                     if (st) { st.mqsR = null; st.mqsL = null; }
+                    const slot = this._plotSlot(m, f);
+                    if (slot) slot.mqs = null;
                 }
                 this._noMqsThisSolve = true;
                 try {
@@ -3395,6 +3444,8 @@ export class TriBackend {
                     `were recomputed with the perturbation estimate instead.` });
             }
         }
+        // The plot data of every mode at the plot frequency is complete.
+        if (!this._isWG) for (const m of this.modeNames) { const slot = this._plotSlot(m, f); if (slot) slot.done = true; }
         const result = { modes };
         if (this._modeWarnings.length) result.warnings = this._modeWarnings;
         this.solver.modeWarnings = this._modeWarnings;

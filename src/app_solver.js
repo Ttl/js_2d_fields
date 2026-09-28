@@ -34,8 +34,9 @@ let lastSweepDisplayUnit = null; // Display unit used during last sweep
 // Modes tab state
 let isSolvingModes = false;
 // Field plot state: the view-model solver whose fields the worker's retained solve
-// belongs to, and the highest frequency of that solve (the default plot frequency).
-let plotFieldsSolver = null;
+// belongs to, the simulate job of that solve, and its highest frequency (the default
+// plot frequency).
+let plotFieldsSolver = null, plotFieldsJob = null;
 let plotFieldsMaxFreq = null;
 let plotFieldsBusy = false, plotFieldsPending = false;
 let modesResult = null;          // last solveModes() summary { modes, nconv, ... }
@@ -957,6 +958,7 @@ function applyFields(target, fields) {
     target.Ey = fields.Ey;
     target.surfaceK = fields.surfaceK || null;
     target.currentJ = fields.currentJ || null;
+    target.currentMesh = fields.currentMesh || null;
     target.surfaceKSource = fields.surfaceKSource || null;
     target.idealGrounds = fields.idealGrounds || null;
     target.fieldFreq = fields.fieldFreq ?? null;
@@ -1693,6 +1695,13 @@ function updateGeometry() {
     // Keep the last valid geometry on screen, the editor lists the errors.
     const keep = !built && isCustom && solver && solver.geometry_params;
     if (!keep) solver = built;
+    if (plotFieldsSolver && solver !== plotFieldsSolver) releasePlotFields(plotFieldsJob);
+}
+
+// Let the worker drop the solve kept for plots at other frequencies.
+function releasePlotFields(job) {
+    if (job === plotFieldsJob) { plotFieldsSolver = null; plotFieldsJob = null; }
+    workerJob('plotRelease', { job }).catch(() => {});
 }
 
 // Writes the current geometry (every rectangle the native solver builds, solder mask,
@@ -1782,6 +1791,8 @@ async function runSimulation() {
     btn.classList.add('stop-mode');
     logSolveStarted();
     isSimulating = true;
+    // A simulate job replaces the worker's kept solve.
+    plotFieldsSolver = null; plotFieldsJob = null;
     updateResultNotices();
     displayedProgress = 0;
     pbar.style.width = '0%';
@@ -1817,7 +1828,7 @@ async function runSimulation() {
             }
         };
 
-        const out = await workerJob('simulate', {
+        const simJob = workerJob('simulate', {
             params: p,
             frequencies,
             opts: {
@@ -1855,11 +1866,20 @@ async function runSimulation() {
                 }
             },
         });
+        const simJobId = _workerJobId;
+        const out = await simJob;
 
         if (solver === solvedSolver) applyFields(solver, out.fields);
+        // The worker keeps this solve for plots at other frequencies while its geometry
+        // is on screen.
         if (!out.stopped) {
-            plotFieldsSolver = solvedSolver;
-            plotFieldsMaxFreq = Math.max(...frequencies);
+            if (solver === solvedSolver) {
+                plotFieldsSolver = solvedSolver;
+                plotFieldsJob = simJobId;
+                plotFieldsMaxFreq = Math.max(...frequencies);
+            } else {
+                releasePlotFields(simJobId);
+            }
         }
         logModeWarnings(out.sweepWarnings);
 
@@ -1988,6 +2008,8 @@ async function runSimulation() {
         heartbeatStop(outcome === 'done' ? `Done in ${elapsed}`
                     : outcome === 'stopped' ? `Stopped after ${elapsed}` : '');
         isSimulating = false;
+        // A Plot Frequency edited during the run.
+        updatePlotFields();
     }
 }
 

@@ -18,6 +18,8 @@
 //   { id, type: 'modeField' , idx }          (after a 'modes' job, same worker)
 //   { id, type: 'paramSweep', points, freqHz, opts }
 //   { id, type: 'plotFields', freq }         (after a 'simulate' job, same worker)
+//   { id, type: 'plotRelease', job }          (drops the solve 'plotFields' reads, if
+//                                              it is still the one of simulate job `job`)
 //   {     type: 'stop' }                     (no id: cancels whatever is running)
 // worker to main:
 //   { id, type: 'log'     , msg }
@@ -35,8 +37,9 @@ import { InterpolatingSweep } from './interpolating_sweep.js';
 let stopRequested = false;
 let currentId = null;
 let modesSolver = null;   // retained between 'modes' and its follow-up 'modeField' calls
-// The last simulate job's solver and converged solve, retained for 'plotFields'.
-let simSolver = null, simCached = null;
+// The last simulate job's solver and converged solve, retained for 'plotFields', and
+// the id of that job.
+let simSolver = null, simCached = null, simJob = null;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const log = (msg) => post({ id: currentId, type: 'log', msg });
@@ -85,19 +88,23 @@ function fieldPayload(solver) {
         V: solver.V, Ex: solver.Ex, Ey: solver.Ey,
         triMesh: solver.triMesh || null,
         surfaceK: solver.surfaceK || null, currentJ: solver.currentJ || null,
+        currentMesh: solver.currentMesh || null,
         surfaceKSource: solver.surfaceKSource || null, idealGrounds: solver.idealGrounds || null,
         fieldFreq: solver.fieldFreq ?? null,
         fieldKind: solver.fieldKind || 'static',
     };
 }
 
-// Plot fields of `solver` at frequency f. A failure keeps the fields it had.
+// Plot fields of `solver` at frequency f. A failure keeps the fields it had and
+// returns false.
 async function plotFields(solver, cached, f) {
     try {
         await solver.plotFieldsAt(f, cached);
         if (solver.plotNote) log(solver.plotNote);
+        return true;
     } catch (e) {
         log(`Plot fields at ${(f / 1e9).toFixed(3)} GHz failed: ${(e && e.message) || e}`);
+        return false;
     }
 }
 
@@ -127,7 +134,7 @@ const MESH_FRACTION = (EST_MESH_PASSES * MESH_PASS_COST) /
     (EST_MESH_PASSES * MESH_PASS_COST + EST_SWEEP_POINTS);
 
 async function jobSimulate({ params, frequencies, opts }) {
-    simSolver = null; simCached = null;
+    simSolver = null; simCached = null; simJob = null;
     const solver = makeSolver(params);
     const p = params;
 
@@ -142,6 +149,9 @@ async function jobSimulate({ params, frequencies, opts }) {
     let sweepResults = [];
     const maxFreq = Math.max(...frequencies);
     solver.freq = maxFreq;
+    // The solve at the plot frequency keeps its fields for the plot after the sweep.
+    const plotFreq = opts.plotFreq ?? maxFreq;
+    solver.plot_freq_target = plotFreq;
 
     log('Calculating mesh...');
     solver.ensure_mesh();
@@ -181,8 +191,11 @@ async function jobSimulate({ params, frequencies, opts }) {
 
     // First plottable state: the converged mesh solve. Ship the fields now so the
     // geometry tab paints its E-field overlay while the sweep is still running.
+    // The sweep points overwrite the solver's fields, so a run that ends without the
+    // plot fields returns these.
     solver.fieldFreq = maxFreq;
-    post({ id: currentId, type: 'partial', fields: fieldPayload(solver),
+    const fieldsAtMax = fieldPayload(solver);
+    post({ id: currentId, type: 'partial', fields: fieldsAtMax,
            sweepResults: stripSweep(sweepResults) });
 
     const fMax = maxFreq;
@@ -291,9 +304,10 @@ async function jobSimulate({ params, frequencies, opts }) {
     }
 
     sweepResults.sort((a, b) => a.freq - b.freq);
+    let plotted = false;
     if (!stopRequested) {
-        await plotFields(solver, cachedResults, opts.plotFreq ?? maxFreq);
-        simSolver = solver; simCached = cachedResults;
+        plotted = await plotFields(solver, cachedResults, plotFreq);
+        simSolver = solver; simCached = cachedResults; simJob = currentId;
     }
     return {
         stopped: stopRequested,
@@ -302,7 +316,7 @@ async function jobSimulate({ params, frequencies, opts }) {
         // RLGC_matrix from it, and an interpolated sweep row is not a substitute (it is
         // rebuilt from the interpolant, not from a full solve).
         meshResult: stripResult(results),
-        fields: fieldPayload(solver),
+        fields: plotted ? fieldPayload(solver) : fieldsAtMax,
         sweepWarnings,
     };
 }
@@ -329,6 +343,11 @@ async function jobPlotFields({ freq }) {
     if (!simSolver) return { fields: null };
     await plotFields(simSolver, simCached, freq);
     return { fields: fieldPayload(simSolver) };
+}
+
+function jobPlotRelease({ job }) {
+    if (job === simJob) { simSolver = null; simCached = null; simJob = null; }
+    return {};
 }
 
 function jobModeField({ idx }) {
@@ -390,6 +409,7 @@ const JOBS = {
     modeField: jobModeField,
     paramSweep: jobParamSweep,
     plotFields: jobPlotFields,
+    plotRelease: jobPlotRelease,
 };
 
 async function runJob(msg) {

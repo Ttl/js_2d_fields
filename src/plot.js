@@ -1,7 +1,7 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB,
          isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
-import { isComplement, svgRingPath, svgShapePath, shapePoly, isPolyShape } from './shapes.js';
+import { isComplement, svgRingPath, svgShapePath, shapePoly, isPolyShape, shapeContains } from './shapes.js';
 
 // A polygon or ring shape as a Plotly path shape with `style`.
 const polyPathShape = (shape, style) => ({ type: 'path', path: svgShapePath(shape), fillrule: 'evenodd', ...style });
@@ -501,13 +501,21 @@ function getCurrentJ() {
     return J[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
 }
 
+// The triangle mesh of the displayed view: the skin mesh of the MQS solve for the
+// current views that come from it, else the solve mesh (null on the rectilinear backend).
+function viewTriMesh(solver) {
+    const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+    const fromMqs = currentView === "density"
+        || (currentView === "current" && solver.surfaceKSource && solver.surfaceKSource[mi] === 'mqs');
+    return (fromMqs && solver.currentMesh && solver.currentMesh[mi]) || solver.triMesh || null;
+}
+
 // Conductor shapes of the |J| view. A conductor under a current density block gets only
 // an outline above the heatmap: its fill (and plating edges) below would show through
 // at the block edges as a false hot rim. Metal without a block (walls, wall grounds)
 // keeps its fill.
 function densityConductorShapes(solver, blocks, maxY) {
-    const bb = blocks.map(b => ({ x0: Math.min(b.x[0], b.x[b.x.length - 1]), x1: Math.max(b.x[0], b.x[b.x.length - 1]),
-                                  y0: b.y[0], y1: b.y[b.y.length - 1] }));
+    const bb = blocks.map(blockBox);
     const covered = c => bb.some(b => Math.min(b.x1, c.x_max) > Math.max(b.x0, c.x_min)
         && Math.min(b.y1, c.y_max) > Math.max(b.y0, c.y_min));
     const conductors = solver.conductors || [];
@@ -528,6 +536,112 @@ function densityConductorShapes(solver, blocks, maxY) {
     return out;
 }
 
+// Bounding box { x0, x1, y0, y1 } of a |J| block, grid or triangles.
+function blockBox(b) {
+    if (b.tris) {
+        const o = { x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity };
+        for (let i = 0; i < b.tris.length; i += 2) {
+            o.x0 = Math.min(o.x0, b.tris[i]); o.x1 = Math.max(o.x1, b.tris[i]);
+            o.y0 = Math.min(o.y0, b.tris[i + 1]); o.y1 = Math.max(o.y1, b.tris[i + 1]);
+        }
+        return o;
+    }
+    return { x0: Math.min(b.x[0], b.x[b.x.length - 1]), x1: Math.max(b.x[0], b.x[b.x.length - 1]),
+             y0: b.y[0], y1: b.y[b.y.length - 1] };
+}
+
+// Hover and color axis of the triangle blocks (shaped conductors): invisible markers at
+// the centroids of at most HOVER_MAX triangles, a marker per triangle (~1e5 on a skin
+// mesh) makes every pan and zoom slow. The |J| itself is the image of rasterizeDensity.
+const HOVER_MAX = 5000;
+function densityHoverTrace(blocks, db) {
+    const mx = [], my = [], mv = [];
+    const n = blocks.reduce((a, b) => a + b.J.length, 0);
+    const stride = Math.max(1, Math.ceil(n / HOVER_MAX));
+    for (const b of blocks) {
+        const T = b.tris;
+        for (let t = 0; t < b.J.length; t += stride) {
+            const k = 6 * t;
+            mx.push((T[k] + T[k + 2] + T[k + 4]) * 1000 / 3); my.push((T[k + 1] + T[k + 3] + T[k + 5]) * 1000 / 3);
+            mv.push(db ? (b.J[t] > 0 ? 20 * Math.log10(b.J[t]) : null) : b.J[t]);
+        }
+    }
+    return {
+        type: "scattergl", mode: "markers", x: mx, y: my,
+        marker: { size: 4, opacity: 0, color: mv, coloraxis: "coloraxis" },
+        hovertemplate: `x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>|J|: %{marker.color:${db ? ".1f} dB(A/m²)" : ".4g} A/m²"}<extra></extra>`,
+        showlegend: false,
+    };
+}
+
+// |J| of the triangle blocks rasterized for the visible axis ranges (mm) at w x h pixels:
+// each triangle Gouraud-shaded from its vertex values, so the skin layer of a slanted or
+// curved face stays smooth at any zoom. Returns a layout image, or null.
+function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
+    if (!(w > 0 && h > 0)) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    const px = img.data;
+    const LUT = Array.from({ length: 256 }, (_, i) => viridisAt(i / 255).match(/\d+/g).map(Number));
+    const span = zmax - zmin || 1;
+    const sx = w / (xr[1] - xr[0]), sy = h / (yr[1] - yr[0]);
+    const val = v => db ? (v > 0 ? 20 * Math.log10(v) : zmin) : v;
+    let any = false;
+    for (const b of blocks) {
+        const T = b.tris, Jv = b.Jv;
+        for (let t = 0; t < b.J.length; t++) {
+            const k = 6 * t;
+            const ax = (T[k] * 1000 - xr[0]) * sx, ay = (yr[1] - T[k + 1] * 1000) * sy;
+            const bx = (T[k + 2] * 1000 - xr[0]) * sx, by = (yr[1] - T[k + 3] * 1000) * sy;
+            const cx = (T[k + 4] * 1000 - xr[0]) * sx, cy = (yr[1] - T[k + 5] * 1000) * sy;
+            const i0 = Math.max(0, Math.ceil(Math.min(ax, bx, cx) - 0.5)), i1 = Math.min(w - 1, Math.floor(Math.max(ax, bx, cx) - 0.5));
+            const j0 = Math.max(0, Math.ceil(Math.min(ay, by, cy) - 0.5)), j1 = Math.min(h - 1, Math.floor(Math.max(ay, by, cy) - 0.5));
+            if (i0 > i1 || j0 > j1) continue;
+            const det = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+            if (!det) continue;
+            const va = val(Jv[3 * t]), vb = val(Jv[3 * t + 1]), vc = val(Jv[3 * t + 2]);
+            for (let j = j0; j <= j1; j++) {
+                const qy = j + 0.5;
+                for (let i = i0; i <= i1; i++) {
+                    const qx = i + 0.5;
+                    const l1 = ((qx - ax) * (cy - ay) - (cx - ax) * (qy - ay)) / det;
+                    const l2 = ((bx - ax) * (qy - ay) - (qx - ax) * (by - ay)) / det;
+                    const l0 = 1 - l1 - l2;
+                    if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9) continue;
+                    const u = (l0 * va + l1 * vb + l2 * vc - zmin) / span;
+                    const c = LUT[Math.max(0, Math.min(255, Math.round(u * 255)))];
+                    const o = 4 * (j * w + i);
+                    px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 255;
+                    any = true;
+                }
+            }
+        }
+    }
+    if (!any) return null;
+    ctx.putImageData(img, 0, 0);
+    return { source: canvas.toDataURL(), xref: 'x', yref: 'y', x: xr[0], y: yr[1],
+             sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer: 'above' };
+}
+
+// Redraws the |J| image of the triangle blocks for the current axis ranges and plot size.
+let densityImageFrame = 0;
+function updateDensityImage(container) {
+    cancelAnimationFrame(densityImageFrame);
+    densityImageFrame = requestAnimationFrame(() => {
+        const blocks = currentView === "density" ? (getCurrentJ() || []).filter(b => b.tris) : [];
+        const fl = container._fullLayout;
+        if (!blocks.length || !fl || !fl.xaxis || !fl._size) return;
+        const ratio = Math.min(window.devicePixelRatio || 1, 2);
+        const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
+        const im = rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
+            zMin, zMax, getPlotOptions().efieldDb);
+        container._densityImageUpdate = true;
+        getPlotly().relayout(container, { images: im ? [im] : [] }).finally(() => { container._densityImageUpdate = false; });
+    });
+}
+
 // A |J| block extended by a hair past each face with copies of its edge samples, so the
 // heatmap reaches the conductor outline without an antialiasing seam.
 function padBlock(b) {
@@ -546,6 +660,15 @@ function padBlock(b) {
 function densityAutoscale(blocks, db) {
     const pts = [];
     for (const b of blocks) {
+        if (b.tris) {
+            const T = b.tris;
+            for (let t = 0; t < b.J.length; t++) {
+                const k = 6 * t;
+                const area = Math.abs((T[k + 2] - T[k]) * (T[k + 5] - T[k + 1]) - (T[k + 4] - T[k]) * (T[k + 3] - T[k + 1])) / 2;
+                if (b.J[t] > 0) pts.push([b.J[t], area]);
+            }
+            continue;
+        }
         const nx = b.x.length, ny = b.y.length;
         for (let j = 0; j < ny; j++) {
             const dy = (b.y[Math.min(j + 1, ny - 1)] - b.y[Math.max(j - 1, 0)]) / 2;
@@ -575,6 +698,43 @@ function viridisAt(u) {
     const a = VIRIDIS[i], b = VIRIDIS[i + 1];
     const ch = (c, k) => parseInt(c.slice(1 + 2 * k, 3 + 2 * k), 16);
     return `rgb(${[0, 1, 2].map(k => Math.round(ch(a, k) + f * (ch(b, k) - ch(a, k)))).join(',')})`;
+}
+
+// Grid samples inside a conductor or outside the mesh (|E| exactly 0) of the solver's
+// plot grid, cached on the grid arrays.
+function metalMask(solver, z) {
+    const X = solver.x, Y = solver.y;
+    const c = solver._metalMask;
+    if (c && c.x === X && c.y === Y && c.ny === z.length) return c.mask;
+    const conductors = solver.conductors || [];
+    const mask = z.map((row, j) => Uint8Array.from(row, (v, i) =>
+        v === 0 || conductors.some(o => shapeContains(o, X[i], Y[j])) ? 1 : 0));
+    solver._metalMask = { x: X, y: Y, ny: z.length, mask };
+    return mask;
+}
+
+// |E| of the display grid carried two samples into the metal (and past the mesh edge):
+// the samples next to the dielectric take the mean of their dielectric neighbours. A
+// contour cell across a curved or slanted surface would otherwise pack every contour
+// level into a staircase along the grid; the conductor fill hides the metal.
+function extendIntoMetal(z, solver) {
+    const ny = z.length, nx = ny ? z[0].length : 0;
+    if (!nx || !solver.x || solver.x.length !== nx) return z;
+    const mask = metalMask(solver, z).map(row => row.slice());
+    for (let pass = 0; pass < 2; pass++) {
+        const fill = [];
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+            if (!mask[j][i]) continue;
+            let sum = 0, n = 0;
+            for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+                const m = mask[j + dj];
+                if (m && m[i + di] === 0) { sum += z[j + dj][i + di]; n++; }
+            }
+            if (n) fill.push(j, i, sum / n);
+        }
+        for (let k = 0; k < fill.length; k += 3) { z[fill[k]][fill[k + 1]] = fill[k + 2]; mask[fill[k]][fill[k + 1]] = 0; }
+    }
+    return z;
 }
 
 // Autoscale of the surface current: the linear max is the length-weighted 99th
@@ -711,6 +871,7 @@ function draw(resetZoom = false) {
             }
             if (zData.length > 0) {
                 const auto = efieldAutoscale(zData, xMM, yMM);
+                extendIntoMetal(zData, solver);
                 zMin = 0;
                 zMax = auto.max;
                 contourFloor = auto.floor;
@@ -807,6 +968,7 @@ function draw(resetZoom = false) {
             }
         }
         const auto = efieldAutoscale(zData, xMM, yMM);
+        extendIntoMetal(zData, solver);
         contourFloor = auto.floor;
         if (db) {
             ({ min: zMin, max: zMax } = efieldDbRange(auto));
@@ -855,7 +1017,8 @@ function draw(resetZoom = false) {
         const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
         const fromMqs = solver.surfaceKSource && solver.surfaceKSource[mi] === 'mqs';
         const ideal = fromMqs && solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "";
-        title = `Surface Current |K| per 1 A${modeLabel} (${db ? "dB A/m" : "A/m"})` +
+        // From the MQS solve |K| is the tangential H, the current sheet only in the skin regime.
+        title = `Surface Current |K| ${fromMqs ? "= |H<sub>t</sub>| " : ""}per 1 A${modeLabel} (${db ? "dB A/m" : "A/m"})` +
             (fromMqs ? `${fieldFreqLabel(solver)}, MQS${ideal}` : ", perfect-conductor limit");
         const below = s => ({ ...s, layer: 'below' });
         shapes.push(...dielectricFillShapes(solver, maxY).map(below));
@@ -891,7 +1054,10 @@ function draw(resetZoom = false) {
         const db = plotOptions.efieldDb;
         colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale,
                       colorbar: { title: db ? "dB(A/m²)" : "A/m²", len: 0.8 } };
-        for (const b of getCurrentJ().map(padBlock)) {
+        const blocks = getCurrentJ();
+        const triBlocks = blocks.filter(b => b.tris);
+        if (triBlocks.length) traces.push(densityHoverTrace(triBlocks, db));
+        for (const b of blocks.filter(b => !b.tris).map(padBlock)) {
             traces.push({
                 type: "heatmap", coloraxis: "coloraxis", zsmooth: "best",
                 x: Array.from(b.x, v => v * 1000), y: Array.from(b.y, v => v * 1000),
@@ -1016,9 +1182,10 @@ function draw(resetZoom = false) {
     }
 
     // Mesh overlay
-    if (showMesh && solver.solution_valid && solver.triMesh) {
+    const triMesh = viewTriMesh(solver);
+    if (showMesh && solver.solution_valid && triMesh) {
         // Triangular backend: draw triangle edges (deduped) as one batched trace.
-        const { nodes, tris, nTris } = solver.triMesh;
+        const { nodes, tris, nTris } = triMesh;
         const seen = new Set();
         const ex = [], ey = [];
         const nNodesTri = nodes.length / 2;
@@ -1190,6 +1357,7 @@ function draw(resetZoom = false) {
     };
 
     Plotly.react(container, traces, layout, config);
+    if (currentView === "density") updateDensityImage(container);
 
     if (!container._viewListenerBound) {
         container.on('plotly_buttonclicked', (event) => {
@@ -1238,6 +1406,8 @@ function draw(resetZoom = false) {
 
         // Handle autoscale button click
         container.on('plotly_relayout', (eventData) => {
+            // A zoom or pan redraws the |J| image of the shaped conductors for the new view.
+            if (currentView === "density" && !container._densityImageUpdate) updateDensityImage(container);
             // Check if this is an autoscale event (both axes autoscaling)
             if (eventData && eventData['xaxis.autorange'] === true && eventData['yaxis.autorange'] === true) {
                 // Only reset color scale if this is from the autoscale button, not double-click

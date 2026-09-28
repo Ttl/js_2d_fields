@@ -3795,6 +3795,7 @@ export class FieldSolver2D {
     //   Ex(-x) = -sV * Ex(x). Ey(-x) = sV * Ey(x).
     getPlotFields() {
         const extra = { surfaceK: this.surfaceK || null, currentJ: this.currentJ || null,
+                        currentMesh: this.currentMesh || null,
                         surfaceKSource: this.surfaceKSource || null, idealGrounds: this.idealGrounds || null,
                         fieldFreq: this.fieldFreq ?? null,
                         fieldKind: this.fieldKind || 'static' };
@@ -3828,13 +3829,17 @@ export class FieldSolver2D {
     // Plot fields at frequency f: the fields of the solve at f (the static solve at the
     // causal permittivity of f, the full-wave quasi-TEM mode field on the triangular
     // backend) and the surface current per ampere, left on the solver for getPlotFields.
+    // The solve at the plot frequency (plot_freq_target) kept its results, so only
+    // another frequency solves anything.
     async plotFieldsAt(f, cachedResults) {
         if (this.mesh_backend === 'triangular') {
             const tri = await this._ensureTriBackend();
             tri.plotFieldsAt(f);
             return;
         }
-        const r = await this.computeAtFrequency(f, cachedResults);
+        this.plot_freq_target = f;
+        const c = this._plotResult;
+        const r = c && c.freq === f && c.cached === cachedResults ? c.r : await this.computeAtFrequency(f, cachedResults);
         this.V = r.modes.map(m => m.V);
         this.Ex = r.modes.map(m => m.Ex);
         this.Ey = r.modes.map(m => m.Ey);
@@ -4193,7 +4198,9 @@ export class FieldSolver2D {
                 modeResults.push(result);
             }
 
-            return this._build_results(modeResults);
+            const out = this._build_results(modeResults);
+            if (freq === this.plot_freq_target) this._plotResult = { freq, cached: cachedResults, r: out };
+            return out;
         }
 
         // Fast path: Non-causal materials - use cached fields
