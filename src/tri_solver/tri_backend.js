@@ -2828,6 +2828,8 @@ export class TriBackend {
                 return [...out].map(([k, rects]) => ({ k, rects }));
             };
             const sigBands = byDelta(true), gndBands = byDelta(false);
+            // The half-domain cut through a conductor is not a surface.
+            const symX = this.symmetry ? this.condRect.xmin_domain : null;
             const buildSkin = (base, dlt) => {
                 // Each refineSkinBand stamps its own bandTrunc on the mesh it returns,
                 // so collect them as they come and leave the merged list (or null) on
@@ -2836,13 +2838,13 @@ export class TriBackend {
                 let m = base;
                 const sigCap = base.nTris + mqsMaxTris;
                 for (const { k, rects } of sigBands) {
-                    m = refineSkinBand(m, { rects }, k * dlt, bandPasses, mqsBand, bandDelta * k * dlt,
+                    m = refineSkinBand(m, { rects, symX }, k * dlt, bandPasses, mqsBand, bandDelta * k * dlt,
                         sigCap, null, depthSlope);
                     if (m.bandTrunc) trunc.push({ band: 'signal', ...m.bandTrunc });
                 }
                 const gndCap = m.nTris + gndBudget;
                 for (const { k, rects } of gndBands) {
-                    m = refineSkinBand(m, { rects }, k * dlt, bandPasses, mqsBand,
+                    m = refineSkinBand(m, { rects, symX }, k * dlt, bandPasses, mqsBand,
                         bandDelta * k * dlt, gndCap, gndGrading, depthSlope);
                     if (m.bandTrunc) trunc.push({ band: 'ground', ...m.bandTrunc });
                 }

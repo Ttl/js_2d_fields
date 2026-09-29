@@ -13,6 +13,7 @@
 //      minority share of R_total.
 //   4. The two-pass band respects its budget: trace budget + ground budget.
 //   5. Differential GCPW solves both modes on the MQS path with sane R.
+//   6. The half-domain cut through the trace (symmetry plane) gets no skin band.
 import { MicrostripSolver } from '../src/microstrip.js';
 import { initTriBackend, TriBackend } from '../src/tri_solver/tri_backend.js';
 import { mqsConductorLoss } from '../src/tri_solver/mqs_loss.js';
@@ -101,6 +102,27 @@ async function tri(opts, triOpts = {}) {
     const rW = bW.solveAt(10e9).modes[0].RLGC.R;
     check('wide-gap GCPW R → microstrip R at 10 GHz (±5%)', relDiff(rW, rM) < 0.05,
         `gcpw ${rW.toFixed(2)} vs microstrip ${rM.toFixed(2)} Ω/m`);
+}
+
+// ---- 6: no skin band on the symmetry plane ----
+{
+    const b = await tri(gcpw);
+    b.solveAt(10e9);
+    const m = b._skinCache.mesh;
+    const x0 = b.condRect.xmin_domain, yTop = base.substrate_height + base.trace_thickness;
+    // Triangles inside the trace's vertical middle third, near the plane vs mid-trace.
+    const inner = (xa, xb) => {
+        let n = 0;
+        for (let t = 0; t < m.nTris; t++) {
+            let cx = 0, cy = 0;
+            for (let k = 0; k < 3; k++) { const v = m.tris[3 * t + k]; cx += m.nodes[2 * v] / 3; cy += m.nodes[2 * v + 1] / 3; }
+            if (cx >= xa && cx < xb && cy > yTop - 0.67 * base.trace_thickness && cy < yTop - 0.33 * base.trace_thickness) n++;
+        }
+        return n;
+    };
+    const dx = 10e-6, plane = inner(x0, x0 + dx), mid = inner(x0 + 60e-6, x0 + 60e-6 + dx);
+    check('half domain: no skin band along the symmetry-plane cut', b.symmetry && plane <= 2 * mid + 4,
+        `${plane} tris within 10 um of the plane vs ${mid} mid-trace`);
 }
 
 // ---- 5: differential GCPW, both modes ----

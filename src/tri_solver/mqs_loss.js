@@ -80,8 +80,14 @@ const P2_AT_Q = (() => {
 // from the slot, so full δ-resolution is only needed within ~Dfine of the signal
 // and the band cost stays independent of how far the ground pour extends.
 // Refinement stops naturally once the graded target exceeds the base mesh size.
+//
+// condRect.symX (optional) is the x of a symmetry plane. A rect cut by it is measured
+// as its mirrored whole, so the cut face gets no band. Shaped conductors keep their
+// full polygon in a half-domain solve and need no mirroring.
 export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity, grading = null, depthSlope = 0) {
-    const rects = condRect.rects || [condRect];
+    const symX = condRect.symX ?? null;
+    const rects = (condRect.rects || [condRect]).map(r =>
+        symX !== null && !r.shape && Math.abs(r.xmin - symX) < 1e-12 ? { ...r, xmin: 2 * symX - r.xmax } : r);
     const bw = band * delta;
     // A ground ring around every signal conductor is a shield: its current runs on the
     // hole side, and its outer surface needs no band.
