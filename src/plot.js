@@ -477,6 +477,21 @@ function solverGridMM(solver) {
 }
 
 // Title suffix naming the frequency and kind of the plotted fields.
+// Help topic (field_solver.html helpContent) of the view on screen.
+function plotHelpTopic() {
+    return currentView.startsWith("potential") ? "plot_potential"
+        : currentView.startsWith("efield") ? "plot_efield"
+        : currentView === "current" ? "plot_current"
+        : currentView === "density" ? "plot_density" : "plot_geometry";
+}
+
+// Modebar icon for the mesh toggle, a 3x3 grid (Plotly has no grid icon).
+const GRID_ICON = {
+    width: 1000, height: 1000,
+    path: [0, 460, 920].map(p =>
+        `M${p} 0h80v1000h-80z M0 ${p}h1000v80h-1000z`).join(' '),
+};
+
 function fieldFreqLabel(solver) {
     const f = solver.fieldFreq;
     if (typeof f !== "number" || !(f >= 0)) return "";
@@ -1439,7 +1454,7 @@ function draw(resetZoom = false) {
         modeBarButtonsToAdd: [
             {
                 name: "Toggle Mesh",
-                icon: Plotly.Icons.grid,
+                icon: GRID_ICON,
                 click: () => {
                     showMesh = !showMesh;
                     draw();
@@ -1449,6 +1464,11 @@ function draw(resetZoom = false) {
                 name: "Scale Range",
                 icon: Plotly.Icons.autoscale,
                 click: () => window.toggleScaleDialog && window.toggleScaleDialog()
+            },
+            {
+                name: "About this plot",
+                icon: Plotly.Icons.question,
+                click: () => window.showHelpModal && window.showHelpModal(plotHelpTopic())
             }
         ]
     };

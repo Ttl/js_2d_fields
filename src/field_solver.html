@@ -1275,6 +1275,26 @@
             title: 'Top Substrate Height',
             body: '<p>Distance from the top of the upper conductor to the bottom surface of the top ground plane.</p><p>Ground-to-ground spacing = Bottom + Middle + Top substrate heights (trace thickness is not counted separately).</p>'
         },
+        plot_geometry: {
+            title: 'Geometry',
+            body: '<p>The cross-section as it is solved: conductors and dielectric layers. After a solve the button at the top left can be used to visualize the field plots, each has its own help on this button.</p>'
+        },
+        plot_potential: {
+            title: 'Potential',
+            body: '<p>Electrostatic potential of the static solve, with the signal conductors at 1 V (odd mode +1 V and &minus;1 V, even mode both +1 V) and the grounds at 0 V.</p><p><i>Quasi-static:</i> this is what is actually solved and the E-field is calculated from it.</p><p><i>Full-wave:</i> the full-wave solver does not solve a potential. Its frequency-dependent solution is an eigenmode field, which has no scalar potential, so this view always shows the static solve whatever the plot frequency.</p>'
+        },
+        plot_efield: {
+            title: '|E| Field',
+            body: '<p>Shown for the selected mode (odd or even for differential lines) at the <b>Plot Frequency</b> of Plot Options.</p><p>Field magnitude with the signal conductors at 1 V (odd mode +1 V and &minus;1 V, even mode both +1 V).</p><p><i>Quasi-static:</i> the static field &minus;&nabla;V, the same at every frequency.</p><p><i>Full-wave:</i> the transverse E-field of the quasi-TEM eigenmode at the plot frequency, scaled to the static field so it stays on the same 1 V scale. At low frequencies static field is used for numerical stability reasons. At high frequencies it differs from the static field where dispersion pulls the field into the dielectric, the title then says &quot;full-wave mode&quot;.</p>'
+        },
+        plot_current: {
+            title: '|K| Surface Current',
+            body: '<p>Shown for the selected mode (odd or even for differential lines) at the <b>Plot Frequency</b> of Plot Options.</p><p>Surface current on the conductors per 1 A of line current, plotted as the tangential magnetic field |H<sub>t</sub>| at the surface.</p><p><i>Quasi-static:</i> the perfect-conductor limit from the static solve. The current is an infinitely thin sheet, so |K| = |H<sub>t</sub>| exactly, and conductor loss is integrated over this distribution.</p><p><i>Full-wave:</i> |H<sub>t</sub>| from the magneto-quasi-static (MQS) conductor solve at the plot frequency with finite conductivity. When the skin depth is much smaller than the conductor thickness it is the surface current. When the skin depth is comparable to or larger than the thickness, the current flows through the metal (see |J| Density) and |H<sub>t</sub>| is only the surface field. Where the MQS solve is not run (DC, or when the title says perfect-conductor limit) the plot is the same perfect-conductor limit as on the quasi-static solver.</p>'
+        },
+        plot_density: {
+            title: '|J| Current Density',
+            body: '<p>Shown for the selected mode (odd or even for differential lines) at the <b>Plot Frequency</b> of Plot Options, the highest solved frequency when it is empty.</p><p>Full-wave only. Current density inside the conductors per 1 A of line current, from the magneto-quasi-static (MQS) conductor solve at the plot frequency. It shows the skin and proximity effects: uniform at DC, crowding to the surfaces and corners as the frequency rises.</p><p>It is drawn on the conductor mesh graded to the skin depth, which the mesh toggle shows.</p><p>The quasi-static solver does not solve the current inside the metal, it models conductor loss with a surface impedance over the surface current |K|.</p>'
+        },
         modes: {
             title: 'Modes',
             body: '<p>Solves the full-wave eigenmodes of the current geometry (uses full-wave solver independent of the Solver dropdown).</p><p>Each mode is classified by its effective permittivity &epsilon;<sub>eff</sub> (derived from the squared propagation constant, &epsilon;<sub>eff</sub> = &minus;&gamma;&sup2;/k&sup2;):</p><ul><li><b>PROP</b>: propagating, with a real &epsilon;<sub>eff</sub> shown. Includes the quasi-TEM mode and propagating higher-order modes.</li><li><b>evan</b>: evanescent / below cutoff (no propagating &epsilon;<sub>eff</sub>).</li><li><b>spurious</b> / <b>null</b>: non-physical eigenvalues (&epsilon;<sub>eff</sub> &gt; &epsilon;<sub>r</sub>, or the discrete null space).</li></ul><p><b>overlap</b> measures how closely a mode\'s transverse field matches the static (quasi-TEM) field distribution, normalized from 0 to 1. The fundamental quasi-TEM mode has an overlap near 1 (marked with <b>*</b> when above 0.5). Higher-order, radiation, and spurious modes have overlaps near 0.</p><p>Click any mode to plot its transverse E-field. Increase "Number of modes" to find more higher-order modes.</p>'
