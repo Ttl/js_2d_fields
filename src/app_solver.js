@@ -38,6 +38,7 @@ let isSolvingModes = false;
 // plot frequency).
 let plotFieldsSolver = null, plotFieldsJob = null;
 let plotFieldsMaxFreq = null;
+let plotFieldsSolveKey = null;   // solveInputKey() of that solve
 let plotFieldsBusy = false, plotFieldsPending = false;
 let modesResult = null;          // last solveModes() summary { modes, nconv, ... }
 let modesSelectedIdx = -1;       // index into modesResult.modes of the plotted mode
@@ -1004,6 +1005,37 @@ async function updatePlotFields() {
     }
 }
 
+// Everything a simulate job depends on except the plot frequency. A Solve with the same
+// key as the kept solve only needs new plot fields.
+function solveInputKey() {
+    try {
+        return JSON.stringify({
+            params: getParams(),
+            frequencies: getFrequencies(),
+            interp: !!document.getElementById('chk_interp_sweep')?.checked,
+            interpTol: document.getElementById('interp_tolerance')?.value,
+        });
+    } catch (e) {
+        return null;
+    }
+}
+
+// Solve button: when only the plot frequency changed since the kept solve, update the
+// plot fields instead of solving again. Returns true when it handled the click.
+function replotInsteadOfSolve() {
+    if (!solver || solver !== plotFieldsSolver || !solver.solution_valid) return false;
+    const key = solveInputKey();
+    if (!key || key !== plotFieldsSolveKey) return false;
+    const f = plotFrequency() ?? plotFieldsMaxFreq;
+    if (f === solver.fieldFreq) {
+        log('Nothing changed since the last solve.');
+    } else {
+        log(`Only the plot frequency changed: updating the field plots at ${(f / 1e9).toPrecision(4)} GHz.`);
+        updatePlotFields();
+    }
+    return true;
+}
+
 function getFrequencies() {
     const start = getInputValue('freq-start');
     const stop = getInputValue('freq-stop');
@@ -1766,6 +1798,7 @@ async function runSimulation() {
     // solve.
     const solvedGeometry = getGeometryHash();
     const solvedFrequency = getFrequencyHash();
+    const solvedKey = solveInputKey();
     // The view model these fields belong to. A mid-solve edit runs
     // updateGeometry(), which replaces `solver` with one describing a different
     // cross-section. Identity is the exact test: updateGeometry() always
@@ -1856,8 +1889,8 @@ async function runSimulation() {
                 logModeWarnings(m.warnings);
             },
             warnings: (m) => logModeWarnings(m.warnings),
-            // Live plots while the sweep runs. Redrawing is cheap next to a solve, and
-            // now that the solve is off-thread these actually paint.
+            // Live plots while the sweep runs. The worker sends fields only when they
+            // are already the final ones (quasi-static).
             partial: (m) => {
                 if (m.fields && solver === solvedSolver) { applyFields(solver, m.fields); draw(); }
                 if (m.sweepResults) {
@@ -1878,6 +1911,7 @@ async function runSimulation() {
                 plotFieldsSolver = solvedSolver;
                 plotFieldsJob = simJobId;
                 plotFieldsMaxFreq = Math.max(...frequencies);
+                plotFieldsSolveKey = solvedKey;
             } else {
                 releasePlotFields(simJobId);
             }
@@ -2322,6 +2356,8 @@ function bindEvents() {
             workerStop();
             log("Stop requested...");
         } else {
+            // Before updateGeometry(), which replaces the solver the kept solve belongs to.
+            if (replotInsteadOfSolve()) return;
             // Start the simulation
             updateGeometry(); // Ensure geometry is updated with latest parameters
             runSimulation();

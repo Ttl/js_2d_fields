@@ -189,13 +189,14 @@ async function jobSimulate({ params, frequencies, opts }) {
         sweepResults.push({ freq: maxFreq, result: results });
     }
 
-    // First plottable state: the converged mesh solve. Ship the fields now so the
-    // geometry tab paints its E-field overlay while the sweep is still running.
-    // The sweep points overwrite the solver's fields, so a run that ends without the
-    // plot fields returns these.
+    // Fields of the converged mesh solve. The sweep points overwrite the solver's fields,
+    // so a run that ends without the plot fields returns these. Quasi-static fields do not
+    // depend on frequency and are shown while the sweep runs; full-wave ones are the
+    // static field, not the field at the plot frequency, so the plot waits for the end.
     solver.fieldFreq = maxFreq;
     const fieldsAtMax = fieldPayload(solver);
-    post({ id: currentId, type: 'partial', fields: fieldsAtMax,
+    const liveFields = solver.mesh_backend !== 'triangular' ? fieldsAtMax : undefined;
+    post({ id: currentId, type: 'partial', fields: liveFields,
            sweepResults: stripSweep(sweepResults) });
 
     const fMax = maxFreq;
