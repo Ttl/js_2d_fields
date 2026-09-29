@@ -519,23 +519,20 @@ function getFieldMesh() {
     return M[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
 }
 
-// Surface current on the grounds of unlimited width when the displayed mode's MQS
-// solve held them as ideal returns (no current inside, see _mqsSolve), or null. A
-// segment belongs to them when its midpoint lies on one of their bodies and on no
-// signal conductor.
-function idealGroundK(solver) {
+// Surface current of the displayed mode's MQS solve on the metal with no |J| block: the
+// walls and the grounds absorbed into them (a surface impedance), and the grounds held
+// as ideal returns (see _mqsSolve), or null. A segment belongs to them when its
+// midpoint lies on no conductor with a block.
+function bareMetalK(solver, blocks) {
     const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
     const K = getSurfaceK();
-    if (!K || !solver.idealGrounds || !solver.idealGrounds[mi] || !solver._unlimited_grounds) return null;
-    const conductors = solver.conductors || [];
-    const U = [...solver._unlimited_grounds()].map(ci => conductors[ci]).filter(Boolean);
-    const sig = conductors.filter(c => c.is_signal);
+    if (!K || !solver.surfaceKSource || solver.surfaceKSource[mi] !== 'mqs') return null;
+    const withJ = (solver.conductors || []).filter(hasDensityBlock(blocks));
     const tol = 1e-9 * (solver.domain_width || 1);
-    const on = (c, x, y) => x >= c.x_min - tol && x <= c.x_max + tol && y >= c.y_min - tol && y <= c.y_max + tol;
     const out = { x0: [], x1: [], y0: [], y1: [], K: [] };
     for (let i = 0; i < K.K.length; i++) {
         const mx = (K.x0[i] + K.x1[i]) / 2, my = (K.y0[i] + K.y1[i]) / 2;
-        if (!U.some(c => on(c, mx, my)) || sig.some(c => on(c, mx, my))) continue;
+        if (withJ.some(c => shapeContains(c, mx, my, tol))) continue;
         out.x0.push(K.x0[i]); out.x1.push(K.x1[i]); out.y0.push(K.y0[i]); out.y1.push(K.y1[i]); out.K.push(K.K[i]);
     }
     return out.K.length ? out : null;
@@ -563,9 +560,7 @@ function viewTriMesh(solver) {
 // at the block edges as a false hot rim. Metal without a block (walls, wall grounds)
 // keeps its fill.
 function densityConductorShapes(solver, blocks, maxY) {
-    const bb = blocks.map(blockBox);
-    const covered = c => bb.some(b => Math.min(b.x1, c.x_max) > Math.max(b.x0, c.x_min)
-        && Math.min(b.y1, c.y_max) > Math.max(b.y0, c.y_min));
+    const covered = hasDensityBlock(blocks);
     const conductors = solver.conductors || [];
     const rest = Object.create(solver);
     rest.conductors = conductors.filter(c => !covered(c));
@@ -574,7 +569,6 @@ function densityConductorShapes(solver, blocks, maxY) {
     for (const c of conductors.filter(covered)) {
         const sh = c.shape;
         if (sh && !isPolyShape(sh)) {
-            if (isComplement(sh)) continue;
             const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
             out.push({ type: 'circle', xref: 'x', yref: 'y', x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r, ...OUTLINE });
         } else {
@@ -582,6 +576,14 @@ function densityConductorShapes(solver, blocks, maxY) {
         }
     }
     return out;
+}
+
+// Test of whether a conductor lies under one of the |J| blocks. A complement shell (coax
+// shield) has no cross-section and never gets one.
+function hasDensityBlock(blocks) {
+    const bb = blocks.map(blockBox);
+    return c => !(c.shape && isComplement(c.shape)) && bb.some(b => Math.min(b.x1, c.x_max) > Math.max(b.x0, c.x_min)
+        && Math.min(b.y1, c.y_max) > Math.max(b.y0, c.y_min));
 }
 
 // Bounding box { x0, x1, y0, y1 } of a |J| block, grid or triangles.
@@ -1108,8 +1110,8 @@ function draw(resetZoom = false) {
         let modeLabel = "";
         if (isDifferentialMode()) modeLabel = getSelectedModeIndex() === 1 ? " (Even Mode)" : " (Odd Mode)";
         const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
-        const ideal = solver.idealGrounds && solver.idealGrounds[mi]
-            ? (idealGroundK(solver) ? ", ideal edge grounds: surface |K| (A/m)" : ", ideal edge grounds") : "";
+        const ideal = (solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "")
+            + (bareMetalK(solver, getCurrentJ()) ? ", surface |K| (A/m) on metal without |J|" : "");
         title = `Current Density |J| per 1 A${modeLabel} (${db ? "dB A/m²" : "A/m²"})${fieldFreqLabel(solver)}${ideal}`;
         shapes.push(...dielectricFillShapes(solver, maxY).map(s => ({ ...s, layer: 'below' })));
         shapes.push(...densityConductorShapes(solver, getCurrentJ(), maxY));
@@ -1167,9 +1169,9 @@ function draw(resetZoom = false) {
             if (override) { zMin = override.min; zMax = override.max; }
         }
         const db = plotOptions.efieldDb;
-        // Ideal edge grounds carry no current inside: their surface |K| is drawn on
-        // their faces, on its own colorbar below the |J| one.
-        const gK = idealGroundK(solver);
+        // Walls and ideal edge grounds carry no current inside: their surface |K| is
+        // drawn on their faces, on its own colorbar below the |J| one.
+        const gK = bareMetalK(solver, getCurrentJ());
         colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale,
                       colorbar: gK ? { title: { text: db ? "|J| dB(A/m²)" : "|J| A/m²" }, len: 0.45, y: 1, yanchor: "top" }
                                    : { title: { text: db ? "dB(A/m²)" : "A/m²" }, len: 0.8 } };
