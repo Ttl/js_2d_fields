@@ -88,7 +88,7 @@ function fieldPayload(solver) {
         V: solver.V, Ex: solver.Ex, Ey: solver.Ey,
         triMesh: solver.triMesh || null,
         surfaceK: solver.surfaceK || null, currentJ: solver.currentJ || null,
-        currentMesh: solver.currentMesh || null,
+        currentMesh: solver.currentMesh || null, fieldMesh: solver.fieldMesh || null,
         surfaceKSource: solver.surfaceKSource || null, idealGrounds: solver.idealGrounds || null,
         fieldFreq: solver.fieldFreq ?? null,
         fieldKind: solver.fieldKind || 'static',

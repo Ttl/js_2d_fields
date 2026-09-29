@@ -3795,7 +3795,7 @@ export class FieldSolver2D {
     //   Ex(-x) = -sV * Ex(x). Ey(-x) = sV * Ey(x).
     getPlotFields() {
         const extra = { surfaceK: this.surfaceK || null, currentJ: this.currentJ || null,
-                        currentMesh: this.currentMesh || null,
+                        currentMesh: this.currentMesh || null, fieldMesh: this.fieldMesh || null,
                         surfaceKSource: this.surfaceKSource || null, idealGrounds: this.idealGrounds || null,
                         fieldFreq: this.fieldFreq ?? null,
                         fieldKind: this.fieldKind || 'static' };

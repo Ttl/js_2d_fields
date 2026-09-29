@@ -431,7 +431,9 @@ function setScaleRange(min, max) {
     zMin = min;
     zMax = max;
     // The surface current colors are binned by value, so a new range redraws them.
-    if (currentView === "current" || currentView === "density") { draw(); return; }
+    if (currentView === "current" || currentView === "density" || (currentView.startsWith("efield") && getFieldMesh())) {
+        draw(); return;
+    }
 
     const container = document.getElementById('sim_canvas');
     const Plotly = getPlotly();
@@ -491,6 +493,15 @@ function getSurfaceK() {
     const K = solver && solver.surfaceK;
     if (!K) return null;
     return K[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
+}
+
+// |E| on the triangles of the displayed mode (meshFieldBlock), or null: the triangular
+// backend's plot fields, drawn as an image and traced contours instead of the grid.
+function getFieldMesh() {
+    const solver = get.solver();
+    const M = solver && solver.fieldMesh;
+    if (!M) return null;
+    return M[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
 }
 
 // Current density blocks of the displayed mode, or null.
@@ -574,10 +585,66 @@ function densityHoverTrace(blocks, db) {
     };
 }
 
-// |J| of the triangle blocks rasterized for the visible axis ranges (mm) at w x h pixels:
-// each triangle Gouraud-shaded from its vertex values, so the skin layer of a slanted or
-// curved face stays smooth at any zoom. Returns a layout image, or null.
-function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
+// Hover and color axis of |E| on the mesh: invisible markers at the centroids of at most
+// HOVER_MAX triangles.
+function fieldMeshHoverTrace(M, db) {
+    const n = M.E.length / 3, stride = Math.max(1, Math.ceil(n / HOVER_MAX));
+    const mx = [], my = [], mv = [];
+    for (let t = 0; t < n; t += stride) {
+        const k = 6 * t, v = (M.E[3 * t] + M.E[3 * t + 1] + M.E[3 * t + 2]) / 3;
+        mx.push((M.tris[k] + M.tris[k + 2] + M.tris[k + 4]) * 1000 / 3);
+        my.push((M.tris[k + 1] + M.tris[k + 3] + M.tris[k + 5]) * 1000 / 3);
+        mv.push(db ? (v > 0 ? toDb(v) : null) : v);
+    }
+    return {
+        type: "scattergl", mode: "markers", x: mx, y: my,
+        marker: { size: 4, opacity: 0, color: mv, coloraxis: "coloraxis" },
+        hovertemplate: `x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>|E|: %{marker.color:${db ? ".1f} dB(V/m)" : ".4g} V/m"}<extra></extra>`,
+        showlegend: false,
+    };
+}
+
+// Contour lines of |E| on the mesh at the log10 levels limits = [start, end, step]
+// (efieldContourTrace's), traced through each triangle of the linear field.
+function fieldMeshContourTrace(M, limits) {
+    const [lo, hi, step] = limits;
+    const levels = [];
+    for (let L = lo; L <= hi + 1e-9 && levels.length < 500; L += step) levels.push(L);
+    const x = [], y = [];
+    const T = M.tris, n = T.length / 6;
+    const lv = new Float64Array(3);
+    for (let t = 0; t < n; t++) {
+        for (let a = 0; a < 3; a++) lv[a] = Math.log10(Math.max(M.E[3 * t + a], 1e-3));
+        const vmin = Math.min(lv[0], lv[1], lv[2]), vmax = Math.max(lv[0], lv[1], lv[2]);
+        if (vmax <= lo || vmin >= hi + 1e-9) continue;
+        for (const L of levels) {
+            if (L <= vmin || L >= vmax) continue;
+            let cnt = 0;
+            for (let a = 0; a < 3; a++) {
+                const b = (a + 1) % 3, da = lv[a] - L, db = lv[b] - L;
+                if ((da < 0) !== (db < 0)) {
+                    const u = da / (da - db);
+                    x.push((T[6 * t + 2 * a] + u * (T[6 * t + 2 * b] - T[6 * t + 2 * a])) * 1000);
+                    y.push((T[6 * t + 2 * a + 1] + u * (T[6 * t + 2 * b + 1] - T[6 * t + 2 * a + 1])) * 1000);
+                    cnt++;
+                }
+            }
+            if (cnt === 2) { x.push(null); y.push(null); }
+            else if (cnt) { x.length -= cnt; y.length -= cnt; }
+        }
+    }
+    return {
+        type: "scattergl", mode: "lines", x, y,
+        line: { width: 1, color: "rgba(0, 0, 0, 0.4)" },
+        name: "E-field contours", showlegend: false, hoverinfo: "skip",
+    };
+}
+
+// Triangle blocks { tris, Jv } (vertex values, |J| or |E|) rasterized for the visible
+// axis ranges (mm) at w x h pixels: each triangle Gouraud-shaded from its vertex values,
+// so a skin layer or a field jump on a slanted or curved face stays sharp and smooth at
+// any zoom. Returns a layout image in `layer`, or null.
+function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, layer = 'above') {
     if (!(w > 0 && h > 0)) return null;
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
@@ -590,8 +657,8 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
     const val = v => db ? (v > 0 ? 20 * Math.log10(v) : zmin) : v;
     let any = false;
     for (const b of blocks) {
-        const T = b.tris, Jv = b.Jv;
-        for (let t = 0; t < b.J.length; t++) {
+        const T = b.tris, Jv = b.Jv, nT = T.length / 6;
+        for (let t = 0; t < nT; t++) {
             const k = 6 * t;
             const ax = (T[k] * 1000 - xr[0]) * sx, ay = (yr[1] - T[k + 1] * 1000) * sy;
             const bx = (T[k + 2] * 1000 - xr[0]) * sx, by = (yr[1] - T[k + 3] * 1000) * sy;
@@ -622,21 +689,31 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
     if (!any) return null;
     ctx.putImageData(img, 0, 0);
     return { source: canvas.toDataURL(), xref: 'x', yref: 'y', x: xr[0], y: yr[1],
-             sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer: 'above' };
+             sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer };
 }
 
-// Redraws the |J| image of the triangle blocks for the current axis ranges and plot size.
+// The triangle blocks the current view draws as an image: the shaped conductors' |J|,
+// or |E| on the mesh.
+function imageBlocks() {
+    if (currentView === "density") return (getCurrentJ() || []).filter(b => b.tris);
+    const M = currentView.startsWith("efield") ? getFieldMesh() : null;
+    return M ? [{ tris: M.tris, Jv: M.E }] : [];
+}
+
+// Redraws the image of the triangle blocks for the current axis ranges and plot size.
 let densityImageFrame = 0;
 function updateDensityImage(container) {
     cancelAnimationFrame(densityImageFrame);
     densityImageFrame = requestAnimationFrame(() => {
-        const blocks = currentView === "density" ? (getCurrentJ() || []).filter(b => b.tris) : [];
+        const blocks = imageBlocks();
         const fl = container._fullLayout;
         if (!blocks.length || !fl || !fl.xaxis || !fl._size) return;
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
         const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
+        // |J| covers the dielectric fills (layer below); |E| has none and its contour
+        // lines must stay on top.
         const im = rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
-            zMin, zMax, getPlotOptions().efieldDb);
+            zMin, zMax, getPlotOptions().efieldDb, currentView === "density" ? 'above' : 'below');
         container._densityImageUpdate = true;
         getPlotly().relayout(container, { images: im ? [im] : [] }).finally(() => { container._densityImageUpdate = false; });
     });
@@ -1090,7 +1167,9 @@ function draw(resetZoom = false) {
 
         // Add E-field contours if requested (shared with the |E| field view)
         if (n > 0) {
-            traces.push(efieldContourTrace(xMM, yMM, zData, contourScaledB(eMin, eMax, n)));
+            const M = getFieldMesh();
+            traces.push(M ? fieldMeshContourTrace(M, contourScaledB(eMin, eMax, n))
+                : efieldContourTrace(xMM, yMM, zData, contourScaledB(eMin, eMax, n)));
         }
 
         // Add streamlines if requested via plot options
@@ -1139,7 +1218,19 @@ function draw(resetZoom = false) {
         const n = plotOptions.contours;
         const hoverTpl = "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.3e}<extra></extra>";
 
-        if (currentView.startsWith("efield")) {
+        const fieldMesh = currentView.startsWith("efield") ? getFieldMesh() : null;
+        if (fieldMesh) {
+            // |E| on the triangles: the color is an image (updateDensityImage), the hover
+            // and colorbar ride on invisible markers, the contours are traced per triangle.
+            const db = plotOptions.efieldDb;
+            colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale, colorbar: { title: zTitle, len: 0.8 } };
+            traces.push(fieldMeshHoverTrace(fieldMesh, db));
+            if (n > 0) {
+                const limits = db ? contourLimitsDb(zMin, zMax, n)
+                    : contourScaledB(autoscaled ? contourFloor : Math.max(zMin, 0), zMax, n);
+                traces.push(fieldMeshContourTrace(fieldMesh, limits));
+            }
+        } else if (currentView.startsWith("efield")) {
             const db = plotOptions.efieldDb;
             // |E| heatmap (linear or dB) for the color + colorbar...
             traces.push({
@@ -1236,6 +1327,9 @@ function draw(resetZoom = false) {
         }
     }
 
+    // An |E| image below the traces sits under the grid lines, which the heatmap covered.
+    const gridOff = currentView.startsWith("efield") && !!getFieldMesh();
+
     // UI menues
     const layout = {
         title: { text: title, font: { color: '#fff' } },
@@ -1246,14 +1340,16 @@ function draw(resetZoom = false) {
             range: currentXRange,  // Preserve zoom/pan
             color: '#aaa',
             gridcolor: '#444',
-            zerolinecolor: '#555'
+            zerolinecolor: '#555',
+            showgrid: !gridOff, zeroline: !gridOff
         },
         yaxis: {
             title: { text: "Height (mm)", font: { color: '#aaa' } },
             range: currentYRange,  // Preserve zoom/pan
             color: '#aaa',
             gridcolor: '#444',
-            zerolinecolor: '#555'
+            zerolinecolor: '#555',
+            showgrid: !gridOff, zeroline: !gridOff
         },
         margin: { l: 70, r: 90, t: 50, b: 60 },
         showlegend: false,
@@ -1357,7 +1453,7 @@ function draw(resetZoom = false) {
     };
 
     Plotly.react(container, traces, layout, config);
-    if (currentView === "density") updateDensityImage(container);
+    if (currentView === "density" || currentView.startsWith("efield")) updateDensityImage(container);
 
     if (!container._viewListenerBound) {
         container.on('plotly_buttonclicked', (event) => {
@@ -1407,7 +1503,8 @@ function draw(resetZoom = false) {
         // Handle autoscale button click
         container.on('plotly_relayout', (eventData) => {
             // A zoom or pan redraws the |J| image of the shaped conductors for the new view.
-            if (currentView === "density" && !container._densityImageUpdate) updateDensityImage(container);
+            if ((currentView === "density" || currentView.startsWith("efield")) && !container._densityImageUpdate)
+                updateDensityImage(container);
             // Check if this is an autoscale event (both axes autoscaling)
             if (eventData && eventData['xaxis.autorange'] === true && eventData['yaxis.autorange'] === true) {
                 // Only reset color scale if this is from the autoscale button, not double-click

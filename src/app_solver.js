@@ -959,6 +959,7 @@ function applyFields(target, fields) {
     target.surfaceK = fields.surfaceK || null;
     target.currentJ = fields.currentJ || null;
     target.currentMesh = fields.currentMesh || null;
+    target.fieldMesh = fields.fieldMesh || null;
     target.surfaceKSource = fields.surfaceKSource || null;
     target.idealGrounds = fields.idealGrounds || null;
     target.fieldFreq = fields.fieldFreq ?? null;

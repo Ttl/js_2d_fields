@@ -201,29 +201,16 @@ function gridDiff(vm, v0, vp, dl, dr, okM, okP) {
 // Returns { x:Float64Array(nx), y:Float64Array(ny), V, Ex, Ey } with V/Ex/Ey as
 // [ny][nx] arrays (row index = y, matching plot.js / streamlines.js). Points
 // outside the mesh (inside conductors, below ground) are left at 0.
-export function resampleStatic(mesh, phi, domain, opts = {}) {
-    // Sample on the caller-supplied grid (normally the mesh-derived graded grid from
-    // buildGridFromMesh) when given, so the contour plot resolves thin conductors and
-    // the ground surface; otherwise a uniform grid spanning the domain.
-    const { x, y } = makeGrid(domain, opts);
-    const nx = x.length, ny = y.length;
-
-    // For a half-domain (symmetry) solve, mirror x<0 from the meshed x>0 half.
-    // parity: 'even' → V even; 'odd' → V odd. E-field parity follows automatically
-    // from differentiating the mirrored V grid below.
+// Point evaluator of the smoothed static field E = -grad V of a P2 solve `phi` (plot
+// coordinates, a half-domain solve mirrored by opts.parity as in resampleStatic):
+// evalE(px, py, h, dxl, dxr, dyd, dyu) differences V over an element-size baseline
+// (h the local element size, d* the grid pitches around the point, 0 off a grid) and
+// returns [Ex, Ey], a component NaN where no baseline fits (the caller falls back).
+// opts.oneSidedEdges: at the domain edge the stencil turns one-sided instead of
+// shrinking (a mesh point on the edge has no grid neighbour to fall back to).
+function staticFieldEvaluator(mesh, phi, domain, opts = {}) {
     const parity = opts.parity || null;
     const { locate, coeffOf } = buildLocator(mesh);
-    // Sample only V (the P2 potential — continuous, and conductor interiors carry
-    // their exact Dirichlet potential since they are meshed), then compute E = −∇V
-    // by central differences. Evaluating ∇φ per P2 element instead (tried) leaves
-    // the element-boundary gradient discontinuities in the data — faceted/kinked
-    // |E| contours on coarse elements, and a hard one-sided jump along
-    // material-interface rows where a centered stencil blends the two sides.
-    const V = Array.from({ length: ny }, () => new Float64Array(nx));
-    const Ex = Array.from({ length: ny }, () => new Float64Array(nx));
-    const Ey = Array.from({ length: ny }, () => new Float64Array(nx));
-    // Local element size at each sample — sets the differencing baseline below.
-    const hT = Array.from({ length: ny }, () => new Float32Array(nx));
     // Deterministic side selection for on-edge samples (grid rows sit exactly on
     // mesh lines): nudge the LOCATE query by a tiny NE bias; V is continuous so
     // the evaluated value is side-independent, this only makes degenerate
@@ -273,42 +260,8 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
         if (t < 0) return NaN;
         return s * evalPhiValue(phi, mesh, coeffOf(t), t, qx, qy);
     };
-    for (let j = 0; j < ny; j++) {
-        for (let i = 0; i < nx; i++) {
-            let qx = x[i], sV = 1;
-            if (parity && qx < 0) {
-                qx = -qx;
-                if (parity === 'odd') sV = -1;
-            }
-            let t = locate(qx + eps, y[j] + eps);
-            if (t < 0) t = locate(qx, y[j]);   // domain edge: fall back to the exact point
-            if (t < 0) continue;
-            V[j][i] = sV * evalPhiValue(phi, mesh, coeffOf(t), t, qx, y[j]);
-            hT[j][i] = sizeAt(t, qx, y[j]);
-        }
-    }
-    // E = −∇V by central differences over an ELEMENT-SIZE-AWARE baseline: half-width
-    // max(local grid pitch, half the containing element's size). Where the mesh is
-    // finer than the grid (near conductors) this is the plain grid-pitch central
-    // difference. Where the mesh is coarser (the far field — the tensor grid carries
-    // the trace region's µm-fine lines all the way out), a grid-pitch baseline would
-    // sample the P2 gradient jump across each element edge as a sharp step, and the
-    // |E| contours come out jagged wherever they cross element boundaries; widening
-    // the baseline to the element scale averages the jump away, which is exactly the
-    // resolution the FEM solution actually has there. The baseline SHRINKS
-    // CONTINUOUSLY as a conductor surface or domain edge approaches — clamped to the
-    // distance so an endpoint lands at most ON the surface (a valid Dirichlet
-    // sample), never across it into the interior V plateau (which would bias the
-    // difference low right where the field is largest). A continuous clamp, not a
-    // switch to another estimator: a hard hand-off to the grid stencil near
-    // surfaces (tried) leaves a small systematic |E| step along the hand-off band,
-    // which drags contour lines sideways just before they reach the ground plane
-    // instead of letting them meet it straight. Only when the clamp collapses the
-    // baseline below the local grid pitch (points ON a surface line, or inside a
-    // conductor next to its face) does it fall back to the plain non-uniform grid
-    // stencil. Boundary rows/columns stay 0.
-    const x0 = domain.x_min ?? x[0], x1 = domain.x_max ?? x[nx - 1];
-    const y0 = domain.y_min ?? y[0], y1 = domain.y_max ?? y[ny - 1];
+    const x0 = domain.x_min, x1 = domain.x_max;
+    const y0 = domain.y_min, y1 = domain.y_max;
     // Conductor rects in PLOT (full-domain) coordinates. Prefer the caller-supplied
     // list (tri_backend passes the solver's conductor geometry — it includes the
     // ground planes, which mesh.condRect.rects does NOT: grounds are handled as PEC
@@ -344,114 +297,266 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
         }
         return q;
     };
+    const oneSided = !!opts.oneSidedEdges;
+    const evalE = (px, py, h, dxl, dxr, dyd, dyu) => {
+        let bx = Math.max((dxl + dxr) / 2, 0.5 * h);
+        let by = Math.max((dyd + dyu) / 2, 0.5 * h);
+        if (!oneSided) {
+            bx = Math.min(bx, px - x0, x1 - px);
+            by = Math.min(by, py - y0, y1 - py);
+        }
+        // Baseline vs conductor faces. Center inside a conductor: clamp the
+        // baseline to stay inside (interior plateau, E→0). Otherwise, when the
+        // baseline would cross the NEAREST face, don't clamp — MIRROR the sample
+        // across it (image theory: |E| is even about a flat Dirichlet face, so
+        // the odd extension Ṽ(face−d) = 2·V_face − V(face+d) is the correct
+        // continuation). This keeps the SAME baseline width for every row near
+        // the face, so the E estimate stays consistent from the bulk all the way
+        // onto the surface row and contours meet the ground at 90° — clamping or
+        // switching estimators near the face (tried) leaves a percent-level |E|
+        // step across the hand-off band that visibly bends the contours sideways
+        // just above the plane.
+        let inside = false;
+        let mxPlane = null, mxSide = 0, mxDist = Infinity;   // nearest x-face the baseline crosses
+        let myPlane = null, mySide = 0, myDist = Infinity;   // nearest y-face the baseline crosses
+        // A point the mesh puts in a dielectric is outside every shaped conductor: the
+        // exact polygon test (a shield ring's loops) only runs for metal and off-mesh points.
+        const regP = regionAt(px, py);
+        const maybeInShape = regP < 0 || regP === condRegion;
+        for (const c of rects) {
+            if (c.shape) {
+                if (!maybeInShape) continue;
+                // Curved conductor: clamp the baseline inside it as for a rect, but
+                // do NOT set up a mirror plane. The image-theory extension below is
+                // derived for a FLAT Dirichlet face and does not hold on a curved
+                // one; near a coax surface the grid is mesh-quantile dense anyway,
+                // so the plain non-uniform stencil is accurate there.
+                if (shapeContains(c, px, py, -tolC)) {
+                    const d = distToShapeBoundary(c, px, py);
+                    bx = Math.min(bx, d); by = Math.min(by, d);
+                    inside = true;
+                }
+                continue;
+            }
+            const inX = px > c.xmin + tolC && px < c.xmax - tolC;
+            const inY = py > c.ymin + tolC && py < c.ymax - tolC;
+            if (inX && inY) {
+                bx = Math.min(bx, px - c.xmin, c.xmax - px);
+                by = Math.min(by, py - c.ymin, c.ymax - py);
+                inside = true;
+            } else if (inY) {
+                // conductor beside the point; side = which side of the face the metal is on
+                const left = px <= c.xmin + tolC;   // metal to the right of its xmin face
+                const plane = left ? c.xmin : c.xmax;
+                const d = Math.abs(px - plane);
+                if (d < bx && d < mxDist) { mxDist = d; mxPlane = plane; mxSide = left ? 1 : -1; }
+            } else if (inX) {
+                const below = py >= c.ymax - tolC;  // metal below its ymax face
+                const plane = below ? c.ymax : c.ymin;
+                const d = Math.abs(py - plane);
+                if (d < by && d < myDist) { myDist = d; myPlane = plane; mySide = below ? -1 : 1; }
+            }
+        }
+        // Mirror any sample that falls on the METAL side of the nearest face
+        // (including when the center itself sits exactly on the face).
+        const sampleX = (qx) => {
+            if (!inside && mxPlane !== null && (qx - mxPlane) * mxSide > 0) {
+                return 2 * sampleV(mxPlane, py) - sampleV(2 * mxPlane - qx, py);
+            }
+            return sampleV(qx, py);
+        };
+        const sampleY = (qy) => {
+            if (!inside && myPlane !== null && (qy - myPlane) * mySide > 0) {
+                return 2 * sampleV(px, myPlane) - sampleV(px, 2 * myPlane - qy);
+            }
+            return sampleV(px, qy);
+        };
+        // The normal E jumps at a dielectric interface, so the baseline must not blend
+        // the two sides: an end in another dielectric is pulled back to the interface
+        // (V is continuous there) and the derivative taken from the quadratic through
+        // the two ends and their midpoint, all on the sample's own side. An end in a
+        // conductor with no mirror plane (a curved or slanted surface) is pulled back
+        // to its surface the same way, the metal's constant V would bias E low.
+        const reg = inside ? -1 : regP;
+        const derivative = (sample, p, b, at, pitch, mirrored, edgeLo, edgeHi) => {
+            let lo = p - b, hi = p + b;
+            if (oneSided) { lo = Math.max(lo, edgeLo); hi = Math.min(hi, edgeHi); }
+            if (reg >= 0 && reg !== condRegion) {
+                lo = interfaceToward(at, p, lo, reg, !mirrored);
+                hi = interfaceToward(at, p, hi, reg, !mirrored);
+            }
+            if (lo === p - b && hi === p + b) return -(sample(hi) - sample(lo)) / (2 * b);
+            if (hi - lo < 0.5 * pitch || !(hi - lo > 1e-6 * b)) return NaN;
+            const m = (lo + hi) / 2;
+            return -(sample(lo) * (2 * p - m - hi) / ((lo - m) * (lo - hi))
+                + sample(m) * (2 * p - lo - hi) / ((m - lo) * (m - hi))
+                + sample(hi) * (2 * p - lo - m) / ((hi - lo) * (hi - m)));
+        };
+        const pitchX = Math.min(dxl, dxr), pitchY = Math.min(dyd, dyu);
+        const ex = bx > 0.5 * pitchX
+            ? derivative(sampleX, px, bx, q => regionAt(q, py), pitchX, mxPlane !== null, x0, x1) : NaN;
+        const ey = by > 0.5 * pitchY
+            ? derivative(sampleY, py, by, q => regionAt(px, q), pitchY, myPlane !== null, y0, y1) : NaN;
+        return [ex, ey];
+    };
+    return { locate, coeffOf, sampleV, sizeAt, regionOf, condRegion, regionAt, evalE, eps };
+}
+
+export function resampleStatic(mesh, phi, domain, opts = {}) {
+    // Sample on the caller-supplied grid (normally the mesh-derived graded grid from
+    // buildGridFromMesh) when given, so the contour plot resolves thin conductors and
+    // the ground surface; otherwise a uniform grid spanning the domain.
+    const { x, y } = makeGrid(domain, opts);
+    const nx = x.length, ny = y.length;
+    const parity = opts.parity || null;
+    const ev = staticFieldEvaluator(mesh, phi, { x_min: domain.x_min ?? x[0], x_max: domain.x_max ?? x[nx - 1],
+        y_min: domain.y_min ?? y[0], y_max: domain.y_max ?? y[ny - 1] }, opts);
+    const { locate, coeffOf, sizeAt, eps } = ev;
+    // Sample only V (the P2 potential — continuous, and conductor interiors carry
+    // their exact Dirichlet potential since they are meshed), then compute E = −∇V
+    // by central differences. Evaluating ∇φ per P2 element instead (tried) leaves
+    // the element-boundary gradient discontinuities in the data — faceted/kinked
+    // |E| contours on coarse elements, and a hard one-sided jump along
+    // material-interface rows where a centered stencil blends the two sides.
+    const V = Array.from({ length: ny }, () => new Float64Array(nx));
+    const Ex = Array.from({ length: ny }, () => new Float64Array(nx));
+    const Ey = Array.from({ length: ny }, () => new Float64Array(nx));
+    // Local element size at each sample — sets the differencing baseline below.
+    const hT = Array.from({ length: ny }, () => new Float32Array(nx));
+    for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+            let qx = x[i], sV = 1;
+            if (parity && qx < 0) {
+                qx = -qx;
+                if (parity === 'odd') sV = -1;
+            }
+            let t = locate(qx + eps, y[j] + eps);
+            if (t < 0) t = locate(qx, y[j]);   // domain edge: fall back to the exact point
+            if (t < 0) continue;
+            V[j][i] = sV * evalPhiValue(phi, mesh, coeffOf(t), t, qx, y[j]);
+            hT[j][i] = sizeAt(t, qx, y[j]);
+        }
+    }
+    // E = −∇V by central differences over an ELEMENT-SIZE-AWARE baseline: half-width
+    // max(local grid pitch, half the containing element's size). Where the mesh is
+    // finer than the grid (near conductors) this is the plain grid-pitch central
+    // difference. Where the mesh is coarser (the far field — the tensor grid carries
+    // the trace region's µm-fine lines all the way out), a grid-pitch baseline would
+    // sample the P2 gradient jump across each element edge as a sharp step, and the
+    // |E| contours come out jagged wherever they cross element boundaries; widening
+    // the baseline to the element scale averages the jump away, which is exactly the
+    // resolution the FEM solution actually has there. The baseline SHRINKS
+    // CONTINUOUSLY as a conductor surface or domain edge approaches — clamped to the
+    // distance so an endpoint lands at most ON the surface (a valid Dirichlet
+    // sample), never across it into the interior V plateau (which would bias the
+    // difference low right where the field is largest). A continuous clamp, not a
+    // switch to another estimator: a hard hand-off to the grid stencil near
+    // surfaces (tried) leaves a small systematic |E| step along the hand-off band,
+    // which drags contour lines sideways just before they reach the ground plane
+    // instead of letting them meet it straight. Only when the clamp collapses the
+    // baseline below the local grid pitch (points ON a surface line, or inside a
+    // conductor next to its face) does it fall back to the plain non-uniform grid
+    // stencil. Boundary rows/columns stay 0.
     for (let j = 1; j < ny - 1; j++) {
         const dyd = y[j] - y[j - 1], dyu = y[j + 1] - y[j];
         for (let i = 1; i < nx - 1; i++) {
             const h = hT[j][i];
             if (!h) continue;   // outside the mesh
-            const px = x[i], py = y[j];
-            const dxl = px - x[i - 1], dxr = x[i + 1] - px;
-            let bx = Math.max((dxl + dxr) / 2, 0.5 * h);
-            let by = Math.max((dyd + dyu) / 2, 0.5 * h);
-            bx = Math.min(bx, px - x0, x1 - px);
-            by = Math.min(by, py - y0, y1 - py);
-            // Baseline vs conductor faces. Center inside a conductor: clamp the
-            // baseline to stay inside (interior plateau, E→0). Otherwise, when the
-            // baseline would cross the NEAREST face, don't clamp — MIRROR the sample
-            // across it (image theory: |E| is even about a flat Dirichlet face, so
-            // the odd extension Ṽ(face−d) = 2·V_face − V(face+d) is the correct
-            // continuation). This keeps the SAME baseline width for every row near
-            // the face, so the E estimate stays consistent from the bulk all the way
-            // onto the surface row and contours meet the ground at 90° — clamping or
-            // switching estimators near the face (tried) leaves a percent-level |E|
-            // step across the hand-off band that visibly bends the contours sideways
-            // just above the plane.
-            let inside = false;
-            let mxPlane = null, mxSide = 0, mxDist = Infinity;   // nearest x-face the baseline crosses
-            let myPlane = null, mySide = 0, myDist = Infinity;   // nearest y-face the baseline crosses
-            for (const c of rects) {
-                if (c.shape) {
-                    // Curved conductor: clamp the baseline inside it as for a rect, but
-                    // do NOT set up a mirror plane. The image-theory extension below is
-                    // derived for a FLAT Dirichlet face and does not hold on a curved
-                    // one; near a coax surface the grid is mesh-quantile dense anyway,
-                    // so the plain non-uniform stencil is accurate there.
-                    if (shapeContains(c, px, py, -tolC)) {
-                        const d = distToShapeBoundary(c, px, py);
-                        bx = Math.min(bx, d); by = Math.min(by, d);
-                        inside = true;
-                    }
-                    continue;
-                }
-                const inX = px > c.xmin + tolC && px < c.xmax - tolC;
-                const inY = py > c.ymin + tolC && py < c.ymax - tolC;
-                if (inX && inY) {
-                    bx = Math.min(bx, px - c.xmin, c.xmax - px);
-                    by = Math.min(by, py - c.ymin, c.ymax - py);
-                    inside = true;
-                } else if (inY) {
-                    // conductor beside the point; side = which side of the face the metal is on
-                    const left = px <= c.xmin + tolC;   // metal to the right of its xmin face
-                    const plane = left ? c.xmin : c.xmax;
-                    const d = Math.abs(px - plane);
-                    if (d < bx && d < mxDist) { mxDist = d; mxPlane = plane; mxSide = left ? 1 : -1; }
-                } else if (inX) {
-                    const below = py >= c.ymax - tolC;  // metal below its ymax face
-                    const plane = below ? c.ymax : c.ymin;
-                    const d = Math.abs(py - plane);
-                    if (d < by && d < myDist) { myDist = d; myPlane = plane; mySide = below ? -1 : 1; }
-                }
-            }
-            // Mirror any sample that falls on the METAL side of the nearest face
-            // (including when the center itself sits exactly on the face).
-            const sampleX = (qx) => {
-                if (!inside && mxPlane !== null && (qx - mxPlane) * mxSide > 0) {
-                    return 2 * sampleV(mxPlane, py) - sampleV(2 * mxPlane - qx, py);
-                }
-                return sampleV(qx, py);
-            };
-            const sampleY = (qy) => {
-                if (!inside && myPlane !== null && (qy - myPlane) * mySide > 0) {
-                    return 2 * sampleV(px, myPlane) - sampleV(px, 2 * myPlane - qy);
-                }
-                return sampleV(px, qy);
-            };
-            // The normal E jumps at a dielectric interface, so the baseline must not blend
-            // the two sides: an end in another dielectric is pulled back to the interface
-            // (V is continuous there) and the derivative taken from the quadratic through
-            // the two ends and their midpoint, all on the sample's own side. An end in a
-            // conductor with no mirror plane (a curved or slanted surface) is pulled back
-            // to its surface the same way, the metal's constant V would bias E low.
-            const reg = inside ? -1 : regionAt(px, py);
-            const derivative = (sample, p, b, at, pitch, mirrored) => {
-                let lo = p - b, hi = p + b;
-                if (reg >= 0 && reg !== condRegion) {
-                    lo = interfaceToward(at, p, lo, reg, !mirrored);
-                    hi = interfaceToward(at, p, hi, reg, !mirrored);
-                }
-                if (lo === p - b && hi === p + b) return -(sample(hi) - sample(lo)) / (2 * b);
-                if (hi - lo < 0.5 * pitch) return NaN;
-                const m = (lo + hi) / 2;
-                return -(sample(lo) * (2 * p - m - hi) / ((lo - m) * (lo - hi))
-                    + sample(m) * (2 * p - lo - hi) / ((m - lo) * (m - hi))
-                    + sample(hi) * (2 * p - lo - m) / ((hi - lo) * (hi - m)));
-            };
-            let e;
-            if (bx > 0.5 * Math.min(dxl, dxr) &&
-                isFinite(e = derivative(sampleX, px, bx, q => regionAt(q, py), Math.min(dxl, dxr), mxPlane !== null))) {
-                Ex[j][i] = e;
-            } else {
-                Ex[j][i] = gridDiff(V[j][i - 1], V[j][i], V[j][i + 1], dxl, dxr, hT[j][i - 1] > 0, hT[j][i + 1] > 0);
-            }
-            if (by > 0.5 * Math.min(dyd, dyu) &&
-                isFinite(e = derivative(sampleY, py, by, q => regionAt(px, q), Math.min(dyd, dyu), myPlane !== null))) {
-                Ey[j][i] = e;
-            } else {
-                Ey[j][i] = gridDiff(V[j - 1][i], V[j][i], V[j + 1][i], dyd, dyu, hT[j - 1][i] > 0, hT[j + 1][i] > 0);
-            }
+            const dxl = x[i] - x[i - 1], dxr = x[i + 1] - x[i];
+            const [ex, ey] = ev.evalE(x[i], y[j], h, dxl, dxr, dyd, dyu);
+            Ex[j][i] = isFinite(ex) ? ex
+                : gridDiff(V[j][i - 1], V[j][i], V[j][i + 1], dxl, dxr, hT[j][i - 1] > 0, hT[j][i + 1] > 0);
+            Ey[j][i] = isFinite(ey) ? ey
+                : gridDiff(V[j - 1][i], V[j][i], V[j + 1][i], dyd, dyu, hT[j - 1][i] > 0, hT[j + 1][i] > 0);
         }
     }
     return { x, y, V, Ex, Ey };
+}
+
+// -grad of the P2 potential phi in triangle t at (x, y).
+function evalPhiField(phi, mesh, coeff, t, x, y) {
+    const { tris, triEdges } = mesh;
+    const pv = phi.phiVertex, pe = phi.phiEdge;
+    const l = [0, 1, 2].map(a => coeff[a][0] + coeff[a][1] * x + coeff[a][2] * y);
+    let gx = 0, gy = 0;
+    for (let a = 0; a < 3; a++) {
+        const b = (a + 1) % 3;
+        const fv = pv[tris[3 * t + a]] * (4 * l[a] - 1), fe = 4 * pe[triEdges[3 * t + a]];
+        gx += fv * coeff[a][1] + fe * (l[a] * coeff[b][1] + l[b] * coeff[a][1]);
+        gy += fv * coeff[a][2] + fe * (l[a] * coeff[b][2] + l[b] * coeff[a][2]);
+    }
+    return [-gx, -gy];
+}
+
+// The smoothed static field (staticFieldEvaluator, as on the plot grid) at the three
+// vertices and three edge midpoints of every dielectric triangle, each evaluated on the
+// triangle's own side of an interface. Point order per triangle: v0, v1, v2, then the
+// midpoints of v0-v1, v1-v2, v2-v0. Returns { tri, Ex, Ey } (6 values per triangle).
+export function staticFieldOnMesh(mesh, phi, domain, opts = {}) {
+    const ev = staticFieldEvaluator(mesh, phi, domain, { ...opts, oneSidedEdges: true });
+    const { nodes, tris, nTris } = mesh;
+    const tri = [];
+    for (let t = 0; t < nTris; t++) if (ev.regionOf[t] !== ev.condRegion) tri.push(t);
+    const Ex = new Float64Array(6 * tri.length), Ey = new Float64Array(6 * tri.length);
+    const px = new Float64Array(6), py = new Float64Array(6);
+    tri.forEach((t, k) => {
+        const v = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
+        for (let a = 0; a < 3; a++) {
+            const b = (a + 1) % 3;
+            px[a] = nodes[2 * v[a]]; py[a] = nodes[2 * v[a] + 1];
+            px[3 + a] = (nodes[2 * v[a]] + nodes[2 * v[b]]) / 2;
+            py[3 + a] = (nodes[2 * v[a] + 1] + nodes[2 * v[b] + 1]) / 2;
+        }
+        const cx = (px[0] + px[1] + px[2]) / 3, cy = (py[0] + py[1] + py[2]) / 3;
+        const coeff = ev.coeffOf(t);
+        for (let q = 0; q < 6; q++) {
+            // A hair toward the centroid, so a point on an interface reads this side.
+            const qx = px[q] + 1e-4 * (cx - px[q]), qy = py[q] + 1e-4 * (cy - py[q]);
+            let [ex, ey] = ev.evalE(qx, qy, ev.sizeAt(t, qx, qy), 0, 0, 0, 0);
+            if (!isFinite(ex) || !isFinite(ey)) {
+                const g = evalPhiField(phi, mesh, coeff, t, qx, qy);
+                if (!isFinite(ex)) ex = g[0];
+                if (!isFinite(ey)) ey = g[1];
+            }
+            Ex[6 * k + q] = ex; Ey[6 * k + q] = ey;
+        }
+    });
+    return { tri: Int32Array.from(tri), Ex, Ey };
+}
+
+// |E| on the dielectric triangles for a plot: each triangle of staticFieldOnMesh split in
+// four at its edge midpoints, { tris: [x0, y0, x1, y1, x2, y2, ...], E: [E0, E1, E2, ...] }.
+// combine(t, q, Ex, Ey) maps the static field at point q of triangle t to the plotted one
+// ([Ex, Ey]); mirror adds the image about x = 0 of a half-domain solve.
+export function meshFieldBlock(mesh, sf, combine = null, mirror = false) {
+    const { nodes, tris } = mesh;
+    const SUB = [[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]];
+    const n = sf.tri.length, copies = mirror ? 2 : 1;
+    const T = new Float64Array(24 * n * copies), E = new Float64Array(12 * n * copies);
+    const px = new Float64Array(6), py = new Float64Array(6), mag = new Float64Array(6);
+    for (let k = 0; k < n; k++) {
+        const t = sf.tri[k];
+        for (let a = 0; a < 3; a++) {
+            const va = tris[3 * t + a], vb = tris[3 * t + (a + 1) % 3];
+            px[a] = nodes[2 * va]; py[a] = nodes[2 * va + 1];
+            px[3 + a] = (nodes[2 * va] + nodes[2 * vb]) / 2; py[3 + a] = (nodes[2 * va + 1] + nodes[2 * vb + 1]) / 2;
+        }
+        for (let q = 0; q < 6; q++) {
+            const e = combine ? combine(t, q, sf.Ex[6 * k + q], sf.Ey[6 * k + q]) : [sf.Ex[6 * k + q], sf.Ey[6 * k + q]];
+            mag[q] = Math.hypot(e[0], e[1]);
+        }
+        for (let c = 0; c < copies; c++) {
+            const sx = c ? -1 : 1, base = (c * n + k) * 4;
+            SUB.forEach((sub, u) => {
+                for (let a = 0; a < 3; a++) {
+                    T[6 * (base + u) + 2 * a] = sx * px[sub[a]];
+                    T[6 * (base + u) + 2 * a + 1] = py[sub[a]];
+                    E[3 * (base + u) + a] = mag[sub[a]];
+                }
+            });
+        }
+    }
+    return { tris: T, E };
 }
 
 // Per-triangle material region for the nodal recovery. Averaging must never cross a
@@ -461,7 +566,18 @@ export function resampleStatic(mesh, phi, domain, opts = {}) {
 // wavelength-scale bulk element sizes renders as jagged element-shaped blobs along the
 // substrate and around the trace. Triangles are grouped by their epsMap permittivity,
 // with conductor interiors (centroid inside a conductor rect) as their own region.
-function buildTriRegions(mesh) {
+const regionCache = new WeakMap();
+export function buildTriRegions(mesh) {
+    // Cached per mesh and material map: the conductor test is a polygon test per
+    // triangle, and every plot field of a solve needs the same regions.
+    const hit = regionCache.get(mesh);
+    if (hit && hit.epsMap === mesh.epsMap) return hit.value;
+    const value = triRegions(mesh);
+    regionCache.set(mesh, { epsMap: mesh.epsMap, value });
+    return value;
+}
+
+function triRegions(mesh) {
     const { nodes, tris, nTris, epsMap, condRect } = mesh;
     const regionOf = new Int32Array(nTris);
     if (!epsMap || epsMap.length !== nTris) return { regionOf, nRegions: 1, condRegion: -1 };
@@ -498,7 +614,18 @@ function buildTriRegions(mesh) {
 // region), so the genuine field jumps at dielectric interfaces and conductor surfaces
 // stay sharp; a triangle always contributes to its own region's slots, so every
 // (vertex, region-of-containing-triangle) slot an interpolation reads is populated.
-function recoverNodalModeField(mesh, fm, vRe, vIm) {
+const nodalCache = new WeakMap();
+export function recoverNodalModeField(mesh, fm, vRe, vIm) {
+    // Cached per eigenvector: the E plot recovers each mode field on the grid and on
+    // the mesh.
+    const hit = nodalCache.get(vRe);
+    if (hit && hit.mesh === mesh && hit.vIm === vIm) return hit.value;
+    const value = nodalModeField(mesh, fm, vRe, vIm);
+    nodalCache.set(vRe, { mesh, vIm, value });
+    return value;
+}
+
+function nodalModeField(mesh, fm, vRe, vIm) {
     const { nodes, tris, nTris, nNodes } = mesh;
     const { regionOf, nRegions } = buildTriRegions(mesh);
     const nSlots = nNodes * nRegions;
@@ -649,7 +776,15 @@ export function sampleMqsCurrent(F, rects, n = 160, symX = null) {
 
 // Point evaluation of an MQS solve (mqsConductorLoss opts.fieldOut): the complex J in a
 // conductor triangle, null elsewhere, and the complex gradient of A in any triangle.
+const fieldEvalCache = new WeakMap();
 function mqsFieldEval(F) {
+    // One locator per solve: the |J| and |K| plots both evaluate it.
+    let ev = fieldEvalCache.get(F);
+    if (!ev) fieldEvalCache.set(F, ev = mqsFieldEvaluator(F));
+    return ev;
+}
+
+function mqsFieldEvaluator(F) {
     const { mesh, sol, nF, dofOf, isCondTri, triGroup, triRect, sRel, sigma, omega, Cr, Ci, CgR, CgI } = F;
     const { nodes, tris, triEdges, nNodes } = mesh;
     const { locate, coeffOf } = buildLocator(mesh);

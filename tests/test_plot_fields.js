@@ -134,6 +134,36 @@ for (const backend of ['rectilinear', 'triangular']) {
         check(`${label} E_y jumps by er across the substrate top`, Math.abs(ratio / MS.epsilon_r - 1) < 0.05,
             `${ratio.toFixed(3)} at y ${(pf.y[jb] * 1e3).toFixed(4)} / ${(pf.y[ja] * 1e3).toFixed(4)} mm`);
     }
+    // |E| on the mesh for the image and traced contours: at the substrate top, clear of
+    // the trace, a vertex read from the air triangles and from the substrate triangles
+    // jumps as the grid rows on either side of the interface do (normal D continuous,
+    // tangential E continuous), not smeared across it.
+    {
+        const M = hi.fieldMesh && hi.fieldMesh[0];
+        check('full-wave E on the mesh present', !!(M && M.E.length && M.E.every(isFinite)), M ? `${M.E.length / 3} triangles` : 'none');
+        const h = MS.substrate_height, above = [], below = [];
+        for (let t = 0; M && t < M.E.length / 3; t++) {
+            const cy = (M.tris[6 * t + 1] + M.tris[6 * t + 3] + M.tris[6 * t + 5]) / 3;
+            for (let a = 0; a < 3; a++) {
+                const x = M.tris[6 * t + 2 * a], y = M.tris[6 * t + 2 * a + 1];
+                if (Math.abs(y - h) > 1e-9 || x < 0.4e-3 || x > 0.6e-3) continue;
+                (cy > h ? above : below).push([x, M.E[3 * t + a]]);
+            }
+        }
+        const jA = hi.y.findIndex(v => v >= h), jB = jA - 1;
+        const Eg = (j, i) => Math.hypot(hi.Ex[0][j][i], hi.Ey[0][j][i]);
+        const errs = [];
+        for (const [x, e] of above) {
+            const b = below.find(([xb]) => Math.abs(xb - x) < 1e-9);
+            if (!b) continue;
+            const i = hi.x.findIndex(v => v >= x);
+            errs.push(Math.abs((e / b[1]) / (Eg(jA, i) / Eg(jB, i)) - 1));
+        }
+        errs.sort((a, b) => a - b);
+        const med = errs[errs.length >> 1];
+        check('full-wave E on the mesh jumps at the substrate top like the grid', errs.length > 0 && med < 0.05,
+            `${errs.length} vertices, median deviation ${med !== undefined ? (med * 100).toFixed(1) : '-'} %`);
+    }
     // At 100 GHz the mode differs strongly from the static field: the grid row on the
     // substrate top must read the same (air) side for both parts, and the outermost
     // columns, where the static field has no sample, the mode itself.

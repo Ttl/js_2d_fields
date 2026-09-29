@@ -45,7 +45,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
     spreadWidthFloor } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh, surfaceCurrentPoints, sampleMqsCurrent,
-    mqsSurfaceCurrent } from './resample.js';
+    mqsSurfaceCurrent, staticFieldOnMesh, meshFieldBlock, recoverNodalModeField } from './resample.js';
 import { Complex } from '../complex.js';
 import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
@@ -2478,7 +2478,7 @@ export class TriBackend {
         // At the plot frequency the solves below keep their fields for plotFieldsAt, once:
         // a repeat of the frequency may take the anchors and the fields it kept.
         const slot = this._plotSlot(mode, f);
-        if (slot && !slot.fields) { slot.st = st; slot.fields = st.fields; }
+        if (slot && !slot.fields) { slot.st = st; slot.fields = st.fields; slot.phiEps = st.phiEps; }
 
         // Full-wave eigenmode above 100 MHz (dispersive eps + the mode field used
         // for the perturbation conductor loss); static solve near DC.
@@ -3313,6 +3313,7 @@ export class TriBackend {
         s.V = modes.map(m => m.V);
         s.Ex = modes.map(m => m.Ex);
         s.Ey = modes.map(m => m.Ey);
+        s.fieldMesh = modes.map(m => m.mesh || null);
         // Surface current from the MQS solve at f where it ran, else the perfect-conductor
         // limit of the static solve.
         const cur = this._plotCurrents(f, slots);
@@ -3366,9 +3367,14 @@ export class TriBackend {
         const K = st.phiAir ? surfaceCurrentPoints(this.mesh, st.fm, st.phiAir,
             buildLossEdges(this.mesh, st.fm, this.condRect), Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000,
             symX, nets) : null;
-        const fw = f >= F_STATIC_MAX && slot ? slot.fw : null;
-        if (!fw) return { x, y, V, Ex, Ey, K, fullwave: false };
         const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
+        // |E| on the triangles for the plot (meshFieldBlock): sharp at every interface,
+        // curved ones included, which the grid can only draw as a staircase.
+        const sf = staticFieldOnMesh(this.mesh, (slot && slot.phiEps) || st.phiEps, this.domain,
+            { parity, rects: this._plotRects });
+        const meshOf = combine => meshFieldBlock(this.mesh, sf, combine, !!parity);
+        const fw = f >= F_STATIC_MAX && slot ? slot.fw : null;
+        if (!fw) return { x, y, V, Ex, Ey, K, fullwave: false, mesh: meshOf(null) };
         // An eigenvector has an arbitrary complex scale: fit it to the static field of
         // the same drive by least squares, area weighted on the graded grid.
         const fitted = (w) => {
@@ -3386,11 +3392,24 @@ export class TriBackend {
             }
             if (!(den > 0)) return null;
             const sr = nr / den, si = ni / den;
-            return { Ex: m.Ex.map((row, j) => row.map((v, i) => sr * v - si * m.ExIm[j][i])),
+            // The same scaled field on the mesh vertices, per material region.
+            const nod = recoverNodalModeField(this.mesh, st.fm, w.vRe, w.vIm);
+            const at = (t, q) => {
+                const tris = this.mesh.tris, reg = nod.regionOf[t], nR = nod.nRegions;
+                const ends = q < 3 ? [tris[3 * t + q]] : [tris[3 * t + q - 3], tris[3 * t + (q - 2) % 3]];
+                let ex = 0, ey = 0;
+                for (const v of ends) {
+                    const k = v * nR + reg;
+                    ex += (sr * nod.exr[k] - si * nod.exi[k]) / ends.length;
+                    ey += (sr * nod.eyr[k] - si * nod.eyi[k]) / ends.length;
+                }
+                return [ex, ey];
+            };
+            return { at, Ex: m.Ex.map((row, j) => row.map((v, i) => sr * v - si * m.ExIm[j][i])),
                      Ey: m.Ey.map((row, j) => row.map((v, i) => sr * v - si * m.EyIm[j][i])) };
         };
         const m = fitted(fw);
-        if (!m) return { x, y, V, Ex, Ey, K, fullwave: false };
+        if (!m) return { x, y, V, Ex, Ey, K, fullwave: false, mesh: meshOf(null) };
         // The mode field sampled per element keeps the jumps of its normal component
         // between elements, which kink the |E| contours; the static field is smooth
         // because it is differenced from the continuous potential. So the plot is the
@@ -3399,9 +3418,13 @@ export class TriBackend {
         // Where the static field has no sample (the outermost rows and columns, the
         // metal), the mode field itself.
         const r = slot.fwRef ? fitted(slot.fwRef) : null;
-        if (!r) return { x, y, V, Ex: m.Ex, Ey: m.Ey, K, fullwave: true };
+        if (!r) return { x, y, V, Ex: m.Ex, Ey: m.Ey, K, fullwave: true, mesh: meshOf((t, q) => m.at(t, q)) };
         const none = (j, i) => Ex[j][i] === 0 && Ey[j][i] === 0;
-        return { x, y, V, K, fullwave: true,
+        const mesh = meshOf((t, q, sx, sy) => {
+            const a = m.at(t, q), b = r.at(t, q);
+            return [sx + a[0] - b[0], sy + a[1] - b[1]];
+        });
+        return { x, y, V, K, fullwave: true, mesh,
                  Ex: m.Ex.map((row, j) => row.map((v, i) => none(j, i) ? v : Ex[j][i] + v - r.Ex[j][i])),
                  Ey: m.Ey.map((row, j) => row.map((v, i) => none(j, i) ? v : Ey[j][i] + v - r.Ey[j][i])) };
     }
@@ -3488,6 +3511,7 @@ export class TriBackend {
         this.solver.V = modes.map(m => m.V);
         this.solver.Ex = modes.map(m => m.Ex);
         this.solver.Ey = modes.map(m => m.Ey);
+        this.solver.fieldMesh = null;   // the plot fields of plotFieldsAt, not these
         this.solver.triMesh = { nodes: this.mesh.nodes, tris: this.mesh.tris, nTris: this.mesh.nTris };
         this.solver.solution_valid = true;
         // Open walls are natural boundaries in the static solve too: same field check
