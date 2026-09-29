@@ -1609,7 +1609,7 @@ function updateModesImage(container) {
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
         const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
         const im = rasterizeDensity(mm.blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
-            0, mm.zmax, false, 'below');
+            0, mm.zmax, false);
         container._modesImageUpdate = true;
         getPlotly().relayout(container, { images: im ? [im] : [] })
             .finally(() => { container._modesImageUpdate = false; });

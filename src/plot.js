@@ -680,8 +680,9 @@ function fieldMeshContourTrace(M, limits) {
 // Triangle blocks { tris, Jv } (vertex values, |J| or |E|) rasterized for the visible
 // axis ranges (mm) at w x h pixels: each triangle Gouraud-shaded from its vertex values,
 // so a skin layer or a field jump on a slanted or curved face stays sharp and smooth at
-// any zoom. Returns a layout image in `layer`, or null.
-function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, layer = 'above') {
+// any zoom. Returns a layout image above the shapes of layer 'below' (the dielectric
+// fills) and under the traces (mesh overlay, contour lines), or null.
+function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
     if (!(w > 0 && h > 0)) return null;
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
@@ -726,7 +727,7 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, layer = 'above')
     if (!any) return null;
     ctx.putImageData(img, 0, 0);
     return { source: canvas.toDataURL(), xref: 'x', yref: 'y', x: xr[0], y: yr[1],
-             sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer };
+             sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer: 'below' };
 }
 
 // The triangle blocks the current view draws as an image: the shaped conductors' |J|,
@@ -747,10 +748,8 @@ function updateDensityImage(container) {
         if (!blocks.length || !fl || !fl.xaxis || !fl._size) return;
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
         const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
-        // |J| covers the dielectric fills (layer below); |E| has none and its contour
-        // lines must stay on top.
         const im = rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
-            zMin, zMax, getPlotOptions().efieldDb, currentView === "density" ? 'above' : 'below');
+            zMin, zMax, getPlotOptions().efieldDb);
         container._densityImageUpdate = true;
         getPlotly().relayout(container, { images: im ? [im] : [] }).finally(() => { container._densityImageUpdate = false; });
     });
