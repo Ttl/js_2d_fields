@@ -18,6 +18,7 @@
 //
 // Run: node tests/test_box_modes.mjs
 import { MicrostripSolver } from '../src/microstrip.js';
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { check, quiet, done } from './helpers.js';
 
 const C0 = 299792458;
@@ -133,6 +134,43 @@ function makeSolver(opts) {
     // classification sanity: nothing propagating above the densest medium
     check('εr=4.4 box: no propagating mode with ε_eff > εr',
         prop.every(m => m.eps_eff < 4.4 * 1.02));
+}
+
+// ---------------------------------------------------------------------------
+// Shielded line in an OPEN domain: an elliptical coax (εr = 2.1 fill) with radiating
+// domain walls. The TE11-like modes inside the shield are waveguide modes, ε_eff =
+// εr − (c·kc/2πf)^2, which drops below 1 near cutoff. They must stay propagating: only
+// modes living in the region that reaches a radiating wall are radiation continuum.
+{
+    const text = `units mm
+d = 0.9; a = 2.2; b = 1.4; t_sh = 0.15
+bounds open open open open
+domain -1.1*(a+t_sh) 1.1*(a+t_sh) -1.1*(b+t_sh) 1.1*(b+t_sh)
+diel  ellipse  x=0  y=0  rx=a  ry=b  n=128  er=2.1  tand=0.0002
+sig+  ngon  x=0  y=0  r=d/2  n=64
+gnd   ellipse  x=0  y=0  rx=a+t_sh  ry=b+t_sh  rx_in=a  ry_in=b  n=128
+`;
+    const sub1 = {};
+    for (const f of [45e9, 50e9]) {
+        const s = new CustomGeometrySolver({ text, freq: f, mesh_backend: 'triangular' });
+        const r = await quiet(() => s.solveModes(f, 4));
+        const m = r.modes.filter(m => m.eps_eff != null && m.eps_eff < 1 && m.eps_eff > 0.3);
+        check(`elliptical coax ${f / 1e9} GHz: sub-light-line shield mode found`, m.length === 1,
+            r.modes.map(m => `${m.status}:${m.eps_eff?.toFixed(4)}`).join(' '));
+        if (m.length) {
+            check(`elliptical coax ${f / 1e9} GHz: shield mode propagating, not spurious`,
+                m[0].status === 'propagating', m[0].status);
+            sub1[f] = m[0].eps_eff;
+        }
+    }
+    // Two frequencies fix εr − (fc'/f)^2: the fitted εr must be the fill's.
+    if (sub1[45e9] && sub1[50e9]) {
+        const a = 1 / 45 ** 2, b = 1 / 50 ** 2;
+        const fc2 = (sub1[50e9] - sub1[45e9]) / (a - b);
+        const er = sub1[50e9] + fc2 * b;
+        check('elliptical coax: shield mode follows εr − (fc/f)^2 with εr = 2.1', Math.abs(er - 2.1) < 0.01,
+            `εr fit ${er.toFixed(4)}`);
+    }
 }
 
 done();

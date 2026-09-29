@@ -45,7 +45,9 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
     spreadWidthFloor } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh, surfaceCurrentPoints, sampleMqsCurrent,
-    mqsSurfaceCurrent, staticFieldOnMesh, meshFieldBlock, recoverNodalModeField, modeFieldMeshBlock } from './resample.js';
+    mqsSurfaceCurrent, staticFieldOnMesh, meshFieldBlock, recoverNodalModeField, modeFieldMeshBlock,
+    buildTriRegions } from './resample.js';
+import { evalFieldsAtPoint } from './tri_ms_solver.js';
 import { Complex } from '../complex.js';
 import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
@@ -697,6 +699,74 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
 // shift placed exactly there converges in a handful of Arnoldi steps and cannot mode-hop.
 
 // Largest real permittivity on the mesh.
+// Triangles of the dielectric connected to a radiating wall (abc: { left, right, top,
+// bottom }) without crossing metal, as a 0/1 mask. A region closed off by a conductor
+// (the inside of a coax shield) is not part of it.
+function openRegionMask(mesh, abc) {
+    const { nodes, tris, nTris, triEdges } = mesh;
+    const { regionOf, condRegion } = buildTriRegions(mesh);
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let i = 0; i < nodes.length; i += 2) {
+        x0 = Math.min(x0, nodes[i]); x1 = Math.max(x1, nodes[i]);
+        y0 = Math.min(y0, nodes[i + 1]); y1 = Math.max(y1, nodes[i + 1]);
+    }
+    const tol = 1e-9 * Math.max(x1 - x0, y1 - y0);
+    const onWall = v => {
+        const x = nodes[2 * v], y = nodes[2 * v + 1];
+        return (abc.left && x - x0 < tol) || (abc.right && x1 - x < tol)
+            || (abc.bottom && y - y0 < tol) || (abc.top && y1 - y < tol);
+    };
+    let nEdges = 0;
+    for (let k = 0; k < triEdges.length; k++) if (triEdges[k] >= nEdges) nEdges = triEdges[k] + 1;
+    const edgeTris = new Int32Array(2 * nEdges).fill(-1);
+    for (let t = 0; t < nTris; t++) {
+        for (let a = 0; a < 3; a++) {
+            const e = triEdges[3 * t + a];
+            edgeTris[2 * e + (edgeTris[2 * e] < 0 ? 0 : 1)] = t;
+        }
+    }
+    const mask = new Uint8Array(nTris), stack = [];
+    for (let t = 0; t < nTris; t++) {
+        if (regionOf[t] === condRegion) continue;
+        for (let a = 0; a < 3; a++) {
+            if (onWall(tris[3 * t + a]) && onWall(tris[3 * t + (a + 1) % 3])) { mask[t] = 1; stack.push(t); break; }
+        }
+    }
+    while (stack.length) {
+        const t = stack.pop();
+        for (let a = 0; a < 3; a++) {
+            const e = triEdges[3 * t + a];
+            for (const u of [edgeTris[2 * e], edgeTris[2 * e + 1]]) {
+                if (u >= 0 && !mask[u] && regionOf[u] !== condRegion) { mask[u] = 1; stack.push(u); }
+            }
+        }
+    }
+    return mask;
+}
+
+// Fraction of a mode's transverse field energy (the integral of |e_t|^2, edge-midpoint
+// rule) in the triangles of mask.
+function maskedEnergyFraction(mesh, fm, vRe, vIm, mask) {
+    const { nodes, tris, nTris } = mesh;
+    let inMask = 0, total = 0;
+    for (let t = 0; t < nTris; t++) {
+        const v = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
+        const area = Math.abs((nodes[2 * v[1]] - nodes[2 * v[0]]) * (nodes[2 * v[2] + 1] - nodes[2 * v[0] + 1])
+            - (nodes[2 * v[2]] - nodes[2 * v[0]]) * (nodes[2 * v[1] + 1] - nodes[2 * v[0] + 1])) / 2;
+        let w = 0;
+        for (let a = 0; a < 3; a++) {
+            const b = (a + 1) % 3;
+            const f = evalFieldsAtPoint(t, (nodes[2 * v[a]] + nodes[2 * v[b]]) / 2,
+                (nodes[2 * v[a] + 1] + nodes[2 * v[b] + 1]) / 2, mesh, fm, vRe, vIm);
+            w += f.exr * f.exr + f.exi * f.exi + f.eyr * f.eyr + f.eyi * f.eyi;
+        }
+        w *= area / 3;
+        total += w;
+        if (mask[t]) inMask += w;
+    }
+    return total > 0 ? inMask / total : 0;
+}
+
 function maxEpsRe(epsMap) {
     let m = 1;
     for (let t = 0; t < epsMap.length; t++) if (epsMap[t].re > m) m = epsMap[t].re;
@@ -3613,10 +3683,18 @@ export class TriBackend {
         // Refinements on the γ²<0 branch:
         //   • ε_eff ≈ 0 (γ² negligible vs the k²·ε mode scale, only escaped the absolute
         //     nullThresh band) → null space, not a guided mode.
-        //   • OPEN domain (any radiating ABC wall) has no bound modes below the light line —
-        //     ε_eff < 1 there is the radiation continuum of the truncated domain → spurious.
-        //   • enclosed (all-PEC) box keeps sub-light-line modes (cavity modes above cutoff).
+        //   • ε_eff < 1 with most of the mode energy in the dielectric connected to a
+        //     radiating ABC wall → spurious: the open region has no bound modes below the
+        //     light line, those are the radiation continuum of the truncated domain.
+        //   • ε_eff < 1 elsewhere (an all-PEC box, the inside of a coax shield) → a
+        //     waveguide mode above its cutoff, propagating.
         const isEnclosed = !(abc.left || abc.right || abc.top || abc.bottom);
+        let openMask = null;
+        const inOpenRegion = (vRe, vIm) => {
+            if (isEnclosed) return false;
+            openMask ??= openRegionMask(mesh, abc);
+            return maskedEnergyFraction(mesh, fm, vRe, vIm, openMask) > 0.5;
+        };
         const list = [];
         for (let i = 0; i < res.nconv; i++) {
             const g2Re = res.evalsRe[i], g2Im = res.evalsIm[i];
@@ -3643,7 +3721,7 @@ export class TriBackend {
                 // still has no bound mode below the light line (ε_eff < 1 = radiation
                 // continuum) → spurious; an enclosed box keeps cavity modes as propagating.
                 if (epsCand < 1e-2) status = 'nullspace';
-                else { eps_eff = epsCand; status = (!isEnclosed && eps_eff < 1.0) ? 'spurious' : 'propagating'; }
+                else { eps_eff = epsCand; status = (eps_eff < 1.0 && inOpenRegion(vRe, vIm)) ? 'spurious' : 'propagating'; }
             } else status = 'evanescent';
             list.push({ idx: i, g2Re, g2Im, eps_eff, overlap, status, vRe, vIm });
         }
