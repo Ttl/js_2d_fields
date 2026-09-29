@@ -45,7 +45,7 @@ const F_STATIC_MAX = 100e6;
 import { calculate_Zrough, calculate_Zrough_layered, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
     spreadWidthFloor } from '../surface_roughness.js';
 import { resampleStatic, resampleModeField, buildGridFromMesh, surfaceCurrentPoints, sampleMqsCurrent,
-    mqsSurfaceCurrent, staticFieldOnMesh, meshFieldBlock, recoverNodalModeField } from './resample.js';
+    mqsSurfaceCurrent, staticFieldOnMesh, meshFieldBlock, recoverNodalModeField, modeFieldMeshBlock } from './resample.js';
 import { Complex } from '../complex.js';
 import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
@@ -3682,7 +3682,8 @@ export class TriBackend {
     }
 
     // Resample the transverse E-field of the sortedIdx-th mode from the last solveModes()
-    // onto a grid for plotting. Returns { x, y, E, Ex, Ey } (see resampleModeField) or null.
+    // onto a grid for plotting. Returns { x, y, E, Ex, Ey } (see resampleModeField) plus
+    // `mesh` (modeFieldMeshBlock), or null.
     //
     // The grid is a fine UNIFORM grid whose sample points are CELL CENTERS spanning exactly
     // the domain. We deliberately do NOT reuse the FDM mesher's graded grid here: its bulk
@@ -3705,8 +3706,12 @@ export class TriBackend {
         const x = new Float64Array(nx), y = new Float64Array(ny);
         for (let i = 0; i < nx; i++) x[i] = d.x_min + dx * (i + 0.5);
         for (let j = 0; j < ny; j++) y[j] = d.y_min + dy * (j + 0.5);
-        return resampleModeField(this.mesh, ms.fm, m.vRe, m.vIm, this.domain,
+        const grid = resampleModeField(this.mesh, ms.fm, m.vRe, m.vIm, this.domain,
             { resolution: this.opts.resolution, grid: { x, y } });
+        // |E| on the triangles, which the plot draws instead of the grid: sharp at
+        // curved conductor and dielectric faces, where the grid staircases.
+        grid.mesh = modeFieldMeshBlock(this.mesh, ms.fm, m.vRe, m.vIm);
+        return grid;
     }
 
 }

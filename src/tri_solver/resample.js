@@ -651,6 +651,58 @@ function nodalModeField(mesh, fm, vRe, vIm) {
     return { exr, exi, eyr, eyi, regionOf, nRegions };
 }
 
+// |E_t| of an eigenmode on the dielectric triangles for a plot, in meshFieldBlock's
+// format { tris, E }: the recovered nodal field (recoverNodalModeField) at the vertices
+// and the element field averaged per material region at the edge midpoints, each
+// triangle split in four at the midpoints. The magnitude is complex (|Re|^2 + |Im|^2),
+// so the eigenvector's arbitrary phase drops out.
+export function modeFieldMeshBlock(mesh, fm, vRe, vIm) {
+    const { nodes, tris, nTris, triEdges } = mesh;
+    const nod = recoverNodalModeField(mesh, fm, vRe, vIm);
+    const { regionOf, nRegions: nR } = nod;
+    const condRegion = buildTriRegions(mesh).condRegion;
+    let nEdges = 0;
+    for (let k = 0; k < triEdges.length; k++) if (triEdges[k] >= nEdges) nEdges = triEdges[k] + 1;
+    // Edge midpoint field per (edge, region), averaged over the triangles sharing it.
+    const mid = new Float64Array(5 * nEdges * nR);
+    for (let t = 0; t < nTris; t++) {
+        const reg = regionOf[t];
+        if (reg === condRegion) continue;
+        for (let a = 0; a < 3; a++) {
+            const va = tris[3 * t + a], vb = tris[3 * t + (a + 1) % 3];
+            const f = evalFieldsAtPoint(t, (nodes[2 * va] + nodes[2 * vb]) / 2,
+                (nodes[2 * va + 1] + nodes[2 * vb + 1]) / 2, mesh, fm, vRe, vIm);
+            const s = 5 * (triEdges[3 * t + a] * nR + reg);
+            mid[s] += f.exr; mid[s + 1] += f.exi; mid[s + 2] += f.eyr; mid[s + 3] += f.eyi; mid[s + 4]++;
+        }
+    }
+    const tri = [];
+    for (let t = 0; t < nTris; t++) if (regionOf[t] !== condRegion) tri.push(t);
+    const SUB = [[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]];
+    const T = new Float64Array(24 * tri.length), E = new Float64Array(12 * tri.length);
+    const px = new Float64Array(6), py = new Float64Array(6), mag = new Float64Array(6);
+    tri.forEach((t, k) => {
+        const reg = regionOf[t];
+        for (let a = 0; a < 3; a++) {
+            const va = tris[3 * t + a], vb = tris[3 * t + (a + 1) % 3];
+            px[a] = nodes[2 * va]; py[a] = nodes[2 * va + 1];
+            px[3 + a] = (nodes[2 * va] + nodes[2 * vb]) / 2; py[3 + a] = (nodes[2 * va + 1] + nodes[2 * vb + 1]) / 2;
+            const s = va * nR + reg;
+            mag[a] = Math.hypot(nod.exr[s], nod.exi[s], nod.eyr[s], nod.eyi[s]);
+            const m = 5 * (triEdges[3 * t + a] * nR + reg), c = mid[m + 4] || 1;
+            mag[3 + a] = Math.hypot(mid[m], mid[m + 1], mid[m + 2], mid[m + 3]) / c;
+        }
+        SUB.forEach((sub, u) => {
+            for (let a = 0; a < 3; a++) {
+                T[6 * (4 * k + u) + 2 * a] = px[sub[a]];
+                T[6 * (4 * k + u) + 2 * a + 1] = py[sub[a]];
+                E[3 * (4 * k + u) + a] = mag[sub[a]];
+            }
+        });
+    });
+    return { tris: T, E };
+}
+
 // Resample a full-wave eigenmode's transverse E-field onto a regular grid.
 // The Lee–Jin eigenvector stores e_t = γ·Et, so the spatial pattern of |e_t| is the
 // transverse field pattern (the constant γ only scales the whole map), which is what a

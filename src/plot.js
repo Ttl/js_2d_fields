@@ -2123,4 +2123,5 @@ function unfreeze() {
 function isFrozen() { return frozenResultsData !== null; }
 
 export { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop };
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
+    rasterizeDensity };

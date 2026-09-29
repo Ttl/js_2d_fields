@@ -32,7 +32,18 @@ for (let j = 0; j < grid.E.length; j++) for (let i = 0; i < grid.E[0].length; i+
 }
 console.log(`field grid ${grid.E[0].length}x${grid.E.length}  |Et|max=${emax.toExponential(2)}  nonzero=${nonzero}/${total}`);
 
-const ok = res.modes.length > 0 && q.status === 'propagating' &&
+// |E| on the triangles (the plotted field): populated, finite, and peaking at the
+// grid's magnitude or above (the vertices on the trace corners see the singularity the
+// grid samples step over).
+const M = grid.mesh;
+let mmax = 0, finite = true;
+for (const v of M.E) { if (!isFinite(v)) finite = false; if (v > mmax) mmax = v; }
+const nSub = M.E.length / 3;
+console.log(`field mesh ${nSub} sub-triangles  |Et|max=${mmax.toExponential(2)}  max ratio mesh/grid=${(mmax / emax).toFixed(3)}`);
+const meshOk = M && M.tris.length === 2 * M.E.length && nSub >= 4 && finite
+    && mmax / emax > 0.9 && mmax / emax < 5;
+
+const ok = meshOk && res.modes.length > 0 && q.status === 'propagating' &&
     q.eps_eff > 1 && q.eps_eff < 4.4 && q.overlap > 0.5 &&
     emax > 0 && nonzero > total * 0.1;
 console.log(ok ? '\nMODES OK' : '\nMODES SUSPECT');

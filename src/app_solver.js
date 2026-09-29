@@ -2,7 +2,8 @@ import { Complex } from './complex.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usableSweepPoints } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
 import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop } from './plot.js';
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
+    rasterizeDensity } from './plot.js';
 import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
          getCustomOverrides, customSweepParams } from './custom_geometry_editor.js';
 import { solverToGeometryText } from './custom_geometry_text.js';
@@ -1506,54 +1507,113 @@ function plotModesField(grid, mode, idx, resetView = false) {
     if (!Plotly || !container || !modesSolver) return;
     if (!grid) {
         Plotly.purge(container);
+        container._modesMesh = null;
+        container._modesRelayoutBound = false;
         container.innerHTML = '<p style="color:var(--text-muted); padding:12px;">No field available for this mode.</p>';
         return;
     }
 
     const maxY = displayTop(modesSolver);
-
-    const yArr = Array.from(grid.y);
-    const maxYIdx = yArr.findIndex(y => y > maxY);
-    const nyDisp = maxYIdx > 0 ? maxYIdx : yArr.length;
-    const xMM = Array.from(grid.x, v => v * 1000);
-    const yMM = yArr.slice(0, nyDisp).map(v => v * 1000);
-    // A mode's eigenvector has an arbitrary scale, so absolute |E| is meaningless — show
-    // the field normalized to its own maximum (0–1). This also keeps the colorbar tick
-    // labels a constant width across modes, so switching modes never resizes the plot
-    // area (and thus never shifts the equal-aspect x-range).
-    let zmax = 0;
-    for (const row of grid.E) for (const v of row) if (v > zmax) zmax = v;
-    const inv = zmax > 0 ? 1 / zmax : 1;
-    const z = grid.E.slice(0, nyDisp).map(row => Array.from(row, v => v * inv));
+    const M = grid.mesh || null;
 
     const eeff = mode.eps_eff != null ? `, ε_eff=${mode.eps_eff.toFixed(3)}` : '';
     const STATUS_LABEL = { propagating: 'propagating', near_cutoff: 'near cutoff (evan?)', evanescent: 'evanescent', spurious: 'spurious', nullspace: 'null-space' };
     const title = `Mode ${idx} transverse |E| (${STATUS_LABEL[mode.status] || mode.status}${eeff})`;
+    // A mode's eigenvector has an arbitrary scale, so absolute |E| is meaningless — show
+    // the field normalized to its own maximum (0–1). This also keeps the colorbar tick
+    // labels a constant width across modes, so switching modes never resizes the plot
+    // area (and thus never shifts the equal-aspect x-range). The maximum is the grid's:
+    // the mesh vertices sit on the conductor corners, where the field is singular, and
+    // their maximum would dim the rest of the plot.
+    let zmax = 0;
+    for (const row of grid.E) for (const v of row) if (v > zmax) zmax = v;
+    const inv = zmax > 0 ? 1 / zmax : 1;
+    const colorbar = { title: { text: '|E_t| / max', font: { color: '#aaa' } }, tickfont: { color: '#aaa' } };
 
-    // Switching modes (a plot already exists, no view reset): update only the field data
-    // and title in place — leaving the axes untouched preserves the current zoom/pan
-    // exactly. (Re-issuing the layout would re-run the equal-aspect scaleanchor solver and
-    // drift the x-range a little each time.) The colorbar auto-rescales to the new field.
-    if (!resetView && container.data && container.data.length) {
-        Plotly.restyle(container, { z: [z], x: [xMM], y: [yMM] }, [0]);
+    let traces;
+    if (M) {
+        // |E| on the triangles: the color is an image (updateModesImage), the hover and
+        // colorbar ride on invisible markers at the triangle centroids.
+        container._modesMesh = { blocks: [{ tris: M.tris, Jv: M.E }], zmax: zmax || 1 };
+        const n = M.E.length / 3, stride = Math.max(1, Math.ceil(n / 5000));
+        const mx = [], my = [], mv = [];
+        for (let t = 0; t < n; t += stride) {
+            const k = 6 * t;
+            mx.push((M.tris[k] + M.tris[k + 2] + M.tris[k + 4]) * 1000 / 3);
+            my.push((M.tris[k + 1] + M.tris[k + 3] + M.tris[k + 5]) * 1000 / 3);
+            mv.push((M.E[3 * t] + M.E[3 * t + 1] + M.E[3 * t + 2]) * inv / 3);
+        }
+        traces = [{
+            type: 'scattergl', mode: 'markers', x: mx, y: my,
+            marker: { size: 4, opacity: 0, color: mv, coloraxis: 'coloraxis' },
+            hovertemplate: 'x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>|E_t|/max: %{marker.color:.3f}<extra></extra>',
+            showlegend: false,
+        }];
+    } else {
+        container._modesMesh = null;
+        const yArr = Array.from(grid.y);
+        const maxYIdx = yArr.findIndex(y => y > maxY);
+        const nyDisp = maxYIdx > 0 ? maxYIdx : yArr.length;
+        const xMM = Array.from(grid.x, v => v * 1000);
+        const yMM = yArr.slice(0, nyDisp).map(v => v * 1000);
+        const z = grid.E.slice(0, nyDisp).map(row => Array.from(row, v => v * inv));
+        traces = [{
+            type: 'heatmap', x: xMM, y: yMM, z,
+            colorscale: 'Viridis', zsmooth: 'best',
+            zmin: 0, zmax: 1, colorbar,
+            hoverinfo: 'skip',
+        }];
+    }
+
+    // Switching modes (a plot of the same kind exists, no view reset): update only the
+    // field data and title in place — leaving the axes untouched preserves the current
+    // zoom/pan exactly. (Re-issuing the layout would re-run the equal-aspect scaleanchor
+    // solver and drift the x-range a little each time.)
+    if (!resetView && container.data && container.data.length && container.data[0].type === traces[0].type) {
+        const t = traces[0];
+        Plotly.restyle(container, M ? { x: [t.x], y: [t.y], 'marker.color': [t.marker.color] }
+            : { z: [t.z], x: [t.x], y: [t.y] }, [0]);
         Plotly.relayout(container, { 'title.text': title });
+        if (M) updateModesImage(container);
         return;
     }
 
     // Fresh plot (first render or after a new solve): full render at the focused view.
     const shapes = buildGeometryShapes(maxY);
     const view = computeModesView(maxY);
+    const layout = modesPlotLayout(title, view, shapes);
+    if (M) {
+        layout.coloraxis = { cmin: 0, cmax: 1, colorscale: 'Viridis', colorbar };
+        // The image sits below the traces, under the grid lines.
+        for (const ax of [layout.xaxis, layout.yaxis]) { ax.showgrid = false; ax.zeroline = false; }
+    }
 
-    const traces = [{
-        type: 'heatmap', x: xMM, y: yMM, z,
-        colorscale: 'Viridis', zsmooth: 'best',
-        zmin: 0, zmax: 1,
-        colorbar: { title: { text: '|E_t| / max', font: { color: '#aaa' } }, tickfont: { color: '#aaa' } },
-        hoverinfo: 'skip',
-    }];
-
-    Plotly.react(container, traces, modesPlotLayout(title, view, shapes),
+    Plotly.react(container, traces, layout,
         { responsive: true, displayModeBar: true, scrollZoom: true });
+    if (M) updateModesImage(container);
+    if (!container._modesRelayoutBound) {
+        container._modesRelayoutBound = true;
+        // A zoom, pan or resize redraws the image for the new view.
+        container.on('plotly_relayout', () => {
+            if (container._modesMesh && !container._modesImageUpdate) updateModesImage(container);
+        });
+    }
+}
+
+// Redraws the |E| image of the mode's triangles for the current axis ranges and plot size.
+function updateModesImage(container) {
+    cancelAnimationFrame(container._modesImageFrame || 0);
+    container._modesImageFrame = requestAnimationFrame(() => {
+        const mm = container._modesMesh, fl = container._fullLayout;
+        if (!mm || !fl || !fl.xaxis || !fl._size) return;
+        const ratio = Math.min(window.devicePixelRatio || 1, 2);
+        const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
+        const im = rasterizeDensity(mm.blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
+            0, mm.zmax, false, 'below');
+        container._modesImageUpdate = true;
+        getPlotly().relayout(container, { images: im ? [im] : [] })
+            .finally(() => { container._modesImageUpdate = false; });
+    });
 }
 
 // Draw a geometry-only preview into the mode plot (before any solve), so the tab shows
@@ -1562,6 +1622,7 @@ function plotModesGeometry() {
     const Plotly = getPlotly();
     const container = document.getElementById('modes-plot');
     if (!Plotly || !container || !modesSolver || !modesSolver.conductors) return;
+    container._modesMesh = null;
     const maxY = displayTop(modesSolver);
     const view = computeModesView(maxY);
     // Invisible scatter spanning the view so the axes (and shapes) scale correctly.
