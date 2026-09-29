@@ -476,7 +476,6 @@ function solverGridMM(solver) {
              nx: solver.x.length, nyDisplay: solver.y.length };
 }
 
-// Title suffix naming the frequency and kind of the plotted fields.
 // Help topic (field_solver.html helpContent) of the view on screen.
 function plotHelpTopic() {
     return currentView.startsWith("potential") ? "plot_potential"
@@ -492,6 +491,7 @@ const GRID_ICON = {
         `M${p} 0h80v1000h-80z M0 ${p}h1000v80h-1000z`).join(' '),
 };
 
+// Title suffix naming the frequency and kind of the plotted fields.
 function fieldFreqLabel(solver) {
     const f = solver.fieldFreq;
     if (typeof f !== "number" || !(f >= 0)) return "";
@@ -517,6 +517,28 @@ function getFieldMesh() {
     const M = solver && solver.fieldMesh;
     if (!M) return null;
     return M[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
+}
+
+// Surface current on the grounds of unlimited width when the displayed mode's MQS
+// solve held them as ideal returns (no current inside, see _mqsSolve), or null. A
+// segment belongs to them when its midpoint lies on one of their bodies and on no
+// signal conductor.
+function idealGroundK(solver) {
+    const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+    const K = getSurfaceK();
+    if (!K || !solver.idealGrounds || !solver.idealGrounds[mi] || !solver._unlimited_grounds) return null;
+    const conductors = solver.conductors || [];
+    const U = [...solver._unlimited_grounds()].map(ci => conductors[ci]).filter(Boolean);
+    const sig = conductors.filter(c => c.is_signal);
+    const tol = 1e-9 * (solver.domain_width || 1);
+    const on = (c, x, y) => x >= c.x_min - tol && x <= c.x_max + tol && y >= c.y_min - tol && y <= c.y_max + tol;
+    const out = { x0: [], x1: [], y0: [], y1: [], K: [] };
+    for (let i = 0; i < K.K.length; i++) {
+        const mx = (K.x0[i] + K.x1[i]) / 2, my = (K.y0[i] + K.y1[i]) / 2;
+        if (!U.some(c => on(c, mx, my)) || sig.some(c => on(c, mx, my))) continue;
+        out.x0.push(K.x0[i]); out.x1.push(K.x1[i]); out.y0.push(K.y0[i]); out.y1.push(K.y1[i]); out.K.push(K.K[i]);
+    }
+    return out.K.length ? out : null;
 }
 
 // Current density blocks of the displayed mode, or null.
@@ -847,7 +869,7 @@ function currentAutoscale(K, db) {
 
 // Surface current traces: the segments binned by color into one line trace per bin,
 // plus invisible midpoint markers carrying the hover text and the colorbar.
-function surfaceCurrentTraces(K, zmin, zmax, db) {
+function surfaceCurrentTraces(K, zmin, zmax, db, colorbar = { len: 0.8 }) {
     const NB = 48;
     const bins = Array.from({ length: NB }, () => ({ x: [], y: [] }));
     const mx = [], my = [], mv = [];
@@ -867,7 +889,7 @@ function surfaceCurrentTraces(K, zmin, zmax, db) {
     traces.push({
         type: "scattergl", mode: "markers", x: mx, y: my,
         marker: { size: 6, opacity: 0, color: mv, cmin: zmin, cmax: zmax, colorscale: VIRIDIS_SCALE,
-                  showscale: true, colorbar: { title: db ? "dB(A/m)" : "A/m", len: 0.8 } },
+                  showscale: true, colorbar: { title: { text: db ? "dB(A/m)" : "A/m" }, ...colorbar } },
         hovertemplate: `x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>|K|: %{marker.color:${db ? ".1f} dB(A/m)" : ".4g} A/m"}<extra></extra>`,
         showlegend: false,
     });
@@ -1087,7 +1109,8 @@ function draw(resetZoom = false) {
         let modeLabel = "";
         if (isDifferentialMode()) modeLabel = getSelectedModeIndex() === 1 ? " (Even Mode)" : " (Odd Mode)";
         const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
-        const ideal = solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "";
+        const ideal = solver.idealGrounds && solver.idealGrounds[mi]
+            ? (idealGroundK(solver) ? ", ideal edge grounds: surface |K| (A/m)" : ", ideal edge grounds") : "";
         title = `Current Density |J| per 1 A${modeLabel} (${db ? "dB A/m²" : "A/m²"})${fieldFreqLabel(solver)}${ideal}`;
         shapes.push(...dielectricFillShapes(solver, maxY).map(s => ({ ...s, layer: 'below' })));
         shapes.push(...densityConductorShapes(solver, getCurrentJ(), maxY));
@@ -1145,8 +1168,17 @@ function draw(resetZoom = false) {
             if (override) { zMin = override.min; zMax = override.max; }
         }
         const db = plotOptions.efieldDb;
+        // Ideal edge grounds carry no current inside: their surface |K| is drawn on
+        // their faces, on its own colorbar below the |J| one.
+        const gK = idealGroundK(solver);
         colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale,
-                      colorbar: { title: db ? "dB(A/m²)" : "A/m²", len: 0.8 } };
+                      colorbar: gK ? { title: { text: db ? "|J| dB(A/m²)" : "|J| A/m²" }, len: 0.45, y: 1, yanchor: "top" }
+                                   : { title: { text: db ? "dB(A/m²)" : "A/m²" }, len: 0.8 } };
+        if (gK) {
+            const k = currentAutoscale(gK, db);
+            traces.push(...surfaceCurrentTraces(gK, k.min, k.max, db,
+                { title: { text: db ? "|K| dB(A/m)" : "|K| A/m" }, len: 0.45, y: 0, yanchor: "bottom" }));
+        }
         const blocks = getCurrentJ();
         const triBlocks = blocks.filter(b => b.tris);
         if (triBlocks.length) traces.push(densityHoverTrace(triBlocks, db));
@@ -1239,7 +1271,7 @@ function draw(resetZoom = false) {
             // |E| on the triangles: the color is an image (updateDensityImage), the hover
             // and colorbar ride on invisible markers, the contours are traced per triangle.
             const db = plotOptions.efieldDb;
-            colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale, colorbar: { title: zTitle, len: 0.8 } };
+            colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale, colorbar: { title: { text: zTitle }, len: 0.8 } };
             traces.push(fieldMeshHoverTrace(fieldMesh, db));
             if (n > 0) {
                 const limits = db ? contourLimitsDb(zMin, zMax, n)
@@ -1256,7 +1288,7 @@ function draw(resetZoom = false) {
                 z: db ? zData.map(row => row.map(v => v > 0 ? toDb(v) : null)) : zData,
                 zmin: zMin, zmax: zMax,
                 colorscale: colorscale,
-                colorbar: { title: zTitle, len: 0.8 },
+                colorbar: { title: { text: zTitle }, len: 0.8 },
                 hovertemplate: db ? "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.1f} dB(V/m)<extra></extra>" : hoverTpl
             });
             // ...overlaid with log-spaced contour lines: the geometry view's in linear, one per
@@ -1282,7 +1314,7 @@ function draw(resetZoom = false) {
                 colorscale: colorscale,
                 contours: contourSettings,
                 line: { smoothing: 1.3, width: 0.5 },
-                colorbar: { title: zTitle, len: 0.8 },
+                colorbar: { title: { text: zTitle }, len: 0.8 },
                 hovertemplate: hoverTpl
             });
         }

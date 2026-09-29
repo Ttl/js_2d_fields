@@ -3442,6 +3442,8 @@ export class TriBackend {
         // through the same per-solve channel as the mode warnings, so the UI logs it.
         if (this._certWarn) this._modeWarnings.push(this._certWarn);
         if (this._buildNotes) this._modeWarnings.push(...this._buildNotes.values());
+        const spreadNote = this.solver._ground_spreading_note ? this.solver._ground_spreading_note(f) : null;
+        if (spreadNote) this._modeWarnings.push({ ...spreadNote, freq: f });
         // A waveguide never reaches _modeAtFreq, so its quasi-static fallback (which would
         // be physically meaningless below cutoff) is unreachable for this medium.
         let modes = this._isWG ? [this._waveguideModeAtFreq(f)]

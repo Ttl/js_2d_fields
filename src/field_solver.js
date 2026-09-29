@@ -2183,6 +2183,39 @@ export class FieldSolver2D {
     // bulk skin depths under its plating (solid plating is exact by convention).
     //   meshedThick - thick plating was solved as meshed metal and is left out
     //   fullWave    - the full-wave solver, which can mesh the plating
+    // Accuracy note for the grounds of unlimited width at low frequency. A thin ground
+    // shields the field only over the lateral spreading length l = delta^2 / d =
+    // 1 / (pi f mu0 sigma d). Once l exceeds the ground's distance to the signal, the
+    // return current spreads sideways, the resistance drops and the inductance rises
+    // with the board width. Both backends keep these grounds as ideal returns there,
+    // so L stays at its high-frequency distribution. Returns null above the highest
+    // onset frequency of any such ground.
+    _ground_spreading_note(f) {
+        if (!(f >= 0) || !this.conductors) return null;
+        const U = this._unlimited_grounds();
+        const signals = this.conductors.filter(c => c.is_signal);
+        if (!U.size || !signals.length) return null;
+        let worst = null;
+        for (const ci of U) {
+            const c = this.conductors[ci];
+            const d = Math.min(Math.abs(c.width), Math.abs(c.height));
+            const g = Math.min(...signals.map(sc => bodyDistance(sc, c)));
+            if (!(d > 0) || !(g > 0)) continue;
+            const fOn = 1 / (Math.PI * CONSTANTS.MU0 * this._bulk_sigma(c) * d * g);
+            if (!worst || fOn > worst.fOn) worst = { fOn, d, g };
+        }
+        if (!worst || !(f < worst.fOn)) return null;
+        const fmtF = v => v >= 1e6 ? `${+(v / 1e6).toPrecision(3)} MHz` : `${+(v / 1e3).toPrecision(3)} kHz`;
+        const um = v => `${+(v * 1e6).toPrecision(3)} µm`;
+        return { type: 'accuracy', reason: 'ground-spreading', mode: 'all', message:
+            `Below ${fmtF(worst.fOn)} the return current spreads sideways in the ground planes ` +
+            `(${um(worst.d)} thick, ${um(worst.g)} from the signal). Grounds reaching the edge of ` +
+            `the domain are modelled as ideal returns of unlimited width. ` +
+            `The real inductance is higher and depends on ` +
+            `the board width, and the ground resistance is approximate. Use custom geometry with ` +
+            `finite grounds when this matters.` };
+    }
+
     _plating_transition_note(f, { meshedThick = false, fullWave = false } = {}) {
         if (!(f > 0) || !this.conductors) return null;
         let worst = null;
@@ -3746,6 +3779,8 @@ export class FieldSolver2D {
         // _build_results and models these regimes accurately (MQS).
         if (this._proximityWarn) warns.push(this._proximityWarn);
         if (this._causalWarn) warns.push(this._causalWarn);
+        const spreadWarn = this._ground_spreading_note(this.freq);
+        if (spreadWarn) warns.push(spreadWarn);
         const openWarn = this.openBoundaryFieldWarning(modeResults.map(m => m.V));
         if (openWarn) warns.push(openWarn);
         if (warns.length) {

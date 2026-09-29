@@ -15,6 +15,9 @@
 //      Both backends, thin film in the skin transition.
 //   S5 rectangular waveguide with b > a: the second cutoff is the lower of TE(1,0)
 //      and TE(0,2), and the over-moded warning starts there, not at the fundamental.
+//   S9 grounds of unlimited width at low frequency: both backends warn below the
+//      frequency where the ground's lateral spreading length delta^2/d reaches its
+//      distance to the signal, and not above it.
 //
 // Run: node tests/test_shared_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -168,6 +171,19 @@ for (const backend of ['rectilinear', 'triangular']) {
     check('over-moded warning above the second cutoff', over(1.05 * fc2));
     const wide = new RectWaveguideSolver({ width: b, height: a, sigma_cond: 5.8e7, freq: 10e9 });
     check('rotating the guide leaves both cutoffs unchanged', rel(wide.fc, g.fc) < 1e-12 && rel(wide.fc2, g.fc2) < 1e-12);
+}
+
+// ---- S9: ground-spreading warning ----
+{
+    // Onset 1 / (pi f mu0 sigma d g): d = 35 um ground, g = 0.1 mm substrate.
+    const fOn = 1 / (Math.PI * 4e-7 * Math.PI * MS.sigma_cond * MS.gnd_thickness * MS.substrate_height);
+    for (const backend of ['rectilinear', 'triangular']) {
+        const { s, r } = await solved(ms({}, backend));
+        const spread = async f => ((await at(s, r, f)).warnings || []).some(w => w.reason === 'ground-spreading');
+        const lo = await spread(0.5 * fOn), hi = await spread(2 * fOn), dc = await spread(0);
+        check(`${backend}: ground-spreading warning below ${(fOn / 1e3).toFixed(0)} kHz and at DC, not above`,
+            lo && dc && !hi, `below ${lo}, DC ${dc}, above ${hi}`);
+    }
 }
 
 done();
