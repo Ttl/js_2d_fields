@@ -20,6 +20,7 @@ import { buildSolverFromParams } from '../src/solver_factory.js';
 import { _clipDomain, condRectsOf, groundBodyCount } from '../src/tri_solver/occ_to_mesh.js';
 import { polyRadiusForArea, circlePolygon, shapePoly, shapeArea, shapeContains,
          shapeSegments, shapeSignedDist, isComplement } from '../src/shapes.js';
+import { isXSymmetric } from '../src/geometry_symmetry.js';
 import { check, done } from './helpers.js';
 
 const near = (x, y, tol = 1e-12) => Math.abs(x - y) < tol;
@@ -360,27 +361,24 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
         epsilon_r: 2.1, tan_delta: 2e-4, sigma_cond: 5.8e7 });
     const sig = signals(s), gnd = grounds(s);
     check('coax: one signal conductor and one ground', sig.length === 1 && gnd.length === 1);
-    check('coax: centre conductor is a disk of radius d/2',
-        sig[0].shape.type === 'circle' && near(sig[0].shape.r, a));
-    // The shield is the COMPLEMENT of the dielectric disk, not a ring: it owns the outer
-    // boundary (making it PEC and giving it loss edges) without meshing any metal or
-    // leaving dead air cavities in the corners of a bounding box.
-    check('coax: shield is the complement of the dielectric disk',
-        gnd[0].shape.type === 'outside_circle' && near(gnd[0].shape.r, b));
-    check('coax: the dielectric and the meshed domain are the SAME polygon object',
-        s.dielectrics[0].shape === s.domain_shape);
-    check('coax: fully enclosed — every wall is gnd', s.boundaries.every(v => v === 'gnd'));
+    // Each circle is a regular n-gon of the circle's area, the shield a ring of the
+    // shield thickness around the dielectric disk, in an open domain.
+    check('coax: centre conductor is an n-gon of area pi*a^2',
+        sig[0].shape.type === 'polygon' && near(shapeArea(sig[0]) / (Math.PI * a * a), 1, 1e-5));
+    check('coax: shield is a ring around the dielectric disk',
+        gnd[0].shape.type === 'ring' && gnd[0].shape.hole.every((v, i) => near(v, s.dielectrics[0].shape.poly[i])));
+    check('coax: shield is shield_thickness thick', near((gnd[0].shape.radial.rOut - gnd[0].shape.radial.holeOut)
+        / s.shield_thickness, 1, 1e-3));
+    check('coax: open domain around the shield', s.boundaries.every(v => v === 'open'));
     check('coax: single-ended', s.is_differential === false);
-    check('coax: DC-resistance area is pi*a^2, not the bbox 4a^2',
-        near(shapeArea(sig[0]) / (Math.PI * a * a), 1, 1e-12));
-    // n % 4 == 0 with phase 0 puts vertices exactly on both axes, which is what makes
-    // the x >= 0 half an EXACT half — required by the half-domain symmetry solve.
+    // n % 4 == 0 puts vertices exactly on both axes, which is what makes the x >= 0
+    // half an EXACT half, required by the half-domain symmetry solve.
     check('coax: segment counts are multiples of 4',
         s.n_inner % 4 === 0 && s.n_outer % 4 === 0, `${s.n_inner}, ${s.n_outer}`);
-    check('coax: shapes declare mirror symmetry',
-        [...s.conductors, ...s.dielectrics].every(o => o.shape.xSymmetric === true));
-    check('coax: domain box strictly encloses the meshed disk',
-        s.domain_width / 2 > b && s.domain_height > b && s.t_gnd > b);
+    check('coax: mirror symmetric', isXSymmetric(s.conductors, s.dielectrics, s.domain_width));
+    check('coax: domain box strictly encloses the shield',
+        s.domain_width / 2 > b + s.shield_thickness && s.domain_height > b + s.shield_thickness
+            && s.domain_y_min < -b - s.shield_thickness);
 
     // Plating on a circle has no faces to select between; what it selects is WHICH
     // CONDUCTOR carries the layer. A block naming neither (the pre-inner/outer shape, or
@@ -406,11 +404,11 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
     // A shaped ground must never be absorbed into a wall — its bbox spans the domain but
     // its body does not fill it.
     const cl = _clipDomain({ x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
-                             y_min: -s.t_gnd, y_max: s.domain_height },
+                             y_min: s.domain_y_min, y_max: s.domain_height },
                            s.conductors, s.boundaries, s.domain_width * 1e-9);
     check('coax: _clipDomain leaves the domain untouched (no full-span slab)',
         near(cl.X0, -s.domain_width / 2) && near(cl.X1, s.domain_width / 2) &&
-        near(cl.Y0, -s.t_gnd) && near(cl.Y1, s.domain_height));
+        near(cl.Y0, s.domain_y_min) && near(cl.Y1, s.domain_height));
 
     const rejects = (o, label) => {
         try { new CoaxSolver({ inner_diameter: 1e-3, dielectric_diameter: 3e-3, epsilon_r: 2.1, ...o }); }

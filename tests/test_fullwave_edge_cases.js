@@ -83,6 +83,7 @@ for (const backend of ['rectilinear', 'triangular']) {
     const a = 0.46e-3, b = 1.475e-3;
     const cx = new CoaxSolver({ inner_diameter: 2 * a, dielectric_diameter: 2 * b, epsilon_r: 2.1, tan_delta: 2e-4, sigma_cond: 5.8e7, freq: 1e9 });
     cx.use_causal_materials = false;
+    cx.tri_opts = { lossMethod: 'perturbation' };
     const r = await quiet(() => cx.solve_adaptive({ max_nodes: 20000 }));
     const freqs = [1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10];
     const lint = [];

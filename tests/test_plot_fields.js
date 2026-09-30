@@ -60,10 +60,13 @@ async function solved(s, f) {
     let kin = 0, kout = Infinity;
     for (let i = 0; i < K.K.length; i++) {
         const r = Math.hypot((K.x0[i] + K.x1[i]) / 2, (K.y0[i] + K.y1[i]) / 2);
-        if (r < (a + b) / 2) kin = Math.max(kin, K.K[i]); else kout = Math.min(kout, K.K[i]);
+        // The shield's outer surface faces field-free air.
+        if (r < (a + b) / 2) kin = Math.max(kin, K.K[i]); else if (r < 1.01 * b) kout = Math.min(kout, K.K[i]);
     }
     check('coax inner K = 1/(2 pi a)', Math.abs(kin * 2 * Math.PI * a - 1) < 0.03, `${kin.toFixed(1)} A/m`);
     check('coax outer K = 1/(2 pi b)', Math.abs(kout * 2 * Math.PI * b - 1) < 0.03, `${kout.toFixed(1)} A/m`);
+    check('coax |K| from the MQS solve, skin mesh for the |J| overlay', pf.surfaceKSource[0] === 'mqs'
+        && !!(pf.currentMesh && pf.currentMesh[0] && pf.currentMesh[0].nTris > 0), pf.surfaceKSource[0]);
 }
 
 // ---------------------------------------------------------------- microstrip

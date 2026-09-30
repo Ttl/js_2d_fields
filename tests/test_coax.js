@@ -16,15 +16,12 @@
 //           the geometry cancels out of alpha_d = omega*tand*C*Z0/2 entirely)
 //   alpha_c = Rs*(1/a + 1/b) / (2*eta*ln(b/a)),  Rs = 1/(sigma*delta), eta = eta0/sqrt(er)
 //
-// Frequencies are chosen to exercise BOTH conductor-loss estimators: 50 MHz is below
-// F_STATIC_MAX so it takes the static-field perturbation path, while 1/10 GHz are deep
-// in the skin regime (delta/2a ~ 2e-3) and take the SIBC-blended path.
+// Conductor loss comes from the MQS eddy-current solve at every frequency: 50 MHz is
+// below F_STATIC_MAX (static fields), 1/10 GHz are deep in the skin regime
+// (delta/2a ~ 2e-3).
 //
-// alpha_c is the one quantity that converges slowly, because it is a pure surface
-// integral: it lands ~1% low on the default mesh and is the only thing that mesh size
-// is chosen for (see CoaxSolver._hFine). Everything else — Z0, C, L, eps_eff, alpha_d —
-// is at or below 0.05% here and stays under 0.1% on meshes several times coarser, so the
-// 0.5% tolerances below are loose by design and the 2% on alpha_c is the real bound.
+// Z0, C, L, eps_eff and alpha_d are at or below 0.05% here, so the 0.5% tolerances
+// below are loose by design and the 2% on alpha_c is the real bound.
 //
 // Geometry construction, shape predicates and parameter validation live in
 // tests/test_geometry.js (pure JS, milliseconds); this file owns the physics.
@@ -108,6 +105,7 @@ for (const f of [50e6, 1e9, 10e9]) {
     near('alpha_d', m.alpha_d, alphaD_x(f), 0.5);
     // Surface integral — the slowest-converging quantity (see header).
     near('alpha_c', m.alpha_c, alphaC_x(f), 2.0);
+    check('conductor loss from the MQS solve', m.lossVia === 'mqs', m.lossVia);
 }
 
 // The homogeneous-fill invariant, and the sharpest assertion in the file. Below
@@ -129,7 +127,7 @@ for (const f of [50e6, 1e9, 10e9]) {
 // rather than approximate because n % 4 == 0 and phase 0 put polygon vertices precisely
 // on the y axis, so the half really is half the n-gon.
 //
-// The full-domain reference below is deliberately run on a COARSER mesh: it is a
+// The full-domain reference below is deliberately run on a SMALLER budget: it is a
 // different mesh either way, so agreement between them is a mesh-independent statement,
 // and this keeps the fast tier affordable.
 console.log('\n=== half-domain symmetry ===');
@@ -139,12 +137,9 @@ console.log('\n=== half-domain symmetry ===');
     for (let i = 0; i < s.triMesh.nodes.length; i += 2) minX = Math.min(minX, s.triMesh.nodes[i]);
     check('half-domain mesh is x >= 0', minX > -b * 1e-6, `min x = ${minX.toExponential(2)}`);
 
-    const fullS = makeSolver();
-    // Clearing the flag is exactly what isXSymmetric keys on, so this exercises the gate.
-    for (const o of [...fullS.conductors, ...fullS.dielectrics]) o.shape.xSymmetric = false;
-    fullS.tri_mesh_hints.hFine *= 2;
+    const fullS = makeSolver({ symmetry: false });
     const log = console.log; console.log = () => {};
-    await fullS.solve_adaptive({ max_nodes: 20000 });
+    await fullS.solve_adaptive({ max_nodes: 10000 });
     console.log = log;
     check('the reference solve used the full domain', fullS._triBackend.symmetry === false);
 

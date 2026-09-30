@@ -993,7 +993,7 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     const scale = LENGTH_UNITS[units];
     if (scale === undefined) throw new Error(`unknown unit '${units}'`);
     const all = [...(solver.dielectrics || []), ...(solver.conductors || [])];
-    if (solver.domain_shape && solver.a > 0 && solver.b > 0) return coaxToGeometryText(solver, units);
+    if (solver.is_coax) return coaxToGeometryText(solver, units);
     if (all.some(o => o.shape)) throw new Error('Only rectangular geometries can be converted.');
     const fmt = v => (units === 'm' ? String(v) : String(Number((v / scale).toPrecision(12))));
     // Roughness and plating thickness in micrometres, their usual unit, whatever the
@@ -1043,11 +1043,12 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     return lines.join('\n') + '\n';
 }
 
-// A coaxial line (CoaxSolver) as n-gons: the dielectric disk, the centre conductor and
-// the shield as a ring of the model's wall thickness. Each n-gon has the vertex count
-// of the coax model and the area of its circle, so the text solves to the same line.
-// The domain is open around the shield.
-function coaxToGeometryText(solver, units) {
+// A coaxial line as n-gons: the dielectric disk, the centre conductor and the shield
+// as a ring of the given wall thickness. Each n-gon has the area of its circle. The
+// domain is open around the shield. CoaxSolver builds its geometry from this text.
+// solver: { a, b, n_inner, n_outer, shield_thickness, epsilon_r, tan_delta, plating },
+// plating { sigma, thickness, rq, inner, outer } or null.
+export function coaxToGeometryText(solver, units) {
     const scale = LENGTH_UNITS[units];
     const fmt = v => String(Number((v / scale).toPrecision(12)));
     // Vertex radius of the n-gon with the area of a circle of radius r.

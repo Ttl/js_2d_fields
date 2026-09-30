@@ -2568,7 +2568,7 @@ export class TriBackend {
         // grounds, via slabs, cutout remnants) are handled inside the solve as passive
         // C = 0 return conductors. On 'auto' a differential pair needs a way to select
         // the mode (the symmetry-plane BC or the per-conductor drives below), a
-        // single-ended line has one mode and runs on a full domain too. Shaped conductors (coax) have no rect-based skin-band/
+        // single-ended line has one mode and runs on a full domain too. Circle shapes have no skin-band/
         // classification support, so they fall back to the H-field perturbation.
         // Per-face plating is handled inside MQS (surfaceZs weights each face's smooth
         // current by its own impedance), so plating doesn't force perturbation.
@@ -2622,8 +2622,7 @@ export class TriBackend {
                 'accurately.' });
         }
         // Any other geometry the default MQS method passes to the perturbation method. Not
-        // one of round conductors only (a coax): with no corners, the perturbation method
-        // is accurate there.
+        // one of circles only: with no corners, the perturbation method is accurate there.
         const roundOnly = cr.rects.every(r => r.shape && !isPolyShape(r.shape));
         if (lossMethod === 'auto' && !useMQS && f > 0 && !roundOnly && !this._noMqsThisSolve) {
             this._warnOnce({ type: 'mqs-perturbation', mode, freq: f, message:

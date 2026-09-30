@@ -115,7 +115,7 @@ function halfCirclePolygon(cx, cy, r, n, phase = 0) {
 //   thickness - the conductor's thin dimension (slab reactance, skin band gating)
 //   round     - a round wire (n-gon), whose internal inductance follows the wire rule
 //
-// An `outside_*` shape is the COMPLEMENT of its body: the coax shield is "everything at
+// An `outside_*` shape is the COMPLEMENT of its body: a shield that is "everything at
 // radius >= b", which has zero meshed area (the meshed domain stops at the boundary)
 // but still owns every node and edge on that boundary. That is what makes the outer
 // boundary PEC and gives it loss edges, without meshing any shield metal or leaving
@@ -125,8 +125,8 @@ export function isComplement(shape) {
     return shape.type === 'outside_circle' || shape.type === 'outside_polygon';
 }
 
-// Polygon and ring shapes (custom geometry primitives), as opposed to the circles of
-// the coax model.
+// Polygon and ring shapes (custom geometry primitives and the coax), as opposed to
+// circles.
 export const isPolyShape = shape => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
 
 // Bounds of a rect { x_min.. } or { xmin.. } as { xmin, xmax, ymin, ymax }.

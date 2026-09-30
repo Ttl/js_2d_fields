@@ -2270,7 +2270,7 @@ export class FieldSolver2D {
 
     // Per-unit-length DC conductance of the positive traces, the negative traces and
     // the grounds. Conductors of one kind that overlap count the shared area once, at
-    // the later one's metal. A complement shape (the native coax shield) has no area:
+    // the later one's metal. A complement shape (a shield outside a circle) has no area:
     // it is semi-infinite metal without DC resistance.
     _dc_conductances() {
         const g = { pos: 0, neg: 0, gnd: 0 };

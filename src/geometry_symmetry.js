@@ -124,9 +124,8 @@ export function conductorFinishKey(c) {
 export function isXSymmetric(conductors, dielectrics, domainW, { finish: withFinish = true } = {}) {
     const tol = symTol(domainW);
     // Shaped geometry can't be compared by rect spans, so a shape declares its own mirror
-    // symmetry instead (CoaxSolver sets xSymmetric on polygons built with n % 4 === 0 and
-    // phase 0, which puts vertices exactly on the y axis so the x >= 0 half is an exact
-    // half). Every shape must qualify and the rectangular remainder still has to pass
+    // symmetry instead (xSymmetric on circles built with n % 4 === 0 and phase 0, which
+    // puts vertices exactly on the y axis so the x >= 0 half is an exact half). Every shape must qualify and the rectangular remainder still has to pass
     // the span test below, so a shaped conductor can never wave through asymmetric rects
     // sitting next to it.
     // Polygon and ring shapes (custom geometry) need a mirror partner of the same role

@@ -124,7 +124,7 @@ class RectWaveguideSolver extends FieldSolver2D {
         // lossy surface impedance on the domain boundary, contributing surface loss but no
         // DC resistance), so nothing but the plot reads this. Without it the geometry view
         // would show a bare rectangle of dielectric with no indication of the metal that
-        // makes it a waveguide. Same role as CoaxSolver's Rd = 1.10*b shield extent.
+        // makes it a waveguide.
         const tWall = 0.06 * Math.min(this.a, this.b);
         this.enclosure_walls = {
             x_min: -this.a / 2, x_max: this.a / 2, y_min: 0, y_max: this.b,

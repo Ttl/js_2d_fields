@@ -83,9 +83,9 @@ const platingOf = (sel) => ({ sigma: AG, thickness: 4e-6, rq: 0, ...sel });
     // conductor's plating to all-around. With neither conductor named it is the centre
     // one — what coax plating meant before the selection existed.
     const plated = makeSolver({ plating: platingOf({ top: true, sides: false, bottom: false }) });
-    check('plating normalized to all-around',
-        plated.plating.all === true && plated.plating.top && plated.plating.sides && plated.plating.bottom);
-    check('plating has no thick-corner wrap (no corners)', plated.plating.thick_corners === false);
+    const pc = plated.conductors[0].plating;
+    check('plating normalized to all-around', pc.all === true && pc.top && pc.sides && pc.bottom);
+    check('plating has no thick-corner wrap (no corners)', pc.thick_corners === false);
     check('an unnamed plating block applies to the inner conductor only',
         plated.conductors[0].plating !== null && plated.conductors[1].plating === null);
 
