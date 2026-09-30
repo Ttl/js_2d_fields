@@ -875,6 +875,8 @@ function getWorker() {
         // this one is holding a multi-hundred-MB WASM heap.
         w.terminate();
         if (_worker === w) _worker = null;
+        // The solve kept for plots died with the worker.
+        plotFieldsSolver = null; plotFieldsJob = null; plotFieldsSolveKey = null;
     };
     _worker.onmessageerror = () => {
         // A reply that could not be deserialized (structured clone refused something in a
@@ -1025,6 +1027,8 @@ function solveInputKey() {
 // plot fields instead of solving again. Returns true when it handled the click.
 function replotInsteadOfSolve() {
     if (!solver || solver !== plotFieldsSolver || !solver.solution_valid) return false;
+    // A running solve: runSimulation reports it.
+    if (isSimulating || isSweeping || isSolvingModes) return false;
     const key = solveInputKey();
     if (!key || key !== plotFieldsSolveKey) return false;
     const f = plotFrequency() ?? plotFieldsMaxFreq;
@@ -1589,7 +1593,7 @@ function plotModesField(grid, mode, idx, resetView = false) {
     }
 
     Plotly.react(container, traces, layout,
-        { responsive: true, displayModeBar: true, scrollZoom: true });
+        { responsive: true, displayModeBar: true, scrollZoom: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
     if (M) updateModesImage(container);
     if (!container._modesRelayoutBound) {
         container._modesRelayoutBound = true;
@@ -1629,7 +1633,7 @@ function plotModesGeometry() {
     const traces = [{ type: 'scatter', x: [view.xRange[0], view.xRange[1]], y: [view.yRange[0], view.yRange[1]],
         mode: 'markers', marker: { size: 0, opacity: 0 }, hoverinfo: 'skip', showlegend: false }];
     const layout = modesPlotLayout('Geometry (click Solve Modes to compute fields)', view, buildGeometryShapes(maxY));
-    Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+    Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
 
 // Focused view (mm) around the signal conductors — the geometry tab's zoom

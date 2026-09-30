@@ -305,13 +305,16 @@ async function jobSimulate({ params, frequencies, opts }) {
     }
 
     sweepResults.sort((a, b) => a.freq - b.freq);
+    // A stop that arrives during the plot below comes after the sweep finished, so it
+    // does not discard the sweep.
+    const stopped = stopRequested;
     let plotted = false;
-    if (!stopRequested) {
+    if (!stopped) {
         plotted = await plotFields(solver, cachedResults, plotFreq);
         simSolver = solver; simCached = cachedResults; simJob = currentId;
     }
     return {
-        stopped: stopRequested,
+        stopped,
         sweepResults: stripSweep(sweepResults),
         // The converged mesh solve itself: the summary block reports Z_diff / Z_common /
         // RLGC_matrix from it, and an interpolated sweep row is not a substitute (it is
@@ -353,7 +356,10 @@ function jobPlotRelease({ job }) {
 
 function jobModeField({ idx }) {
     if (!modesSolver) return { grid: null };
-    return { grid: modesSolver.getModeField(idx) || null };
+    const g = modesSolver.getModeField(idx);
+    if (!g) return { grid: null };
+    // The plot reads |E| and the triangles, not the field components.
+    return { grid: { x: g.x, y: g.y, E: g.E, mesh: g.mesh } };
 }
 
 // Parameter Sweep

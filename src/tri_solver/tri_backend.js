@@ -2692,7 +2692,8 @@ export class TriBackend {
                 slot.fw = fw;
                 // The same mode at F_STATIC_MAX with the same materials: the plot takes
                 // the change of the mode field from there, see _plotMode.
-                slot.fwRef = null;
+                // At F_STATIC_MAX the mode is its own reference.
+                slot.fwRef = f === F_STATIC_MAX ? fw : null;
                 if (fw && f > F_STATIC_MAX) {
                     try { slot.fwRef = this._eigenPick(st, F_STATIC_MAX, phiEps, eps_eff_static).fw; } catch { slot.fwRef = null; }
                 }
@@ -3386,16 +3387,19 @@ export class TriBackend {
         if (!slots.every(sl => sl.done)) {
             const prevWarnings = this._modeWarnings;
             this._modeWarnings = [];
+            let failed = false;
             try {
                 this._syncMaterials(f, false);
                 for (const mode of this.modeNames) this._modeAtFreq(mode, f);
             } catch (e) {
+                failed = true;
                 s.plotNote = `Plot field solve at ${(f / 1e9).toFixed(3)} GHz failed: ${(e && e.message) || e}`;
             } finally {
                 this._modeWarnings = prevWarnings;
             }
             slots = this.modeNames.map(mode => this._plotSlot(mode, f));
-            for (const sl of slots) sl.done = true;
+            // A failed solve plots what it got but is not kept: the next plot at f retries.
+            if (!failed) for (const sl of slots) sl.done = true;
         }
         const modes = this.modeNames.map((mode, i) => this._plotMode(mode, f, slots[i]));
         s.x = modes[0].x;

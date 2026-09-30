@@ -430,8 +430,10 @@ function getActualDataRange() {
 function setScaleRange(min, max) {
     zMin = min;
     zMax = max;
-    // The surface current colors are binned by value, so a new range redraws them.
-    if (currentView === "current" || currentView === "density" || (currentView.startsWith("efield") && getFieldMesh())) {
+    // The surface current colors are binned by value, and the triangle-mesh contours
+    // are traced per level, so a new range redraws them.
+    if (currentView === "current" || currentView === "density"
+        || ((currentView.startsWith("efield") || currentView === "geometry") && getFieldMesh())) {
         draw(); return;
     }
 

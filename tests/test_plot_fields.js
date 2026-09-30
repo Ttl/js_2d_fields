@@ -122,6 +122,12 @@ for (const backend of ['rectilinear', 'triangular']) {
     const dLo = relDiff(lo, st);
     check('full-wave E just above 100 MHz continues the static field', lo.fieldKind === 'fullwave' && dLo < 0.005,
         `${lo.fieldKind}, ${(dLo * 100).toFixed(3)} %`);
+    // At exactly 100 MHz the mode is its own reference: as smooth as the static field.
+    await quiet(() => s.plotFieldsAt(100e6, cached));
+    const at = s.getPlotFields();
+    const rAt = roughness(at) / roughness(st);
+    check('full-wave E at exactly 100 MHz as smooth as the static field', at.fieldKind === 'fullwave' && rAt < 1.05,
+        `${at.fieldKind}, x${rAt.toFixed(2)}`);
     await quiet(() => s.plotFieldsAt(20e9, cached));
     const hi = s.getPlotFields();
     const r = roughness(hi) / roughness(st);
