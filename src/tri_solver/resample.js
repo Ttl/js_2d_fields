@@ -529,12 +529,29 @@ export function staticFieldOnMesh(mesh, phi, domain, opts = {}) {
 // four at its edge midpoints, { tris: [x0, y0, x1, y1, x2, y2, ...], E: [E0, E1, E2, ...] }.
 // combine(t, q, Ex, Ey) maps the static field at point q of triangle t to the plotted one
 // ([Ex, Ey]); mirror adds the image about x = 0 of a half-domain solve.
+//
+// Each triangle's field is its own, so a vertex or edge midpoint shared by triangles would
+// read a different |E| in each (by tens of percent at a conductor corner, where the field
+// is singular) and a contour line would end on the shared edge. The plotted value is the
+// mean over the triangles of the same material sharing the point: continuous within a
+// material, sharp across an interface.
 export function meshFieldBlock(mesh, sf, combine = null, mirror = false) {
-    return splitTriBlock(mesh, sf.tri, (k, t, mag) => {
+    const { tris, triEdges, nNodes, nEdges } = mesh;
+    const { regionOf, nRegions: nR } = buildTriRegions(mesh);
+    const n = sf.tri.length;
+    const sum = new Float64Array((nNodes + nEdges) * nR), cnt = new Uint32Array((nNodes + nEdges) * nR);
+    // Slot of point q (vertices 0-2, then edge midpoints) of triangle t.
+    const slot = (t, q) => (q < 3 ? tris[3 * t + q] : nNodes + triEdges[3 * t + q - 3]) * nR + regionOf[t];
+    for (let k = 0; k < n; k++) {
+        const t = sf.tri[k];
         for (let q = 0; q < 6; q++) {
             const e = combine ? combine(t, q, sf.Ex[6 * k + q], sf.Ey[6 * k + q]) : [sf.Ex[6 * k + q], sf.Ey[6 * k + q]];
-            mag[q] = Math.hypot(e[0], e[1]);
+            const i = slot(t, q);
+            sum[i] += Math.hypot(e[0], e[1]); cnt[i]++;
         }
+    }
+    return splitTriBlock(mesh, sf.tri, (k, t, mag) => {
+        for (let q = 0; q < 6; q++) { const i = slot(t, q); mag[q] = sum[i] / cnt[i]; }
     }, mirror);
 }
 

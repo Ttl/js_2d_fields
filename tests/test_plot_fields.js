@@ -150,6 +150,26 @@ for (const backend of ['rectilinear', 'triangular']) {
     {
         const M = hi.fieldMesh && hi.fieldMesh[0];
         check('full-wave E on the mesh present', !!(M && M.E.length && M.E.every(isFinite)), M ? `${M.E.length / 3} triangles` : 'none');
+        // A point shared by triangles of one material reads one value in all of them, or a
+        // contour line ends on the shared edge (the trace corners, where the field is
+        // singular, used to differ by tens of percent).
+        {
+            const seen = new Map();
+            let worst = 0, at = '';
+            for (let t = 0; M && t < M.E.length / 3; t++) {
+                const cy = (M.tris[6 * t + 1] + M.tris[6 * t + 3] + M.tris[6 * t + 5]) / 3;
+                for (let a = 0; a < 3; a++) {
+                    const x = M.tris[6 * t + 2 * a], y = M.tris[6 * t + 2 * a + 1];
+                    const key = `${Math.round(x * 1e10)},${Math.round(y * 1e10)},${cy > MS.substrate_height}`;
+                    const v = M.E[3 * t + a], u = seen.get(key);
+                    if (u === undefined) { seen.set(key, v); continue; }
+                    const d = Math.abs(v - u) / Math.max(u, v);
+                    if (d > worst) { worst = d; at = `(${(x * 1e3).toFixed(4)}, ${(y * 1e3).toFixed(4)}) mm`; }
+                }
+            }
+            check('full-wave E on the mesh: one value per shared point within a material', worst < 1e-9,
+                `worst ${(worst * 100).toFixed(2)} % at ${at}`);
+        }
         const h = MS.substrate_height, above = [], below = [];
         for (let t = 0; M && t < M.E.length / 3; t++) {
             const cy = (M.tris[6 * t + 1] + M.tris[6 * t + 3] + M.tris[6 * t + 5]) / 3;
