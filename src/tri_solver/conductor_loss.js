@@ -310,6 +310,48 @@ function gatherHt(triIdx, mesh, htRe, htIm, hDofs) {
 }
 
 // --- Poynting power from projected Ht (consistent with loss integral) ---
+// Surface current |K| = |H| (transverse and axial) of a projectH field on the loss
+// edges, evaluated in the triangle beside each edge and sampled every maxLen at most.
+// Returns segments { x0, y0, x1, y1, K } in the scale of the projected field.
+export function surfaceHSegments(mesh, fm, projH, isLossEdge, maxLen) {
+    const { nodes, edges, tris, triEdges, nEdges, nTris, nNodes } = mesh;
+    const { htRe, htIm, hzRe, hzIm, hDofs, omu } = projH;
+    const edgeVertsLocal = [[0, 1], [1, 2], [2, 0]];
+    const edgeToTri = buildEdgeToTri(nEdges, nTris, triEdges);
+    const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
+    const hzR = new Float64Array(6), hzI = new Float64Array(6);
+    for (let e = 0; e < nEdges; e++) {
+        if (!isLossEdge[e]) continue;
+        let t = -1;
+        for (const u of edgeToTri[e]) if (fm.faceF[2 * u] >= 0) { t = u; break; }
+        if (t < 0) continue;
+        const { hR, hI, nNed } = gatherHt(t, mesh, htRe, htIm, hDofs);
+        const { coeff } = triCoefficients(nodes, tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]);
+        for (let k = 0; k < 3; k++) {
+            hzR[k] = hzRe[tris[3 * t + k]]; hzI[k] = hzIm[tris[3 * t + k]];
+            hzR[k + 3] = hzRe[nNodes + triEdges[3 * t + k]]; hzI[k + 3] = hzIm[nNodes + triEdges[3 * t + k]];
+        }
+        const n0 = edges[2 * e], n1 = edges[2 * e + 1];
+        const x0 = nodes[2 * n0], y0 = nodes[2 * n0 + 1], dx = nodes[2 * n1] - x0, dy = nodes[2 * n1 + 1] - y0;
+        const n = Math.max(1, Math.ceil(Math.hypot(dx, dy) / maxLen));
+        for (let k = 0; k < n; k++) {
+            const px = x0 + dx * (k + 0.5) / n, py = y0 + dy * (k + 0.5) / n;
+            const { Wx, Wy } = evalNedelecBasis(coeff, edgeVertsLocal, px, py);
+            let hxR = 0, hxI = 0, hyR = 0, hyI = 0;
+            for (let m = 0; m < nNed; m++) { hxR += Wx[m] * hR[m]; hxI += Wx[m] * hI[m]; hyR += Wy[m] * hR[m]; hyI += Wy[m] * hI[m]; }
+            const { Nz } = evalLagrangeBasis(coeff, edgeVertsLocal, px, py);
+            let zR = 0, zI = 0;
+            for (let m = 0; m < 6; m++) { zR += Nz[m] * hzR[m]; zI += Nz[m] * hzI[m]; }
+            seg.x0.push(x0 + dx * k / n); seg.y0.push(y0 + dy * k / n);
+            seg.x1.push(x0 + dx * (k + 1) / n); seg.y1.push(y0 + dy * (k + 1) / n);
+            seg.K.push(Math.sqrt(hxR * hxR + hxI * hxI + hyR * hyR + hyI * hyI + zR * zR + zI * zI) / omu);
+        }
+    }
+    const out = {};
+    for (const k of ['x0', 'y0', 'x1', 'y1', 'K']) out[k] = Float64Array.from(seg[k]);
+    return out;
+}
+
 export function computePoyntingFromProjectedH(mesh, fm, vecRe, vecIm, htRe, htIm, omu, hDofs) {
     const { nodes, tris, triEdges, triSigns, nTris, nEdges } = mesh;
     const { edgeF, faceF, nFreeTransverse } = fm;

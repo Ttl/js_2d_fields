@@ -239,6 +239,31 @@ console.log('\n=== surface finish ===');
         calculate_Zrough_layered(f, SIG, PL.rq, PL.sigma, PL.thickness).re / Rs, 0.5);
 }
 
+// ---------------------------------------------------------------- wall current |K|
+// TE10 per 1 W: on the side walls only Hz, |K| = E0*kc/(omega*mu0), at the broad-wall
+// centre only Hx, |K| = E0*beta/(omega*mu0), with P = E0^2*a*b/(4*Z_TE). The loss
+// integral of |K|^2 is alpha_c: Rs * int |K|^2 dl / 4 at 1 W.
+console.log('\n=== wall current |K| ===');
+for (const f of [7e9, 10e9]) {
+    await quiet(() => s.plotFieldsAt(f));
+    const K = s.getPlotFields().surfaceK[0];
+    const w = 2 * Math.PI * f, beta = air.beta(f);
+    const E0 = Math.sqrt(4 * air.ZTE(f) / (A * B));
+    let side = NaN, centre = NaN, h2 = 0;
+    for (let i = 0; i < K.K.length; i++) {
+        const mx = (K.x0[i] + K.x1[i]) / 2, my = (K.y0[i] + K.y1[i]) / 2;
+        h2 += K.K[i] ** 2 * Math.hypot(K.x1[i] - K.x0[i], K.y1[i] - K.y0[i]);
+        if (Math.abs(Math.abs(mx) - A / 2) < 1e-9 && Math.abs(my - B / 2) < B / 50) side = K.K[i];
+        if (Math.abs(my - B) < 1e-9 && Math.abs(mx) < A / 500) centre = K.K[i];
+    }
+    const Rs = 1 / (SIG * Math.sqrt(2 / (w * MU0 * SIG)));
+    near(`${f / 1e9} GHz: |K| side wall`, side, E0 * kc / (w * MU0), 0.5);
+    near(`${f / 1e9} GHz: |K| broad-wall centre`, centre, E0 * beta / (w * MU0), 0.5);
+    near(`${f / 1e9} GHz: Rs * int |K|^2 / 4 = alpha_c`, Rs * h2 / 4, air.alphaC(f), 0.5);
+}
+await quiet(() => s.plotFieldsAt(5e9));
+check('no |K| below cutoff', s.getPlotFields().surfaceK[0] === null);
+
 // ---------------------------------------------------------------- mesh independence
 // A different mesh either way, so agreement between them is a mesh-independent statement.
 console.log('\n=== mesh independence ===');

@@ -33,7 +33,7 @@ import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, re
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
          femFromDecomposition, decompositionClassEps, buildTriGauge, gaugeSeed, gaugeExpand } from './tri_fem.js';
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
-         projectH, computePoyntingFromProjectedH } from './conductor_loss.js';
+         projectH, computePoyntingFromProjectedH, surfaceHSegments } from './conductor_loss.js';
 import { csqrt } from './fem_core.js';
 import { mqsConductorLoss, mqsPecInductance, refineSkinBand, condThinDim } from './mqs_loss.js';
 import { checkMeshQuality } from './tri_mesh.js';
@@ -3368,8 +3368,18 @@ export class TriBackend {
     plotFieldsAt(f) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         const s = this.solver;
-        // A waveguide's mode pattern is geometric, the same at every frequency.
-        if (this._isWG) { s.fieldFreq = f; s.fieldKind = 'fullwave'; return; }
+        // A waveguide's mode pattern is geometric, the same at every frequency. Its wall
+        // currents are not: the axial H grows relative to the transverse H towards cutoff.
+        if (this._isWG) {
+            this._syncMaterials(f, false);
+            s.surfaceK = [this._wgPlotCurrents(f)];
+            s.currentJ = null;
+            s.currentMesh = null;
+            s.surfaceKSource = ['waveguide'];
+            s.idealGrounds = null;
+            s.fieldFreq = f; s.fieldKind = 'fullwave';
+            return;
+        }
         s.plot_freq_target = f;
         s.plotNote = null;
         let slots = this.modeNames.map(mode => this._plotSlot(mode, f));
@@ -3407,6 +3417,31 @@ export class TriBackend {
         s.triMesh = { nodes: this.mesh.nodes, tris: this.mesh.tris, nTris: this.mesh.nTris };
         s.solution_valid = true;
         s.mesh_generated = true;
+    }
+
+    // Surface current |K| = |H| on the waveguide walls at f per 1 W of transmitted
+    // power, segments { x0, y0, x1, y1, K }. Null below cutoff, where the mode carries
+    // no power.
+    _wgPlotCurrents(f) {
+        const wg = this._wg, mesh = this.mesh;
+        const er = maxEpsRe(mesh.epsMap);
+        const k0 = 2 * Math.PI * f / c0;
+        const g2 = wg.kc * wg.kc - k0 * k0 * er;
+        if (!(g2 < 0)) return null;
+        const beta = Math.sqrt(-g2);
+        let projH, P;
+        try {
+            projH = projectH(mesh, wg.fm, wg.vRe, wg.vIm, { re: 0, im: beta }, f, this.ctx.wasmSolver, wg.projCache);
+            P = Math.abs(computePoyntingFromProjectedH(mesh, wg.fm, wg.vRe, wg.vIm,
+                projH.htRe, projH.htIm, 2 * Math.PI * f * MU0, projH.hDofs));
+        } catch { return null; }
+        if (!(P > 1e-30)) return null;
+        const d = this.domain;
+        const K = surfaceHSegments(mesh, wg.fm, projH, wg.lossMask,
+            Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000);
+        const scale = 1 / Math.sqrt(P);
+        for (let i = 0; i < K.K.length; i++) K.K[i] *= scale;
+        return K;
     }
 
     // Current plots from the MQS solves kept in the plot slots, per mode: |J| in the

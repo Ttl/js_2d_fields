@@ -95,7 +95,7 @@ check('S11 is zero at every point (self-referenced)', sp.s11max === -300,
     `max ${sp.s11max.toFixed(1)} dB`);
 check('S21 is a small insertion loss', sp.s21max < 0 && sp.s21max > -1, `max ${sp.s21max.toFixed(4)} dB`);
 
-// ---- Geometry view has no Potential button (there is no static potential) ----
+// ---- Geometry view has no Potential or |J| button (no static potential, no MQS) ----
 await page.click('[data-tab="geometry"]');
 await page.waitForTimeout(800);
 const geo = await page.evaluate(() => {
@@ -107,8 +107,9 @@ const geo = await page.evaluate(() => {
         rings: shapes.filter(s => s.type === 'path' && s.fillrule === 'evenodd').length,
     };
 });
-check('geometry view offers Geometry and |E| Field only',
-    JSON.stringify(geo.buttons) === '["Geometry","|E| Field"]', JSON.stringify(geo.buttons));
+// The wall current |K| comes from the mode field, there is no MQS solve for a |J|.
+check('geometry view offers Geometry, |E| Field and |K| Current',
+    JSON.stringify(geo.buttons) === '["Geometry","|E| Field","|K| Current"]', JSON.stringify(geo.buttons));
 // The walls are not in solver.conductors (they live in the boundary conditions), so they
 // are drawn from the cosmetic enclosure_walls descriptor as a ring. Without it the view is
 // a bare rectangle of dielectric with nothing marking the metal.

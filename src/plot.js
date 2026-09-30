@@ -1135,8 +1135,11 @@ function draw(resetZoom = false) {
         const ideal = fromMqs && solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "";
         // Both plot the tangential H at the surface. In the perfect-conductor limit it is the
         // current sheet, from the MQS solve only in the skin regime.
-        title = `Surface Current |K| = |H<sub>t</sub>| per 1 A${modeLabel} (${db ? "dB A/m" : "A/m"})` +
-            (fromMqs ? `${fieldFreqLabel(solver)}, MQS${ideal}` : ", perfect-conductor limit");
+        const wg = solver.surfaceKSource && solver.surfaceKSource[mi] === 'waveguide';
+        title = wg
+            ? `Surface Current |K| = |H| per 1 W (${db ? "dB A/m" : "A/m"})${fieldFreqLabel(solver)}`
+            : `Surface Current |K| = |H<sub>t</sub>| per 1 A${modeLabel} (${db ? "dB A/m" : "A/m"})` +
+                (fromMqs ? `${fieldFreqLabel(solver)}, MQS${ideal}` : ", perfect-conductor limit");
         const below = s => ({ ...s, layer: 'below' });
         shapes.push(...dielectricFillShapes(solver, maxY).map(below));
         shapes.push(...conductorFillShapes(solver, maxY).map(below));
