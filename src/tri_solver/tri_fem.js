@@ -1518,7 +1518,10 @@ function localEdgeOf(tris, u, a, b) {
 // Marked triangles get their longest edge bisected. Propagation ensures
 // conformity: if a triangle has a marked non-longest edge, its longest
 // edge also gets marked. This preserves the minimum angle guarantee.
-export function refineTriMesh(mesh, marked) {
+// opts.longest: the edge each triangle bisects (local index 0-2, -1 for the longest),
+// the longest in a metric of the caller's: anisotropic refinement.
+// opts.smooth === false: no smoothing or edge swaps, which would undo it.
+export function refineTriMesh(mesh, marked, opts = {}) {
     const { nodes, tris, edges, triEdges, triSigns, nNodes, nTris, nEdges } = mesh;
 
     // Compute edge lengths
@@ -1528,6 +1531,7 @@ export function refineTriMesh(mesh, marked) {
         const dx = nodes[2*n1]-nodes[2*n0], dy = nodes[2*n1+1]-nodes[2*n0+1];
         edgeLen2[e] = dx*dx + dy*dy;
     }
+    const smooth = opts.smooth !== false;
 
     // Find longest edge of each triangle
     const triLongest = new Int32Array(nTris); // local edge index (0,1,2)
@@ -1535,7 +1539,7 @@ export function refineTriMesh(mesh, marked) {
         let best = 0;
         if (edgeLen2[triEdges[3*t+1]] > edgeLen2[triEdges[3*t+best]]) best = 1;
         if (edgeLen2[triEdges[3*t+2]] > edgeLen2[triEdges[3*t+best]]) best = 2;
-        triLongest[t] = best;
+        triLongest[t] = opts.longest && opts.longest[t] >= 0 ? opts.longest[t] : best;
     }
 
     // Minimum edge length guard
@@ -1879,9 +1883,11 @@ export function refineTriMesh(mesh, marked) {
     }
 
     // Phase 1: smooth new midpoints
-    const newMidpoints = new Uint8Array(newNodeCount);
-    for (let n = nNodes; n < newNodeCount; n++) newMidpoints[n] = 1;
-    smoothVertexSet(newMidpoints, 3);
+    if (smooth) {
+        const newMidpoints = new Uint8Array(newNodeCount);
+        for (let n = nNodes; n < newNodeCount; n++) newMidpoints[n] = 1;
+        smoothVertexSet(newMidpoints, 3);
+    }
 
     // --- Iterative quality improvement: alternating edge swaps and targeted smoothing ---
     function isOnConstraint(na, nb) {
@@ -2012,7 +2018,7 @@ export function refineTriMesh(mesh, marked) {
     }
 
     // Phase 2: alternating edge swaps + quality-targeted smoothing
-    for (let outerPass = 0; outerPass < 3; outerPass++) {
+    for (let outerPass = 0; smooth && outerPass < 3; outerPass++) {
         // Edge swaps
         for (let sp = 0; sp < 5; sp++) { if (edgeSwapPass() === 0) break; }
         // Quality-targeted smoothing of vertices near slivers. Determined
@@ -2066,7 +2072,7 @@ export function refineTriMesh(mesh, marked) {
         smoothVertexSet(sliverAdj, 5, clampLo, clampHi);
     }
     // Final edge swap pass after last smoothing
-    for (let sp = 0; sp < 5; sp++) { if (edgeSwapPass() === 0) break; }
+    for (let sp = 0; smooth && sp < 5; sp++) { if (edgeSwapPass() === 0) break; }
 
     // --- Rebuild edge list and tri-edge mapping ---
     // Edges are numbered in order of first appearance (triangle-major, local edge

@@ -2884,7 +2884,16 @@ export class TriBackend {
             // stops on its own as soon as nothing is left above the size target
             // (or the triangle cap trips), so an unused pass costs nothing. The
             // triangle cap is the real bound on runaway growth.
-            const bandPasses = this.opts.mqsBandPasses ?? 20;
+            // Anisotropic band (refineSkinBand aniso), the default: elements stretched
+            // along the surface away from corners, sized across it by delta. R within
+            // ~0.1 % of the isotropic band with 2-20x fewer triangles, the more the
+            // longer the perimeter / delta, so wide conductors and round shields at
+            // tens of GHz stay under mqsMaxTris. One bisection per pass instead of a
+            // 1-to-4 split, so it takes more passes. mqsBandAniso: false restores the
+            // isotropic band.
+            const bandAniso = (this.opts.mqsBandAniso ?? true) ? { cornerGrade: this.opts.mqsBandCornerGrade,
+                maxAspect: this.opts.mqsBandMaxAspect, cornerTurn: this.opts.mqsBandCornerTurn } : null;
+            const bandPasses = this.opts.mqsBandPasses ?? (bandAniso ? 60 : 20);
             // Rects sharing a skin depth refine together: [{ k: delta / dlt, rects }],
             // one entry unless conductors have their own conductivity.
             const byDelta = (isSig) => {
@@ -2909,13 +2918,13 @@ export class TriBackend {
                 const sigCap = base.nTris + mqsMaxTris;
                 for (const { k, rects } of sigBands) {
                     m = refineSkinBand(m, { rects, symX }, k * dlt, bandPasses, mqsBand, bandDelta * k * dlt,
-                        sigCap, null, depthSlope);
+                        sigCap, null, depthSlope, bandAniso);
                     if (m.bandTrunc) trunc.push({ band: 'signal', ...m.bandTrunc });
                 }
                 const gndCap = m.nTris + gndBudget;
                 for (const { k, rects } of gndBands) {
                     m = refineSkinBand(m, { rects, symX }, k * dlt, bandPasses, mqsBand,
-                        bandDelta * k * dlt, gndCap, gndGrading, depthSlope);
+                        bandDelta * k * dlt, gndCap, gndGrading, depthSlope, bandAniso);
                     if (m.bandTrunc) trunc.push({ band: 'ground', ...m.bandTrunc });
                 }
                 m.bandTrunc = trunc.length ? trunc : null;

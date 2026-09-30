@@ -84,7 +84,21 @@ const P2_AT_Q = (() => {
 // condRect.symX (optional) is the x of a symmetry plane. A rect cut by it is measured
 // as its mirrored whole, so the cut face gets no band. Shaped conductors keep their
 // full polygon in a half-domain solve and need no mirroring.
-export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity, grading = null, depthSlope = 0) {
+//
+// `aniso` (optional, { cornerGrade, maxAspect }) refines to a metric aligned with the
+// surface instead of isotropically: the size across the band is the depth-graded
+// target above, the size along it only shrinks towards corners, max(across,
+// cornerGrade * distance to the nearest corner), at most maxAspect times the size
+// across. The current along a face varies on the scale of the face, not of delta, so
+// the band elements stretch along it. Corners are the rect corners and the polygon
+// vertices turning by more than CORNER_TURN, the vertices of an n-gon standing in for
+// a circle are not. Each triangle takes one metric, at its point closest to the
+// surface, and bisects its longest edge in it: longest-edge bisection in a fixed
+// affine frame keeps the triangles' shape in the metric bounded. (Edges measured each
+// in their own metric let a triangle keep splitting a short edge where the normal
+// turns, down to a degenerate needle.)
+const CORNER_TURN = 20 * Math.PI / 180;
+export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH = 0, maxTris = Infinity, grading = null, depthSlope = 0, aniso = null) {
     const symX = condRect.symX ?? null;
     const rects = (condRect.rects || [condRect]).map(r =>
         symX !== null && !r.shape && Math.abs(r.xmin - symX) < 1e-12 ? { ...r, xmin: 2 * symX - r.xmax } : r);
@@ -153,7 +167,19 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
         for (const r of rects) d = Math.min(d, Math.abs(distToRectBoundary(r, x, y)));
         return d;
     }
+    const metric = aniso && targetH > 0 ? bandMetric() : null;
     for (let p = 0; ; p++) {
+        if (metric) {
+            const r = metric.pass(mesh);
+            if (!r) break;
+            if (p >= passes) { trunc = { reason: 'passes', passes, nTris: mesh.nTris, nMarked: r.nMarked }; break; }
+            if (mesh.nTris + 2 * r.nMarked > maxTris) {
+                trunc = { reason: 'maxTris', maxTris, nTris: mesh.nTris, nMarked: r.nMarked };
+                break;
+            }
+            mesh = refineTriMesh(mesh, r.marked, { longest: r.longest, smooth: false });
+            continue;
+        }
         const marked = new Uint8Array(mesh.nTris);
         let any = false, nMarked = 0;
         // Vertex distances, evaluated once per node on first use (NaN = not yet).
@@ -209,6 +235,117 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     }
     mesh.bandTrunc = trunc;
     return mesh;
+
+    // The surface-aligned metric of `aniso`. pass(mesh) marks the band triangles with an
+    // edge longer than 1 in their metric and returns { marked, nMarked, longest } (the
+    // local edge each band triangle bisects, -1 off the band), or null when every band
+    // triangle fits.
+    function bandMetric() {
+        const corners = [];
+        // A vertex is a corner when the outline turns by more than CORNER_TURN within
+        // the band width of it: a rounding much smaller than delta is a corner at the
+        // skin depth's scale, a circle's n-gon is not.
+        const cornerTurn = aniso.cornerTurn ?? CORNER_TURN;
+        const addLoop = (poly) => {
+            const n = poly.length / 2;
+            const turn = new Float64Array(n), seg = new Float64Array(n);
+            for (let i = 0; i < n; i++) {
+                const j = (i + n - 1) % n, k = (i + 1) % n;
+                const ax = poly[2*i] - poly[2*j], ay = poly[2*i+1] - poly[2*j+1];
+                const bx = poly[2*k] - poly[2*i], by = poly[2*k+1] - poly[2*i+1];
+                turn[i] = Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
+                seg[i] = Math.hypot(bx, by);   // vertex i to i+1
+            }
+            for (let i = 0; i < n; i++) {
+                let sum = turn[i];
+                for (let s = 0, k = i; ; ) {        // forward
+                    s += seg[k]; k = (k + 1) % n;
+                    if (s > bw || k === i) break;
+                    sum += turn[k];
+                }
+                for (let s = 0, k = i; ; ) {        // backward
+                    k = (k + n - 1) % n; s += seg[k];
+                    if (s > bw || k === i) break;
+                    sum += turn[k];
+                }
+                if (Math.abs(sum) > cornerTurn) corners.push(poly[2*i], poly[2*i+1]);
+            }
+        };
+        for (const r of rects) {
+            if (!r.shape) { corners.push(r.xmin, r.ymin, r.xmax, r.ymin, r.xmax, r.ymax, r.xmin, r.ymax); continue; }
+            if (!shields.has(r) && r.shape.poly) addLoop(r.shape.poly);
+            if (r.shape.hole) addLoop(r.shape.hole);
+        }
+        const cornerDist = (x, y) => {
+            let d2 = Infinity;
+            for (let i = 0; i < corners.length; i += 2) d2 = Math.min(d2, (x - corners[i]) ** 2 + (y - corners[i+1]) ** 2);
+            return Math.sqrt(d2);
+        };
+        const grade = aniso.cornerGrade ?? 0.25;
+        const maxAspect = aniso.maxAspect ?? 64;
+        // Unit normal of the nearest surface at (x, y), the gradient of its signed
+        // distance, or null on a medial axis (the middle of a trace, the diagonal of a
+        // corner) where the gradient collapses and there is no normal.
+        const normalAt = (x, y) => {
+            let best = null, bd = Infinity;
+            for (const r of rects) {
+                const d = Math.abs(distToRectBoundary(r, x, y));
+                if (d < bd) { bd = d; best = r; }
+            }
+            const h = 1e-3 * targetH;
+            const gx = distToRectBoundary(best, x + h, y) - distToRectBoundary(best, x - h, y);
+            const gy = distToRectBoundary(best, x, y + h) - distToRectBoundary(best, x, y - h);
+            const g = Math.hypot(gx, gy);
+            return g > h ? [gx / g, gy / g] : null;
+        };
+        return { pass(m) {
+            const { nodes, tris, nTris } = m;
+            const nodeDist = new Float64Array(m.nNodes).fill(NaN);
+            const vertDist = (v) => {
+                let d = nodeDist[v];
+                if (d !== d) d = nodeDist[v] = surfDist(nodes[2*v], nodes[2*v+1]);
+                return d;
+            };
+            const marked = new Uint8Array(nTris);
+            const longest = new Int8Array(nTris).fill(-1);
+            let nMarked = 0;
+            const P = new Float64Array(6), L2 = new Float64Array(3);
+            for (let t = 0; t < nTris; t++) {
+                for (let k = 0; k < 3; k++) { const v = tris[3*t+k]; P[2*k] = nodes[2*v]; P[2*k+1] = nodes[2*v+1]; }
+                const bx0 = Math.min(P[0], P[2], P[4]), bx1 = Math.max(P[0], P[2], P[4]);
+                const by0 = Math.min(P[1], P[3], P[5]), by1 = Math.max(P[1], P[3], P[5]);
+                if (!grown.some(g => !(bx1 < g.x0 || bx0 > g.x1 || by1 < g.y0 || by0 > g.y1))) continue;
+                const xc = (P[0] + P[2] + P[4]) / 3, yc = (P[1] + P[3] + P[5]) / 3;
+                // The closest point to the surface, of the centroid and the vertices.
+                let dS = surfDist(xc, yc), px = xc, py = yc;
+                for (let k = 0; k < 3; k++) {
+                    const d = vertDist(tris[3*t+k]);
+                    if (d < dS) { dS = d; px = P[2*k]; py = P[2*k+1]; }
+                }
+                if (!(dS < bw)) continue;
+                let hn = grading ? targetAt(xc, yc) : targetH;
+                if (depthSlope > 0) hn = Math.max(hn, depthTarget(dS));
+                // The normal at the closest point, or at the centroid when that point is
+                // on the surface of two faces (a corner vertex).
+                const n = normalAt(px, py) || normalAt(xc, yc);
+                // Corner distance of the triangle's nearest point to a corner (of the
+                // centroid and the vertices).
+                const dc = Math.min(cornerDist(xc, yc), cornerDist(P[0], P[1]), cornerDist(P[2], P[3]), cornerDist(P[4], P[5]));
+                const ht = n ? Math.min(maxAspect * hn, Math.max(hn, grade * dc)) : hn;
+                let lMax = 0, kMax = 0;
+                for (let k = 0; k < 3; k++) {
+                    const a = k, b = (k + 1) % 3;
+                    const ex = P[2*b] - P[2*a], ey = P[2*b+1] - P[2*a+1];
+                    const l2 = ex * ex + ey * ey, en = n ? ex * n[0] + ey * n[1] : 0;
+                    L2[k] = n ? en * en / (hn * hn) + Math.max(0, l2 - en * en) / (ht * ht) : l2 / (hn * hn);
+                    if (L2[k] > lMax) { lMax = L2[k]; kMax = k; }
+                }
+                longest[t] = kMax;
+                if (lMax > 1) { marked[t] = 1; nMarked++; }
+            }
+            return nMarked ? { marked, nMarked, longest } : null;
+        } };
+    }
 }
 
 // Compute conductor loss by volume eddy-current solve.

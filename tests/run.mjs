@@ -59,6 +59,7 @@ const TIERS = {
     ],
     slow: [
         { file: 'tests/test_fullwave_correctness.js', cost: 98 },
+        { file: 'tests/test_mqs_aniso_band.js', cost: 23 },
         { file: 'tests/test_dielectric_overlap.js', cost: 40 },
         { file: 'tests/test_custom_geometry_lines.js', cost: 90 },
         { file: 'tests/test_custom_geometry_materials.js', cost: 100 },
