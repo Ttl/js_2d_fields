@@ -884,6 +884,18 @@ function viewAvailable(view, solver) {
     return false;
 }
 
+// Whether the plot fields `fields` (the worker's field payload) hold what the selected
+// view draws. A live update without it would switch the plot to the geometry view.
+function fieldsHaveWantedView(fields) {
+    if (!fields || wantedView === "geometry") return true;
+    const mi = shownModeIndex();
+    if (wantedView.startsWith("potential")) return !!fields.V;
+    if (wantedView.startsWith("efield")) return !!fields.Ex;
+    if (wantedView === "current") return !!(fields.surfaceK && fields.surfaceK[mi]);
+    if (wantedView === "density") return !!(fields.currentJ && fields.currentJ[mi]);
+    return true;
+}
+
 function draw(resetZoom = false) {
     const solver = get.solver();
     const Plotly = getPlotly();
@@ -2006,6 +2018,6 @@ function unfreeze() {
 }
 function isFrozen() { return frozenResultsData !== null; }
 
-export { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+export { draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
     centroidHoverTrace, triMeanE, updateTriImage };

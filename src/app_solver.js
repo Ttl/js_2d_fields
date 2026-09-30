@@ -1,7 +1,7 @@
 import { Complex } from './complex.js';
 import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usableSweepPoints } from './sparameters.js';
 import { exportSnP } from './snp_export.js';
-import { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+import { draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
     centroidHoverTrace, triMeanE, updateTriImage } from './plot.js';
 import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
@@ -1914,9 +1914,13 @@ async function runSimulation() {
             },
             warnings: (m) => logModeWarnings(m.warnings),
             // Live plots while the sweep runs. The worker sends fields only when they
-            // are already the final ones (quasi-static).
+            // are already the final ones (quasi-static). They carry no surface current
+            // yet, so a current view keeps the plot it has until the final fields.
             partial: (m) => {
-                if (m.fields && solver === solvedSolver) { applyFields(solver, m.fields); draw(); }
+                if (m.fields && solver === solvedSolver && fieldsHaveWantedView(m.fields)) {
+                    applyFields(solver, m.fields);
+                    draw();
+                }
                 if (m.sweepResults) {
                     frequencySweepResults = reviveSweep(m.sweepResults);
                     drawResultsPlot();
