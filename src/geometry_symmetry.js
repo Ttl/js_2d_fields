@@ -123,18 +123,14 @@ export function conductorFinishKey(c) {
 // calculation needs).
 export function isXSymmetric(conductors, dielectrics, domainW, { finish: withFinish = true } = {}) {
     const tol = symTol(domainW);
-    // Shaped geometry can't be compared by rect spans, so a shape declares its own mirror
-    // symmetry instead (xSymmetric on circles built with n % 4 === 0 and phase 0, which
-    // puts vertices exactly on the y axis so the x >= 0 half is an exact half). Every shape must qualify and the rectangular remainder still has to pass
-    // the span test below, so a shaped conductor can never wave through asymmetric rects
-    // sitting next to it.
-    // Polygon and ring shapes (custom geometry) need a mirror partner of the same role
-    // and finish, or material, which may be the shape itself.
+    // Shaped geometry can't be compared by rect spans: a polygon or ring shape needs a
+    // mirror partner of the same role and finish, or material, which may be the shape
+    // itself. The rectangular remainder still has to pass the span test below.
     const shaped = (o) => !!o.shape;
     const condKey = c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g') + (withFinish ? '|' + conductorFinishKey(c) : '');
     const dielKey = d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}`;
-    const partnered = (list, key) => list.filter(shaped).every(o => o.shape.xSymmetric === true
-        || list.some(p => p.shape && key(p) === key(o) && isMirrorShape(o.shape, p.shape, tol)));
+    const partnered = (list, key) => list.filter(shaped).every(o =>
+        list.some(p => p.shape && key(p) === key(o) && isMirrorShape(o.shape, p.shape, tol)));
     if (!partnered(conductors, condKey) || !partnered(dielectrics, dielKey)) return false;
     conductors = conductors.filter(o => !shaped(o));
     dielectrics = dielectrics.filter(o => !shaped(o));

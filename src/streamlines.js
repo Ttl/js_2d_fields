@@ -1,11 +1,9 @@
 import { shapeContains, distToShapeBoundary, segShapeBoundaryHit,
          shapePerimeter, shapePerimeterPoint } from './shapes.js';
 
-// NOTE ON SHAPED CONDUCTORS (coax): every helper below was written for axis-aligned
-// rectangles. A shaped conductor's bounding box is not its body. A coax shield's spans
-// the whole domain, so a bbox test would report every point as inside metal and kill
-// each streamline at its seed. Shaped conductors therefore route through shapeContains /
-// distToShapeBoundary / segShapeBoundaryHit.
+// Shaped conductors (polygons, rings): the bounding box is not the body (a ring's box
+// covers its hole), so they route through shapeContains / distToShapeBoundary /
+// segShapeBoundaryHit instead of bbox tests.
 function isInsideConductor(x, y, conductors) {
     for (const c of conductors) {
         if (c.shape) {

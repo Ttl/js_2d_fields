@@ -5,6 +5,7 @@
 
 import { csqrt, tripletsToCSR, GL3p, GL3w } from './fem_core.js';
 import { shapeContains, isPolyShape } from '../shapes.js';
+import { segmentBuffer } from '../surface_segments.js';
 import { ne1, ne2, nf1, nf2,
          lv, le, lvGrad, leGrad, triCoefficients,
          ne1Curl, ne2Curl, nf1Curl, nf2Curl,
@@ -318,7 +319,7 @@ export function surfaceHSegments(mesh, fm, projH, isLossEdge, maxLen) {
     const { htRe, htIm, hzRe, hzIm, hDofs, omu } = projH;
     const edgeVertsLocal = [[0, 1], [1, 2], [2, 0]];
     const edgeToTri = buildEdgeToTri(nEdges, nTris, triEdges);
-    const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
+    const seg = segmentBuffer();
     const hzR = new Float64Array(6), hzI = new Float64Array(6);
     for (let e = 0; e < nEdges; e++) {
         if (!isLossEdge[e]) continue;
@@ -342,14 +343,11 @@ export function surfaceHSegments(mesh, fm, projH, isLossEdge, maxLen) {
             const { Nz } = evalLagrangeBasis(coeff, edgeVertsLocal, px, py);
             let zR = 0, zI = 0;
             for (let m = 0; m < 6; m++) { zR += Nz[m] * hzR[m]; zI += Nz[m] * hzI[m]; }
-            seg.x0.push(x0 + dx * k / n); seg.y0.push(y0 + dy * k / n);
-            seg.x1.push(x0 + dx * (k + 1) / n); seg.y1.push(y0 + dy * (k + 1) / n);
-            seg.K.push(Math.sqrt(hxR * hxR + hxI * hxI + hyR * hyR + hyI * hyI + zR * zR + zI * zI) / omu);
+            seg.push(x0 + dx * k / n, y0 + dy * k / n, x0 + dx * (k + 1) / n, y0 + dy * (k + 1) / n,
+                Math.sqrt(hxR * hxR + hxI * hxI + hyR * hyR + hyI * hyI + zR * zR + zI * zI) / omu);
         }
     }
-    const out = {};
-    for (const k of ['x0', 'y0', 'x1', 'y1', 'K']) out[k] = Float64Array.from(seg[k]);
-    return out;
+    return seg.out();
 }
 
 export function computePoyntingFromProjectedH(mesh, fm, vecRe, vecIm, htRe, htIm, omu, hDofs) {
@@ -489,7 +487,7 @@ function evalH2dlCorrected(mesh, fm, htRe, htIm, hzRe, hzIm, omu, isLossEdge, hD
     for (let e = 0; e < nEdges; e++) h2dl += edgeH2dl[e];
 
     // --- Step 2: Identify PEC corners with correct ν ---
-    // No condRect (e.g. circular geometry): no rectangular corners to correct.
+    // No condRect: no rectangular corners to correct.
     const condRects = condRect ? (condRect.rects || [condRect]) : [];
     const symX = (condRect && condRect.symmetry > 1) ? condRect.xmin_domain : null;
     const corners = [];

@@ -25,8 +25,8 @@ export function clipDomainWalls(domain, conductors, boundaries, tol) {
         changed = false;
         for (const [ci, c] of conductors.entries()) {
             if (c.is_signal || absorbed.has(ci)) continue;
-            // Shaped grounds (e.g. a coax shield) are not full-span slabs: their
-            // bounding box spans the domain but their body does not fill it.
+            // Shaped grounds are not full-span slabs: their body does not fill their
+            // bounding box.
             if (c.shape) continue;
             const r = rectOf(c);
             const touchesL = r.xmin <= X0 + tol, touchesR = r.xmax >= X1 - tol;

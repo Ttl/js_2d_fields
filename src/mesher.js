@@ -46,7 +46,7 @@ class Conductor {
      * @param {boolean} plating.sides - Apply plating on side faces
      * @param {boolean} plating.bottom - Apply plating on bottom face
      * @param {boolean} plating.all - Apply plating over the whole boundary (shaped
-     *   conductors only — a circle has one continuous surface, not three faces)
+     *   conductors: every edge of the polygon or ring)
      * @param {object|null} shape - Optional non-rectangular shape descriptor (see
      *   shapes.js). When set, x/y/width/height are only the BOUNDING BOX: containment
      *   tests go through shapeContains() instead. Full-wave backend only — the

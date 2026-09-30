@@ -3,13 +3,14 @@
 // shape the rectilinear FDM solver exposes — so plot.js (heatmap/contour) and
 // streamlines.js work unchanged on the triangular backend's output.
 //
-// We resample the static potential φ and E = −∇φ (real-valued, always available,
-// and the same quasi-TEM field the FDM plots), not the complex full-wave
-// eigenvector. The triangle mesh itself is also returned for the mesh overlay.
+// Also the field on the triangles themselves for the |E| image (static, full-wave mode
+// and Modes tab), the full-wave mode field on a grid, and the MQS current density and
+// surface current plots.
 
 import { triCoefficients } from './tri_fem.js';
-import { shapeContains, distToShapeBoundary, isComplement } from '../shapes.js';
+import { shapeContains, distToShapeBoundary } from '../shapes.js';
 import { evalFieldsAtPoint } from './tri_ms_solver.js';
+import { segmentBuffer } from '../surface_segments.js';
 
 
 // Build the regular sample grid for `domain`, honoring an optional caller-supplied
@@ -197,10 +198,6 @@ function gridDiff(vm, v0, vp, dl, dr, okM, okP) {
     return 0;
 }
 
-// Resample a static solution onto a regular grid spanning `domain`.
-// Returns { x:Float64Array(nx), y:Float64Array(ny), V, Ex, Ey } with V/Ex/Ey as
-// [ny][nx] arrays (row index = y, matching plot.js / streamlines.js). Points
-// outside the mesh (inside conductors, below ground) are left at 0.
 // Point evaluator of the smoothed static field E = -grad V of a P2 solve `phi` (plot
 // coordinates, a half-domain solve mirrored by opts.parity as in resampleStatic):
 // evalE(px, py, h, dxl, dxr, dyd, dyu) differences V over an element-size baseline
@@ -402,6 +399,10 @@ function staticFieldEvaluator(mesh, phi, domain, opts = {}) {
     return { locate, coeffOf, sampleV, sizeAt, regionOf, condRegion, regionAt, evalE, eps };
 }
 
+// Resample a static solution onto a regular grid spanning `domain`.
+// Returns { x:Float64Array(nx), y:Float64Array(ny), V, Ex, Ey } with V/Ex/Ey as
+// [ny][nx] arrays (row index = y, matching plot.js / streamlines.js). Points
+// outside the mesh (inside conductors, below ground) are left at 0.
 export function resampleStatic(mesh, phi, domain, opts = {}) {
     // Sample on the caller-supplied grid (normally the mesh-derived graded grid from
     // buildGridFromMesh) when given, so the contour plot resolves thin conductors and
@@ -529,22 +530,32 @@ export function staticFieldOnMesh(mesh, phi, domain, opts = {}) {
 // combine(t, q, Ex, Ey) maps the static field at point q of triangle t to the plotted one
 // ([Ex, Ey]); mirror adds the image about x = 0 of a half-domain solve.
 export function meshFieldBlock(mesh, sf, combine = null, mirror = false) {
+    return splitTriBlock(mesh, sf.tri, (k, t, mag) => {
+        for (let q = 0; q < 6; q++) {
+            const e = combine ? combine(t, q, sf.Ex[6 * k + q], sf.Ey[6 * k + q]) : [sf.Ex[6 * k + q], sf.Ey[6 * k + q]];
+            mag[q] = Math.hypot(e[0], e[1]);
+        }
+    }, mirror);
+}
+
+// Triangles `tri` of the mesh each split in four at the edge midpoints, with a value at
+// the three vertices and three edge midpoints (order v0, v1, v2, then v0-v1, v1-v2,
+// v2-v0) written by fill(k, t, mag) for the k-th triangle t. { tris: [x0, y0, x1, y1,
+// x2, y2, ...], E: [E0, E1, E2, ...] }; mirror adds the image about x = 0.
+function splitTriBlock(mesh, tri, fill, mirror = false) {
     const { nodes, tris } = mesh;
     const SUB = [[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]];
-    const n = sf.tri.length, copies = mirror ? 2 : 1;
+    const n = tri.length, copies = mirror ? 2 : 1;
     const T = new Float64Array(24 * n * copies), E = new Float64Array(12 * n * copies);
     const px = new Float64Array(6), py = new Float64Array(6), mag = new Float64Array(6);
     for (let k = 0; k < n; k++) {
-        const t = sf.tri[k];
+        const t = tri[k];
         for (let a = 0; a < 3; a++) {
             const va = tris[3 * t + a], vb = tris[3 * t + (a + 1) % 3];
             px[a] = nodes[2 * va]; py[a] = nodes[2 * va + 1];
             px[3 + a] = (nodes[2 * va] + nodes[2 * vb]) / 2; py[3 + a] = (nodes[2 * va + 1] + nodes[2 * vb + 1]) / 2;
         }
-        for (let q = 0; q < 6; q++) {
-            const e = combine ? combine(t, q, sf.Ex[6 * k + q], sf.Ey[6 * k + q]) : [sf.Ex[6 * k + q], sf.Ey[6 * k + q]];
-            mag[q] = Math.hypot(e[0], e[1]);
-        }
+        fill(k, t, mag);
         for (let c = 0; c < copies; c++) {
             const sx = c ? -1 : 1, base = (c * n + k) * 4;
             SUB.forEach((sub, u) => {
@@ -657,12 +668,10 @@ function nodalModeField(mesh, fm, vRe, vIm) {
 // triangle split in four at the midpoints. The magnitude is complex (|Re|^2 + |Im|^2),
 // so the eigenvector's arbitrary phase drops out.
 export function modeFieldMeshBlock(mesh, fm, vRe, vIm) {
-    const { nodes, tris, nTris, triEdges } = mesh;
+    const { nodes, tris, nTris, triEdges, nEdges } = mesh;
     const nod = recoverNodalModeField(mesh, fm, vRe, vIm);
     const { regionOf, nRegions: nR } = nod;
     const condRegion = buildTriRegions(mesh).condRegion;
-    let nEdges = 0;
-    for (let k = 0; k < triEdges.length; k++) if (triEdges[k] >= nEdges) nEdges = triEdges[k] + 1;
     // Edge midpoint field per (edge, region), averaged over the triangles sharing it.
     const mid = new Float64Array(5 * nEdges * nR);
     for (let t = 0; t < nTris; t++) {
@@ -678,29 +687,15 @@ export function modeFieldMeshBlock(mesh, fm, vRe, vIm) {
     }
     const tri = [];
     for (let t = 0; t < nTris; t++) if (regionOf[t] !== condRegion) tri.push(t);
-    const SUB = [[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]];
-    const T = new Float64Array(24 * tri.length), E = new Float64Array(12 * tri.length);
-    const px = new Float64Array(6), py = new Float64Array(6), mag = new Float64Array(6);
-    tri.forEach((t, k) => {
+    return splitTriBlock(mesh, tri, (k, t, mag) => {
         const reg = regionOf[t];
         for (let a = 0; a < 3; a++) {
-            const va = tris[3 * t + a], vb = tris[3 * t + (a + 1) % 3];
-            px[a] = nodes[2 * va]; py[a] = nodes[2 * va + 1];
-            px[3 + a] = (nodes[2 * va] + nodes[2 * vb]) / 2; py[3 + a] = (nodes[2 * va + 1] + nodes[2 * vb + 1]) / 2;
-            const s = va * nR + reg;
+            const s = tris[3 * t + a] * nR + reg;
             mag[a] = Math.hypot(nod.exr[s], nod.exi[s], nod.eyr[s], nod.eyi[s]);
             const m = 5 * (triEdges[3 * t + a] * nR + reg), c = mid[m + 4] || 1;
             mag[3 + a] = Math.hypot(mid[m], mid[m + 1], mid[m + 2], mid[m + 3]) / c;
         }
-        SUB.forEach((sub, u) => {
-            for (let a = 0; a < 3; a++) {
-                T[6 * (4 * k + u) + 2 * a] = px[sub[a]];
-                T[6 * (4 * k + u) + 2 * a + 1] = py[sub[a]];
-                E[3 * (4 * k + u) + a] = mag[sub[a]];
-            }
-        });
     });
-    return { tris: T, E };
 }
 
 // Resample a full-wave eigenmode's transverse E-field onto a regular grid.
@@ -761,7 +756,7 @@ export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
 // trace), one block per conductor of `rects` (solve coordinates) carrying current. A
 // rectangle is sampled on a graded grid whose lines follow the skin-refined mesh nodes
 // inside it, n per axis at most, the faces sampled just inside the metal:
-// { x, y, J[ny][nx] }, null outside the metal. A shaped conductor (polygon, circle,
+// { x, y, J[ny][nx] }, null outside the metal. A shaped conductor (polygon,
 // ring) is its own triangles with |J| at each centroid and each vertex, { tris: [x0, y0,
 // x1, y1, x2, y2, ...], J, Jv: [J0, J1, J2, ...] }: a grid cannot follow a slanted or
 // curved skin layer. symX mirrors a
@@ -779,7 +774,6 @@ export function sampleMqsCurrent(F, rects, n = 160, symX = null) {
     };
     const out = [];
     rects.forEach((r, k) => {
-        if (r.shape && isComplement(r.shape)) return;   // a shell with no cross-section
         if (r.shape) {
             const xy = [], Jt = [], Jv = [];
             const mag = (t, x, y) => { const J = ev.J(t, x, y); return J ? Math.hypot(J[0], J[1]) : 0; };
@@ -911,8 +905,7 @@ export function mqsSurfaceCurrent(F, maxLen, symX = null) {
     const { dofOf } = F, nNodes = mesh.nNodes;
     const metalBoundary = (e, n0, n1) => dofOf[n0] < 0 && dofOf[n1] < 0 && dofOf[nNodes + e] < 0
         && !(symX !== null && Math.abs(nodes[2 * n0] - symX) < 1e-12 && Math.abs(nodes[2 * n1] - symX) < 1e-12);
-    const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
-    const push = (xa, ya, xb, yb, K) => { seg.x0.push(xa); seg.y0.push(ya); seg.x1.push(xb); seg.y1.push(yb); seg.K.push(K); };
+    const seg = segmentBuffer();
     for (let e = 0; e < nEdges; e++) {
         const ta = edgeTris[2 * e], tb = edgeTris[2 * e + 1];
         const n0 = edges[2 * e], n1 = edges[2 * e + 1];
@@ -931,13 +924,11 @@ export function mqsSurfaceCurrent(F, maxLen, symX = null) {
             const px = x0 + dx * (k + 0.5) / n, py = y0 + dy * (k + 0.5) / n;
             const K = surfaceH(td, px, py, dy / L, -dx / L);
             const xa = x0 + dx * k / n, ya = y0 + dy * k / n, xb = x0 + dx * (k + 1) / n, yb = y0 + dy * (k + 1) / n;
-            push(xa, ya, xb, yb, K);
-            if (symX !== null && px > symX + TOL) push(2 * symX - xa, ya, 2 * symX - xb, yb, K);
+            seg.push(xa, ya, xb, yb, K);
+            if (symX !== null && px > symX + TOL) seg.push(2 * symX - xa, ya, 2 * symX - xb, yb, K);
         }
     }
-    const out = {};
-    for (const k of ['x0', 'y0', 'x1', 'y1', 'K']) out[k] = Float64Array.from(seg[k]);
-    return out;
+    return seg.out();
 }
 
 // Surface current density of the perfect-conductor limit on the conductor surfaces and
@@ -950,7 +941,7 @@ export function mqsSurfaceCurrent(F, maxLen, symX = null) {
 // driving potential (the current is per net). Returns segments { x0, y0, x1, y1, K }.
 export function surfaceCurrentPoints(mesh, fm, phi, lossMask, maxLen, symX = null, nets = 1) {
     const { nodes, tris, edges, triEdges, nTris, nEdges } = mesh;
-    const pv = phi.phiVertex, pe = phi.phiEdge;
+    const pv = phi.phiVertex;
     const edgeTri = new Int32Array(nEdges).fill(-1);
     for (let t = 0; t < nTris; t++) {
         if (fm.faceF && fm.faceF[2 * t] < 0) continue;   // conductor interior
@@ -964,8 +955,7 @@ export function surfaceCurrentPoints(mesh, fm, phi, lossMask, maxLen, symX = nul
     if (!(pMax > 0)) return null;
     const onDriven = (n) => Math.abs(pv[n] - pMax) < 1e-9 * pMax;
     const TOL = 1e-12;
-    const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
-    const push = (xa, ya, xb, yb, K) => { seg.x0.push(xa); seg.y0.push(ya); seg.x1.push(xb); seg.y1.push(yb); seg.K.push(K); };
+    const seg = segmentBuffer();
     let I = 0, cutByPlane = false;
     for (let e = 0; e < nEdges; e++) {
         const t = lossMask[e] ? edgeTri[e] : -1;
@@ -977,32 +967,18 @@ export function surfaceCurrentPoints(mesh, fm, phi, lossMask, maxLen, symX = nul
         const driven = onDriven(n0) && onDriven(n1);
         if (driven && symX !== null && (Math.abs(x0 - symX) < TOL || Math.abs(x0 + dx - symX) < TOL)) cutByPlane = true;
         const c = triCoefficients(nodes, tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]).coeff;
-        const v = [pv[tris[3 * t]], pv[tris[3 * t + 1]], pv[tris[3 * t + 2]]];
-        const ev = [pe[triEdges[3 * t]], pe[triEdges[3 * t + 1]], pe[triEdges[3 * t + 2]]];
         const n = Math.max(1, Math.ceil(L / maxLen));
         for (let k = 0; k < n; k++) {
             const px = x0 + dx * (k + 0.5) / n, py = y0 + dy * (k + 0.5) / n;
-            const l = [0, 1, 2].map(a => c[a][0] + c[a][1] * px + c[a][2] * py);
-            let gx = 0, gy = 0;
-            for (let a = 0; a < 3; a++) {
-                const b = (a + 1) % 3;
-                const fv = v[a] * (4 * l[a] - 1);
-                gx += fv * c[a][1]; gy += fv * c[a][2];
-                gx += 4 * ev[a] * (l[a] * c[b][1] + l[b] * c[a][1]);
-                gy += 4 * ev[a] * (l[a] * c[b][2] + l[b] * c[a][2]);
-            }
-            const E = Math.hypot(gx, gy);
+            const E = Math.hypot(...evalPhiField(phi, mesh, c, t, px, py));
             if (driven) I += E * L / n;
             const xa = x0 + dx * k / n, ya = y0 + dy * k / n, xb = x0 + dx * (k + 1) / n, yb = y0 + dy * (k + 1) / n;
-            push(xa, ya, xb, yb, E);
-            if (symX !== null && px > symX + TOL) push(2 * symX - xa, ya, 2 * symX - xb, yb, E);
+            seg.push(xa, ya, xb, yb, E);
+            if (symX !== null && px > symX + TOL) seg.push(2 * symX - xa, ya, 2 * symX - xb, yb, E);
         }
     }
     if (cutByPlane) I *= 2;
     I /= nets;
     if (!(I > 0)) return null;
-    const out = {};
-    for (const k of ['x0', 'y0', 'x1', 'y1']) out[k] = Float64Array.from(seg[k]);
-    out.K = Float64Array.from(seg.K, v => v / I);
-    return out;
+    return seg.out(1 / I);
 }

@@ -1055,8 +1055,6 @@ export function coaxToGeometryText(solver, units) {
     const R = polyRadiusForArea;
     const { a, b, n_inner: ni, n_outer: no } = solver;
     const c = b + solver.shield_thickness;
-    // Six digits keep the area within 1e-6 of the circle's.
-    const r6 = v => String(Number((v / scale).toPrecision(6)));
     const pl = solver.plating;
     const plated = which => (pl && pl[which] ? ' plating=all' : '');
     const lines = [
@@ -1064,7 +1062,7 @@ export function coaxToGeometryText(solver, units) {
         '# Each circle is an n-gon of the same area: r1, r2 and r3 are the vertex radii of the',
         '# centre conductor, the dielectric and the outside of the shield.',
         `units ${units}`,
-        `r1 = ${r6(R(a, ni))}; r2 = ${r6(R(b, no))}; r3 = ${r6(R(c, no))}`,
+        `r1 = ${fmt(R(a, ni))}; r2 = ${fmt(R(b, no))}; r3 = ${fmt(R(c, no))}`,
         'bounds open open open open',
         'domain -1.1*r3 1.1*r3 -1.1*r3 1.1*r3',
     ];

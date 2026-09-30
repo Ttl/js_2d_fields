@@ -475,7 +475,8 @@ await page.click('#btn-solve-modes');
 await page.waitForFunction(() => document.querySelectorAll('#modes-list tr[data-idx]').length > 0, null, { timeout: 180000 });
 await page.waitForTimeout(1500);
 const modes = await page.evaluate(() => {
-    const d = (document.getElementById('modes-plot').data || []).find(tr => tr.type === 'heatmap' || tr.type === 'contour');
+    // The field is an image, its hover markers sit at the triangle centroids.
+    const d = (document.getElementById('modes-plot').data || []).find(tr => tr.type === 'scattergl');
     const y = d ? Array.from(d.y) : [];
     return { yMin: Math.min(...y), yMax: Math.max(...y), n: y.length };
 });

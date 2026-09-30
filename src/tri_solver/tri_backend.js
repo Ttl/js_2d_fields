@@ -25,8 +25,8 @@ import { createWasmHelpers } from './fem_core.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
          groundBodyCount } from './occ_to_mesh.js';
-import { shapeBBox, shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance,
-         platedThrough, insideRingHole, isComplement, isPolyShape } from '../shapes.js';
+import { shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance,
+         platedThrough, insideRingHole } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
@@ -211,9 +211,9 @@ function makePlatingZs(solver, condRect, freq) {
     const Zbare = calculate_Zrough(freq, sigmaBase, rqBase);    // Complex (.re/.im)
     const layeredCache = new Map();
     const singleCache = new Map();
-    // face is 'top' | 'bottom' | 'sides' | 'all'. 'all' is the shaped-conductor case:
-    // a circle has ONE continuous surface, so there is nothing to select between and
-    // the plating covers the whole boundary (CoaxSolver sets pl.all).
+    // face is 'top' | 'bottom' | 'sides' | 'all'. 'all' is a shape edge without a face
+    // name (an n-gon or ring surface), plated when the plating covers the whole boundary
+    // (pl.all, which the coax geometry text sets).
     // Bare metal of rect ri: its own conductivity and roughness when it has them, else
     // the base metal.
     const rqOf = (ri) => {
@@ -303,10 +303,8 @@ function solidPlated(r, pl) {
 // carries current on both faces, so each face sees half its thinner dimension; a
 // ground rect is a one-sided slab of its full thinner dimension; a round wire of
 // radius r has the DC internal inductance mu0/(8 pi), which the slab form
-// reproduces with d = 3r/4; a complement shell (coax shield) has no meshed
-// thickness and takes the solver's declared wall thickness.
+// reproduces with d = 3r/4.
 function slabThickness(r, role) {
-    if (r.shape && isComplement(r.shape)) return (role && role.slab_thickness) || Infinity;
     const dim = condThinDim(r);
     if (r.shape && (r.shape.round || !r.shape.thickness)) return 0.75 * dim / 2;
     return role && role.is_signal ? dim / 2 : dim;
@@ -716,9 +714,7 @@ function openRegionMask(mesh, abc) {
         return (abc.left && x - x0 < tol) || (abc.right && x1 - x < tol)
             || (abc.bottom && y - y0 < tol) || (abc.top && y1 - y < tol);
     };
-    let nEdges = 0;
-    for (let k = 0; k < triEdges.length; k++) if (triEdges[k] >= nEdges) nEdges = triEdges[k] + 1;
-    const edgeTris = new Int32Array(2 * nEdges).fill(-1);
+    const edgeTris = new Int32Array(2 * mesh.nEdges).fill(-1);
     for (let t = 0; t < nTris; t++) {
         for (let a = 0; a < 3; a++) {
             const e = triEdges[3 * t + a];
@@ -1167,10 +1163,7 @@ export class TriBackend {
         const survives = c => Math.min(c.x_max, clip.X1) - Math.max(c.x_min, clip.X0) > 0
                           && Math.min(c.y_max, clip.Y1) - Math.max(c.y_min, clip.Y0) > 0;
         // MQS handles explicit ground rects as passive (C = 0) return
-        // conductors, only shaped conductors do (coax), and
-        // a surviving signal rect must exist to drive.
-        // Polygon shapes (custom trapezoids, n-gons, rings) are meshed bodies like rects.
-        const shapedPre = s.conductors.some(c => c.shape && !isPolyShape(c.shape));
+        // conductors, and a surviving signal conductor must exist to drive.
         const sigCondPre = s.conductors.some(c => c.is_signal && survives(c));
         // A differential pair without the symmetry-plane mode walls runs the
         // per-conductor-drive MQS (modeCurrents) when both polarity groups
@@ -1181,18 +1174,18 @@ export class TriBackend {
         const diffMultiPre = s.is_differential
             && s.conductors.some(c => c.is_signal && (c.polarity || 1) > 0 && survives(c))
             && s.conductors.some(c => c.is_signal && (c.polarity || 1) < 0 && survives(c));
-        const mqsPre = ((lmPre === 'mqs' && !shapedPre && sigCondPre)
-            || (lmPre === 'auto' && (this.symmetry || diffMultiPre || !s.is_differential) && !shapedPre && sigCondPre))
+        const mqsPre = ((lmPre === 'mqs' && sigCondPre)
+            || (lmPre === 'auto' && (this.symmetry || diffMultiPre || !s.is_differential) && sigCondPre))
             && (!s.is_differential || this.symmetry || diffMultiPre);
-        // A medium may supply its own base sizing (coax: derived from the conductor
-        // radii, since w/t have no meaning for a round conductor).
+        // A medium may supply its own base sizing (rectangular waveguide: w/t have no
+        // meaning for a hollow guide).
         const hints = s.tri_mesh_hints || {};
         // Clearance from the signal rects to the nearest other conductor rect or
         // PEC wall. Absorbed wall slabs do not survive the clip, the wall they
         // became does. A touching pair is one conductor as far as sizing goes
         // and does not count as a gap.
         let gapRef = Infinity;
-        const rectsPre = s.conductors.filter(c => (!c.shape || isPolyShape(c.shape)) && survives(c));
+        const rectsPre = s.conductors.filter(survives);
         for (const a of rectsPre) {
             if (!a.is_signal) continue;
             for (const b of rectsPre) {
@@ -1247,14 +1240,10 @@ export class TriBackend {
         const occBase = {
             conductors: s.conductors, dielectrics: s.dielectrics,
             domain: dom, boundaries: s.boundaries, symmetry: this.symmetry, nearField,
-            // Non-rectangular meshed domain (coax: the dielectric disk itself).
-            domainShape: s.domain_shape || null,
             // Conductor interiors are meshed only for the MQS volume eddy-current
             // solve. mqsPre is the same applicability test _modeAtFreq uses. On
             // the perturbation path those elements carry no DOFs, every
-            // node/edge inside metal is PEC, so meshing them is pure cost. Coax
-            // always lands here: its shaped (non-rectangular) conductors rule
-            // MQS out.
+            // node/edge inside metal is PEC, so meshing them is pure cost.
             meshConductorInterior: mqsPre,
             // The MQS loss solves plating as a layer of metal, which needs the inside of
             // each plating layer as a mesh interface.
@@ -1371,14 +1360,6 @@ export class TriBackend {
             coarsenPasses++;
         }
         this.condRect = mesh.condRect;
-        // A shaped domain does not fill the solver's bounding box, so tighten the
-        // plotting/resample box onto the actual body. Taken from the FULL polygon, not
-        // mesh.meshedDomain — under symmetry the latter is only the x >= 0 half, while
-        // buildGridFromMesh(mirrorX) reconstructs the whole cross-section.
-        if (s.domain_shape) {
-            const bb = shapeBBox(s.domain_shape);
-            this.domain = { x_min: bb.xmin, x_max: bb.xmax, y_min: bb.ymin, y_max: bb.ymax };
-        }
 
         // Loss routines read per-rect metadata: .symmetry scales the half-domain
         // integral, .xmin_domain locates the symmetry plane (corner/edge exclusion —
@@ -1619,16 +1600,14 @@ export class TriBackend {
         // skin band re-refines them before the MQS solve, so their shape says nothing
         // about this mesh's accuracy. A rect thinner than its surface element size
         // (a 1 um trace on the thick-copper sizing) holds flat slivers of Q in the
-        // hundreds that would otherwise trip the UI warning. Shaped conductors are
-        // never interior-meshed and their bbox can span the domain (coax shield), so
-        // only rects are tested.
+        // hundreds that would otherwise trip the UI warning.
         // Nor the triangles inside a dielectric layer thinner than their longest edge: a
         // layer thinner than the element size (a solder mask) is meshed as slivers
         // spanning it, its faces held by the refiner, and their shape is the layer's
         // aspect, which the field along the layer does not need resolved.
         try {
             const skip = new Uint8Array(mesh.nTris);
-            const rects = (this.condRect.rects || []).filter(r => !r.shape || isPolyShape(r.shape));
+            const rects = this.condRect.rects || [];
             const layers = (this.solver.dielectrics || []).filter(d => !d.shape);
             const tolL = 1e-9 * (this.domain.x_max - this.domain.x_min);
             for (let t = 0; t < mesh.nTris; t++) {
@@ -1793,7 +1772,7 @@ export class TriBackend {
         // here, both evaluated at the same fRef every pass so this is a relative test.
         //
         // kc is the binding one. alpha_c is a pure SURFACE integral, which is what makes it
-        // converge last on every OTHER medium (see CoaxSolver._hFine), but
+        // converge last on every other medium, but
         // a waveguide has straight walls and a smooth sinusoidal mode, no
         // corner singularities or polygonized curve, so measured it is
         // converged to five figures on the coarsest usable mesh while kc is
@@ -1861,6 +1840,20 @@ export class TriBackend {
             eps_eff_static: null, Z_static: null, fields } };
     }
 
+    // H of the waveguide mode projected at f and propagation constant beta, and the
+    // power it carries: { projH, P }, P = 0 when the projection fails.
+    _wgProjectH(mesh, wg, f, beta) {
+        try {
+            const projH = projectH(mesh, wg.fm, wg.vRe, wg.vIm, { re: 0, im: beta }, f,
+                this.ctx.wasmSolver, wg.projCache);
+            const P = Math.abs(computePoyntingFromProjectedH(mesh, wg.fm, wg.vRe, wg.vIm,
+                projH.htRe, projH.htIm, 2 * Math.PI * f * MU0, projH.hDofs));
+            return { projH, P };
+        } catch {
+            return { projH: null, P: 0 };
+        }
+    }
+
     // Conductor loss of a waveguide mode at f. Returns { alpha_c_np, R_ac }.
     //
     // solveConductorLoss needs NO waveguide special-casing: with an empty rect list
@@ -1879,13 +1872,7 @@ export class TriBackend {
         const sigma = s.sigma_cond ?? 5.8e7;
         const omega = 2 * Math.PI * f;
         if (!(beta > 0)) return { alpha_c_np: 0, R_ac: 0, X_ac: 0 };
-        let projH, P;
-        try {
-            projH = projectH(mesh, wg.fm, wg.vRe, wg.vIm, { re: 0, im: beta }, f,
-                this.ctx.wasmSolver, wg.projCache);
-            P = Math.abs(computePoyntingFromProjectedH(mesh, wg.fm, wg.vRe, wg.vIm,
-                projH.htRe, projH.htIm, omega * MU0, projH.hDofs));
-        } catch { P = 0; }
+        const { projH, P } = this._wgProjectH(mesh, wg, f, beta);
         if (!(P > 1e-30)) {
             this._warnOnce({ type: 'wg-loss-failed', freq: f, message:
                 'The waveguide conductor-loss evaluation failed at this frequency: the reported ' +
@@ -2021,8 +2008,7 @@ export class TriBackend {
         // where the field actually concentrates.
         const forcedX = [], forcedY = [];
         for (const r of [...(s.conductors || []), ...(s.dielectrics || [])]) {
-            // A shaped body has no axis-aligned interfaces to force lines onto, and a
-            // complement's bbox lies outside the meshed domain entirely.
+            // A shaped body has no axis-aligned interfaces to force lines onto.
             if (r.shape) continue;
             forcedX.push(r.x_min, r.x_max);
             forcedY.push(r.y_min, r.y_max);
@@ -2049,12 +2035,7 @@ export class TriBackend {
         // Conductor rects in full-domain coordinates for the resampler's E-baseline
         // clamping — taken from the solver geometry because it includes the ground
         // planes (mesh.condRect.rects only carries the non-wall conductors).
-        // A complement conductor (coax shield) is EXCLUDED: its bounding box spans the
-        // whole domain, so the resampler would treat every grid point as inside metal
-        // and clamp |E| to zero across the entire plot. Its surface is the domain
-        // outline, which the resampler already handles as a boundary.
         this._plotRects = (s.conductors || [])
-            .filter(c => !(c.shape && isComplement(c.shape)))
             .map(c => ({ xmin: c.x_min, xmax: c.x_max, ymin: c.y_min, ymax: c.y_max, shape: c.shape || null }));
         // Asymmetric differential pair on the full domain: the odd/even excitation basis is
         // NOT the modal basis (the two traces sit in different environments), so driving
@@ -2441,10 +2422,7 @@ export class TriBackend {
     _dcInternalInductance(mode, cr) {
         const s = this.solver;
         let tMax = 0;
-        for (const c of cr.rects) {
-            if (c.shape && isComplement(c.shape)) continue;
-            tMax = Math.max(tMax, condThinDim(c));
-        }
+        for (const c of cr.rects) tMax = Math.max(tMax, condThinDim(c));
         const sigma = s.sigma_cond ?? 5.8e7;
         const delta = 100 * tMax;
         const fDc = tMax > 0 ? 2 / (2 * Math.PI * MU0 * sigma * delta * delta) : 0;
@@ -2568,18 +2546,16 @@ export class TriBackend {
         // grounds, via slabs, cutout remnants) are handled inside the solve as passive
         // C = 0 return conductors. On 'auto' a differential pair needs a way to select
         // the mode (the symmetry-plane BC or the per-conductor drives below), a
-        // single-ended line has one mode and runs on a full domain too. Circle shapes have no skin-band/
-        // classification support, so they fall back to the H-field perturbation.
+        // single-ended line has one mode and runs on a full domain too.
         // Per-face plating is handled inside MQS (surfaceZs weights each face's smooth
         // current by its own impedance), so plating doesn't force perturbation.
-        const mqsOk = cr.rects.length > 0 && !cr.rects.some(r => r.shape && !isPolyShape(r.shape))
-            && cr.rectRoles.some(r => r.is_signal);
+        const mqsOk = cr.rects.length > 0 && cr.rectRoles.some(r => r.is_signal);
         // Refuse a forced 'mqs' override where it cannot apply (with a warning)
         // rather than produce garbage.
         if (lossMethod === 'mqs' && !mqsOk) {
             this._warnOnce({ type: 'mqs-shape', mode, freq: f,
-                message: 'MQS conductor loss is not applicable to this geometry ' +
-                         '(shaped conductors or no signal conductor), using the perturbation method instead.' });
+                message: 'MQS conductor loss needs a signal conductor in the solved domain, ' +
+                         'using the perturbation method instead.' });
         }
         // A differential pair without the symmetry-plane mode walls uses the
         // per-conductor-drive MQS: one unit solve per polarity group and an NxN
@@ -2615,19 +2591,17 @@ export class TriBackend {
                          'mesh was built without it. Using the perturbation method instead.' });
         }
         // The perturbation integral has a corner model for rectangles only.
-        if (!useMQS && f > 0 && cr.rects.some(r => isPolyShape(r.shape))) {
+        if (!useMQS && f > 0 && cr.rects.some(r => r.shape)) {
             this._warnOnce({ type: 'pert-shape', mode, freq: f, message:
-                'Conductor loss of the trapezoids and n-gons comes from the perturbation method, which has ' +
-                'no model of their corners: R can be off by 20% or more. The MQS loss method, the default, solves them ' +
-                'accurately.' });
+                'Conductor loss of the trapezoids and n-gons comes from the perturbation method, which does ' +
+                'not model the field singularity at their corners, so R is less accurate at sharp corners ' +
+                '(trapezoids, n-gons with few sides). The MQS loss method, the default, solves them accurately.' });
         }
-        // Any other geometry the default MQS method passes to the perturbation method. Not
-        // one of circles only: with no corners, the perturbation method is accurate there.
-        const roundOnly = cr.rects.every(r => r.shape && !isPolyShape(r.shape));
-        if (lossMethod === 'auto' && !useMQS && f > 0 && !roundOnly && !this._noMqsThisSolve) {
+        // Any other geometry the default MQS method passes to the perturbation method.
+        if (lossMethod === 'auto' && !useMQS && f > 0 && cr.rects.length > 0 && !this._noMqsThisSolve) {
             this._warnOnce({ type: 'mqs-perturbation', mode, freq: f, message:
                 'The MQS conductor-loss solve does not apply here (' + (!mqsOk
-                    ? 'curved conductors next to cornered ones, or no signal conductor in the solved domain'
+                    ? 'no signal conductor in the solved domain'
                     : 'a differential pair with one trace outside the solved domain') + '). Conductor loss and ' +
                 'internal inductance come from the perturbation method, which is less accurate in the skin ' +
                 'transition and at conductor corners.' },
@@ -2777,9 +2751,6 @@ export class TriBackend {
         // the static/SIBC blend below).
         let minDim = Infinity;
         for (const c of cr.rects) {
-            // A complement conductor (coax shield) is a zero-thickness PEC shell whose
-            // bbox is the whole cavity, it has no cross-section to gate anything on.
-            if (c.shape && isComplement(c.shape)) continue;
             minDim = Math.min(minDim, c.shape ? condThinDim(c) : Math.min(c.xmax - c.xmin, c.ymax - c.ymin));
         }
         if (f > 0 && useMQS) {
@@ -2908,7 +2879,7 @@ export class TriBackend {
             };
             const sigBands = byDelta(true), gndBands = byDelta(false);
             // The half-domain cut through a conductor is not a surface.
-            const symX = this.symmetry ? this.condRect.xmin_domain : null;
+            const symX = this._symX();
             const buildSkin = (base, dlt) => {
                 // Each refineSkinBand stamps its own bandTrunc on the mesh it returns,
                 // so collect them as they come and leave the merged list (or null) on
@@ -3369,6 +3340,7 @@ export class TriBackend {
     plotFieldsAt(f) {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         const s = this.solver;
+        s.plotNote = null;
         // A waveguide's mode pattern is geometric, the same at every frequency. Its wall
         // currents are not: the axial H grows relative to the transverse H towards cutoff.
         if (this._isWG) {
@@ -3382,7 +3354,6 @@ export class TriBackend {
             return;
         }
         s.plot_freq_target = f;
-        s.plotNote = null;
         let slots = this.modeNames.map(mode => this._plotSlot(mode, f));
         if (!slots.every(sl => sl.done)) {
             const prevWarnings = this._modeWarnings;
@@ -3423,6 +3394,17 @@ export class TriBackend {
         s.mesh_generated = true;
     }
 
+    // x of the half-domain symmetry plane, null on a full domain.
+    _symX() {
+        return this.symmetry ? this.condRect.xmin_domain : null;
+    }
+
+    // Longest surface current plot segment: 1/2000 of the domain.
+    _plotSegLen() {
+        const d = this.domain;
+        return Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000;
+    }
+
     // Surface current |K| = |H| on the waveguide walls at f per 1 W of transmitted
     // power, segments { x0, y0, x1, y1, K }. Null below cutoff, where the mode carries
     // no power.
@@ -3433,16 +3415,12 @@ export class TriBackend {
         const g2 = wg.kc * wg.kc - k0 * k0 * er;
         if (!(g2 < 0)) return null;
         const beta = Math.sqrt(-g2);
-        let projH, P;
-        try {
-            projH = projectH(mesh, wg.fm, wg.vRe, wg.vIm, { re: 0, im: beta }, f, this.ctx.wasmSolver, wg.projCache);
-            P = Math.abs(computePoyntingFromProjectedH(mesh, wg.fm, wg.vRe, wg.vIm,
-                projH.htRe, projH.htIm, 2 * Math.PI * f * MU0, projH.hDofs));
-        } catch { return null; }
-        if (!(P > 1e-30)) return null;
-        const d = this.domain;
-        const K = surfaceHSegments(mesh, wg.fm, projH, wg.lossMask,
-            Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000);
+        const { projH, P } = this._wgProjectH(mesh, wg, f, beta);
+        if (!(P > 1e-30)) {
+            this.solver.plotNote = `Waveguide wall current at ${(f / 1e9).toFixed(3)} GHz failed: the H projection carries no power.`;
+            return null;
+        }
+        const K = surfaceHSegments(mesh, wg.fm, projH, wg.lossMask, this._plotSegLen());
         const scale = 1 / Math.sqrt(P);
         for (let i = 0; i < K.K.length; i++) K.K[i] *= scale;
         return K;
@@ -3455,9 +3433,8 @@ export class TriBackend {
     // method, f = 0).
     _plotCurrents(f, slots) {
         if (!(f > 0)) return null;
-        const d = this.domain;
-        const maxLen = Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000;
-        const symX = this.symmetry ? this.condRect.xmin_domain : null;
+        const maxLen = this._plotSegLen();
+        const symX = this._symX();
         const J = [], K = [], mesh = [], ideal = [];
         for (const sl of slots) {
             const c = sl.mqs;
@@ -3476,16 +3453,14 @@ export class TriBackend {
     _plotMode(mode, f, slot) {
         const st = (slot && slot.st) || this._static[mode];
         const { x, y, V, Ex, Ey } = (slot && slot.fields) || st.fields;
-        const d = this.domain;
-        const symX = this.symmetry ? this.condRect.xmin_domain : null;
+        const symX = this._symX();
         // Nets at the driving potential: both traces of an even drive on the full domain.
         const pot = drivePotentials(this.condRect, mode, this.symmetry);
         const pMax = Math.max(...pot);
         const nets = st.modalVec ? 1 : new Set(this.condRect.rectRoles
             .filter((r, i) => r.is_signal && pot[i] === pMax).map(r => (r.polarity || 1) < 0)).size || 1;
         const K = st.phiAir ? surfaceCurrentPoints(this.mesh, st.fm, st.phiAir,
-            buildLossEdges(this.mesh, st.fm, this.condRect), Math.max(d.x_max - d.x_min, d.y_max - d.y_min) / 2000,
-            symX, nets) : null;
+            buildLossEdges(this.mesh, st.fm, this.condRect), this._plotSegLen(), symX, nets) : null;
         const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
         // |E| on the triangles for the plot (meshFieldBlock): sharp at every interface,
         // curved ones included, which the grid can only draw as a staircase.

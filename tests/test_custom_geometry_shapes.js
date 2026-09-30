@@ -57,9 +57,7 @@ const rect = await solve(MS('sig+ x=-0.15 y=0.2 w=0.3 h=0.035'));
 {
     const p = { tl_type: 'coax', coax_d: 0.92e-3, coax_D: 2.95e-3, coax_er: 2.1, coax_tand: 2e-4, coax_sigma: 5.8e7,
         rq: 0, freq: 1e9, mesh_backend: 'fullwave_mqs', use_plating: false };
-    const native = buildSolverFromParams(p, () => {});
-    const text = solverToGeometryText(native, { units: 'mm' });
-    const nat = modes(await quiet(() => native.solve_adaptive(SOLVE)));
+    const text = solverToGeometryText(buildSolverFromParams(p, () => {}), { units: 'mm' });
     const c = await solve(text, { sigma_cond: 5.8e7 });
     const eta = 376.730313668 / Math.sqrt(2.1);
     const a = 0.46e-3, b = 1.475e-3;
@@ -68,12 +66,9 @@ const rect = await solve(MS('sig+ x=-0.15 y=0.2 w=0.3 h=0.035'));
     // The centre conductor's curvature adds about delta/(2a) to its share.
     const R = Rs / (2 * Math.PI) * (1 / a + 1 / b);
     check('coax n-gons: Z0 = closed form', rel(c.m[0].Z0, Z0) < 1e-3, `${c.m[0].Z0.toFixed(3)} vs ${Z0.toFixed(3)}`);
-    // eps_eff sits above er by the internal inductance, like the native coax.
-    check('coax n-gons: eps_eff = native coax', rel(c.m[0].eps, nat[0].eps) < 1e-4, `${c.m[0].eps.toFixed(5)} vs ${nat[0].eps.toFixed(5)}`);
     check('coax n-gons: R = closed form (MQS)', c.m[0].lossVia === 'mqs' && rel(c.m[0].R, R) < 0.01,
         `${c.m[0].R.toFixed(4)} vs ${R.toFixed(4)}, ${pct(rel(c.m[0].R, R))}`);
     check('coax n-gons: shield band not capped', !c.warnings.some(w => w.type === 'mqs-band-capped'));
-    check('coax n-gons: Z0 = native coax', rel(c.m[0].Z0, nat[0].Z0) < 1e-3, `${c.m[0].Z0.toFixed(3)} vs ${nat[0].Z0.toFixed(3)}`);
 }
 
 // --- 4. Etched pair, half domain against full domain ---

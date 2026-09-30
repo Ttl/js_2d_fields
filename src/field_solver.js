@@ -7,6 +7,7 @@ import { classifyModalDecomposition, conductorFinishKey } from './geometry_symme
 import { buildPhysicalRLGC } from './sparameters.js';
 import { visibleAreas, platedThrough, platingArea, insideRingHole, bodyDistance, shapeArea } from './shapes.js';
 import { unlimitedGrounds } from './wall_grounds.js';
+import { segmentBuffer } from './surface_segments.js';
 
 export const CONSTANTS = {
     EPS0: 8.854187817e-12,
@@ -1162,7 +1163,7 @@ export class FieldSolver2D {
             y_min: this.domain_y_min, y_max: this.domain_height };
         const c = this._gndClasses;
         if (c && c.key === key && c.x_max === dom.x_max && c.y_min === dom.y_min && c.y_max === dom.y_max) return c;
-        const cls = (this.domain_shape || !key) ? { walls: new Set(), unlimited: new Set() }
+        const cls = !key ? { walls: new Set(), unlimited: new Set() }
             : unlimitedGrounds(dom, key, this.boundaries, this.domain_width * 1e-9);
         this._gndClasses = { key, ...dom, ...cls };
         return this._gndClasses;
@@ -2270,8 +2271,7 @@ export class FieldSolver2D {
 
     // Per-unit-length DC conductance of the positive traces, the negative traces and
     // the grounds. Conductors of one kind that overlap count the shared area once, at
-    // the later one's metal. A complement shape (a shield outside a circle) has no area:
-    // it is semi-infinite metal without DC resistance.
+    // the later one's metal.
     _dc_conductances() {
         const g = { pos: 0, neg: 0, gnd: 0 };
         const visible = visibleAreas(this.conductors || []);
@@ -3895,8 +3895,7 @@ export class FieldSolver2D {
         const isCond = (i, j) => this.signal_mask[i][j] || this.ground_mask[i][j];
         // Span of the face at node k: halfway to each neighbouring grid line.
         const span = (a, k) => [(a[Math.max(k - 1, 0)] + a[k]) / 2, (a[k] + a[Math.min(k + 1, a.length - 1)]) / 2];
-        const seg = { x0: [], y0: [], x1: [], y1: [], K: [] };
-        const push = (xa, ya, xb, yb, K) => { seg.x0.push(xa); seg.y0.push(ya); seg.x1.push(xb); seg.y1.push(yb); seg.K.push(K); };
+        const seg = segmentBuffer(), push = seg.push;
         const net = [0, 0];
         const straddles = [false, false];
         const mirror = !!this.sym_half && x[0] === 0;
@@ -3930,10 +3929,7 @@ export class FieldSolver2D {
         }
         const I = Math.max(Math.abs(net[0]) * (straddles[0] ? 2 : 1), Math.abs(net[1]) * (straddles[1] ? 2 : 1));
         if (!(I > 0)) return null;
-        const out = {};
-        for (const k of ['x0', 'y0', 'x1', 'y1']) out[k] = Float64Array.from(seg[k]);
-        out.K = Float64Array.from(seg.K, v => v / I);
-        return out;
+        return seg.out(1 / I);
     }
 
     /**

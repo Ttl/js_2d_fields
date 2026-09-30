@@ -1,7 +1,7 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB,
          isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
-import { isComplement, svgRingPath, svgShapePath, shapePoly, isPolyShape, shapeContains } from './shapes.js';
+import { svgShapePath, shapePoly, isPolyShape, shapeContains } from './shapes.js';
 
 // A polygon or ring shape as a Plotly path shape with `style`.
 const polyPathShape = (shape, style) => ({ type: 'path', path: svgShapePath(shape), fillrule: 'evenodd', ...style });
@@ -187,48 +187,17 @@ function conductorFillShapes(solver, maxY) {
             if (cond.plating) out.push(...platedEdgeLines(sh, cond.plating, GOLD));
             continue;
         }
-        if (sh) {
-            // A round conductor is drawn with Plotly's ellipse shape. The enclosing
-            // shield is an annulus, which needs an SVG path because Plotly's shape path
-            // grammar has no arc command (M/L/H/V/Q/C/T/S/Z only), svgRingPath emits
-            // two polygonal loops filled with the evenodd rule.
-            const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
-            if (isComplement(sh)) {
-                out.push({
-                    type: 'path', path: svgRingPath(cx, cy, r, cond.x_max * 1000),
-                    fillrule: 'evenodd', fillcolor: FILL, line: EDGE, layer: 'above',
-                });
-            } else {
-                out.push({
-                    type: 'circle', xref: 'x', yref: 'y',
-                    x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r,
-                    fillcolor: FILL, line: EDGE, layer: 'above',
-                });
-            }
-            // Plating covers the whole circumference (a circle has no separate faces),
-            // so the indicator is a gold outline rather than per-face lines.
-            if (cond.plating) {
-                out.push({
-                    type: 'circle', xref: 'x', yref: 'y',
-                    x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r,
-                    fillcolor: 'rgba(0,0,0,0)', line: GOLD, layer: 'above',
-                });
-            }
-            continue;
-        }
         if (cond.y_min > maxY) continue;
         const yMax = Math.min(cond.y_max, maxY);
         out.push({
             type: 'rect',
             x0: cond.x_min * 1000, y0: cond.y_min * 1000,
             x1: cond.x_max * 1000, y1: yMax * 1000,
-            fillcolor: 'rgba(217, 119, 6, 1.0)',
-            line: { color: 'rgba(0, 0, 0, 0.5)', width: 1 },
-            layer: 'above'
+            fillcolor: FILL, line: EDGE, layer: 'above'
         });
         if (cond.plating) {   // yellow lines on plated edges
             const x0 = cond.x_min * 1000, x1 = cond.x_max * 1000, y0 = cond.y_min * 1000, y1 = yMax * 1000;
-            const plateLine = { color: 'rgba(255, 215, 0, 1.0)', width: 3 };
+            const plateLine = GOLD;
             if (cond.plating.top) out.push({ type: 'line', x0, y0: y1, x1, y1: y1, line: plateLine, layer: 'above' });
             if (cond.plating.bottom) out.push({ type: 'line', x0, y0: y0, x1, y1: y0, line: plateLine, layer: 'above' });
             if (cond.plating.sides) {
@@ -260,15 +229,6 @@ function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, lay
         const sh = diel.shape;
         if (isPolyShape(sh)) {
             out.push(polyPathShape(sh, { fillcolor, line: { color: lineColor, width: 0.5 }, layer }));
-            continue;
-        }
-        if (sh && !isComplement(sh)) {
-            const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
-            out.push({
-                type: 'circle', xref: 'x', yref: 'y',
-                x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r,
-                fillcolor, line: { color: lineColor, width: 0.5 }, layer
-            });
             continue;
         }
         out.push({
@@ -504,12 +464,34 @@ function fieldFreqLabel(solver) {
     return ` at ${fs}` + (solver.fieldKind === 'fullwave' && currentView.startsWith("efield") ? ", full-wave mode" : "") + evanescent;
 }
 
+// Index of the displayed mode in the per-mode plot data.
+const shownModeIndex = () => (isDifferentialMode() ? getSelectedModeIndex() : 0);
+
+// " (Odd Mode)" / " (Even Mode)" of the displayed differential mode, else "".
+const shownModeLabel = () => (isDifferentialMode() ? (getSelectedModeIndex() === 1 ? " (Even Mode)" : " (Odd Mode)") : "");
+
+// The user's scale range of the view on screen, or null.
+const storedScale = () => (window.getStoredScale ? window.getStoredScale(scaleView()) : null);
+
+// |E| on the solver grid, rows 0..ny-1, [] without fields.
+function efieldMagnitude(ny, nx) {
+    const { Ex, Ey } = getFields();
+    const z = [];
+    if (!Ex || !Ey || Ex.length < ny) return z;
+    for (let i = 0; i < ny; i++) {
+        const row = [];
+        if (Ex[i] && Ey[i]) for (let j = 0; j < nx; j++) row.push(Math.hypot(Ex[i][j], Ey[i][j]));
+        z.push(row);
+    }
+    return z;
+}
+
 // Surface current segments of the displayed mode, or null.
 function getSurfaceK() {
     const solver = get.solver();
     const K = solver && solver.surfaceK;
     if (!K) return null;
-    return K[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
+    return K[shownModeIndex()] || null;
 }
 
 // |E| on the triangles of the displayed mode (meshFieldBlock), or null: the triangular
@@ -518,7 +500,7 @@ function getFieldMesh() {
     const solver = get.solver();
     const M = solver && solver.fieldMesh;
     if (!M) return null;
-    return M[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
+    return M[shownModeIndex()] || null;
 }
 
 // Surface current of the displayed mode's MQS solve on the metal with no |J| block: the
@@ -526,7 +508,7 @@ function getFieldMesh() {
 // as ideal returns (see _mqsSolve), or null. A segment belongs to them when its
 // midpoint lies on no conductor with a block.
 function bareMetalK(solver, blocks) {
-    const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+    const mi = shownModeIndex();
     const K = getSurfaceK();
     if (!K || !solver.surfaceKSource || solver.surfaceKSource[mi] !== 'mqs') return null;
     const withJ = (solver.conductors || []).filter(hasDensityBlock(blocks));
@@ -545,13 +527,13 @@ function getCurrentJ() {
     const solver = get.solver();
     const J = solver && solver.currentJ;
     if (!J) return null;
-    return J[isDifferentialMode() ? getSelectedModeIndex() : 0] || null;
+    return J[shownModeIndex()] || null;
 }
 
 // The triangle mesh of the displayed view: the skin mesh of the MQS solve for the
 // current views that come from it, else the solve mesh (null on the rectilinear backend).
 function viewTriMesh(solver) {
-    const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+    const mi = shownModeIndex();
     const fromMqs = currentView === "density"
         || (currentView === "current" && solver.surfaceKSource && solver.surfaceKSource[mi] === 'mqs');
     return (fromMqs && solver.currentMesh && solver.currentMesh[mi]) || solver.triMesh || null;
@@ -568,23 +550,14 @@ function densityConductorShapes(solver, blocks, maxY) {
     rest.conductors = conductors.filter(c => !covered(c));
     const out = conductorFillShapes(rest, maxY).map(sh => ({ ...sh, layer: 'below' }));
     const OUTLINE = { fillcolor: 'rgba(0,0,0,0)', line: { color: 'rgba(255, 255, 255, 0.5)', width: 1 }, layer: 'above' };
-    for (const c of conductors.filter(covered)) {
-        const sh = c.shape;
-        if (sh && !isPolyShape(sh)) {
-            const cx = sh.cx * 1000, cy = sh.cy * 1000, r = sh.r * 1000;
-            out.push({ type: 'circle', xref: 'x', yref: 'y', x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r, ...OUTLINE });
-        } else {
-            out.push(bodyShape(c, maxY, OUTLINE));
-        }
-    }
+    for (const c of conductors.filter(covered)) out.push(bodyShape(c, maxY, OUTLINE));
     return out;
 }
 
-// Test of whether a conductor lies under one of the |J| blocks. A complement shell (coax
-// shield) has no cross-section and never gets one.
+// Test of whether a conductor lies under one of the |J| blocks.
 function hasDensityBlock(blocks) {
     const bb = blocks.map(blockBox);
-    return c => !(c.shape && isComplement(c.shape)) && bb.some(b => Math.min(b.x1, c.x_max) > Math.max(b.x0, c.x_min)
+    return c => bb.some(b => Math.min(b.x1, c.x_max) > Math.max(b.x0, c.x_min)
         && Math.min(b.y1, c.y_max) > Math.max(b.y0, c.y_min));
 }
 
@@ -602,48 +575,42 @@ function blockBox(b) {
              y0: b.y[0], y1: b.y[b.y.length - 1] };
 }
 
-// Hover and color axis of the triangle blocks (shaped conductors): invisible markers at
-// the centroids of at most HOVER_MAX triangles, a marker per triangle (~1e5 on a skin
-// mesh) makes every pan and zoom slow. The |J| itself is the image of rasterizeDensity.
+// Hover and color axis of triangle blocks drawn as an image (rasterizeDensity): invisible
+// markers at the centroids of at most HOVER_MAX triangles, a marker per triangle (~1e5 on
+// a skin mesh) makes every pan and zoom slow. blocks: { tris: [x0, y0, x1, y1, x2, y2,
+// ...] }, value(b, t) the color of triangle t of block b.
 const HOVER_MAX = 5000;
-function densityHoverTrace(blocks, db) {
-    const mx = [], my = [], mv = [];
-    const n = blocks.reduce((a, b) => a + b.J.length, 0);
+function centroidHoverTrace(blocks, value, hovertemplate) {
+    const n = blocks.reduce((a, b) => a + b.tris.length / 6, 0);
     const stride = Math.max(1, Math.ceil(n / HOVER_MAX));
+    const mx = [], my = [], mv = [];
     for (const b of blocks) {
         const T = b.tris;
-        for (let t = 0; t < b.J.length; t += stride) {
+        for (let t = 0; t < T.length / 6; t += stride) {
             const k = 6 * t;
             mx.push((T[k] + T[k + 2] + T[k + 4]) * 1000 / 3); my.push((T[k + 1] + T[k + 3] + T[k + 5]) * 1000 / 3);
-            mv.push(db ? (b.J[t] > 0 ? 20 * Math.log10(b.J[t]) : null) : b.J[t]);
+            mv.push(value(b, t));
         }
     }
     return {
         type: "scattergl", mode: "markers", x: mx, y: my,
         marker: { size: 4, opacity: 0, color: mv, coloraxis: "coloraxis" },
-        hovertemplate: `x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>|J|: %{marker.color:${db ? ".1f} dB(A/m²)" : ".4g} A/m²"}<extra></extra>`,
-        showlegend: false,
+        hovertemplate, showlegend: false,
     };
 }
 
-// Hover and color axis of |E| on the mesh: invisible markers at the centroids of at most
-// HOVER_MAX triangles.
-function fieldMeshHoverTrace(M, db) {
-    const n = M.E.length / 3, stride = Math.max(1, Math.ceil(n / HOVER_MAX));
-    const mx = [], my = [], mv = [];
-    for (let t = 0; t < n; t += stride) {
-        const k = 6 * t, v = (M.E[3 * t] + M.E[3 * t + 1] + M.E[3 * t + 2]) / 3;
-        mx.push((M.tris[k] + M.tris[k + 2] + M.tris[k + 4]) * 1000 / 3);
-        my.push((M.tris[k + 1] + M.tris[k + 3] + M.tris[k + 5]) * 1000 / 3);
-        mv.push(db ? (v > 0 ? toDb(v) : null) : v);
-    }
-    return {
-        type: "scattergl", mode: "markers", x: mx, y: my,
-        marker: { size: 4, opacity: 0, color: mv, coloraxis: "coloraxis" },
-        hovertemplate: `x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>|E|: %{marker.color:${db ? ".1f} dB(V/m)" : ".4g} V/m"}<extra></extra>`,
-        showlegend: false,
-    };
-}
+const densityHoverTrace = (blocks, db) => centroidHoverTrace(blocks,
+    (b, t) => db ? (b.J[t] > 0 ? 20 * Math.log10(b.J[t]) : null) : b.J[t],
+    `x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>|J|: %{marker.color:${db ? ".1f} dB(A/m²)" : ".4g} A/m²"}<extra></extra>`);
+
+// Mean of the vertex values E of triangle t of a mesh field block.
+const triMeanE = (M, t) => (M.E[3 * t] + M.E[3 * t + 1] + M.E[3 * t + 2]) / 3;
+
+// Hover and color axis of |E| on the mesh.
+const fieldMeshHoverTrace = (M, db) => centroidHoverTrace([M], (b, t) => {
+    const v = triMeanE(b, t);
+    return db ? (v > 0 ? toDb(v) : null) : v;
+}, `x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>|E|: %{marker.color:${db ? ".1f} dB(V/m)" : ".4g} V/m"}<extra></extra>`);
 
 // Contour lines of |E| on the mesh at the log10 levels limits = [start, end, step]
 // (efieldContourTrace's), traced through each triangle of the linear field.
@@ -743,19 +710,25 @@ function imageBlocks() {
 }
 
 // Redraws the image of the triangle blocks for the current axis ranges and plot size.
-let densityImageFrame = 0;
-function updateDensityImage(container) {
-    cancelAnimationFrame(densityImageFrame);
-    densityImageFrame = requestAnimationFrame(() => {
-        const blocks = imageBlocks();
+const updateDensityImage = container =>
+    updateTriImage(container, () => ({ blocks: imageBlocks(), zmin: zMin, zmax: zMax, db: getPlotOptions().efieldDb }));
+
+// Redraws the image of triangle blocks in `container` on the next frame, for its axis
+// ranges and plot size. get() returns { blocks, zmin, zmax, db } at draw time.
+// container._triImageUpdate is set while the relayout runs, so a relayout handler can
+// tell it from a zoom or pan.
+function updateTriImage(container, get) {
+    cancelAnimationFrame(container._triImageFrame || 0);
+    container._triImageFrame = requestAnimationFrame(() => {
+        const { blocks, zmin, zmax, db } = get();
         const fl = container._fullLayout;
-        if (!blocks.length || !fl || !fl.xaxis || !fl._size) return;
+        if (!blocks || !blocks.length || !fl || !fl.xaxis || !fl._size) return;
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
         const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
         const im = rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
-            zMin, zMax, getPlotOptions().efieldDb);
-        container._densityImageUpdate = true;
-        getPlotly().relayout(container, { images: im ? [im] : [] }).finally(() => { container._densityImageUpdate = false; });
+            zmin, zmax, db);
+        container._triImageUpdate = true;
+        getPlotly().relayout(container, { images: im ? [im] : [] }).finally(() => { container._triImageUpdate = false; });
     });
 }
 
@@ -928,6 +901,12 @@ function draw(resetZoom = false) {
         currentYRange = container.layout.yaxis.range;
     }
 
+    // The initial view of the geometry, unless the plot keeps the user's.
+    const fitView = (maxY) => {
+        const view = computeGeometryView(solver, maxY);
+        if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
+    };
+
     let zData = [];
     let title = "";
     let colorscale = "Viridis";
@@ -943,10 +922,7 @@ function draw(resetZoom = false) {
         const maxY = displayTop(solver);
 
         // Calculate intelligent zoom ranges for initial view (only if no current view exists)
-        if (!currentXRange || resetZoom) {
-            const view = computeGeometryView(solver, maxY);
-            if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
-        }
+        if (!currentXRange || resetZoom) fitView(maxY);
 
         // The solved region of a custom geometry, drawn as air under everything else.
         if (solver.user_domain) {
@@ -972,20 +948,7 @@ function draw(resetZoom = false) {
 
             xMM = Array.from(solver.x, v => v * 1000);
             yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
-
-            // Compute E-field magnitude
-            const { Ex, Ey } = getFields();
-            if (Ex && Ey && Ex.length >= nyDisplay) {
-                for (let i = 0; i < nyDisplay; i++) {
-                    const row = [];
-                    if (Ex[i] && Ey[i]) {
-                        for (let j = 0; j < nx; j++) {
-                            row.push(Math.hypot(Ex[i][j], Ey[i][j]));
-                        }
-                    }
-                    zData.push(row);
-                }
-            }
+            zData = efieldMagnitude(nyDisplay, nx);
             if (zData.length > 0) {
                 const auto = efieldAutoscale(zData, xMM, yMM);
                 extendIntoMetal(zData, solver);
@@ -1009,17 +972,7 @@ function draw(resetZoom = false) {
             solver.ensure_mesh();
         }
 
-        nx = solver.x.length;
-        ny = solver.y.length;
-
-        // Limit display Y to domain extent
-        const yArr = Array.from(solver.y);
-        const maxY = yArr[ny - 1];
-        const maxYIdx = yArr.findIndex(y => y > maxY);
-        nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
-
-        xMM = Array.from(solver.x, v => v * 1000);
-        yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
+        ({ xMM, yMM, nx, nyDisplay } = solverGridMM(solver));
 
         let modeLabel = "";
         if (currentView === "potential_odd") {
@@ -1050,17 +1003,7 @@ function draw(resetZoom = false) {
             solver.ensure_mesh();
         }
 
-        nx = solver.x.length;
-        ny = solver.y.length;
-
-        // Limit display Y to actual domain extent
-        const yArr = Array.from(solver.y);
-        const maxY = yArr[ny - 1];
-        const maxYIdx = yArr.findIndex(y => y > maxY);
-        nyDisplay = maxYIdx > 0 ? maxYIdx : ny;
-
-        xMM = Array.from(solver.x, v => v * 1000);
-        yMM = yArr.slice(0, nyDisplay).map(v => v * 1000);
+        ({ xMM, yMM, nx, nyDisplay } = solverGridMM(solver));
 
         let modeLabel = "";
         if (currentView === "efield_odd") {
@@ -1072,18 +1015,7 @@ function draw(resetZoom = false) {
         title = `|E| Field Magnitude${modeLabel} (${db ? "dB V/m" : "V/m"})${fieldFreqLabel(solver)}`;
         zTitle = db ? "dB(V/m)" : "V/m";
 
-        const { Ex, Ey } = getFields();
-        if (Ex && Ey && Ex.length >= nyDisplay) {
-            for (let i = 0; i < nyDisplay; i++) {
-                const row = [];
-                if (Ex[i] && Ey[i]) {
-                    for (let j = 0; j < nx; j++) {
-                        row.push(Math.hypot(Ex[i][j], Ey[i][j]));
-                    }
-                }
-                zData.push(row);
-            }
-        }
+        zData = efieldMagnitude(nyDisplay, nx);
         const auto = efieldAutoscale(zData, xMM, yMM);
         extendIntoMetal(zData, solver);
         contourFloor = auto.floor;
@@ -1099,19 +1031,15 @@ function draw(resetZoom = false) {
         actualDataMax = zMax;
         // Mask the conductor interior (field is 0 inside the PEC) so the heatmap/contour bleed
         // across the boundary is hidden, like the geometry view.
-        shapes.push(...conductorFillShapes(solver, yArr[nyDisplay - 1]));
+        shapes.push(...conductorFillShapes(solver, solver.y[nyDisplay - 1]));
     }
 
     else if (currentView === "density" && solver.solution_valid && getCurrentJ()) {
         const maxY = displayTop(solver);
-        if (!currentXRange || resetZoom) {
-            const view = computeGeometryView(solver, maxY);
-            if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
-        }
+        if (!currentXRange || resetZoom) fitView(maxY);
         const db = plotOptions.efieldDb;
-        let modeLabel = "";
-        if (isDifferentialMode()) modeLabel = getSelectedModeIndex() === 1 ? " (Even Mode)" : " (Odd Mode)";
-        const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+        const modeLabel = shownModeLabel();
+        const mi = shownModeIndex();
         const ideal = (solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "")
             + (bareMetalK(solver, getCurrentJ()) ? ", surface |K| (A/m) on metal without |J|" : "");
         title = `Current Density |J| per 1 A${modeLabel} (${db ? "dB A/m²" : "A/m²"})${fieldFreqLabel(solver)}${ideal}`;
@@ -1125,14 +1053,10 @@ function draw(resetZoom = false) {
 
     else if (currentView === "current" && solver.solution_valid && getSurfaceK()) {
         const maxY = displayTop(solver);
-        if (!currentXRange || resetZoom) {
-            const view = computeGeometryView(solver, maxY);
-            if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
-        }
+        if (!currentXRange || resetZoom) fitView(maxY);
         const db = plotOptions.efieldDb;
-        let modeLabel = "";
-        if (isDifferentialMode()) modeLabel = getSelectedModeIndex() === 1 ? " (Even Mode)" : " (Odd Mode)";
-        const mi = isDifferentialMode() ? getSelectedModeIndex() : 0;
+        const modeLabel = shownModeLabel();
+        const mi = shownModeIndex();
         const fromMqs = solver.surfaceKSource && solver.surfaceKSource[mi] === 'mqs';
         const ideal = fromMqs && solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "";
         // Both plot the tangential H at the surface. In the perfect-conductor limit it is the
@@ -1158,21 +1082,13 @@ function draw(resetZoom = false) {
         yMM = [0, (solver.h || 1) * 1000];
     }
 
-    // Save original mesh coordinates for mesh overlay before interpolation
-    let xMM_mesh = xMM;
-    let yMM_mesh = yMM;
-    let nx_mesh = nx;
-    let nyDisplay_mesh = nyDisplay;
-
     // Main field trace
     let traces = [];
 
     let colorAxis = null;
+    const override = storedScale();
     if (currentView === "density" && getCurrentJ()) {
-        if (window.getStoredScale) {
-            const override = window.getStoredScale(scaleView());
-            if (override) { zMin = override.min; zMax = override.max; }
-        }
+        if (override) { zMin = override.min; zMax = override.max; }
         const db = plotOptions.efieldDb;
         // Walls and ideal edge grounds carry no current inside: their surface |K| is
         // drawn on their faces, on its own colorbar below the |J| one.
@@ -1197,25 +1113,13 @@ function draw(resetZoom = false) {
             });
         }
     } else if (currentView === "current" && getSurfaceK()) {
-        if (window.getStoredScale) {
-            const override = window.getStoredScale(scaleView());
-            if (override) { zMin = override.min; zMax = override.max; }
-        }
+        if (override) { zMin = override.min; zMax = override.max; }
         traces.push(...surfaceCurrentTraces(getSurfaceK(), zMin, zMax, plotOptions.efieldDb));
     } else if (currentView === "geometry" && zData.length > 0) {
         const { Ex, Ey } = getFields();
 
-        let eMax = zMax;
-        let eMin = contourFloor;
-
-        // Check if there's a user-defined scale override
-        if (window.getStoredScale) {
-            const override = window.getStoredScale(scaleView());
-            if (override) {
-                eMin = override.min;
-                eMax = override.max;
-            }
-        }
+        const eMin = override ? override.min : contourFloor;
+        const eMax = override ? override.max : zMax;
 
         const n = plotOptions.contours;
 
@@ -1258,16 +1162,8 @@ function draw(resetZoom = false) {
     } else if (zData.length > 0) {
         // Field views. Heatmap with optional contour lines.
 
-        // Check if there's a user-defined scale override
-        let autoscaled = true;
-        if (window.getStoredScale) {
-            const override = window.getStoredScale(scaleView());
-            if (override) {
-                zMin = override.min;
-                zMax = override.max;
-                autoscaled = false;
-            }
-        }
+        const autoscaled = !override;
+        if (override) { zMin = override.min; zMax = override.max; }
 
         const n = plotOptions.contours;
         const hoverTpl = "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.3e}<extra></extra>";
@@ -1351,34 +1247,16 @@ function draw(resetZoom = false) {
             line: { width: 0.3, color: "rgba(0,0,0,0.5)" },
             showlegend: false, hoverinfo: "skip"
         });
-    } else if (showMesh && solver.solution_valid) {
-        const stepX = 1;
-        const stepY = 1;
-
-        // Use original mesh coordinates (before interpolation)
-        for (let j = 0; j < nx_mesh; j += stepX) {
-            traces.push({
-                type: "scatter",
-                x: [xMM_mesh[j], xMM_mesh[j]],
-                y: [yMM_mesh[0], yMM_mesh[nyDisplay_mesh - 1]],
-                mode: "lines",
-                line: { width: 0.2, color: "black" },
-                showlegend: false,
-                hoverinfo: "skip"
-            });
-        }
-
-        for (let i = 0; i < nyDisplay_mesh; i += stepY) {
-            traces.push({
-                type: "scatter",
-                x: [xMM_mesh[0], xMM_mesh[nx_mesh - 1]],
-                y: [yMM_mesh[i], yMM_mesh[i]],
-                mode: "lines",
-                line: { width: 0.2, color: "black" },
-                showlegend: false,
-                hoverinfo: "skip"
-            });
-        }
+    } else if (showMesh && solver.solution_valid && nx > 0 && nyDisplay > 0) {
+        // Rectilinear grid lines as one trace, separated by nulls.
+        const gx = [], gy = [];
+        for (let j = 0; j < nx; j++) gx.push(xMM[j], xMM[j], null), gy.push(yMM[0], yMM[nyDisplay - 1], null);
+        for (let i = 0; i < nyDisplay; i++) gx.push(xMM[0], xMM[nx - 1], null), gy.push(yMM[i], yMM[i], null);
+        traces.push({
+            type: "scatter", x: gx, y: gy, mode: "lines",
+            line: { width: 0.2, color: "black" },
+            showlegend: false, hoverinfo: "skip"
+        });
     }
 
     // An |E| image below the traces sits under the grid lines, which the heatmap covered.
@@ -1562,7 +1440,7 @@ function draw(resetZoom = false) {
         // Handle autoscale button click
         container.on('plotly_relayout', (eventData) => {
             // A zoom or pan redraws the |J| image of the shaped conductors for the new view.
-            if ((currentView === "density" || currentView.startsWith("efield")) && !container._densityImageUpdate)
+            if ((currentView === "density" || currentView.startsWith("efield")) && !container._triImageUpdate)
                 updateDensityImage(container);
             // Check if this is an autoscale event (both axes autoscaling)
             if (eventData && eventData['xaxis.autorange'] === true && eventData['yaxis.autorange'] === true) {
@@ -2130,4 +2008,4 @@ function isFrozen() { return frozenResultsData !== null; }
 
 export { draw, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
-    rasterizeDensity };
+    centroidHoverTrace, triMeanE, updateTriImage };

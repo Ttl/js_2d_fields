@@ -1519,7 +1519,8 @@ function localEdgeOf(tris, u, a, b) {
 // conformity: if a triangle has a marked non-longest edge, its longest
 // edge also gets marked. This preserves the minimum angle guarantee.
 // opts.longest: the edge each triangle bisects (local index 0-2, -1 for the longest),
-// the longest in a metric of the caller's: anisotropic refinement.
+// the longest in a metric of the caller's: anisotropic refinement. The angle bound
+// then holds in that metric, not in the plane.
 // opts.smooth === false: no smoothing or edge swaps, which would undo it.
 export function refineTriMesh(mesh, marked, opts = {}) {
     const { nodes, tris, edges, triEdges, triSigns, nNodes, nTris, nEdges } = mesh;
@@ -1702,8 +1703,8 @@ export function refineTriMesh(mesh, marked, opts = {}) {
 
     // --- Constraint SEGMENTS (shaped conductors: polygon sides) ---
     // A shaped conductor's boundary is not axis-aligned, so the onXLine/onYLine
-    // machinery above cannot see it — and the bbox-wall test cannot either, since a
-    // circle only touches its bounding box at four points. Without this, every
+    // machinery above cannot see it, and neither can the bbox-wall test, which a
+    // slanted side touches at its ends only. Without this, every
     // polygon-boundary node classifies as FREE and the Laplacian smoother pulls it
     // toward the mesh interior on every pass: the conductor shrinks until the
     // containment test stops matching it and the PEC surface develops holes.

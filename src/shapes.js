@@ -1,35 +1,18 @@
-// Non-rectangular geometry primitives for the full-wave backend.
+// Non-rectangular geometry primitives: convex polygons and rings (a convex outer loop
+// with a convex hole), used by custom geometry and the coax.
 //
-// The whole solver's geometry contract has historically been "axis-aligned rectangle
-// exposing x_min/x_max/y_min/y_max", and roughly a dozen places do a point-in-box test
-// against it. Coax is the first medium that cannot be expressed that way, so
-// Dielectric/Conductor gained an optional `shape` descriptor and those tests route
-// through shapeContains() here.
+// Geometry objects expose x_min/x_max/y_min/y_max, and a Dielectric/Conductor may carry
+// an optional `shape` descriptor. Point-in-body tests route through shapeContains(),
+// which evaluates the plain bbox expression when there is no shape, so rectangular
+// media never run anything else in this module.
 //
-// THE INVARIANT THIS FILE EXISTS TO PRESERVE: when an object carries no `shape`,
-// shapeContains() evaluates the literal legacy bbox expression, so every existing
-// rectangular medium is bit-identical. Nothing in this module runs for them.
-//
-// Circles are materialized as CONVEX POLYGONS (regular n-gons), not treated as ideal
-// circles, and that is deliberate rather than a compromise:
-//
-//   • The mesher (gmsh via OCC) has no disk primitive exported, but more importantly
-//     refineTriMesh() is pure longest-edge bisection that never consults the geometry.
-//     An ideal circle would be discarded at the first mesh extraction anyway.
-//   • buildTriFreedomMap classifies a PEC edge by its MIDPOINT. A mesh edge on a
-//     polygon side is a sub-segment of that side, so its midpoint lies exactly ON the
-//     boundary at any refinement depth. Against an ideal circle those edges are chords
-//     whose midpoints sit a sagitta r(1-cos(pi/n)) inside — harmless for a solid disk
-//     (still inside the metal) but fatal for an `outside_circle` shield, where every
-//     boundary edge would fail the test and the shield would leak.
-//
-// So the polygon IS the geometry, not an approximation of it, and every predicate here
-// is exact with respect to that polygon.
+// The polygon is the geometry: mesh edges on a polygon side are sub-segments of it at
+// any refinement depth, so every predicate here is exact with respect to the polygon.
 
 // Relative tolerance for "is this point on the boundary" tests, scaled by the caller's
 // domain diagonal (or by the local feature size where that is the meaningful scale).
-// Boundary points must classify as inside for both polarities so a node sitting exactly
-// on a conductor surface is PEC.
+// Boundary points classify as inside so a node sitting exactly on a conductor surface
+// is PEC.
 //
 // Every stage that decides "is this node/edge/curve ON a shape boundary" must agree, or a
 // node classifies as metal in one and as free space in the next and the PEC surface
@@ -56,112 +39,42 @@ export function polyRadiusForArea(r, n) {
     return r * Math.sqrt(th / Math.sin(th));
 }
 
-// Vertices of the area-matched regular n-gon, CCW, vertex k at angle phase + 2pi k/n.
-// Pure and deterministic: every consumer (OCC geometry, material tagging, freedom map,
-// loss, plotting) must materialize the SAME polygon or they silently disagree about
-// where the metal is, so this must never depend on mesh state or call order.
-export function circlePolygon(cx, cy, r, n, phase = 0) {
-    const R = polyRadiusForArea(r, n);
-    const poly = new Float64Array(2 * n);
-    for (let k = 0; k < n; k++) {
-        const th = phase + TWO_PI * k / n;
-        poly[2 * k] = cx + R * Math.cos(th);
-        poly[2 * k + 1] = cy + R * Math.sin(th);
-    }
-    return poly;
-}
-
-// The x >= 0 half of a circle polygon, as a closed convex polygon: the arc from
-// angle -pi/2 up through 0 to +pi/2, closed by the chord back down the y axis.
-//
-// Requires n % 4 === 0 and phase === 0 so that vertices land EXACTLY on +-90 degrees.
-// Without that the half is not a half: the chord would cut through a side, the two
-// halves would not tile the full polygon, and the half-domain symmetry solve would be
-// integrating a slightly different body than the full-domain one it is validated
-// against. Callers building symmetric geometry must clamp n to a multiple of 4.
-function halfCirclePolygon(cx, cy, r, n, phase = 0) {
-    if (n % 4 !== 0 || phase !== 0) {
-        throw new Error(`halfCirclePolygon needs n % 4 === 0 and phase === 0 (got n=${n}, phase=${phase})`);
-    }
-    const R = polyRadiusForArea(r, n);
-    const q = n / 4;                       // vertex index of +90 degrees
-    // Arc vertices from -90 degrees (index 3n/4) CCW through 0 to +90 degrees (index n/4).
-    const nArc = 2 * q + 1;
-    const poly = new Float64Array(2 * nArc);
-    for (let i = 0; i < nArc; i++) {
-        const k = 3 * q + i;               // wraps past n back through 0
-        const th = TWO_PI * (k % n) / n;
-        poly[2 * i] = cx + R * Math.cos(th);
-        poly[2 * i + 1] = cy + R * Math.sin(th);
-    }
-    // The chord from (cx, cy+R) back to (cx, cy-R) closes the loop implicitly (the
-    // last vertex connects to the first), so no explicit chord vertices are needed.
-    return poly;
-}
-
 // --- Shape descriptors ----------------------------------------------------------
 //
-//   { type: 'circle',          cx, cy, r, n, phase, xSymmetric }
-//   { type: 'outside_circle',  cx, cy, r, n, phase, xSymmetric }
-//   { type: 'polygon',         poly: Float64Array }     CONVEX, CCW
-//   { type: 'outside_polygon', poly: Float64Array }     CONVEX, CCW
-//   { type: 'ring',            poly, hole }             convex outer and hole loops, CCW
+//   { type: 'polygon', poly: Float64Array }     convex, CCW
+//   { type: 'ring',    poly, hole }             convex outer and hole loops, CCW
 //
-// Custom geometry primitives (trapezoid, n-gon, n-gon ring) are 'polygon' and 'ring'
-// shapes with a few optional fields:
+// Custom geometry primitives (trapezoid, n-gon, n-gon ring) carry a few optional fields:
 //   faces     - face name per polygon edge (edge i runs from vertex i to i + 1): 'top',
 //               'sides' or 'bottom' on a trapezoid, for per-face plating. Without it
 //               every edge is 'all'.
 //   thickness - the conductor's thin dimension (slab reactance, skin band gating)
 //   round     - a round wire (n-gon), whose internal inductance follows the wire rule
-//
-// An `outside_*` shape is the COMPLEMENT of its body: a shield that is "everything at
-// radius >= b", which has zero meshed area (the meshed domain stops at the boundary)
-// but still owns every node and edge on that boundary. That is what makes the outer
-// boundary PEC and gives it loss edges, without meshing any shield metal or leaving
-// dead air cavities in the corners of a bounding box.
+//   radial    - { cx, cy, rIn, rOut, holeIn?, holeOut? }: inscribed and circumscribed
+//               radii of a regular n-gon (and its hole), for the radial fast path in
+//               shapeSignedDist
 
-export function isComplement(shape) {
-    return shape.type === 'outside_circle' || shape.type === 'outside_polygon';
-}
-
-// Polygon and ring shapes (custom geometry primitives and the coax), as opposed to
-// circles.
+// Polygon and ring shapes.
 export const isPolyShape = shape => !!shape && (shape.type === 'polygon' || shape.type === 'ring');
 
 // Bounds of a rect { x_min.. } or { xmin.. } as { xmin, xmax, ymin, ymax }.
 export const rectOf = o => ({ xmin: o.xmin ?? o.x_min, xmax: o.xmax ?? o.x_max, ymin: o.ymin ?? o.y_min, ymax: o.ymax ?? o.y_max });
 
-function isCircular(shape) {
-    return shape.type === 'circle' || shape.type === 'outside_circle';
-}
-
-// Materialized polygon for a shape, memoized on the shape object.
-// `half` returns the x >= 0 half (symmetry solves); it is a DIFFERENT body than the
-// full polygon and is cached separately. Only the mesher and the constraint segments
-// use the half — containment always tests against the FULL polygon (see shapeContains).
+// Polygon of a shape (a ring's outer loop). `half` returns the part at x >= 0
+// (symmetry solves), empty when the polygon lies left of the plane, memoized on the
+// shape object. Only the mesher and the constraint segments use the half; containment
+// always tests against the full polygon (see shapeContains).
 export function shapePoly(shape, { half = false } = {}) {
-    const key = half ? '_polyHalf' : '_poly';
-    let poly = shape[key];
+    if (!half) return shape.poly;
+    let poly = shape._polyHalf;
     if (poly) return poly;
-    if (isCircular(shape)) {
-        poly = half
-            ? halfCirclePolygon(shape.cx, shape.cy, shape.r, shape.n, shape.phase || 0)
-            : circlePolygon(shape.cx, shape.cy, shape.r, shape.n, shape.phase || 0);
-    } else if (half) {
-        // The part at x >= 0 of any other convex polygon, empty when it lies left of
-        // the plane. A ring's poly is its outer loop.
-        if (shape.type === 'outside_polygon') throw new Error('shapePoly: {half} is not supported for outside_polygon');
-        poly = clipPolyX(shape.poly, 0);
-    } else {
-        poly = shape.poly;
-    }
+    poly = clipPolyX(shape.poly, 0);
     // Non-enumerable so a shape object still serializes/spreads cleanly.
-    Object.defineProperty(shape, key, { value: poly, writable: true, configurable: true });
+    Object.defineProperty(shape, '_polyHalf', { value: poly, writable: true, configurable: true });
     return poly;
 }
 
-// Bounding box of the shape's positive BODY (for `outside_*`, the hole it surrounds).
+// Bounding box of the shape.
 export function shapeBBox(shape, opts) {
     const poly = shapePoly(shape, opts);
     let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
@@ -180,22 +93,8 @@ export function shapeBBox(shape, opts) {
 // ambiguity) — the reason shapes are required to be convex.
 //
 // This is on the hot path: buildTriFreedomMap calls shapeContains ~3x per node per
-// mode per refinement pass. Circle-derived shapes get a radial fast path — a point
-// inside the inradius or outside the circumradius is decided in O(1) — so the O(n)
-// half-plane loop only runs for the thin annulus between them.
+// mode per refinement pass.
 export function shapeSignedDist(shape, x, y) {
-    if (isCircular(shape)) {
-        let rad = shape._radii;
-        if (!rad) {
-            const R = polyRadiusForArea(shape.r, shape.n);          // circumradius
-            rad = { R, rIn: R * Math.cos(Math.PI / shape.n) };      // inradius (apothem)
-            Object.defineProperty(shape, '_radii', { value: rad, writable: true, configurable: true });
-        }
-        const d = Math.hypot(x - shape.cx, y - shape.cy);
-        if (d <= rad.rIn) return d - rad.rIn;                       // strictly inside
-        if (d >= rad.R) return d - rad.R;                           // strictly outside
-        // In the annulus between them: fall through to the exact half-plane test.
-    }
     // A regular n-gon (or ring of two): inside the inscribed circle or outside the
     // circumscribed one the radial distance decides, with the same sign and never more
     // than the true distance. Only the band between the circles takes the edge loop.
@@ -231,14 +130,9 @@ function convexSignedDist(poly, x, y) {
 
 // Is (x, y) inside the object, within tol?
 //
-// No shape  -> the LEGACY bbox test, character for character. This is the fallback that
-//              keeps every rectangular medium bit-identical; do not "simplify" it.
-// body      -> s <= +tol  (true ON the boundary)
-// complement-> s >= -tol  (true ON the boundary)
-//
-// Both polarities include their boundary, which is what makes a node sitting exactly on
-// a conductor surface PEC. It also means the boundary belongs to both a disk and its
-// complement, but those are never both present as separate conductors in one geometry.
+// No shape -> the plain bbox test, which keeps every rectangular medium bit-identical.
+// shape    -> s <= +tol, true on the boundary, which is what makes a node sitting
+//             exactly on a conductor surface PEC.
 //
 // `o` is the geometry object (Conductor/Dielectric or a mesher condRect), accepting
 // either the x_min/x_max naming or the xmin/xmax naming used inside the mesher.
@@ -251,16 +145,13 @@ export function shapeContains(o, x, y, tol = 0) {
         const ymax = o.ymax !== undefined ? o.ymax : o.y_max;
         return x >= xmin - tol && x <= xmax + tol && y >= ymin - tol && y <= ymax + tol;
     }
-    const s = shapeSignedDist(shape, x, y);
-    return isComplement(shape) ? (s >= -tol) : (s <= tol);
+    return shapeSignedDist(shape, x, y) <= tol;
 }
 
 // Cross-sectional area of the object.
 //
-// Feeds the DC resistance (R_dc = 1/(sigma*A)), where a bbox would be badly wrong:
-// a disk's bbox area is 4a^2 vs the true pi*a^2, a +27% error on R_dc.
-// A complement shape has no finite area — it is a zero-thickness PEC shell in this
-// model — and returns 0 so it contributes nothing to any area sum.
+// Feeds the DC resistance (R_dc = 1/(sigma*A)), where the bbox area would be wrong for
+// any shape.
 export function shapeArea(o, opts) {
     const shape = o.shape;
     if (!shape) {
@@ -270,7 +161,6 @@ export function shapeArea(o, opts) {
             : ((o.ymax !== undefined ? o.ymax : o.y_max) - (o.ymin !== undefined ? o.ymin : o.y_min));
         return Math.abs(w * h);
     }
-    if (isComplement(shape)) return 0;
     if (shape.type === 'ring') {
         const hole = (opts && opts.half) ? clipPolyX(shape.hole, 0) : shape.hole;
         return polyArea(shapePoly(shape, opts)) - polyArea(hole);
@@ -298,44 +188,28 @@ function polyArea(poly) {
 // develops holes. Bisection midpoints of a straight segment land exactly on it, so
 // pinning costs nothing geometrically.
 //
-// For a complement shape the segments are its inner boundary — the same polygon.
-//
-// In the {half} case the CLOSING edge (last vertex back to first) is the chord down
-// x = cx, i.e. the symmetry plane. It is deliberately omitted: nodes there must stay
-// free to slide ALONG the plane (the mesher constrains them via constraintXRanges),
-// and pinning a whole plane of nodes would strand slivers the smoother could not fix.
+// On a half domain ({half}) the edges lying on the symmetry plane are the cut, not a
+// surface, and are left out: nodes there must stay free to slide along the plane (the
+// mesher constrains them via constraintXRanges).
 export function shapeSegments(o, opts) {
     const shape = o.shape;
     if (!shape) return [];
-    if (!isCircular(shape)) {
-        // Polygon and ring loops. On a half domain the edges lying on the plane are
-        // the cut, not a surface, and are left out like the circle's chord.
-        const half = !!(opts && opts.half);
-        const segs = [];
-        const add = (poly, reverse) => {
-            const n = poly.length >> 1;
-            for (let i = 0; i < n; i++) {
-                const j = (i + 1) % n;
-                const [a, b] = reverse ? [j, i] : [i, j];
-                const seg = { x0: poly[2 * a], y0: poly[2 * a + 1], x1: poly[2 * b], y1: poly[2 * b + 1] };
-                if (half && seg.x0 === 0 && seg.x1 === 0) continue;
-                segs.push(seg);
-            }
-        };
-        add(shapePoly(shape, opts), false);
-        // The hole runs clockwise so the outward normal of every segment points away
-        // from the metal.
-        if (shape.type === 'ring') add(half ? clipPolyX(shape.hole, 0) : shape.hole, true);
-        return segs;
-    }
-    const poly = shapePoly(shape, opts);
-    const n = poly.length >> 1;
-    const last = (opts && opts.half) ? n - 1 : n;   // skip the closing chord on a half
+    const half = !!(opts && opts.half);
     const segs = [];
-    for (let i = 0; i < last; i++) {
-        const j = (i + 1) % n;
-        segs.push({ x0: poly[2 * i], y0: poly[2 * i + 1], x1: poly[2 * j], y1: poly[2 * j + 1] });
-    }
+    const add = (poly, reverse) => {
+        const n = poly.length >> 1;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            const [a, b] = reverse ? [j, i] : [i, j];
+            const seg = { x0: poly[2 * a], y0: poly[2 * a + 1], x1: poly[2 * b], y1: poly[2 * b + 1] };
+            if (half && seg.x0 === 0 && seg.x1 === 0) continue;
+            segs.push(seg);
+        }
+    };
+    add(shapePoly(shape, opts), false);
+    // The hole runs clockwise so the outward normal of every segment points away from
+    // the metal.
+    if (shape.type === 'ring') add(half ? clipPolyX(shape.hole, 0) : shape.hole, true);
     return segs;
 }
 
@@ -349,9 +223,7 @@ export function shapePerimeter(o) {
 
 // Walk a shaped object's boundary by ARC LENGTH: t in [0,1) → a point on the boundary
 // plus the unit OUTWARD normal there. Streamline seeding uses it to place seeds evenly
-// around a curved conductor and to weight them by the normal field |E·n|.
-// For a complement shape the normal points into the hole (toward the field region),
-// which is still "away from the metal".
+// around a shaped conductor and to weight them by the normal field |E·n|.
 export function shapePerimeterPoint(o, t) {
     const segs = shapeSegments(o);
     const total = shapePerimeter(o);
@@ -362,14 +234,11 @@ export function shapePerimeterPoint(o, t) {
         if (target > len && len > 0) { target -= len; continue; }
         const u = len > 0 ? target / len : 0;
         // CCW polygon ⇒ outward normal of edge (ex, ey) is (ey, -ex)/len.
-        const sgn = isComplement(o.shape) ? -1 : 1;
-        return { x: s.x0 + u * ex, y: s.y0 + u * ey,
-                 nx: sgn * ey / len, ny: -sgn * ex / len };
+        return { x: s.x0 + u * ex, y: s.y0 + u * ey, nx: ey / len, ny: -ex / len };
     }
     const s = segs[segs.length - 1];
     const ex = s.x1 - s.x0, ey = s.y1 - s.y0, len = Math.hypot(ex, ey);
-    const sgn = isComplement(o.shape) ? -1 : 1;
-    return { x: s.x1, y: s.y1, nx: sgn * ey / len, ny: -sgn * ex / len };
+    return { x: s.x1, y: s.y1, nx: ey / len, ny: -ex / len };
 }
 
 // Distance from (x, y) to the object's boundary, unsigned. Streamline stepping uses
@@ -400,24 +269,6 @@ export function segShapeBoundaryHit(x1, y1, x2, y2, o) {
         if (inside(mid)) hi = mid; else lo = mid;
     }
     return { x: x1 + hi * (x2 - x1), y: y1 + hi * (y2 - y1), conductor: o };
-}
-
-// SVG path for an annular ring, as two closed polygonal loops for evenodd filling.
-// Plotly's layout.shapes[].path grammar allows only M/L/H/V/Q/C/T/S/Z — there is no
-// elliptical-arc command — so the ring must be drawn as polygons rather than arcs.
-export function svgRingPath(cx, cy, rIn, rOut, n = 180) {
-    const loop = (r, dir) => {
-        let d = '';
-        for (let k = 0; k < n; k++) {
-            const th = dir * TWO_PI * k / n;
-            const x = cx + r * Math.cos(th), y = cy + r * Math.sin(th);
-            d += (k === 0 ? 'M' : 'L') + x.toFixed(6) + ',' + y.toFixed(6);
-        }
-        return d + 'Z';
-    };
-    // Opposite winding for the hole is not required by evenodd, but keeps the path
-    // valid under nonzero filling too.
-    return loop(rOut, 1) + loop(rIn, -1);
 }
 
 // --- Polygon primitives (custom geometry) -----------------------------------------
@@ -526,10 +377,9 @@ export function shapeFaceAt(shape, x, y) {
 }
 
 // Boundary loops of a conductor or dielectric: its rectangle, or the loops of its
-// shape. null for a complement shape, which has no finite body.
+// shape.
 function bodyLoops(o) {
     if (o.shape) {
-        if (isComplement(o.shape)) return null;
         return o.shape.type === 'ring' ? [o.shape.poly, o.shape.hole] : [shapePoly(o.shape)];
     }
     const { xmin: x0, xmax: x1, ymin: y0, ymax: y1 } = rectOf(o);
@@ -548,7 +398,6 @@ function segmentsCross(ax, ay, bx, by, cx, cy, dx, dy) {
 // points always includes a vertex, so vertex-to-edge distances are exact.
 export function bodyDistance(a, b) {
     const la = bodyLoops(a), lb = bodyLoops(b);
-    if (!la || !lb) return Infinity;
     const inside = (o, x, y) => shapeContains(o, x, y, 0);
     let best = Infinity;
     const scan = (loops, other, otherLoops) => {
@@ -694,7 +543,6 @@ function offsetConvex(poly, offsets) {
 // whose shared edge differs by rounding do not overlap. Shapes are tested on a grid of
 // points over the common box.
 export function bodiesOverlap(a, b) {
-    if ((a.shape && isComplement(a.shape)) || (b.shape && isComplement(b.shape))) return false;
     const w = Math.min(a.x_max, b.x_max) - Math.max(a.x_min, b.x_min);
     const h = Math.min(a.y_max, b.y_max) - Math.max(a.y_min, b.y_min);
     const tol = 1e-9 * Math.max(a.x_max - a.x_min, a.y_max - a.y_min, b.x_max - b.x_min, b.y_max - b.y_min);
@@ -760,7 +608,7 @@ export function visibleAreas(conductors) {
 const isPlated = pl => !!(pl && pl.sigma > 0 && (pl.thickness ?? 0) > 0 && (pl.top || pl.sides || pl.bottom || pl.all));
 
 // Whether the edges of a shape carry plating `pl`: per face name, every edge for a
-// round shape or when the plating is all around.
+// shape without face names or when the plating is all around.
 function platedEdge(shape, pl, i) {
     return !!(pl.all || !shape.faces || pl[shape.faces[i]]);
 }
@@ -768,7 +616,7 @@ function platedEdge(shape, pl, i) {
 // Inside of the plating layer `pl` of object o: its outline with the plated faces moved
 // in by the plating thickness, as { rects: [rect] } or { shape }, null when nothing is
 // left (the conductor is plating metal through), undefined without plating or for a
-// shape the layer cannot be built for (a complement).
+// shape the layer cannot be built for.
 export function platingCoreOf(o, pl = o.plating) {
     if (!isPlated(pl)) return undefined;
     const t = pl.thickness;
@@ -815,7 +663,6 @@ export function platingArea(o, pl = o.plating) {
 // ring shape `ring`: b lies in the cavity the ring shields.
 export function insideRingHole(ring, b) {
     const loops = bodyLoops(b);
-    if (!loops) return false;
     const hole = { shape: { type: 'polygon', poly: ring.hole } };
     return loops.every(p => {
         for (let i = 0; i < p.length; i += 2) if (!shapeContains(hole, p[i], p[i + 1], 0)) return false;

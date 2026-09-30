@@ -124,8 +124,8 @@ for (const f of [50e6, 1e9, 10e9]) {
 // ---------------------------------------------------------------- symmetry
 // A coax is mirror-symmetric about x=0, so the backend meshes only the x>=0 half and
 // applies a PMC (natural) wall on the plane — worth ~2.6x on solve time. This is exact
-// rather than approximate because n % 4 == 0 and phase 0 put polygon vertices precisely
-// on the y axis, so the half really is half the n-gon.
+// rather than approximate: the n-gon vertices mirror exactly about x = 0, so the half
+// really is half the n-gon.
 //
 // The full-domain reference below is deliberately run on a SMALLER budget: it is a
 // different mesh either way, so agreement between them is a mesh-independent statement,

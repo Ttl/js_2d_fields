@@ -52,13 +52,14 @@ class CoaxSolver extends CustomGeometrySolver {
     }
 }
 
+// Vertex count of every n-gon. The n-gons have the circles' areas, which leaves a
+// perimeter error of pi^2/(6n^2) = 1e-4 at n = 128, below the loss accuracy.
+const N_GON = 128;
+
 // Radii, vertex counts, material and plating of the coax model.
 function coaxModel(options) {
     // Datasheets specify coax by diameter, the model works in radii.
     const a = options.inner_diameter / 2, b = options.dielectric_diameter / 2;
-    // Every polygon side forces a mesh edge, so the vertex counts are a floor on the
-    // element count. n = 128 leaves a perimeter error of 1e-4, below the loss accuracy.
-    const hSurf = 0.35 * hFine(a, b);
     const pl = options.plating;
     const named = pl && (pl.inner !== undefined || pl.outer !== undefined);
     const selected = pl && (named ? (pl.inner || pl.outer)
@@ -66,8 +67,8 @@ function coaxModel(options) {
     const platingOn = !!(pl && pl.sigma > 0 && selected);
     return {
         a, b,
-        n_inner: clamp4(2 * Math.PI * a / hSurf, 32, 128),
-        n_outer: clamp4(2 * Math.PI * b / hSurf, 32, 128),
+        n_inner: N_GON,
+        n_outer: N_GON,
         shield_thickness: options.shield_thickness ?? 0.10 * b,
         epsilon_r: options.epsilon_r,
         tan_delta: options.tan_delta ?? 0,
@@ -77,11 +78,6 @@ function coaxModel(options) {
                 inner: named ? !!pl.inner : true, outer: named ? !!pl.outer : false }
             : null,
     };
-}
-
-// Surface element scale: the annulus width and the inner circumference.
-function hFine(a, b) {
-    return Math.min((b - a) / 4, 2 * Math.PI * a / 32);
 }
 
 function validateCoax(options) {
@@ -120,13 +116,6 @@ function validateCoax(options) {
     if (errors.length > 0) {
         throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
     }
-}
-
-// Round to a multiple of 4 within [lo, hi]. Multiples of 4 put polygon vertices exactly
-// on both axes, which is what makes the x >= 0 half an exact half.
-function clamp4(v, lo, hi) {
-    const n = Math.round(v / 4) * 4;
-    return Math.max(lo, Math.min(hi, n));
 }
 
 export { CoaxSolver };

@@ -85,13 +85,13 @@ const P2_AT_Q = (() => {
 // as its mirrored whole, so the cut face gets no band. Shaped conductors keep their
 // full polygon in a half-domain solve and need no mirroring.
 //
-// `aniso` (optional, { cornerGrade, maxAspect }) refines to a metric aligned with the
+// `aniso` (optional, { cornerGrade, maxAspect, cornerTurn }) refines to a metric aligned with the
 // surface instead of isotropically: the size across the band is the depth-graded
 // target above, the size along it only shrinks towards corners, max(across,
 // cornerGrade * distance to the nearest corner), at most maxAspect times the size
 // across. The current along a face varies on the scale of the face, not of delta, so
 // the band elements stretch along it. Corners are the rect corners and the polygon
-// vertices turning by more than CORNER_TURN, the vertices of an n-gon standing in for
+// vertices turning by more than cornerTurn (CORNER_TURN), the vertices of an n-gon standing in for
 // a circle are not. Each triangle takes one metric, at its point closest to the
 // surface, and bisects its longest edge in it: longest-edge bisection in a fixed
 // affine frame keeps the triangles' shape in the metric bounded. (Edges measured each

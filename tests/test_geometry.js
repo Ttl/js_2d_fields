@@ -18,8 +18,8 @@ import { CoaxSolver } from '../src/coax.js';
 import { RectWaveguideSolver } from '../src/rect_waveguide.js';
 import { buildSolverFromParams } from '../src/solver_factory.js';
 import { _clipDomain, condRectsOf, groundBodyCount } from '../src/tri_solver/occ_to_mesh.js';
-import { polyRadiusForArea, circlePolygon, shapePoly, shapeArea, shapeContains,
-         shapeSegments, shapeSignedDist, isComplement } from '../src/shapes.js';
+import { polyRadiusForArea, shapeArea, shapeContains,
+         shapeSegments, shapeSignedDist } from '../src/shapes.js';
 import { isXSymmetric } from '../src/geometry_symmetry.js';
 import { check, done } from './helpers.js';
 
@@ -297,56 +297,37 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
 }
 
 // ---------- shape primitives (shapes.js) ----------
-// Circles are materialized as convex polygons and the POLYGON is the geometry, not an
-// approximation of it: the mesher, the material tagging, the freedom map and the loss
-// integrals all test against these same vertices. Two properties carry that design and
-// are pinned here.
+// The polygon is the geometry: the mesher, the material tagging, the freedom map and
+// the loss integrals all test against the same vertices.
 {
     const r = 1.475e-3;
-
-    // 1. Area matching. The n-gon must enclose EXACTLY pi*r^2, which is what keeps the
-    //    capacitance right (and R_dc, which reads shapeArea directly).
-    for (const n of [32, 64, 128]) {
-        const disk = { shape: { type: 'circle', cx: 0, cy: 0, r, n, phase: 0 } };
-        check(`shapes: n=${n} polygon encloses exactly pi*r^2`,
-            near(shapeArea(disk) / (Math.PI * r * r), 1, 1e-12));
-        check(`shapes: n=${n} half polygon is exactly half`,
-            near(shapeArea(disk, { half: true }) / (shapeArea(disk) / 2), 1, 1e-12));
-    }
     check('shapes: area-matched radius sits between in- and circumradius of the circle',
-        polyRadiusForArea(r, 64) > r && polyRadiusForArea(r, 64) / Math.cos(Math.PI / 64) > r);
+        polyRadiusForArea(r, 64) > r && polyRadiusForArea(r, 64) * Math.cos(Math.PI / 64) < r);
 
-    // 2. Boundary ownership, both polarities. Vertices AND side midpoints must classify
-    //    as inside. Midpoints are the load-bearing case: buildTriFreedomMap decides a PEC
-    //    edge by its midpoint, so a complement shape (the coax shield) whose side
-    //    midpoints read as "outside the metal" would leak the whole outer boundary.
-    const n = 64, tol = r * 1e-9;
-    const disk = { shape: { type: 'circle', cx: 0, cy: 0, r, n, phase: 0 } };
-    const shell = { shape: { type: 'outside_circle', cx: 0, cy: 0, r, n, phase: 0 } };
-    const poly = shapePoly(disk.shape);
+    // Boundary ownership: vertices and side midpoints classify as inside. Midpoints are
+    // the load-bearing case, buildTriFreedomMap decides a PEC edge by its midpoint.
+    const n = 64, tol = r * 1e-9, R = polyRadiusForArea(r, n);
+    const poly = new Float64Array(2 * n);
+    for (let k = 0; k < n; k++) { poly[2 * k] = R * Math.cos(2 * Math.PI * k / n); poly[2 * k + 1] = R * Math.sin(2 * Math.PI * k / n); }
+    const disk = { shape: { type: 'polygon', poly } };
+    check('shapes: area-matched n-gon encloses exactly pi*r^2', near(shapeArea(disk) / (Math.PI * r * r), 1, 1e-12));
     let vertexOk = true, midOk = true;
     for (let k = 0; k < n; k++) {
         const j = (k + 1) % n;
         const vx = poly[2 * k], vy = poly[2 * k + 1];
         const mx = (vx + poly[2 * j]) / 2, my = (vy + poly[2 * j + 1]) / 2;
-        if (!shapeContains(disk, vx, vy, tol) || !shapeContains(shell, vx, vy, tol)) vertexOk = false;
-        if (!shapeContains(disk, mx, my, tol) || !shapeContains(shell, mx, my, tol)) midOk = false;
+        if (!shapeContains(disk, vx, vy, tol)) vertexOk = false;
+        if (!shapeContains(disk, mx, my, tol)) midOk = false;
     }
-    check('shapes: both polarities own their polygon vertices', vertexOk);
-    check('shapes: both polarities own their side MIDPOINTS', midOk);
-    check('shapes: disk and shell partition the plane away from the boundary',
-        shapeContains(disk, 0, 0, 0) && !shapeContains(shell, 0, 0, 0) &&
-        !shapeContains(disk, 2 * r, 0, 0) && shapeContains(shell, 2 * r, 0, 0));
-    check('shapes: a shell has no finite area', shapeArea(shell) === 0 && isComplement(shell.shape));
+    check('shapes: a polygon owns its vertices', vertexOk);
+    check('shapes: a polygon owns its side midpoints', midOk);
     check('shapes: signed distance is negative inside, positive outside',
         shapeSignedDist(disk.shape, 0, 0) < 0 && shapeSignedDist(disk.shape, 2 * r, 0) > 0);
-    check('shapes: full boundary has n segments, half drops the symmetry chord',
+    check('shapes: full boundary has n segments, half drops the symmetry-plane cut',
         shapeSegments(disk).length === n && shapeSegments(disk, { half: true }).length === n / 2);
-    check('shapes: circlePolygon is deterministic',
-        circlePolygon(0, 0, r, n, 0).every((v, i) => v === circlePolygon(0, 0, r, n, 0)[i]));
 
-    // A shapeless object must take the LEGACY bbox path unchanged — this is the
-    // invariant that keeps every rectangular medium bit-identical.
+    // A shapeless object takes the plain bbox path, which keeps every rectangular
+    // medium bit-identical.
     const rect = { x_min: -1, x_max: 2, y_min: -3, y_max: 4, width: 3, height: 7 };
     check('shapes: shapeless objects fall back to the bbox test',
         shapeContains(rect, 0, 0, 0) && shapeContains(rect, 2, 4, 0) &&
@@ -371,10 +352,6 @@ const { trace_width: W, substrate_height: H, trace_thickness: T, gnd_thickness: 
         / s.shield_thickness, 1, 1e-3));
     check('coax: open domain around the shield', s.boundaries.every(v => v === 'open'));
     check('coax: single-ended', s.is_differential === false);
-    // n % 4 == 0 puts vertices exactly on both axes, which is what makes the x >= 0
-    // half an EXACT half, required by the half-domain symmetry solve.
-    check('coax: segment counts are multiples of 4',
-        s.n_inner % 4 === 0 && s.n_outer % 4 === 0, `${s.n_inner}, ${s.n_outer}`);
     check('coax: mirror symmetric', isXSymmetric(s.conductors, s.dielectrics, s.domain_width));
     check('coax: domain box strictly encloses the shield',
         s.domain_width / 2 > b + s.shield_thickness && s.domain_height > b + s.shield_thickness

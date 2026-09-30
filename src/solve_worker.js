@@ -357,9 +357,11 @@ function jobPlotRelease({ job }) {
 function jobModeField({ idx }) {
     if (!modesSolver) return { grid: null };
     const g = modesSolver.getModeField(idx);
-    if (!g) return { grid: null };
-    // The plot reads |E| and the triangles, not the field components.
-    return { grid: { x: g.x, y: g.y, E: g.E, mesh: g.mesh } };
+    if (!g || !g.mesh) return { grid: null };
+    // The plot draws |E| on the triangles, scaled by the maximum on the grid.
+    let zmax = 0;
+    for (const row of g.E) for (const v of row) if (v > zmax) zmax = v;
+    return { grid: { mesh: g.mesh, zmax } };
 }
 
 // Parameter Sweep
