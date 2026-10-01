@@ -822,49 +822,94 @@
             <p>by <a href="https://hforsten.com" target="_blank">Henrik Forstén</a> | <a href="https://github.com/Ttl/js_2d_fields" target="_blank">Source code & issues</a></p>
             <p style="color: #888; font-size: 0.85em;">Version: BUILD_VERSION</p>
             <p>A quasi-static and full-wave 2D field solver for transmission line analysis with adaptive mesh refinement.</p>
+            <p>Everything runs locally in your browser and nothing is uploaded to a server.</p>
 
-            <h3>Methodology</h3> <p><b>Quasi-static solver</b> computes the
-            characteristic impedance and propagation parameters of transmission
-            lines by solving Laplace's equation for the electric potential
-            distribution in the cross-section. This assumes that E-field doesn't
-            change as function of frequency, which is strictly valid only for
-            uniform dielectric transmission lines such as stripline. In practice
-            it gives accurate results for many practical transmission line
-            structures.</p>
+            <h3>Methodology</h3> <p><b>Quasi-static solver</b> is a
+            finite-difference solver on a non-uniform rectilinear grid. It
+            solves Laplace's equation for the electric potential twice, with the
+            dielectrics and in vacuum. The two solutions give the capacitance
+            C and the inductance L = 1/(c<sup>2</sup>C<sub>0</sub>), from which
+            the characteristic impedance and effective permittivity can be calculated.
+            Dielectric loss G is integrated from the field in the lossy materials.
+            Conductor loss is calculated from surface current on each face from the static field
+            and weighted by the surface impedance of the metal. The static
+            fields don't change with frequency, so dispersion is not modeled.
+            That is strictly valid only for lines in a uniform dielectric such
+            as stripline, but it is accurate for many practical structures.</p>
 
-            <p><b>Full-wave solver</b> solves Maxwell's equations for the guided
-            mode as an eigenvalue problem (using Nédélec elements) capturing
-            dispersion effects that quasi-static solver misses. This is a more
-            accurate solver, but also much slower.
+            <p><b>Full-wave solver</b> uses a triangular finite-element mesh.
+            It solves the guided mode of Maxwell's equations as an eigenvalue
+            problem with Nédélec elements. It captures the dispersion the
+            quasi-static solver misses and gives more accurate results, but it's
+            also much slower.</p>
 
-            Conductor loss uses a magneto-quasi-static (MQS) solve: instead of
-            treating the metal as a surface impedance, it meshes the conductor
-            interior at finite conductivity and solves for the eddy currents the
-            mode drives inside it, resolving skin and proximity effects directly
-            to give resistive loss and the internal inductance. Surface
-            roughness and plating is applied as post-processing.</p>
+            <p>Full-wave conductor loss uses a magneto-quasi-static (MQS) solve.
+            Instead of treating the metal as a surface impedance, it meshes the
+            conductor interior and solves for the current distribution inside
+            it. This gives accurate resistance for any ratio of skin depth to
+            conductor thickness, including thin films where the current flows
+            through the whole conductor.</p>
 
             <h3>Rectangular Waveguide</h3> <p>The rectangular waveguide
             is not TEM or quasi-TEM. It has
             a single conductor, so there is no static solution. It is solved as
-            a pure eigenmode problem on the full-wave backend, and <b>only the
-            lowest (fundamental) mode is reported</b>, TE<sub>10</sub> when the
+            a pure eigenmode problem on the full-wave backend, and only the
+            lowest (fundamental) mode is reported, TE<sub>10</sub> when the
             broad wall is wider than the narrow one. Below the cutoff frequency that
             mode is evanescent and only its attenuation is meaningful. Above the
             second cutoff the guide is over-moded and the higher-order modes it also
             supports are not included in the results. The Modes tab shows all the
             modes.</p>
 
-            <h3>S-Parameters</h3> <p>S-parameters are computed from the RLGC
-            transmission line model using standard ABCD matrix (T-parameter)
-            formulation. For differential lines, modal decomposition separates
-            odd and even modes, which are then combined into 4-port
-            S-parameters.</p>
+            <h3>Adaptive Mesh Refinement and Certification</h3> <p>Both solvers
+            start from a coarse mesh and refine it in passes. Each pass marks the
+            cells with the largest estimated error and splits them.
+            For differential lines, both the odd and even modes drive the
+            refinement.</p>
 
-            <h3>Adaptive Mesh Refinement</h3> <p>The solver uses adaptive mesh
-            refinement to concentrate grid points where the field gradients are
-            highest (near conductor edges and dielectric interfaces), improving
-            accuracy while keeping computation tractable.</p>
+            <p>A small pass-to-pass change shows that the solution is converging
+            slowly, not that it is close to the converged answer. When
+            <i>Estimate Solution Error</i> is on, the final mesh is certified.
+            The static fields are solved again on a uniformly refined mesh, and
+            the remaining error is estimated by Richardson extrapolation. This
+            extrapolation estimates the error that the current solution would
+            have against infinitely refined mesh.
+            Refinement continues until this estimate is below the tolerance,
+            with a safety margin. The log reports the certified error, and
+            a warning is shown if the node budget runs out first. The
+            certificate covers the static quantities C and C<sub>0</sub>, which
+            set Z<sub>0</sub> and &epsilon;<sub>eff</sub>. Conductor and
+            dielectric loss are not certified. They converge more slowly than
+            the field energy and their error is typically higher.</p>
+
+            <h3>Boundaries and Ground Return</h3> <p>The solved region is a
+            finite box. An open boundary truncates the static field with a
+            zero-normal-flux condition. The automatic domain size is chosen so the
+            truncation is small. After every solve, the field energy reaching the
+            open walls is measured, and a warning is shown when it would shift the
+            impedance by more than about 2%. An enclosure wall is a perfect
+            electric conductor for the field. Its conductor loss is included,
+            computed from the surface current on the wall.</p>
+
+            <p>Grounds that span the domain or reach an open edge stand for
+            planes wider than the domain, such as the ground plane under
+            a microstrip or a GCPW pour. These are treated as ideal returns of
+            unlimited width.  At high frequency this doesn't matter, because the
+            return current crowds under the signal conductor. At DC and low
+            frequency, an ideal return contributes no DC resistance, and its
+            inductance is that of a perfect conductor plus the reactance of its
+            metal thickness.</p>
+
+            <p>Grounds drawn with a finite width that don't reach the domain edge,
+            such as custom geometry ground blocks, are solved as real conductors.
+            Their DC and low-frequency resistance and inductance include the current
+            spreading in them, on both solvers. Draw the ground at the actual board
+            width when the low-frequency inductance or the DC resistance of the
+            return path matters.</p>
+
+            <p>At DC the full-wave solver uses an exact DC current solve, and both
+            solvers approach the exact DC resistance and internal inductance at low
+            frequency.</p>
         </div>
     </div>
 
@@ -1207,11 +1252,11 @@
         },
         plating: {
             title: 'Surface Plating',
-            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both the plating layer and the bulk metal underneath (since the plating conforms to the bulk surface).</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p><p>For a coaxial line each conductor is one continuous circular surface, so instead of faces you choose which conductors are plated: the inner conductor, the shield, or both. An unplated conductor carries the base conductivity and Surface Roughness.</p><p>For a rectangular waveguide the plating covers the whole inner wall.</p>'
+            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both interfaces, air to plating and plating to bulk metal, since the plating conforms to the bulk surface. With <i>Model Thick Plating</i> on, the full-wave solver meshes the plating instead: the plating roughness applies to its outer surface only, and the boundary between plating and bulk metal is smooth.</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p><p>For a coaxial line each conductor is one continuous circular surface, so instead of faces you choose which conductors are plated: the inner conductor, the shield, or both. An unplated conductor carries the base conductivity and Surface Roughness.</p><p>For a rectangular waveguide the plating covers the whole inner wall.</p>'
         },
         plating_thick_corners: {
             title: 'Model Thick Plating',
-            body: '<p>When enabled, the plating is a layer of its thickness inside the conductor outline that covers the corners next to it. The full-wave solver meshes that layer and solves it as metal.</p><p>When disabled, each plated face takes a layered plating surface impedance, which assumes a bulk several skin depths thick under the plating.</p><p>The quasi-static solver always uses the surface impedance, with this option side plating extends to the bottom corners when the bottom face is not plated.</p>'
+            body: '<p>When enabled, the plating is a layer of its thickness inside the conductor outline that covers the corners next to it. The full-wave solver meshes that layer and solves it as metal.</p><p>The outer surface of the meshed layer takes the plating roughness. The boundary between the plating and the bulk metal is an internal material boundary and has no roughness. The bulk roughness applies only on faces the plating leaves bare.</p><p>When disabled, each plated face takes a layered plating surface impedance, which assumes a bulk several skin depths thick under the plating. Its plating roughness applies to both the air/plating and the plating/bulk interfaces.</p><p>The quasi-static solver always uses the surface impedance, with this option side plating extends to the bottom corners when the bottom face is not plated.</p>'
         },
         conductivity: {
             title: 'Conductivity',
