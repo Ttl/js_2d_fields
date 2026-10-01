@@ -108,6 +108,7 @@ const SWEEP_PARAM_CONFIG = {
     plating_t:          { label: 'Plating Thickness',    inputId: 'inp_plating_t',   group: 'plating' },
     plating_sigma:      { label: 'Plating Conductivity', inputId: 'inp_plating_sigma', fixedUnit: 'S/m', group: 'plating' },
     plating_rq:         { label: 'Plating Roughness',    inputId: 'inp_plating_rq',  group: 'plating' },
+    plating_rq_iface:   { label: 'Plating Interface Roughness', inputId: 'inp_plating_rq_iface', group: 'plating' },
 };
 
 // --- Unit Parsing Helper ---
@@ -211,6 +212,7 @@ const DEFAULT_SETTINGS = {
     plating_sigma: 1e7,
     plating_t: 4,    // μm
     plating_rq: 0,   // μm
+    plating_rq_iface: NaN,  // μm, same as plating_rq
     plating_top: 1,
     plating_sides: 1,
     plating_bottom: 0,
@@ -344,6 +346,7 @@ function getUISettings() {
         plating_sigma: getInputValueUnitless('inp_plating_sigma'),
         plating_t: getDisplayValue('inp_plating_t'),
         plating_rq: getDisplayValue('inp_plating_rq'),
+        plating_rq_iface: getDisplayValue('inp_plating_rq_iface'),
         plating_top: document.getElementById('chk_plating_top').checked ? 1 : 0,
         plating_sides: document.getElementById('chk_plating_sides').checked ? 1 : 0,
         plating_bottom: document.getElementById('chk_plating_bottom').checked ? 1 : 0,
@@ -443,7 +446,7 @@ const EXCLUDED_BY_TYPE = {
     rect_waveguide: WAVEGUIDE_EXCLUDED_KEYS,
     // The text carries the whole stackup, the boundaries and the plated faces. Model
     // Thick Plating stays: it applies to every plated conductor.
-    custom: new Set([...COAX_EXCLUDED_KEYS, 'use_plating', 'plating_sigma', 'plating_t', 'plating_rq',
+    custom: new Set([...COAX_EXCLUDED_KEYS, 'use_plating', 'plating_sigma', 'plating_t', 'plating_rq', 'plating_rq_iface',
         'plating_top', 'plating_sides', 'plating_bottom']),
 };
 
@@ -606,6 +609,7 @@ function restoreSettings(settings) {
         document.getElementById('inp_plating_sigma').value = fullSettings.plating_sigma;
         setValueWithUnit('inp_plating_t', fullSettings.plating_t);
         setValueWithUnit('inp_plating_rq', fullSettings.plating_rq);
+        setValueWithUnit('inp_plating_rq_iface', fullSettings.plating_rq_iface);
         document.getElementById('chk_plating_top').checked = !!fullSettings.plating_top;
         document.getElementById('chk_plating_sides').checked = !!fullSettings.plating_sides;
         document.getElementById('chk_plating_bottom').checked = !!fullSettings.plating_bottom;
@@ -1120,6 +1124,7 @@ function getGeometryHash() {
         plating_sigma: p.plating_sigma,
         plating_t: p.plating_t,
         plating_rq: p.plating_rq,
+        plating_rq_iface: p.plating_rq_iface,
         plating_top: p.plating_top,
         plating_sides: p.plating_sides,
         plating_bottom: p.plating_bottom,
@@ -1694,6 +1699,7 @@ function getParams() {
         plating_sigma: getInputValueUnitless('inp_plating_sigma'),
         plating_t: getInputValue('inp_plating_t'),
         plating_rq: getInputValue('inp_plating_rq'),
+        plating_rq_iface: getInputValue('inp_plating_rq_iface'),
         plating_top: document.getElementById('chk_plating_top').checked,
         plating_sides: document.getElementById('chk_plating_sides').checked,
         plating_bottom: document.getElementById('chk_plating_bottom').checked,
@@ -2723,7 +2729,7 @@ function bindEvents() {
         'inp_gnd_cut_w', 'inp_gnd_cut_h',
         'inp_enclosure_width', 'inp_enclosure_height',
         'inp_rq',
-        'inp_plating_sigma', 'inp_plating_t', 'inp_plating_rq',
+        'inp_plating_sigma', 'inp_plating_t', 'inp_plating_rq', 'inp_plating_rq_iface',
         'inp_bs_w', 'inp_bs_t', 'inp_bs_x_offset', 'inp_bs_sigma',
         'inp_bs_h_bottom', 'inp_bs_er_bottom', 'inp_bs_tand_bottom',
         'inp_bs_h_middle', 'inp_bs_er_middle', 'inp_bs_tand_middle',

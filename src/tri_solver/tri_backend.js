@@ -227,10 +227,11 @@ function makePlatingZs(solver, condRect, freq) {
         const pl = roles[ri] && roles[ri].plating;
         if (solidPlated(rects[ri], pl)) return zSingle(pl.sigma, pl.rq ?? 0);
         if (!(pl && pl[face] && pl.sigma > 0)) return bareOf(ri);
-        const key = `${pl.sigma}|${pl.rq}|${pl.thickness}|${sigmaOf(ri)}`;
+        const key = `${pl.sigma}|${pl.rq}|${pl.rq_interface}|${pl.thickness}|${sigmaOf(ri)}`;
         let z = layeredCache.get(key);
         if (!z) {
-            z = calculate_Zrough_layered(freq, sigmaOf(ri), pl.rq ?? 0, pl.sigma, pl.thickness ?? 0);
+            z = calculate_Zrough_layered(freq, sigmaOf(ri), pl.rq ?? 0, pl.sigma, pl.thickness ?? 0,
+                pl.rq_interface ?? pl.rq ?? 0);
             layeredCache.set(key, z);
         }
         return z;
@@ -273,7 +274,9 @@ function makePlatingZs(solver, condRect, freq) {
 // entry itself as plating metal (plating sigma and roughness, no plating) followed by
 // its core (bulk metal, own sigma and roughness). The later of overlapping rects wins,
 // so a triangle in the core is bulk and one in the layer is plating. A face the
-// plating leaves bare is a face of the core. null without plating cores.
+// plating leaves bare is a face of the core. The layer keeps its plated faces and
+// the material under it in `platingIface`, for the plating/bulk interface roughness
+// the mesh holds smooth (buildFaceDZ). null without plating cores.
 function meshedPlatingCR(cr) {
     const cores = cr.platingCores;
     if (!cores) return null;
@@ -283,7 +286,10 @@ function meshedPlatingCR(cr) {
         if (!core) { rects.push(r); rectRoles.push(role); return; }
         const pl = role.plating;
         rects.push(r);
-        rectRoles.push({ ...role, plating: null, sigma: pl.sigma, rq: pl.rq ?? 0 });
+        const rqIface = pl.rq_interface ?? pl.rq ?? 0;
+        const platingIface = rqIface > 0 ? { ...pl, rq: pl.rq ?? 0, rq_interface: rqIface,
+            sigmaBulk: role.sigma || null } : null;
+        rectRoles.push({ ...role, plating: null, sigma: pl.sigma, rq: pl.rq ?? 0, platingIface });
         for (const k of core) {
             rects.push({ ...k, symmetry: r.symmetry, xmin_domain: r.xmin_domain, ymin_domain: r.ymin_domain, is_signal: r.is_signal });
             rectRoles.push({ ...role, plating: null });
@@ -355,6 +361,53 @@ function buildFaceZs(solver, condRect, freq) {
             return zAt(ri, face, x, y);
         }
         return Zbare;
+    };
+}
+
+// Surface impedance added on the plated faces of meshed plating for the roughness of
+// the plating/bulk interface: the layered model with that interface rough minus the
+// same with it smooth, the 1D increment over a bulk under the plating. null where no
+// plated face has a rough interface (bare faces are faces of the core).
+function buildFaceDZ(solver, condRect, freq) {
+    const rects = condRect.rects || [], roles = condRect.rectRoles || [];
+    if (!roles.some(r => r && r.platingIface)) return null;
+    const tol = platingTol(condRect);
+    const sigmaBase = solver.sigma_cond ?? 5.8e7;
+    const cache = new Map();
+    const dzOf = (pi) => {
+        const sb = pi.sigmaBulk || sigmaBase;
+        const key = `${pi.sigma}|${pi.thickness}|${pi.rq}|${pi.rq_interface}|${sb}`;
+        let z = cache.get(key);
+        if (!z) {
+            const rough = calculate_Zrough_layered(freq, sb, pi.rq, pi.sigma, pi.thickness, pi.rq_interface);
+            const smooth = calculate_Zrough_layered(freq, sb, pi.rq, pi.sigma, pi.thickness, 0);
+            z = { re: rough.re - smooth.re, im: rough.im - smooth.im };
+            cache.set(key, z);
+        }
+        return z;
+    };
+    // Later rects first, as in buildFaceZs.
+    return (x, y, orient) => {
+        for (let ri = rects.length - 1; ri >= 0; ri--) {
+            const r = rects[ri];
+            let face = null;
+            if (r.shape) {
+                if (Math.abs(shapeSignedDist(r.shape, x, y)) > tol) continue;
+                face = r.shape.faces ? shapeFaceAt(r.shape, x, y).face : 'all';
+            } else {
+                if (x < r.xmin - tol || x > r.xmax + tol || y < r.ymin - tol || y > r.ymax + tol) continue;
+                if (orient === 'h') {
+                    if (Math.abs(y - r.ymax) < tol) face = 'top';
+                    else if (Math.abs(y - r.ymin) < tol) face = 'bottom';
+                } else if (Math.abs(x - r.xmin) < tol || Math.abs(x - r.xmax) < tol) {
+                    face = 'sides';
+                }
+                if (!face) continue;
+            }
+            const pi = roles[ri] && roles[ri].platingIface;
+            return pi && (pi.all || pi[face]) ? dzOf(pi) : null;
+        }
+        return null;
     };
 }
 
@@ -1887,7 +1940,8 @@ export class TriBackend {
         const Rs = 1 / (sigma * delta);
         const pl = s.plating;
         const Zs = (pl && pl.sigma > 0)
-            ? calculate_Zrough_layered(f, sigma, pl.rq ?? s.rq ?? 0, pl.sigma, pl.thickness ?? 0)
+            ? calculate_Zrough_layered(f, sigma, pl.rq ?? s.rq ?? 0, pl.sigma, pl.thickness ?? 0,
+                pl.rq_interface ?? pl.rq ?? s.rq ?? 0)
             : calculate_Zrough(f, sigma, s.rq ?? 0);
         // Re(Zs) carries the loss and Im(Zs) the internal inductance; solveConductorLoss
         // evaluated BOTH at the smooth Rs, so each is recovered by its own scaling of the
@@ -2985,8 +3039,10 @@ export class TriBackend {
                 Object.assign(o, { wallPEC: crM.wallPEC || null, wallThick: crM.wallThick || null, wallSigma,
                     topGround: !!(crM.wallPEC && crM.wallPEC.top) });   // legacy fallback
                 if (rectSigma) o.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
-                if (anyPlatingM || ownRqM || ownSigmaM) o.surfaceZs = buildFaceZs(s, crM, f);
+                const faceDZ = meshedPlating ? buildFaceDZ(s, crM, f) : null;
+                if (anyPlatingM || ownRqM || ownSigmaM || faceDZ) o.surfaceZs = buildFaceZs(s, crM, f);
                 else o.Rq = rq;
+                if (faceDZ) o.surfaceDZ = faceDZ;
                 return o;
             };
             // Frequency-invariant assembly caches (validated against the mesh object inside

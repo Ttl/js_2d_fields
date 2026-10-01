@@ -81,6 +81,9 @@ function generateParamComments(params) {
         lines.push(`!     Conductivity: ${(params.plating.sigma * 1e-6).toFixed(1)} MS/m`);
         lines.push(`!     Thickness: ${(params.plating.thickness * 1e6).toFixed(2)} um`);
         lines.push(`!     Roughness RMS: ${(params.plating.rq * 1e6).toFixed(2)} um`);
+        if (params.plating.rq_interface !== undefined && params.plating.rq_interface !== params.plating.rq) {
+            lines.push(`!     Interface roughness RMS: ${(params.plating.rq_interface * 1e6).toFixed(2)} um`);
+        }
         // A curved or self-bounded conductor has ONE continuous surface, so the
         // top/sides/bottom selection has nothing to select between (the solvers
         // normalize it to `all`) and listing the three faces would be misleading.

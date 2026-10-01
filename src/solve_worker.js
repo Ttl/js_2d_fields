@@ -144,6 +144,7 @@ async function jobSimulate({ params, frequencies, opts }) {
         if (p.plating_sigma < 1e4) throw new Error('Plating conductivity is too low to be considered a conductor.');
         if (p.plating_t < 0) throw new Error('Plating thickness must be non-negative.');
         if (p.plating_rq < 0) throw new Error('Plating roughness cannot be negative.');
+        if (p.plating_rq_iface < 0) throw new Error('Plating interface roughness cannot be negative.');
     }
 
     let sweepResults = [];

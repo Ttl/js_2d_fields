@@ -74,7 +74,7 @@ function coaxModel(options) {
         tan_delta: options.tan_delta ?? 0,
         // Without a conductor selection the layer goes on the centre conductor.
         plating: platingOn
-            ? { sigma: pl.sigma, thickness: pl.thickness, rq: pl.rq ?? 0,
+            ? { sigma: pl.sigma, thickness: pl.thickness, rq: pl.rq ?? 0, rq_interface: pl.rq_interface,
                 inner: named ? !!pl.inner : true, outer: named ? !!pl.outer : false }
             : null,
     };

@@ -387,6 +387,10 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //   from the MQS smooth current distribution (corner-regularized, unlike a
 //   perturbation surface integral). Reduces exactly to the uniform factor when
 //   every face shares one Zs. Takes precedence over Rq when provided.
+//   opts.surfaceDZ(x, y, orient) — OPTIONAL surface impedance {re,im} or null at a face
+//   midpoint, added on top of surfaceZs as R += Re(dZ) * |K|^2 and X += Im(dZ) * |K|^2
+//   over the face (meshed plating: the roughness of the plating/bulk interface, which
+//   the mesh holds smooth). Needs surfaceZs.
 //   opts.rectSigmaRel — OPTIONAL sigma_rect / sigma per rect (condRect.rects order) for
 //   conductors of different metals. `sigma` stays the reference: the mass matrix, the
 //   drive, the net current and the dissipation carry the ratio per triangle, and the
@@ -1060,6 +1064,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // The same weights per rect, for conductors of different metals.
     const rS = new Float64Array(rects.length), rZreS = new Float64Array(rects.length),
         rZimS = new Float64Array(rects.length);
+    // Additive surface terms (opts.surfaceDZ), 0.5 * dZ * |K|^2 summed like the walls.
+    let dRtr = 0, dXtr = 0, dRgr = 0, dXgr = 0;
     if (opts.surfaceZs) {
         for (let e = 0; e < nEdges; e++) {
             const ta = eA[2*e], tb = eA[2*e+1];
@@ -1105,6 +1111,12 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             else { grS += Sseg; grZreS += Zs.re * Sseg; grZimS += Zs.im * Sseg; }
             const ri = pre.triRect[cnd];
             rS[ri] += Sseg; rZreS[ri] += Zs.re * Sseg; rZimS[ri] += Zs.im * Sseg;
+            const dZ = opts.surfaceDZ ? opts.surfaceDZ(qx, qy, horiz ? 'h' : 'v') : null;
+            if (dZ) {
+                const K2 = 0.5 * Cmag2 * Sseg / (MU0 * MU0);
+                if (isCondTri[cnd] === 1) { dRtr += dZ.re * K2; dXtr += dZ.im * K2; }
+                else { dRgr += dZ.re * K2; dXgr += dZ.im * K2; }
+            }
         }
     }
 
@@ -1225,6 +1237,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         R_gw *= PsiR;
     }
 
+    R_trace += 2 * sym * dRtr; X_trace += 2 * sym * dXtr;
+    R_gr += 2 * sym * dRgr; X_gr += 2 * sym * dXgr;
     const R_gnd = R_gr + R_gw;
     const X_gnd = X_gr + X_gw;
     const R_total = R_trace + R_gnd;

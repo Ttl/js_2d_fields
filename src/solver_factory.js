@@ -87,6 +87,11 @@ function striplineCoverHeight(p) {
     return p.stripline_top_h - p.top_diel_h;
 }
 
+// Roughness of the plating/bulk interface, undefined (the plating roughness) when empty.
+function platingInterfaceRq(p) {
+    return Number.isFinite(p.plating_rq_iface) ? p.plating_rq_iface : undefined;
+}
+
 // The plating block on its own, so line types that take plating but none of the other
 // board-stackup options (coax) can reuse it instead of duplicating it. `extra` carries a
 // type's own surface selection where top/sides/bottom has no meaning, coax passes
@@ -97,6 +102,7 @@ export function platingOptions(p, extra = null) {
         sigma: p.plating_sigma,
         thickness: p.plating_t,
         rq: p.plating_rq,
+        rq_interface: platingInterfaceRq(p),
         top: p.plating_top,
         sides: p.plating_sides,
         bottom: p.plating_bottom,
@@ -288,6 +294,7 @@ export function buildSolverFromParams(p, onError = null) {
                     sigma: p.plating_sigma,
                     thickness: p.plating_t,
                     rq: p.plating_rq,
+                    rq_interface: platingInterfaceRq(p),
                     top: p.plating_top,
                     sides: p.plating_sides,
                     bottom: p.plating_bottom,

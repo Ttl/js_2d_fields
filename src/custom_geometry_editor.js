@@ -813,7 +813,10 @@ function rectRow(model, st, geoRect, index, count) {
                 exprInput('t', fields.plating_t, setField('plating_t'),
                     { ...opt, kind: 'small', title: lengthTip('Plating thickness', 'the plating statement') }),
                 exprInput('rq', fields.plating_rq, setField('plating_rq'),
-                    { ...opt, kind: 'small', title: lengthTip('Plating surface roughness (rms)', 'the plating statement') })));
+                    { ...opt, kind: 'small', title: lengthTip('Plating surface roughness (rms)', 'the plating statement') }),
+                exprInput('rq iface', fields.plating_rq_iface, setField('plating_rq_iface'),
+                    { ...opt, kind: 'small', title: lengthTip('Roughness (rms) of the interface between plating and bulk metal',
+                        'the plating statement, else the plating roughness') })));
         // The plating options sit in a panel that opens from a button on the row. The
         // button names the plated faces, so a collapsed row still shows its plating.
         const { btn: platingBtn, show: showPlating } = panelToggle('custom-plating-toggle', openPlatingRows, st.line, platingPanel, () => {

@@ -1693,7 +1693,8 @@ export class FieldSolver2D {
             const cond = this.conductors[ci];
             const key = `${ci}_layered_${platingRq}`;
             if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough_layered(
-                this.freq, sigmaOf(ci), platingRq, cond.plating.sigma, cond.plating.thickness));
+                this.freq, sigmaOf(ci), platingRq, cond.plating.sigma, cond.plating.thickness,
+                cond.plating.rq_interface ?? platingRq));
             return Z_cache.get(key);
         };
         // Plating metal alone on a face (no bulk under it) with roughness r. With dc the

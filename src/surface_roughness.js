@@ -150,13 +150,15 @@ function _cdfMean(a, b, mean, sigma) {
  *
  * @param {number} f - Frequency in Hz
  * @param {number} sigma_bulk - Bulk conductor conductivity (S/m)
- * @param {number} rq - RMS roughness at all interfaces (m)
+ * @param {number} rq - RMS roughness of the air/plating interface (m)
  * @param {number} sigma_plating - Plating layer conductivity (S/m)
  * @param {number} thickness_plating - Plating layer thickness (m)
+ * @param {number} rq_interface - RMS roughness of the plating/bulk interface (m), default rq
  * @param {number} N - Number of points for recursion (default 2048)
  * @returns {Complex} Complex surface impedance
  */
-function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_plating, N = 2048) {
+function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_plating,
+                                  rq_interface = rq, N = 2048) {
     // Fallback to single-layer if not layered
     if (thickness_plating <= 0 || sigma_plating <= 0) {
         return calculate_Zrough(f, sigma_bulk, rq);
@@ -172,7 +174,9 @@ function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_pl
     // profile has died away) to well past the skin depth. Zs is referenced to the top of
     // this span, so that top must sit at the surface for a sharp interface.
     const recursion_min = -5 * rq;
-    const recursion_max = Math.max(thickness_plating + 10 * skin_depth, 5e-6);
+    // A plating/bulk interface rougher than the surface extends the span by its own tail.
+    const recursion_max = Math.max(thickness_plating + 10 * skin_depth
+        + 5 * Math.max(0, rq_interface - rq), 5e-6);
 
     // Uniform grid spacing
     const dx = (recursion_max - recursion_min) / (N - 1);
@@ -189,20 +193,23 @@ function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_pl
     // ~80 nm and inflating Im(Zs), hence the internal inductance. Averaging places both
     // boundaries exactly wherever they fall, so neither survives grid alignment.
     //
-    // Averaging the CDFs is enough to average sigma: with thickness_plating > 0 the
-    // deeper CDF never exceeds the shallower one, so sigma is a fixed linear combination
-    // of the two and the mean passes straight through it.
+    // Averaging the CDFs is enough to average sigma: with equal roughness and
+    // thickness_plating > 0 the deeper CDF never exceeds the shallower one, so sigma is
+    // a fixed linear combination of the two and the mean passes straight through it.
+    // A plating/bulk interface rougher than a thin plating could reach past the outer
+    // surface, so the bulk fraction is capped at the metal fraction.
     const sigma_profile = new Float64Array(N);
     const s_rough = rq <= 1e-12 ? 0 : rq;   // 0 selects the exact-step branch of _cdfMean
+    const s_iface = rq_interface <= 1e-12 ? 0 : rq_interface;
 
     for (let k = 0; k < N; k++) {
         const xa = recursion_min + k * dx, xb = xa + dx;
         const cdf0 = _cdfMean(xa, xb, 0, s_rough);
-        const cdf1 = _cdfMean(xa, xb, thickness_plating, s_rough);
+        const cdf1 = _cdfMean(xa, xb, thickness_plating, s_iface);
 
         // Region fractions: air (sigma = 0) -> plating -> bulk
-        const p_plating = Math.max(0, cdf0 - cdf1);
-        const p_bulk = cdf1;
+        const p_bulk = Math.min(cdf1, cdf0);
+        const p_plating = cdf0 - p_bulk;
 
         sigma_profile[k] = sigma_plating * p_plating + sigma_bulk * p_bulk;
     }

@@ -66,7 +66,8 @@ class CustomGeometrySolver extends FieldSolver2D {
         this.geometry_params = { ...geo.params };
 
         const platingMaterial = geo.plating ?? (options.plating
-            ? { sigma: options.plating.sigma, thickness: options.plating.thickness, rq: options.plating.rq }
+            ? { sigma: options.plating.sigma, thickness: options.plating.thickness, rq: options.plating.rq,
+                rq_interface: options.plating.rq_interface }
             : null);
         this.plating = platingMaterial;
         this.thick_plating = !!options.thick_plating;

@@ -504,6 +504,10 @@
                 <input type="text" class="unit-input" id="inp_plating_rq" value="0 μm">
             </div>
             <div class="control-group">
+                <label>Interface Roughness RMS <span class="help-icon" onclick="showHelpModal('plating_rq_iface', event)">?</span></label>
+                <input type="text" class="unit-input" id="inp_plating_rq_iface" placeholder="same">
+            </div>
+            <div class="control-group">
                 <label><input type="checkbox" id="chk_plating_thick_corners" checked> Model Thick Plating <span class="help-icon" onclick="showHelpModal('plating_thick_corners', event)">?</span></label>
             </div>
         </div>
@@ -669,11 +673,11 @@
                         <dt><code>sigma= rq=</code></dt>
                         <dd>Conductor's own conductivity (S/m) and roughness. Left out: the sidebar values.</dd>
                         <dt><code>plating=top,sides,bottom</code></dt>
-                        <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq=</code> on the line. Model Thick Plating in Advanced Options decides for every conductor whether the plating is a layer of metal inside the outline (meshed on the full-wave solver) or a layered surface impedance.</dd>
+                        <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq= plating_rq_iface=</code> on the line. Model Thick Plating in Advanced Options sets for every conductor whether the plating is a layer of metal inside the outline (meshed on the full-wave solver) or a layered surface impedance.</dd>
                         <dt><code>mirror=1</code></dt>
                         <dd>Adds the mirror image about <code>x=0</code>, a <code>sig+</code> imaged as <code>sig-</code>. A rectangle touching or crossing <code>x=0</code> becomes one rectangle symmetric about it: <code>diel x=0 w=inf ... mirror=1</code> is a full-width layer.</dd>
-                        <dt><code>plating sigma= t= rq=</code></dt>
-                        <dd>Statement: plating material of every conductor line that gives none.</dd>
+                        <dt><code>plating sigma= t= rq= rq_iface=</code></dt>
+                        <dd>Statement: plating material of every conductor line that gives none. <code>rq_iface</code> is the roughness of the plating/bulk interface, left out it is <code>rq</code>.</dd>
                     </dl>
                 </div>
             </div>
@@ -1126,6 +1130,7 @@
             'inp_rq': 'μm',
             'inp_plating_t': 'μm',
             'inp_plating_rq': 'μm',
+            'inp_plating_rq_iface': 'μm',
             'inp_coax_d': 'mm',
             'inp_coax_D': 'mm',
             'inp_wg_a': 'mm',
@@ -1252,11 +1257,15 @@
         },
         plating: {
             title: 'Surface Plating',
-            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness is used for both interfaces, air to plating and plating to bulk metal, since the plating conforms to the bulk surface. With <i>Model Thick Plating</i> on, the full-wave solver meshes the plating instead: the plating roughness applies to its outer surface only, and the boundary between plating and bulk metal is smooth.</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p><p>For a coaxial line each conductor is one continuous circular surface, so instead of faces you choose which conductors are plated: the inner conductor, the shield, or both. An unplated conductor carries the base conductivity and Surface Roughness.</p><p>For a rectangular waveguide the plating covers the whole inner wall.</p>'
+            body: '<p>Models a single plating layer on top of the bulk conductor using a <a href="https://ieeexplore.ieee.org/document/9903540" target="_blank">layered gradient model</a>. The plating roughness applies to the outer (air/plating) surface. The plating/bulk interface takes the Interface Roughness, which by default is the plating roughness, since the plating conforms to the bulk surface.</p><p>Applied to signal traces and coplanar ground conductors on the substrate. Select which surfaces of the conductor receive plating: top (facing away from substrate), sides, or bottom (facing substrate).</p><p>Unselected surfaces use the base Surface Roughness RMS setting with the single-layer model.</p>'
+        },
+        plating_rq_iface: {
+            title: 'Interface Roughness RMS',
+            body: '<p>RMS roughness of the interface between the plating and the bulk metal. Empty uses the Plating Roughness.</p><p>It matters only where the current reaches the interface, when the plating is not much thicker than the skin depth. For a plating several skin depths thick it has no effect.</p>'
         },
         plating_thick_corners: {
             title: 'Model Thick Plating',
-            body: '<p>When enabled, the plating is a layer of its thickness inside the conductor outline that covers the corners next to it. The full-wave solver meshes that layer and solves it as metal.</p><p>The outer surface of the meshed layer takes the plating roughness. The boundary between the plating and the bulk metal is an internal material boundary and has no roughness. The bulk roughness applies only on faces the plating leaves bare.</p><p>When disabled, each plated face takes a layered plating surface impedance, which assumes a bulk several skin depths thick under the plating. Its plating roughness applies to both the air/plating and the plating/bulk interfaces.</p><p>The quasi-static solver always uses the surface impedance, with this option side plating extends to the bottom corners when the bottom face is not plated.</p>'
+            body: '<p>When enabled, the plating is a layer of its thickness inside the conductor outline that covers the corners next to it. The full-wave solver meshes that layer and solves it as metal.</p><p>The outer surface of the meshed layer takes the plating roughness. The mesh has the boundary between the plating and the bulk metal set to smooth, its roughness (Interface Roughness) is added on the plated faces as the difference of the layered surface impedance with that interface rough and smooth. The bulk roughness applies only on faces the plating leaves bare.</p><p>When disabled, each plated face takes a layered plating surface impedance, which assumes a bulk several skin depths thick under the plating.</p><p>The quasi-static solver always uses the surface impedance, with this option side plating extends to the bottom corners when the bottom face is not plated.</p>'
         },
         conductivity: {
             title: 'Conductivity',

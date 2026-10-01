@@ -43,6 +43,7 @@ const TIERS = {
         { file: 'tests/test_meshability.js', cost: 1 },
         { file: 'tests/test_causal_effect.js', cost: 2 },
         { file: 'tests/test_layered_roughness.js', cost: 1 },
+        { file: 'tests/test_plating_interface_roughness.js', cost: 10 },
         { file: 'tests/test_interpolating_sweep.js', cost: 2 },
         { file: 'tests/test_mtl_sparams.js', cost: 1 },
         { file: 'tests/test_open_boundary_warning.js', cost: 25 },
