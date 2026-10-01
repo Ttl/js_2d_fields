@@ -1654,7 +1654,7 @@ function drawResultsPlot() {
         font: { color: '#fff' }
     };
 
-    Plotly.newPlot('results-plot', allTraces, layout, { responsive: true });
+    Plotly.newPlot('results-plot', allTraces, layout, { responsive: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
 
 function buildSParamTraces(sweepResults, length, Z_ref, plotMode, useMixedMode) {
@@ -1843,7 +1843,7 @@ function drawSParamPlot() {
         font: { color: '#fff' }
     };
 
-    Plotly.newPlot('sparam-plot', allTraces, layout, { responsive: true });
+    Plotly.newPlot('sparam-plot', allTraces, layout, { responsive: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
 
 function drawParameterSweepPlot(sweepData, xLabel, ySelector, useDiffMode) {
@@ -1922,7 +1922,7 @@ function drawParameterSweepPlot(sweepData, xLabel, ySelector, useDiffMode) {
         legend: { x: 0.02, y: 0.98, font: { color: '#fff' } },
         paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' }
     };
-    Plotly.newPlot('sweep-plot', traces, layout, { responsive: true });
+    Plotly.newPlot('sweep-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
 
 // Helper function to check if solver is in differential mode
