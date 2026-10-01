@@ -20,6 +20,8 @@ class Dielectric {
         this.epsilon_r = epsilon_r;
         this.tan_delta = tan_delta;
         this.shape = shape;
+        // Conductivity in S/m (a doped semiconductor), see conductive_dielectric.js.
+        this.sigma = 0;
     }
 
     get x_min() { return this.x; }

@@ -17,10 +17,14 @@
 //      trace nodes if allowed through.
 //   Q6 the mesher's conductor-dimension helpers use |height| so an embedded trace
 //      gets the same bracket treatment as a surface trace.
+//   Q7 a signal touching the domain walls keeps the charge of its wall nodes: a strip
+//      spanning the domain over a two-layer stack is an exact parallel plate, on the
+//      half and the full domain, and with the strip against the top wall too.
 //
 // Run: node tests/test_qs_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { check, quiet, rel, APP, done } from './helpers.js';
 
 
@@ -154,6 +158,21 @@ async function solve(opts, backend) {
     const has = v => s.y.some(y => Math.abs(y - v) < 1e-12);
     check('bracket lines present around both faces',
         has(top + off) && has(top - off) && has(bot + off) && has(bot - off));
+}
+
+// Q7: wall-touching signal.
+{
+    const EPS0 = 8.854187817e-12;
+    const Cex = EPS0 * 100e-6 / (5e-6 / 4.1 + 20e-6 / 11.9);
+    const plate = top => `units um\nbounds open open open gnd\ndomain -50 50 0 ${top}\n`
+        + 'diel x=-inf w=inf y=0 h=20 er=11.9\ndiel x=-inf w=inf y=20 h=5 er=4.1\nsig+ x=-50 w=100 y=25 h=2\n';
+    for (const [what, top, extra] of [['half domain', 40, {}], ['full domain', 40, { symmetry: false }],
+        ['strip against the top wall', 27, {}]]) {
+        const s = new CustomGeometrySolver({ text: plate(top), nx: 30, ny: 30, freq: 1e9, ...extra });
+        const m = (await quiet(() => s.solve_adaptive({ ...APP }))).modes[0];
+        check(`Q7: strip spanning the domain (${what}) is an exact parallel plate`, rel(m.C, Cex) < 1e-9,
+            `C ${m.C.toExponential(6)} vs ${Cex.toExponential(6)}`);
+    }
 }
 
 done();

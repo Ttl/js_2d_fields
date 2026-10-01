@@ -3,6 +3,7 @@ import { Complex } from "./complex.js";
 import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
     spreadWidthFloor } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
+import { hasConductiveDielectric, conductiveOmega, complexEps, conductiveDielectricWarning } from './conductive_dielectric.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
 import { visibleAreas, platedThrough, platingArea, insideRingHole, bodyDistance, shapeArea } from './shapes.js';
@@ -370,6 +371,9 @@ export class FieldSolver2D {
         const nxc = Math.max(nx - 1, 0), nyc = Math.max(ny - 1, 0);
         const eps = Array(nyc).fill().map(() => new Float64Array(nxc).fill(1));
         const tand = Array(nyc).fill().map(() => new Float64Array(nxc));
+        // Conductivity of conductive dielectrics, null when there are none.
+        const sigma = hasConductiveDielectric(this.dielectrics)
+            ? Array(nyc).fill().map(() => new Float64Array(nxc)) : null;
         const xc = new Float64Array(nxc), yc = new Float64Array(nyc);
         for (let j = 0; j < nxc; j++) xc[j] = 0.5 * (this.x[j] + this.x[j + 1]);
         for (let i = 0; i < nyc; i++) yc[i] = 0.5 * (this.y[i] + this.y[i + 1]);
@@ -378,16 +382,18 @@ export class FieldSolver2D {
         for (const d of (this.dielectrics || [])) {
             for (let i = 0; i < nyc; i++) {
                 if (yc[i] < d.y_min || yc[i] > d.y_max) continue;
-                const er = eps[i], td = tand[i];
+                const er = eps[i], td = tand[i], sg = sigma ? sigma[i] : null;
                 for (let j = 0; j < nxc; j++) {
                     if (xc[j] < d.x_min || xc[j] > d.x_max) continue;
                     er[j] = d.epsilon_r;
                     td[j] = d.tan_delta;
+                    if (sg) sg[j] = d.sigma || 0;
                 }
             }
         }
         this.epsilon_cell = eps;
         this.tand_cell = tand;
+        this.sigma_cell = sigma;
     }
 
     // Warnings for 'open' boundaries that sit too close to the conductors. The open
@@ -876,6 +882,108 @@ export class FieldSolver2D {
         }
 
         return Vs;
+    }
+
+    // Conductive dielectrics (see conductive_dielectric.js): the operator of
+    // solve_laplace_multi with the complex cell permittivity a + j b, solved for each
+    // drive Vs[m] (real Dirichlet values). Returns { Vr, Vi } per drive, the real and
+    // imaginary potential on the full grid. The row scaling of the half domain keeps
+    // the matrix complex symmetric.
+    async _solve_laplace_complex(Vs, a, b, planeBC = null) {
+        if (this.ensure_mesh) this.ensure_mesh();
+        const nx = this.x.length;
+        const dx = diff(this.x), dy = diff(this.y);
+        const pec = planeBC === 'pec';
+        const pinned = (i, j) => this.conductor_mask[i][j] || (pec && j === 0);
+        const fixed = (m, i, j) => Vs[m][i][j];
+        const system = e => this._laplace_system(pinned,
+            (i, j) => this._stencil(i, j, dx, dy, (ci, cj) => e[ci][cj], pec), fixed, Vs.length);
+        // Both parts have the same pattern: _laplace_system emits every free
+        // neighbour whatever its coefficient.
+        const re = system(a), im = system(b);
+        const N = re.N;
+        const csr = { rowPtr: re.csr.rowPtr, colIdx: re.csr.colIdx, valRe: re.csr.values, valIm: im.csr.values };
+        const rhs = Vs.map((_, m) => {
+            const r = new Float64Array(2 * N);
+            r.set(re.Bs[m]); r.set(im.Bs[m], N);
+            return r;
+        });
+        const { eigenWasm } = await import('./tri_solver/eigen_module.js');
+        const xs = (await eigenWasm()).helpers.solveComplexSymmetric(N, csr, rhs);
+        return Vs.map((V, m) => {
+            const Vr = V.map(row => Float64Array.from(row));
+            const Vi = V.map(row => new Float64Array(row.length));
+            const x = xs[m], idx = re.idx;
+            for (let n = 0; n < idx.length; n++) {
+                if (idx[n] < 0) continue;
+                const i = (n / nx) | 0, j = n % nx;
+                Vr[i][j] = x[idx[n]]; Vi[i][j] = x[N + idx[n]];
+            }
+            return { Vr, Vi };
+        });
+    }
+
+    // Complex cell permittivity a + j b at angular frequency omega.
+    _complex_cells(omega) {
+        const a = this.epsilon_cell;
+        const b = a.map((row, i) => {
+            const t = this.tand_cell[i], sg = this.sigma_cell ? this.sigma_cell[i] : null;
+            const out = new Float64Array(row.length);
+            for (let j = 0; j < row.length; j++) out[j] = complexEps(row[j], t[j], sg ? sg[j] : 0, omega).im;
+            return out;
+        });
+        return { a, b };
+    }
+
+    // Complex charge { re, im } on the conductor nodes of mask for the potential
+    // Vr + j Vi and cell permittivity a + j b.
+    _complex_flux(Vr, Vi, a, b, mask) {
+        const f = (V, e) => this._signal_flux(V, e, mask);
+        return { re: f(Vr, a) - f(Vi, b), im: f(Vi, a) + f(Vr, b) };
+    }
+
+    // Complex capacitance { C, G } of a mode with conductive dielectrics: C = Re C*,
+    // G = omega * C'' (C* = C' - j C''), per trace like _signal_capacitance. Null when
+    // no dielectric conducts.
+    async _conductive_mode(mode) {
+        if (!hasConductiveDielectric(this.dielectrics)) return null;
+        const omega = conductiveOmega(this.dielectrics, this.freq);
+        const { a, b } = this._complex_cells(omega);
+        const Vd = this._create_voltage_array(mode);
+        const [{ Vr, Vi }] = await this._solve_laplace_complex([Vd], a, b, this._plane_bc(mode));
+        // Charge per volt of the trace's drive.
+        const perTrace = mask => {
+            let v = 0;
+            for (let i = 0; i < mask.length && !v; i++) {
+                const j = mask[i].indexOf(1);
+                if (j >= 0) v = Vd[i][j];
+            }
+            const q = this._complex_flux(Vr, Vi, a, b, mask);
+            return { re: q.re / v, im: q.im / v };
+        };
+        let q;
+        if (!this.is_differential || this.sym_half) q = perTrace(this.signal_mask);
+        else {
+            const p = perTrace(this.signal_p_mask), n = perTrace(this.signal_n_mask);
+            q = { re: 0.5 * (p.re + n.re), im: 0.5 * (p.im + n.im) };
+        }
+        return { C: q.re, G: -omega * q.im };
+    }
+
+    // Replaces the real-permittivity C (and Z0) of a mode result with the complex
+    // solve's and keeps its G for _mode_alpha_d.
+    async _apply_conductive(r) {
+        const c = await this._conductive_mode(r.mode);
+        r.G_diel = c ? c.G : null;
+        if (!c) return;
+        r.C = c.C;
+        if (r.C0 !== undefined) r.Z0 = 1 / (CONSTANTS.C * Math.sqrt(r.C * r.C0));
+    }
+
+    // Dielectric loss of a mode result in dB/m.
+    _mode_alpha_d(r) {
+        if (r.G_diel != null) return 8.686 * r.G_diel * r.Z0 / 2;
+        return this.calculate_dielectric_loss(r.V, r.Z0);
     }
 
     // The 5-point system over the nodes not pinned(i, j), stencil(i, j) giving the
@@ -1438,6 +1546,12 @@ export class FieldSolver2D {
      * @returns {number} - Capacitance in F/m
      */
     calculate_capacitance(V, vacuum=false) {
+        return Math.abs(this._signal_flux(V, vacuum ? null : this.epsilon_cell));
+    }
+
+    // Signed charge on the conductor nodes of mask for the potential V, with the cell
+    // permittivity epsCell (null: vacuum). The flux contour of calculate_capacitance.
+    _signal_flux(V, epsCell, mask = this.signal_mask) {
         let Q = 0.0;
         const ny = this.y.length;
         const nx = this.x.length;
@@ -1454,7 +1568,7 @@ export class FieldSolver2D {
         const j0 = this.sym_half ? 0 : 1;
         for (let i = 1; i < ny - 1; i++) {
             for (let j = j0; j < nx - 1; j++) {
-                if (!this.signal_mask[i][j]) continue;
+                if (!mask[i][j]) continue;
 
                 // Half-widths of the node's control volume, and the cells its
                 // faces cut through. The same decomposition the operator uses
@@ -1471,7 +1585,7 @@ export class FieldSolver2D {
                 // Check 4 neighbors
                 const check_neighbor = (ni, nj, is_vertical_flux) => {
                     // Only add flux if the neighbor is NOT part of the signal conductor
-                    if (this.signal_mask[ni][nj]) return;
+                    if (mask[ni][nj]) return;
 
                     // E-field Normal
                     let En;
@@ -1485,8 +1599,8 @@ export class FieldSolver2D {
                          En = (V[i][j] - V[ni][nj]) / dist;
                          // Average dx for area (half cell at the symmetry plane)
                          area = j > 0 ? (get_dx(j-1) + get_dx(j)) / 2 : get_dx(0) / 2;
-                         if (!vacuum) {
-                             const row = this.epsilon_cell[ni > i ? i : i - 1];
+                         if (epsCell) {
+                             const row = epsCell[ni > i ? i : i - 1];
                              er = (row[cjl] * wl + row[j] * wr) / (wl + wr);
                          }
                     } else {
@@ -1495,10 +1609,10 @@ export class FieldSolver2D {
                         En = (V[i][j] - V[ni][nj]) / dist;
                         // Average dy for area
                         area = (get_dy(i-1) + get_dy(i)) / 2;
-                        if (!vacuum) {
+                        if (epsCell) {
                             const col = nj > j ? j : j - 1;
-                            er = (this.epsilon_cell[i - 1][col] * hd +
-                                  this.epsilon_cell[i][col] * hu) / (hd + hu);
+                            er = (epsCell[i - 1][col] * hd +
+                                  epsCell[i][col] * hu) / (hd + hu);
                         }
                     }
 
@@ -1506,28 +1620,62 @@ export class FieldSolver2D {
                 };
 
                 // Right neighbor
-                if (!this.signal_mask[i][j + 1]) {
+                if (!mask[i][j + 1]) {
                     check_neighbor(i, j + 1, false);
                 }
                 // Left neighbor
-                if (j > 0 && !this.signal_mask[i][j - 1]) {
+                if (j > 0 && !mask[i][j - 1]) {
                     check_neighbor(i, j - 1, false);
                 }
                 // Top neighbor
-                if (!this.signal_mask[i + 1][j]) {
+                if (!mask[i + 1][j]) {
                     check_neighbor(i + 1, j, true);
                 }
                 // Bottom neighbor
-                if (!this.signal_mask[i - 1][j]) {
+                if (!mask[i - 1][j]) {
                     check_neighbor(i - 1, j, true);
                 }
             }
+        }
+        // Signal nodes on the domain walls, a conductor that touches a wall. No flux
+        // crosses the wall (the operator mirrors across it), so the node's control
+        // volume is the part of its cell inside the domain.
+        const wallNode = (i, j) => {
+            if (!mask[i][j]) return;
+            const hd = i > 0 ? dy[i - 1] / 2 : 0, hu = i < ny - 1 ? dy[i] / 2 : 0;
+            const wl = j > 0 ? dx[j - 1] / 2 : 0, wr = j < nx - 1 ? dx[j] / 2 : 0;
+            const flux = (ni, nj) => {
+                if (ni < 0 || ni >= ny || nj < 0 || nj >= nx || mask[ni][nj]) return;
+                let er = 1, area, dist;
+                if (ni !== i) {
+                    dist = Math.abs(this.y[i] - this.y[ni]);
+                    area = wl + wr;
+                    if (epsCell) {
+                        const row = epsCell[ni > i ? i : i - 1];
+                        er = ((wl ? row[j - 1] * wl : 0) + (wr ? row[j] * wr : 0)) / area;
+                    }
+                } else {
+                    dist = Math.abs(this.x[j] - this.x[nj]);
+                    area = hd + hu;
+                    if (epsCell) {
+                        const col = nj > j ? j : j - 1;
+                        er = ((hd ? epsCell[i - 1][col] * hd : 0) + (hu ? epsCell[i][col] * hu : 0)) / area;
+                    }
+                }
+                Q += CONSTANTS.EPS0 * er * (V[i][j] - V[ni][nj]) / dist * area;
+            };
+            flux(i, j + 1); flux(i, j - 1); flux(i + 1, j); flux(i - 1, j);
+        };
+        for (let j = 0; j < nx; j++) { wallNode(0, j); if (ny > 1) wallNode(ny - 1, j); }
+        for (let i = 1; i < ny - 1; i++) {
+            if (!this.sym_half) wallNode(i, 0);
+            if (nx > 1) wallNode(i, nx - 1);
         }
         // A single-ended half domain holds half the line charge (a signal cut by the
         // symmetry plane, or one of a mirrored pair of traces). A differential half
         // domain holds one full trace of the pair.
         const scale = (this.sym_half && !this.is_differential) ? 2 : 1;
-        return scale * Math.abs(Q);
+        return scale * Q;
     }
 
     /**
@@ -2925,13 +3073,33 @@ export class FieldSolver2D {
             return [[this._trace_charge(DA.V, sp, vac), m12],
                     [m12, this._trace_charge(DB.V, sn, vac)]];
         };
-        const Cm = maxwell(A, B, false), Cm0 = maxwell(Av, Bv, true);
+        let Cm = maxwell(A, B, false);
+        const Cm0 = maxwell(Av, Bv, true);
         // Per-trace vacuum fields for the per-line loss matrices (_line_asymmetry), and
         // the dielectric loss matrix over omega, [G11, G12, G22] / omega: v^T G v is twice
         // the power of the potential of drive v, so G12 comes from the drive [1, 1].
-        const pA = this._dielectric_power(A.V, 1), pB = this._dielectric_power(B.V, 1);
-        const pAB = this._dielectric_power(A.V.map((row, i) => row.map((v, j) => v + B.V[i][j])), 1);
-        this._traceVac = { Av, Bv, Cm0, Gw: [2 * pA, pAB - pA - pB, 2 * pB] };
+        let Gw, Gc = null;
+        if (hasConductiveDielectric(this.dielectrics)) {
+            // Conductive dielectrics: [C] and [G] / omega from the complex per-trace
+            // solves, C* = C' - j C'' (G = omega C'').
+            const omega = conductiveOmega(this.dielectrics, this.freq);
+            const { a, b } = this._complex_cells(omega);
+            const [cA, cB] = await this._solve_laplace_complex(
+                [this._create_voltage_array_drive(1, 0), this._create_voltage_array_drive(0, 1)], a, b);
+            const q = (c, mask) => this._complex_flux(c.Vr, c.Vi, a, b, mask);
+            const qAp = q(cA, sp), qAn = q(cA, sn), qBp = q(cB, sp), qBn = q(cB, sn);
+            const m12 = 0.5 * (qAn.re + qBp.re), g12 = -0.5 * (qAn.im + qBp.im);
+            Cm = [[qAp.re, m12], [m12, qBn.re]];
+            // C'' scaled to the frequency of the result (the DC limit solves below it).
+            const k = this.freq > 0 ? omega / (2 * Math.PI * this.freq) : 0;
+            Gc = [[-qAp.im * k, g12 * k], [g12 * k, -qBn.im * k]];
+            Gw = [Gc[0][0], Gc[0][1], Gc[1][1]];
+        } else {
+            const pA = this._dielectric_power(A.V, 1), pB = this._dielectric_power(B.V, 1);
+            const pAB = this._dielectric_power(A.V.map((row, i) => row.map((v, j) => v + B.V[i][j])), 1);
+            Gw = [2 * pA, pAB - pA - pB, 2 * pB];
+        }
+        this._traceVac = { Av, Bv, Cm0, Gw };
         const quad = (M, v) => 0.5 * (v[0] * v[0] * M[0][0] + 2 * v[0] * v[1] * M[0][1] + v[1] * v[1] * M[1][1]);
         // Shared symmetric/degenerate/modal decision (thresholds, ordering — see
         // classifyModalDecomposition; the triangular backend uses the identical guard).
@@ -2956,7 +3124,8 @@ export class FieldSolver2D {
             const eps_eff = Ck / C0k;
             const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
             const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0, label);
-            const alpha_d = this.calculate_dielectric_loss(V, Z0);
+            const alpha_d = Gc ? 8.686 * 2 * Math.PI * this.freq * quad(Gc, v) * Z0 / 2
+                : this.calculate_dielectric_loss(V, Z0);
             const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, Ck, Z0);
             const alpha_c = 8.686 * R_total / (2 * Zc.re);
             results.push({
@@ -3040,13 +3209,15 @@ export class FieldSolver2D {
 
     // Losses, RLGC and the reported parameters of a mode solved by _solve_single_mode.
     async _mode_loss_results(r) {
-        const { mode, Z0, C, C0, V, Ex, Ey, V0, Ex0, Ey0 } = r;
+        // Conductive dielectrics: C and G from the complex solve.
+        await this._apply_conductive(r);
+        const { mode, Z0, C, C0, V, Ex, Ey, V0, Ex0, Ey0, G_diel } = r;
         // Calculate conductor losses with surface roughness and DC resistance
         await this._ensure_dc_signal_inductance(this._plane_bc(mode));
         const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
         // Calculate dielectric loss (returns alpha in dB/m)
-        const alpha_d = this.calculate_dielectric_loss(V, Z0);
+        const alpha_d = this._mode_alpha_d(r);
 
         // Calculate RLGC using new surface roughness aware approach
         const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, C, Z0);
@@ -3064,7 +3235,7 @@ export class FieldSolver2D {
             alpha_c, alpha_d, alpha_total,
             L_internal, L_external,
             V, Ex, Ey,
-            V0, Ex0, Ey0
+            V0, Ex0, Ey0, G_diel
         };
     }
 
@@ -3780,6 +3951,10 @@ export class FieldSolver2D {
         // _build_results and models these regimes accurately (MQS).
         if (this._proximityWarn) warns.push(this._proximityWarn);
         if (this._causalWarn) warns.push(this._causalWarn);
+        const condWarn = conductiveDielectricWarning(this.dielectrics, this.freq, {
+            x_min: -this.domain_width / 2, x_max: this.domain_width / 2,
+            y_min: this.domain_y_min, y_max: this.domain_height });
+        if (condWarn) warns.push(condWarn);
         const spreadWarn = this._ground_spreading_note(this.freq);
         if (spreadWarn) warns.push(spreadWarn);
         const openWarn = this.openBoundaryFieldWarning(modeResults.map(m => m.V));
@@ -4135,10 +4310,11 @@ export class FieldSolver2D {
         }
 
         // If causal materials are enabled, we must re-solve the Laplace equation
-        // because epsilon_r changes with frequency, which changes the field distribution
-        if (this.use_causal_materials) {
+        // because epsilon_r changes with frequency, which changes the field distribution.
+        // Conductive dielectrics make C and G frequency dependent the same way.
+        if (this.use_causal_materials || hasConductiveDielectric(this.dielectrics)) {
             // Apply the causal model to update epsilon_r and tand
-            applyDjordjevicSarkar(this);
+            if (this.use_causal_materials) applyDjordjevicSarkar(this);
 
             // Re-solve at this frequency with updated material parameters
             const modeResults = [];
@@ -4181,7 +4357,7 @@ export class FieldSolver2D {
                 const recalc = (mode) => {
                     const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
                         mode.Ex, mode.Ey, mode.Z0, mode.C0, mode.Ex0, mode.Ey0, mode.mode);
-                    const alpha_d = this.calculate_dielectric_loss(mode.V, mode.Z0);
+                    const alpha_d = this._mode_alpha_d(mode);
                     const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, mode.C, mode.Z0);
                     mode.RLGC = rlgc;
                     mode.Zc = Zc;
@@ -4215,7 +4391,7 @@ export class FieldSolver2D {
                 // Recalculate RLGC parameters with corrected Z0
                 const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
                     result.Ex, result.Ey, result.Z0, result.C0, result.Ex0, result.Ey0, result.mode);
-                const alpha_d = this.calculate_dielectric_loss(result.V, result.Z0);
+                const alpha_d = this._mode_alpha_d(result);
                 const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, result.C, result.Z0);
 
                 result.RLGC = rlgc;

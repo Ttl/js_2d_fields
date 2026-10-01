@@ -45,6 +45,25 @@ diel  x=-wsub/2  y=0   w=wsub  h=h  er=4.4  tand=0.02
 sig+  x=-w/2     y=h   w=w     h=t
 gnd   x=-wgnd/2  y=-t  w=wgnd  h=t
 `,
+    'Integrated circuit microstrip': `# On-chip microstrip: copper top metal on SiO2 over an aluminium ground plane on
+# a conductive silicon substrate. Over it a conformal SiO2 layer (tox on top, tox_s on the
+# trace sides) and a conformal SiN passivation tn thick.
+# hox is the trace bottom height from the bottom of the ground plane.
+units um
+w = 11.5; t = 3; wgnd = 46; tg = 0.49
+hox = 7.66; hbox = 2.6
+tox = 1; tox_s = 0.6; tn = 0.4
+bounds open open open open
+domain auto   # sized from the conductors, or: domain x1 x2 y1 y2
+
+diel  x=-inf           y=-hbox    w=inf             h=-inf          er=11.9  sigma=2   # 50 ohm*cm
+diel  x=-inf           y=-hbox    w=inf             h=hbox+hox+tox  er=4.1  tand=0.001
+diel  x=-inf           y=hox+tox  w=inf             h=tn            er=6.6  tand=0.001  thin=1
+diel  x=-w/2-tox_s-tn  y=hox+tox  w=w+2*(tox_s+tn)  h=t+tn          er=6.6  tand=0.001
+diel  x=-w/2-tox_s     y=hox      w=w+2*tox_s       h=t+tox         er=4.1  tand=0.001
+gnd   x=-wgnd/2        y=0        w=wgnd            h=tg            sigma=3.5e7
+sig+  x=-w/2           y=hox      w=w               h=t
+`,
     'CPW over air': `# Coplanar waveguide on a finite substrate, air above and below
 units mm
 w = 0.2; g = 0.1; t = 0.017; h = 0.635
@@ -692,7 +711,7 @@ function rectRow(model, st, geoRect, index, count) {
             for (const k of CONDUCTOR_KEYS) delete fields[k];
             fields.er = fields.er ?? '4.4'; fields.tand = fields.tand ?? '0.02';
         }
-        if (!isDiel() && wasDiel) { delete fields.er; delete fields.tand; delete fields.thin; }
+        if (!isDiel() && wasDiel) { delete fields.er; delete fields.tand; delete fields.thin; delete fields.sigma; }
         write(true);
     });
 
@@ -775,7 +794,9 @@ function rectRow(model, st, geoRect, index, count) {
     let extra, below = null;
     if (isDiel()) {
         extra = [exprInput('er', fields.er, setField('er'), { cls: 'narrow', kind: 'number' }),
-                 exprInput('tand', fields.tand, setField('tand'), { placeholder: '0', cls: 'narrow', kind: 'number' })];
+                 exprInput('tand', fields.tand, setField('tand'), { placeholder: '0', cls: 'narrow', kind: 'number' }),
+                 exprInput('σ', fields.sigma, setField('sigma'), { placeholder: '0', cls: 'narrow', kind: 'number',
+                     title: 'Conductivity in S/m, for a semiconductor such as a silicon substrate (1/(resistivity in ohm*m)).' })];
     } else {
         const on = new Set(fields.plating === 'all' ? FACES : (fields.plating && fields.plating !== 'none' ? fields.plating.split(',') : []));
         // A round shape or a shell has one outside: its plating is all or nothing. The

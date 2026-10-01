@@ -20,14 +20,14 @@
 // Mesh + freedom maps are built once and reused across a frequency sweep; only
 // the eigen-assembly (k²-dependent) and loss are recomputed per frequency.
 
-import createModule from '../wasm_solver/eigen_solver.js';
-import { createWasmHelpers } from './fem_core.js';
+import { eigenWasm } from './eigen_module.js';
 import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
          groundBodyCount } from './occ_to_mesh.js';
 import { shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance,
          platedThrough, insideRingHole } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
+         solveTriStaticComplex, computeTriEnergyComplex,
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
@@ -53,6 +53,7 @@ import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar, causalModelWarning } from '../djordjevic_sarkar.js';
+import { hasConductiveDielectric, conductiveOmega, conductiveDielectricWarning } from '../conductive_dielectric.js';
 
 const c0 = 299792458;
 const eps0 = 8.854187817e-12;
@@ -107,8 +108,7 @@ let _ctxPromise = null;
 export function initTriBackend() {
     if (!_ctxPromise) {
         _ctxPromise = (async () => {
-            const M = await createModule();
-            const helpers = createWasmHelpers(M);
+            const { M, helpers } = await eigenWasm();
             const G = await initGmsh();
             const wasmSolver = (N, csr, rhsArrays) => helpers.solveSparseMulti(N, csr, rhsArrays);
             return { M, helpers, G, wasmSolver };
@@ -2213,6 +2213,48 @@ export class TriBackend {
         return true;
     }
 
+    // Conductive dielectrics (conductive_dielectric.js): the static solve of the
+    // conductor potentials pot at frequency f with the complex permittivity
+    // er (1 - j tand) - j sigma / (omega eps0), and its complex energy W* = ½ C* V².
+    _conductiveSolve(fm, pot, f) {
+        const { mesh } = this;
+        const omega = conductiveOmega(this.solver.dielectrics, f);
+        const em = mesh.epsMap, lm = mesh.lossMap, k = 1 / (omega * eps0);
+        const epsRe = t => em[t].re;
+        const epsIm = t => -(lm[t].re + (lm[t].sigma || 0) * k);
+        const sol = solveTriStaticComplex(mesh, fm, epsRe, epsIm, pot, this.ctx.helpers.solveComplexSymmetric);
+        const energy = (re, im) => computeTriEnergyComplex(re, im, mesh, epsRe, epsIm);
+        return { sol, energy, omega };
+    }
+
+    // Complex capacitance of a mode: { C, G } with C = Re C*, G = omega C'' (C* = C' - j C'').
+    _conductiveMode(mode, st, f) {
+        const v = st.modalVec;
+        const pot = v ? this.condRect.rectRoles.map(r => (!r.is_signal ? 0 : (r.polarity || 1) > 0 ? v[0] : v[1]))
+            : drivePotentials(this.condRect, mode, this.symmetry);
+        const { sol, energy, omega } = this._conductiveSolve(st.fm, pot, f);
+        const W = energy(sol.re, sol.im), k = st.kC * eps0;
+        return { C: k * W.re, G: -omega * k * W.im };
+    }
+
+    // The physMatrix of an asymmetric pair with [C] and Gw = [G11, G12, G22] / omega from
+    // the complex per-trace solves at frequency f, the energy forms of _prepareStaticModal.
+    _conductivePhys(f) {
+        const st = this._static.odd;
+        const roles = this.condRect.rectRoles;
+        const potA = roles.map(r => (r.is_signal && (r.polarity || 1) > 0) ? 1 : 0);
+        const potB = roles.map(r => (r.is_signal && (r.polarity || 1) < 0) ? 1 : 0);
+        const A = this._conductiveSolve(st.fm, potA, f), B = this._conductiveSolve(st.fm, potB, f);
+        const wa = A.energy(A.sol.re, A.sol.im), wb = A.energy(B.sol.re, B.sol.im);
+        const wab = A.energy(combineStatic(1, A.sol.re, 1, B.sol.re), combineStatic(1, A.sol.im, 1, B.sol.im));
+        const ksc = st.kC * eps0;
+        const m12 = { re: wab.re - wa.re - wb.re, im: wab.im - wa.im - wb.im };
+        const C = [[2 * wa.re * ksc, m12.re * ksc], [m12.re * ksc, 2 * wb.re * ksc]];
+        // C'' at the frequency of the result (the DC limit solves below it).
+        const g = f > 0 ? -A.omega / (2 * Math.PI * f) * ksc : 0;
+        return { ...this._modalPhys, C, Gw: [2 * wa.im * g, m12.im * g, 2 * wb.im * g] };
+    }
+
     // Per-line loss data of a pair from the eddy-current solve driven per trace (line 1 =
     // the positive trace), null when not needed or when the loss did not come from that
     // solve. Loss and internal inductance are quadratic forms in the trace currents.
@@ -2762,12 +2804,18 @@ export class TriBackend {
         }
         // Dielectric dispersion is a capacitance effect: C = eps_d·C0 (geometric
         // L_external = 1/(c²C0)). Reduces to the static result when eps_d = eps_static.
+        // dielectric loss: G from the lossy-permittivity energy integral
+        let G = omega * kC * eps0 * W_loss;
+        // Conductive dielectrics: C and G from the complex static solve. Its C scales the
+        // dispersion the eigensolve found for the real permittivity.
+        if (hasConductiveDielectric(s.dielectrics)) {
+            const cd = this._conductiveMode(mode, st, f);
+            eps_d *= cd.C / (eps_eff_static * C0);
+            G = cd.G;
+        }
         const C = eps_d * C0;
         const L_external = 1 / (c0 * c0 * C0);
         const Z0 = 1 / (c0 * C0 * Math.sqrt(eps_d));
-
-        // dielectric loss: G from the lossy-permittivity energy integral
-        const G = omega * kC * eps0 * W_loss;
         const alpha_d = Z0 > 0 ? (G * Z0 / 2) * NP_TO_DB : 0;
 
         // Conductor loss → R_total and the internal inductance L_internal (which adds
@@ -3323,7 +3371,8 @@ export class TriBackend {
             // `shape` must ride along: without it the rebuilt dielectric is only a
             // bounding box, and the causal re-tag would label everything outside the
             // real body (the polygon's vertex "horns") as air.
-            const rect = { x_min: d.x_min, x_max: d.x_max, y_min: d.y_min, y_max: d.y_max, shape: d.shape || null };
+            const rect = { x_min: d.x_min, x_max: d.x_max, y_min: d.y_min, y_max: d.y_max, shape: d.shape || null,
+                sigma: d.sigma || 0 };
             if (!causal || Math.abs(er - 1) < 1e-6 || Math.abs(td) < 1e-10) return { ...rect, epsilon_r: er, tan_delta: td };
             const { eps_real, tand_actual, valid } = djordjevic_sarkar(f, er, td, fref);
             if (!valid && !causalInvalid) causalInvalid = { er, td };
@@ -3592,6 +3641,8 @@ export class TriBackend {
         if (this._buildNotes) this._modeWarnings.push(...this._buildNotes.values());
         const spreadNote = this.solver._ground_spreading_note ? this.solver._ground_spreading_note(f) : null;
         if (spreadNote) this._modeWarnings.push({ ...spreadNote, freq: f });
+        const condNote = conductiveDielectricWarning(this.solver.dielectrics, f, this.domain);
+        if (condNote) this._modeWarnings.push(condNote);
         // A waveguide never reaches _modeAtFreq, so its quasi-static fallback (which would
         // be physically meaningless below cutoff) is unreachable for this medium.
         let modes = this._isWG ? [this._waveguideModeAtFreq(f)]
@@ -3639,8 +3690,11 @@ export class TriBackend {
             // single-trace drives, carried on the mode RLGC so every consumer of the
             // pair (matrix, S-parameters, interpolating sweep) sees them.
             const asym = this._lineAsymmetry(f, modes);
-            if (this._modalPhys && this._modalPhys.Gw) {
-                for (const m of [odd, even]) m.RLGC.Gm = this._modalPhys.Gw.map(v => v * 2 * Math.PI * f);
+            // Conductive dielectrics: [C] and [G] of the pair from the complex solve.
+            const phys = this._modalPhys && hasConductiveDielectric(this.solver.dielectrics)
+                ? this._conductivePhys(f) : this._modalPhys;
+            if (phys && phys.Gw) {
+                for (const m of [odd, even]) m.RLGC.Gm = phys.Gw.map(v => v * 2 * Math.PI * f);
             }
             if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
             else if (f > 0 && (this._modalPhys || this._pairFinishDiffers())
@@ -3652,9 +3706,9 @@ export class TriBackend {
                       'the two traces and the S-parameters have no mode conversion.' })) {
                 result.warnings = this._modeWarnings;
             }
-            result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, this._modalPhys);
+            result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, phys);
             // True physical 2×2 [C]/[L] for the asymmetric MTL 4-port S-parameter path.
-            if (this._modalPhys) result.physMatrix = this._modalPhys;
+            if (phys) result.physMatrix = phys;
         }
         // Write plotting state onto the solver (mirrors the FDM backend).
         const f0 = this._static[this.modeNames[0]].fields;

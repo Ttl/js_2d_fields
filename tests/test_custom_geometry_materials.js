@@ -53,7 +53,7 @@ async function mixedPair(name, what, A, B, extra, tol, spread) {
     check('rq and plating keys evaluate to metres', f.errors.length === 0 && Math.abs(r.rq - 0.5e-6) < 1e-15
         && r.platingMaterial.sigma === 1e7 && Math.abs(r.platingMaterial.thickness - 4e-6) < 1e-15
         && Math.abs(r.platingMaterial.rq - 0.2e-6) < 1e-15);
-    for (const [what, text] of [['sigma on a dielectric', 'diel x=0 y=0 w=1 h=1 er=2 sigma=1e7'],
+    for (const [what, text] of [['negative sigma on a dielectric', 'diel x=0 y=0 w=1 h=1 er=2 sigma=-1'],
         ['zero sigma', 'sig+ x=0 y=0 w=1 h=1 sigma=0'], ['rq on a dielectric', 'diel x=0 y=0 w=1 h=1 er=2 rq=1'],
         ['negative rq', 'sig+ x=0 y=0 w=1 h=1 rq=-1']]) {
         check(`${what} is an error`, parseAndEvaluate(text).errors.length === 1);

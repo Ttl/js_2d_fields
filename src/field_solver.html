@@ -668,8 +668,8 @@
                         <dd>Ellipse centred on <code>x, y</code> with semi-axes <code>rx, ry</code>, <code>n</code> vertices spaced evenly along the outline, one on top. <code>rx_in ry_in</code> cut a concentric elliptical hole (a ring). Plating: <code>plating=all</code>. Full-wave solver only.</dd>
                         <dt><code>radius= radius_bottom= wall=</code></dt>
                         <dd>On a rectangle or trapezoid: <code>radius</code> rounds every corner, <code>radius_bottom</code> the two lower ones (<code>0</code> keeps them sharp). A radius of half the height gives a stadium. <code>wall</code> hollows the shape into a shell of that thickness, such as a cable shield; a shell is plated with <code>plating=all</code>. Full-wave solver only.</dd>
-                        <dt><code>er= tand=</code></dt>
-                        <dd>Dielectric. Where dielectrics overlap the later line wins. <code>thin=1</code> marks a thin sheet for the mesher.</dd>
+                        <dt><code>er= tand= sigma=</code></dt>
+                        <dd>Dielectric. Where dielectrics overlap the later line wins. <code>sigma</code> is a conductivity in S/m (a silicon substrate). <code>thin=1</code> marks a thin sheet for the mesher.</dd>
                         <dt><code>sigma= rq=</code></dt>
                         <dd>Conductor's own conductivity (S/m) and roughness. Left out: the sidebar values.</dd>
                         <dt><code>plating=top,sides,bottom</code></dt>

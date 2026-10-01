@@ -90,7 +90,7 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
     else return false;
 
     const condKey = c => (c.is_signal ? 's' : 'g');   // signals are interchangeable; grounds map to grounds
-    const dielKey = d => `${(d.epsilon_r ?? 0).toFixed(6)}:${(d.tan_delta ?? 0).toFixed(6)}`;
+    const dielKey = d => `${(d.epsilon_r ?? 0).toFixed(6)}:${(d.tan_delta ?? 0).toFixed(6)}:${d.sigma || 0}`;
     // Polygon shapes must mirror onto a shape of their kind too (the bounding boxes above
     // cannot tell a trapezoid from its mirror image). Only a vertical mirror is tested.
     const shaped = [...conductors, ...dielectrics].filter(o => o.shape);
@@ -128,7 +128,7 @@ export function isXSymmetric(conductors, dielectrics, domainW, { finish: withFin
     // itself. The rectangular remainder still has to pass the span test below.
     const shaped = (o) => !!o.shape;
     const condKey = c => (c.is_signal ? 's' + Math.abs(c.polarity || 0) : 'g') + (withFinish ? '|' + conductorFinishKey(c) : '');
-    const dielKey = d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}`;
+    const dielKey = d => `${d.epsilon_r.toFixed(6)}:${(d.tan_delta || 0).toFixed(6)}:${d.sigma || 0}`;
     const partnered = (list, key) => list.filter(shaped).every(o =>
         list.some(p => p.shape && key(p) === key(o) && isMirrorShape(o.shape, p.shape, tol)));
     if (!partnered(conductors, condKey) || !partnered(dielectrics, dielKey)) return false;

@@ -21,6 +21,8 @@
 //
 // Lengths are in the declared units (default mm). er, tand and sigma are plain numbers.
 // A number may carry its own unit (35um or 35 um), which converts it to the declared units.
+// A dielectric may conduct (sigma=, S/m, a doped silicon substrate): it is solved with the
+// complex permittivity er*(1 - j*tand) - j*sigma/(omega*eps0), see conductive_dielectric.js.
 // A conductor may carry its own conductivity (sigma=, S/m), surface roughness (rq=) and
 // plating material (plating_sigma=, plating_t=, plating_rq=, plating_rq_iface=), which override the
 // solver-wide values and the plating statement for that conductor. Whether plating is
@@ -839,14 +841,18 @@ export function evaluateGeometry(model, overrides = {}) {
             } else { r.x = evalAxis(f, 'x', 'w', len, false); r.y = evalAxis(f, 'y', 'h', len, true); }
             if (s.kind === 'diel') {
                 if (f.er === undefined) throw new Error('diel needs er');
-                if (CONDUCTOR_KEYS.some(k => f[k] !== undefined)) {
-                    throw new Error('sigma, rq and plating apply to conductors only');
+                if (CONDUCTOR_KEYS.some(k => k !== 'sigma' && f[k] !== undefined)) {
+                    throw new Error('rq and plating apply to conductors only');
                 }
                 r.er = num(f.er);
                 r.tand = f.tand !== undefined ? num(f.tand) : 0;
                 r.thin = f.thin !== undefined ? num(f.thin) !== 0 : false;
                 if (!(r.er >= 1) || !Number.isFinite(r.er)) throw new Error('er must be a finite number >= 1');
                 if (!(r.tand >= 0) || !Number.isFinite(r.tand)) throw new Error('tand must be non-negative');
+                if (f.sigma !== undefined) {
+                    r.sigma = num(f.sigma);
+                    if (!(r.sigma >= 0) || !Number.isFinite(r.sigma)) throw new Error('sigma must be non-negative');
+                }
             } else {
                 if (f.er !== undefined || f.tand !== undefined || f.thin !== undefined) {
                     throw new Error('er, tand and thin apply to diel only');
@@ -1033,7 +1039,8 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     }
     lines.push('');
     for (const d of (solver.dielectrics || [])) {
-        lines.push(`diel ${rectText(d)} er=${d.epsilon_r} tand=${d.tan_delta ?? 0}` + (d.thin_sheet ? ' thin=1' : ''));
+        lines.push(`diel ${rectText(d)} er=${d.epsilon_r} tand=${d.tan_delta ?? 0}` + (d.sigma > 0 ? ` sigma=${d.sigma}` : '')
+            + (d.thin_sheet ? ' thin=1' : ''));
     }
     for (const c of (solver.conductors || [])) {
         const kind = c.is_signal ? (c.polarity < 0 ? 'sig-' : 'sig+') : 'gnd';

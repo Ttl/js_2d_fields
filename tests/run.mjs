@@ -66,6 +66,7 @@ const TIERS = {
         { file: 'tests/test_custom_geometry_materials.js', cost: 100 },
         { file: 'tests/test_custom_geometry_blocks.js', cost: 35 },
         { file: 'tests/test_custom_geometry_shapes.js', cost: 30 },
+        { file: 'tests/test_conductive_dielectric.js', cost: 135 },
         { file: 'tests/test_hollow_conductor.js', cost: 40 },
         { file: 'tests/test_pair_line_asymmetry.js', cost: 105 },
         { file: 'tests/test_gcpw_mqs.js', cost: 82 },

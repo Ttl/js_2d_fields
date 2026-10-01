@@ -41,17 +41,18 @@ export function tagMaterials(mesh, dielectrics, tol) {
     const epsMap = new Array(nTris), lossMap = new Array(nTris);
     // shapeContains() falls back to the literal bbox test when d.shape is absent, so
     // shapeless dielectrics behave exactly as before.
-    const defs = dielectrics.map(d => ({ o: d, er: d.epsilon_r, tand: d.tan_delta || 0 }));
+    const defs = dielectrics.map(d => ({ o: d, er: d.epsilon_r, tand: d.tan_delta || 0, sigma: d.sigma || 0 }));
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
         const xc = (nodes[2 * v0] + nodes[2 * v1] + nodes[2 * v2]) / 3;
         const yc = (nodes[2 * v0 + 1] + nodes[2 * v1 + 1] + nodes[2 * v2 + 1]) / 3;
-        let er = 1.0, tand = 0.0;
+        let er = 1.0, tand = 0.0, sigma = 0;
         for (const d of defs) {
-            if (shapeContains(d.o, xc, yc, tol)) { er = d.er; tand = d.tand; }
+            if (shapeContains(d.o, xc, yc, tol)) { er = d.er; tand = d.tand; sigma = d.sigma; }
         }
         epsMap[t] = { re: er, im: 0 };
-        lossMap[t] = { re: er * tand, im: 0 };
+        // sigma: conductivity of a conductive dielectric (conductive_dielectric.js).
+        lossMap[t] = { re: er * tand, im: 0, sigma };
     }
     return { epsMap, lossMap };
 }

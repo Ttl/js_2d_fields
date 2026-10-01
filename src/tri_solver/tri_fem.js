@@ -1169,6 +1169,48 @@ export function assembleTriFEM(mesh, fm, k2, epsMap, abc, condRect) {
 export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSolver = null) {
     // condPotentials: array of potentials per conductor group [V1, V2, ...].
     // If null, all conductors get V=1.0.
+    const { Rows, Cols, ValsRe, nCoo, rhsRe: rhs, nFreeDof } =
+        assembleTriStatic(mesh, fm, t => (epsMap ? epsMap[t].re : 1.0), null, condPotentials);
+    const csrS = tripletsToCSR(Rows.subarray(0, nCoo), Cols.subarray(0, nCoo),
+                               ValsRe.subarray(0, nCoo), nFreeDof);
+    // Direct WASM solve (SPD → LDLT, pattern-cached across the eps/air pair on the
+    // same freedom map) when a solver is supplied; JS CG otherwise / on failure.
+    let phiFree = null;
+    if (directSolver && nFreeDof > 0) {
+        try {
+            const sol = directSolver(nFreeDof, csrS, [rhs])[0];
+            if (sol && sol.every(Number.isFinite)) phiFree = sol;
+        } catch { phiFree = null; }
+    }
+    if (!phiFree) {
+        const { x, iters, residual, converged } = solveCG(csrS, rhs, nFreeDof);
+        if (!converged) {
+            console.warn(`Static CG did not converge in ${iters} iterations ` +
+                `(residual ${residual.toExponential(2)}) — static C/Z0 may be inaccurate.`);
+        }
+        phiFree = x;
+    }
+    return expandTriStatic(mesh, fm, phiFree, 0, t => (condPotentials ? condPotentials[t - 1] : 1.0));
+}
+
+// Static solve with the complex permittivity epsRe(t) + j epsIm(t) per triangle
+// (conductive dielectrics), real conductor potentials. solveComplexSymmetric is the
+// WASM helper. Returns { re, im }, each a potential like solveTriStatic's.
+export function solveTriStaticComplex(mesh, fm, epsRe, epsIm, condPotentials, solveComplexSymmetric) {
+    const { Rows, Cols, ValsRe, ValsIm, nCoo, rhsRe, rhsIm, nFreeDof } =
+        assembleTriStatic(mesh, fm, epsRe, epsIm, condPotentials);
+    const csr = tripletsToCSR(Rows.subarray(0, nCoo), Cols.subarray(0, nCoo),
+                              ValsRe.subarray(0, nCoo), nFreeDof, ValsIm.subarray(0, nCoo));
+    const rhs = new Float64Array(2 * nFreeDof);
+    rhs.set(rhsRe); rhs.set(rhsIm, nFreeDof);
+    const x = nFreeDof > 0 ? solveComplexSymmetric(nFreeDof, csr, [rhs])[0] : rhs;
+    const pot = g => (condPotentials ? condPotentials[g - 1] : 1.0);
+    return { re: expandTriStatic(mesh, fm, x, 0, pot), im: expandTriStatic(mesh, fm, x, nFreeDof, () => 0) };
+}
+
+// COO stiffness of the static system over the free DOFs, the conductor DOFs moved to
+// the right-hand side. epsRe(t), epsIm(t) the triangle permittivity (epsIm null: real).
+function assembleTriStatic(mesh, fm, epsRe, epsIm, condPotentials) {
     const { nodes, tris, nTris } = mesh;
     const { nodeF, edgeNodeF, nFreeVertexDof, nFreeEdgeNodeDof,
             isCondNode, isCondEdge, condNodeGroup, condEdgeGroup } = fm;
@@ -1183,9 +1225,11 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSo
     // per-element scratch buffers for the whole loop: at mesh sizes here the JS-array
     // pushes and the per-triangle allocations cost more than the arithmetic.
     const Rows = new Int32Array(36 * nTris), Cols = new Int32Array(36 * nTris);
-    const Vals = new Float64Array(36 * nTris);
+    const ValsRe = new Float64Array(36 * nTris);
+    const ValsIm = epsIm ? new Float64Array(36 * nTris) : null;
     let nCoo = 0;
-    const rhs = new Float64Array(nFreeDof);
+    const rhsRe = new Float64Array(nFreeDof);
+    const rhsIm = epsIm ? new Float64Array(nFreeDof) : null;
     const nLocal = 6;
     const Sz = new Float64Array(36);
     const globalDof = new Int32Array(nLocal);
@@ -1196,7 +1240,7 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSo
     for (let t = 0; t < nTris; t++) {
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         triP2Stiffness(nodes, v0, v1, v2, Sz);
-        const eps = epsMap ? epsMap[t].re : 1.0;
+        const eps = epsRe(t), epsI = epsIm ? epsIm(t) : 0;
         verts[0] = v0; verts[1] = v1; verts[2] = v2;
         isDirichlet.fill(0);
 
@@ -1236,58 +1280,79 @@ export function solveTriStatic(mesh, fm, epsMap, condPotentials = null, directSo
         for (let li = 0; li < nLocal; li++) {
             const gi = globalDof[li]; if (gi < 0) continue;
             for (let lj = 0; lj < nLocal; lj++) {
-                const v = eps * Sz[li * nLocal + lj];
-                if (v === 0) continue;
+                const sz = Sz[li * nLocal + lj];
+                if (sz === 0) continue;
+                const v = eps * sz, vi = epsI * sz;
                 const gj = globalDof[lj];
                 if (gj >= 0) {
-                    Rows[nCoo] = gi; Cols[nCoo] = gj; Vals[nCoo] = v; nCoo++;
+                    Rows[nCoo] = gi; Cols[nCoo] = gj; ValsRe[nCoo] = v;
+                    if (ValsIm) ValsIm[nCoo] = vi;
+                    nCoo++;
                 } else if (isDirichlet[lj]) {
-                    rhs[gi] -= v * dirichletVal[lj];
+                    rhsRe[gi] -= v * dirichletVal[lj];
+                    if (rhsIm) rhsIm[gi] -= vi * dirichletVal[lj];
                 }
             }
         }
     }
+    return { Rows, Cols, ValsRe, ValsIm, nCoo, rhsRe, rhsIm, nFreeDof };
+}
 
-
-    const csrS = tripletsToCSR(Rows.subarray(0, nCoo), Cols.subarray(0, nCoo),
-                               Vals.subarray(0, nCoo), nFreeDof);
-    // Direct WASM solve (SPD → LDLT, pattern-cached across the eps/air pair on the
-    // same freedom map) when a solver is supplied; JS CG otherwise / on failure.
-    let phiFree = null;
-    if (directSolver && nFreeDof > 0) {
-        try {
-            const sol = directSolver(nFreeDof, csrS, [rhs])[0];
-            if (sol && sol.every(Number.isFinite)) phiFree = sol;
-        } catch { phiFree = null; }
-    }
-    if (!phiFree) {
-        const { x, iters, residual, converged } = solveCG(csrS, rhs, nFreeDof);
-        if (!converged) {
-            console.warn(`Static CG did not converge in ${iters} iterations ` +
-                `(residual ${residual.toExponential(2)}) — static C/Z0 may be inaccurate.`);
-        }
-        phiFree = x;
-    }
-
-    // Reconstruct full potential vector
+// Full potential { phiVertex, phiEdge } from the free-DOF solution x (read from
+// offset), the conductor DOFs at condPot(group).
+function expandTriStatic(mesh, fm, x, offset, condPot) {
+    const { nodeF, edgeNodeF, nFreeVertexDof, isCondNode, isCondEdge, condNodeGroup, condEdgeGroup } = fm;
+    const edgeMidOff = nFreeVertexDof;
     const phiVertex = new Float64Array(mesh.nNodes);
     for (let n = 0; n < mesh.nNodes; n++) {
         if (isCondNode[n]) {
-            const cg = condNodeGroup ? condNodeGroup[n] : 1;
-            phiVertex[n] = condPotentials ? condPotentials[cg - 1] : 1.0;
-        } else if (nodeF[n] >= 0) phiVertex[n] = phiFree[nodeF[n]];
+            phiVertex[n] = condPot(condNodeGroup ? condNodeGroup[n] : 1);
+        } else if (nodeF[n] >= 0) phiVertex[n] = x[offset + nodeF[n]];
     }
 
     const phiEdge = new Float64Array(mesh.nEdges);
     for (let e = 0; e < mesh.nEdges; e++) {
         if (isCondEdge[e]) {
-            const eg = condEdgeGroup ? condEdgeGroup[e]
-                     : (condNodeGroup ? condNodeGroup[mesh.edges[2*e]] : 1);
-            phiEdge[e] = condPotentials ? condPotentials[eg - 1] : 1.0;
-        } else if (edgeNodeF[e] >= 0) phiEdge[e] = phiFree[edgeMidOff + edgeNodeF[e]];
+            phiEdge[e] = condPot(condEdgeGroup ? condEdgeGroup[e]
+                : (condNodeGroup ? condNodeGroup[mesh.edges[2*e]] : 1));
+        } else if (edgeNodeF[e] >= 0) phiEdge[e] = x[offset + edgeMidOff + edgeNodeF[e]];
     }
 
     return { phiVertex, phiEdge };
+}
+
+// Complex bilinear energy W = ½∫ε φ'·φ' dA (no conjugate) of the potential
+// re + j im with the triangle permittivity epsRe(t) + j epsIm(t), returned as
+// { re, im }. For the complex static solution it is ½ C* V², as computeTriEnergy is
+// ½ C V² for the real one.
+export function computeTriEnergyComplex(phiRe, phiIm, mesh, epsRe, epsIm) {
+    const { nodes, tris, triEdges, nTris } = mesh;
+    const Sz = new Float64Array(36);
+    const a = new Float64Array(6), b = new Float64Array(6);
+    let Wre = 0, Wim = 0;
+    for (let t = 0; t < nTris; t++) {
+        const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
+        triP2Stiffness(nodes, v0, v1, v2, Sz);
+        const e0 = triEdges[3*t], e1 = triEdges[3*t+1], e2 = triEdges[3*t+2];
+        a[0] = phiRe.phiVertex[v0]; a[1] = phiRe.phiVertex[v1]; a[2] = phiRe.phiVertex[v2];
+        a[3] = phiRe.phiEdge[e0]; a[4] = phiRe.phiEdge[e1]; a[5] = phiRe.phiEdge[e2];
+        b[0] = phiIm.phiVertex[v0]; b[1] = phiIm.phiVertex[v1]; b[2] = phiIm.phiVertex[v2];
+        b[3] = phiIm.phiEdge[e0]; b[4] = phiIm.phiEdge[e1]; b[5] = phiIm.phiEdge[e2];
+        // (a + j b)^T S (a + j b) = aSa - bSb + 2j aSb
+        let aa = 0, bb = 0, ab = 0;
+        for (let li = 0; li < 6; li++) {
+            const row = li * 6;
+            for (let lj = 0; lj < 6; lj++) {
+                const sz = Sz[row + lj];
+                aa += a[li] * sz * a[lj]; bb += b[li] * sz * b[lj]; ab += a[li] * sz * b[lj];
+            }
+        }
+        const qr = aa - bb, qi = 2 * ab;
+        const er = epsRe(t), ei = epsIm(t);
+        Wre += er * qr - ei * qi;
+        Wim += er * qi + ei * qr;
+    }
+    return { re: 0.5 * Wre, im: 0.5 * Wim };
 }
 
 // Compute energy W = ½∫ε|∇φ|² dA.

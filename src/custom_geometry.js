@@ -326,6 +326,7 @@ class CustomGeometrySolver extends FieldSolver2D {
             if (r.kind === 'diel') {
                 const d = new Dielectric(bx, by, bw, bh, r.er, r.tand, r.shape);
                 if (r.thin) d.thin_sheet = true;
+                if (r.sigma > 0) d.sigma = r.sigma;
                 d.src_line = r.line;
                 if (r.image) d.src_image = true;
                 this.dielectrics.push(d);
@@ -382,7 +383,7 @@ class CustomGeometrySolver extends FieldSolver2D {
     _paint_order_breaks_symmetry() {
         const tol = this.domain_width * 1e-6;
         const ds = this.dielectrics;
-        const same = (a, c) => a.epsilon_r === c.epsilon_r && a.tan_delta === c.tan_delta;
+        const same = (a, c) => a.epsilon_r === c.epsilon_r && a.tan_delta === c.tan_delta && (a.sigma || 0) === (c.sigma || 0);
         const partner = ds.map(d => ds.findIndex(o => same(d, o)
             && Math.abs(o.x_min + d.x_max) <= tol && Math.abs(o.x_max + d.x_min) <= tol
             && Math.abs(o.y_min - d.y_min) <= tol && Math.abs(o.y_max - d.y_max) <= tol));
