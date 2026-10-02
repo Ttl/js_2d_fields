@@ -182,13 +182,15 @@ const literalValue = (expr, unitScale) => {
 const fmt = v => (Number.isFinite(v) ? String(parseFloat(v.toPrecision(6))) : (v > 0 ? 'inf' : '-inf'));
 
 let onChange = () => {};
+let onHighlight = () => {};
 let debounceTimer = null;
 // Highlight changes arrive in pairs (focus leaves one row and enters the next), so the
-// redraw they ask for is coalesced to one per frame.
+// redraw they ask for is coalesced to one per frame. Only the plot is redrawn, the
+// geometry and any solution stay.
 let highlightFrame = 0;
 function redrawSoon() {
     if (highlightFrame) return;
-    highlightFrame = requestAnimationFrame(() => { highlightFrame = 0; onChange(); });
+    highlightFrame = requestAnimationFrame(() => { highlightFrame = 0; onHighlight(); });
 }
 let lastParamSignature = null;
 
@@ -1207,8 +1209,9 @@ async function changeUnits(to) {
     setText(converted);
 }
 
-export function initCustomGeometryEditor({ onGeometryChange, log }) {
+export function initCustomGeometryEditor({ onGeometryChange, onHighlightChange, log }) {
     onChange = onGeometryChange;
+    onHighlight = onHighlightChange;
     const text = $('custom_geom_text');
     if (!text) return;
 

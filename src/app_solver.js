@@ -2788,6 +2788,9 @@ function bindEvents() {
             updateSweepNotice();
             updateModesNotice();
         },
+        onHighlightChange: () => {
+            if (document.getElementById('tl_type').value === 'custom') draw();
+        },
     });
     document.getElementById('btn-convert-custom').addEventListener('click', convertToCustomGeometry);
 

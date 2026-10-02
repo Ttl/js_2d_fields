@@ -965,7 +965,6 @@ function draw(resetZoom = false) {
         shapes.push(...dielectricFillShapes(solver, maxY, { opaque: true }));
         shapes.push(...conductorFillShapes(solver, maxY));
         shapes.push(...mirrorImageShapes(solver, maxY));
-        shapes.push(...sourceLineHighlightShapes(solver, maxY));
 
         // If solution available, overlay E-field contours
         if (solver.solution_valid && solver.mesh_generated) {
@@ -1112,6 +1111,9 @@ function draw(resetZoom = false) {
         xMM = [0, (solver.w || 1) * 2000];
         yMM = [0, (solver.h || 1) * 1000];
     }
+
+    // The rectangles of the editor's selected line, over every view.
+    shapes.push(...sourceLineHighlightShapes(solver, displayTop(solver)));
 
     // Main field trace
     let traces = [];
