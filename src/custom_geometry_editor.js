@@ -8,6 +8,7 @@ import { parseGeometryText, evaluateGeometry, setParamInText, renameParamInText,
          axisEdges, addExpr, formatLength, plausibilityWarnings, isPlainNumber, isLengthLiteral, isReservedName,
          changeUnitsInText, WALLS, ROUND_KEYS, PLATING_FACES as FACES, SHAPE_NAMES, CONDUCTOR_KEYS } from './custom_geometry_text.js';
 import { CustomGeometrySolver } from './custom_geometry.js';
+import { CONDUCTOR_COLOR, dielectricRGB, overAir, rgbToHex, hexToRGB } from './body_colors.js';
 
 const CUSTOM_TEMPLATES = {
     'Stacked-dielectric microstrip': `# Microstrip on two dielectric layers. The ground boundary below the
@@ -56,12 +57,12 @@ tox = 1; tox_s = 0.6; tn = 0.4
 bounds open open open open
 domain auto   # sized from the conductors, or: domain x1 x2 y1 y2
 
-diel  x=-inf           y=-hbox    w=inf             h=-inf          er=11.9  sigma=2   # 50 ohm*cm
-diel  x=-inf           y=-hbox    w=inf             h=hbox+hox+tox  er=4.1  tand=0.001
-diel  x=-inf           y=hox+tox  w=inf             h=tn            er=6.6  tand=0.001  thin=1
-diel  x=-w/2-tox_s-tn  y=hox+tox  w=w+2*(tox_s+tn)  h=t+tn          er=6.6  tand=0.001
-diel  x=-w/2-tox_s     y=hox      w=w+2*tox_s       h=t+tox         er=4.1  tand=0.001
-gnd   x=-wgnd/2        y=0        w=wgnd            h=tg            sigma=3.5e7
+diel  x=-inf           y=-hbox    w=inf             h=-inf          er=11.9  sigma=2  color=#5e5c64   # Si, 50 ohm*cm
+diel  x=-inf           y=-hbox    w=inf             h=hbox+hox+tox  er=4.1  tand=0.001  color=#62a0ea   # SiO2
+diel  x=-inf           y=hox+tox  w=inf             h=tn            er=6.6  tand=0.001  thin=1  color=#99c1f1   # SiN
+diel  x=-w/2-tox_s-tn  y=hox+tox  w=w+2*(tox_s+tn)  h=t+tn          er=6.6  tand=0.001  color=#99c1f1
+diel  x=-w/2-tox_s     y=hox      w=w+2*tox_s       h=t+tox         er=4.1  tand=0.001  color=#62a0ea
+gnd   x=-wgnd/2        y=0        w=wgnd            h=tg            sigma=3.5e7  color=#c0bfbc   # Al
 sig+  x=-w/2           y=hox      w=w               h=t
 `,
     'CPW over air': `# Coplanar waveguide on a finite substrate, air above and below
@@ -584,6 +585,66 @@ function exprInput(label, value, commit, { placeholder = '', cls = '', title = '
         el('span', { class: 'custom-cell-field' }, input, el('span', { class: 'custom-cell-value' })));
 }
 
+// Color band on the left of a row: the row's fill color in the plots, or the kind's color
+// while it has none. Clicking it opens a popup with the color picker, a hex field and a
+// button back to the default. `fallback` is the plot's default color for the row, where
+// the picker starts. commit gets '#rrggbb', or null for the default.
+function colorBand(value, fallback, commit) {
+    // The color set on the row, '#rrggbb' or null. A pick does not rebuild the row, so
+    // this follows it.
+    let current = hexToRGB(value) ? rgbToHex(hexToRGB(value)) : null;
+    const band = el('button', { type: 'button', class: 'custom-color-band' });
+    const show = () => {
+        band.style.background = current ?? '';
+        band.title = current ? `Fill color in the plots, ${current}. Click to change.` : 'Fill color in the plots: the default. Click to change.';
+    };
+    show();
+    band.addEventListener('click', () => {
+        const old = band.parentElement?.querySelector('.custom-color-popup');
+        if (old) { old.close(); return; }
+        const start = current ?? fallback;
+        const picker = el('input', { type: 'color', class: 'custom-color', value: start, title: 'Pick a color' });
+        const hex = el('input', { type: 'text', class: 'custom-color-hex', value: start, spellcheck: 'false',
+            autocomplete: 'off', title: '#rrggbb or #rgb' });
+        const set = rgb => { current = rgbToHex(rgb); show(); commit(current); };
+        picker.addEventListener('input', () => { hex.value = picker.value; set(hexToRGB(picker.value)); });
+        hex.addEventListener('input', () => {
+            const rgb = hexToRGB(hex.value);
+            hex.classList.toggle('invalid', !rgb);
+            if (rgb) { picker.value = rgbToHex(rgb); set(rgb); }
+        });
+        const popup = el('div', { class: 'custom-color-popup' }, picker, hex,
+            rowButton('Default', 'Back to the default color: conductors orange, dielectrics shaded by er',
+                () => { close(); current = null; show(); commit(null); }));
+        const r = band.getBoundingClientRect();
+        popup.style.left = `${r.right + 4}px`;
+        popup.style.top = `${r.top}px`;
+        const onDown = e => { if (!popup.isConnected || (!popup.contains(e.target) && e.target !== band)) close(true); };
+        const onKey = e => { if (e.key === 'Escape') close(); };
+        // `away`: a click outside, which deselects the row. A focused element that is
+        // removed gives no focusout in every browser, and the row's focusout is what
+        // clears its highlight in the plot, so the focus leaves before the popup goes.
+        function close(away = false) {
+            if (popup.contains(document.activeElement)) {
+                if (away) document.activeElement.blur(); else band.focus();
+            }
+            popup.remove();
+            document.removeEventListener('mousedown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+        }
+        popup.close = close;
+        document.addEventListener('mousedown', onDown, true);
+        document.addEventListener('keydown', onKey, true);
+        band.after(popup);
+        // Keep the popup inside the window.
+        const p = popup.getBoundingClientRect();
+        if (p.bottom > window.innerHeight) popup.style.top = `${Math.max(0, window.innerHeight - p.height - 4)}px`;
+        hex.focus();
+        hex.select();
+    });
+    return band;
+}
+
 // Evaluated values under the form's fields, for the current parameters.
 function updateFormValues(geo) {
     const k = LENGTH_UNITS[geo.units];
@@ -881,8 +942,10 @@ function rectRow(model, st, geoRect, index, count) {
         }),
         rowButton('✕', 'Delete', edit((t, m, s) => replaceStatementInText(t, s, null))));
 
+    const band = colorBand(fields.color, isDiel() ? rgbToHex(overAir(dielectricRGB(geoRect ? geoRect.er : parseFloat(fields.er)), 0.8))
+        : CONDUCTOR_COLOR, v => { if (v === null) delete fields.color; else fields.color = v; write(v === null); });
     const row = el('div', { class: `custom-rect-row kind-${st.kind.replace('+', 'p').replace('-', 'n')}`, 'data-line': st.line },
-        kindSel, shapeSel, ...geometryCells, mirrorBtn, ...extra, actions, ...(cornerPanel ? [cornerPanel] : []), ...(below ? [below] : []));
+        band, kindSel, shapeSel, ...geometryCells, mirrorBtn, ...extra, actions, ...(cornerPanel ? [cornerPanel] : []), ...(below ? [below] : []));
     if (geoRect) {
         row.title = `x ${fmt(geoRect.x.min / geoRect.scale)} … ${fmt(geoRect.x.max / geoRect.scale)}, ` +
                     `y ${fmt(geoRect.y.min / geoRect.scale)} … ${fmt(geoRect.y.max / geoRect.scale)} ${geoRect.units}` +

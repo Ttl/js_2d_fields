@@ -952,13 +952,13 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 .custom-form-title { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 6px; }
 .custom-form-title .custom-hint { text-transform: none; letter-spacing: 0; font-weight: normal; }
 .custom-rect-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.custom-rect-row { padding: 4px 6px; margin-bottom: 4px; border: 1px solid var(--border-color); border-left-width: 4px; border-radius: 4px; background: #242424; }
-.custom-rect-row.kind-sigp { border-left-color: #d97706; }
-.custom-rect-row.kind-sign { border-left-color: #b45309; }
-.custom-rect-row.kind-gnd { border-left-color: #8a8a8a; }
-.custom-rect-row.kind-diel { border-left-color: #64a064; }
+.custom-rect-row { position: relative; padding: 4px 6px 4px 14px; margin-bottom: 4px; border: 1px solid var(--border-color); border-radius: 4px; background: #242424; }
+.custom-rect-row.kind-sigp > .custom-color-band:not([style*=background]) { background: #d97706; }
+.custom-rect-row.kind-sign > .custom-color-band:not([style*=background]) { background: #b45309; }
+.custom-rect-row.kind-gnd > .custom-color-band:not([style*=background]) { background: #8a8a8a; }
+.custom-rect-row.kind-diel > .custom-color-band:not([style*=background]) { background: #64a064; }
 .custom-rect-row:focus { outline: none; }
-.custom-rect-row:focus-within { border-color: rgba(56, 189, 248, 1); border-left-width: 4px; }
+.custom-rect-row:focus-within { border-color: rgba(56, 189, 248, 1); }
 .custom-rect-row.has-error { border-color: #f44336; background: #3d2020; }
 .custom-cell { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: normal; }
 .custom-cell-label { color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; min-width: 14px; text-align: right; }
@@ -967,6 +967,15 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 /* Evaluated value under a field. It hangs below the input so the row keeps its line,
    and a row that shows one gets the room for it. */
 .custom-cell-field { position: relative; display: inline-flex; }
+.custom-color { width: 32px; height: 24px; padding: 1px 2px; border: 1px solid var(--border-color); border-radius: 4px;
+    background: transparent; cursor: pointer; }
+.custom-color-band { position: absolute; left: -1px; top: -1px; bottom: -1px; width: 8px; padding: 0; border: none;
+    border-radius: 4px 0 0 4px; background: transparent; cursor: pointer; }
+.custom-color-band:hover, .custom-color-band:focus-visible { width: 10px; outline: 1px solid rgba(255, 255, 255, 0.6); }
+.custom-color-popup { position: fixed; z-index: 1000; display: flex; align-items: center; gap: 6px; padding: 6px;
+    background: var(--panel-color); border: 1px solid var(--border-color); border-radius: 4px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5); }
+#custom-form input.custom-color-hex { width: 76px; padding: 4px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+#custom-form input.custom-color-hex.invalid { border-color: #f44336; }
 .custom-cell-value { position: absolute; top: 100%; left: 2px; right: -40px; margin-top: 1px; color: var(--text-muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 12px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }

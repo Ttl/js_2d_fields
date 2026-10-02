@@ -201,7 +201,7 @@ const afterCell = await page.evaluate(() => ({
     text: document.getElementById('custom_geom_text').value,
     focusKept: document.activeElement?.classList.contains('custom-expr'),
     hl: (document.getElementById('sim_canvas').layout?.shapes || []).filter(s => s.line && /56, 189, 248/.test(s.line.color)).length,
-    width: (document.getElementById('sim_canvas').layout?.shapes || []).filter(s => s.fillcolor === 'rgba(217, 119, 6, 1.0)').map(s => +(s.x1 - s.x0).toFixed(3)),
+    width: (document.getElementById('sim_canvas').layout?.shapes || []).filter(s => s.fillcolor === '#d97706').map(s => +(s.x1 - s.x0).toFixed(3)),
 }));
 check('a form field edit rewrites its statement and keeps the focus', /sig\+\s+x=-w\/2 w=2\*w y=h h=t/.test(afterCell.text) && afterCell.focusKept,
     afterCell.text.split('\n').find(l => l.startsWith('sig+')));
@@ -210,11 +210,34 @@ await wCell.fill('w');
 await page.waitForTimeout(600);
 
 // A click on the row itself, outside its fields, outlines the rectangle too.
-await page.locator('#custom-form .custom-rect-row.kind-gnd').click({ position: { x: 3, y: 3 } });
+await page.locator('#custom-form .custom-rect-row.kind-gnd').click({ position: { x: 12, y: 2 } });
 await page.waitForTimeout(400);
 check('clicking a row outside its fields outlines its rectangle', await page.evaluate(() =>
     (document.getElementById('sim_canvas').layout?.shapes || []).filter(s => s.line && /56, 189, 248/.test(s.line.color)).length === 1
     && document.activeElement.classList.contains('custom-rect-row')));
+
+// The color band opens a popup that writes color=, and shows the new color when reopened.
+{
+    const band = '#custom-form .custom-rect-row.kind-gnd .custom-color-band';
+    const shown = () => page.evaluate(() => [document.querySelector('.custom-color-popup input[type=color]')?.value,
+        document.querySelector('.custom-color-hex')?.value]);
+    await page.click(band);
+    await page.fill('.custom-color-hex', '#123456');
+    await page.waitForTimeout(600);
+    const written = /^gnd .*color=#123456/m.test(await geomText());
+    await page.keyboard.press('Escape');
+    await page.click(band);
+    const reopened = await shown();
+    await page.locator('.custom-color-popup button', { hasText: 'Default' }).click();
+    await page.waitForTimeout(600);
+    const cleared = !/^gnd .*color=/m.test(await geomText());
+    await page.click(band);
+    const afterDefault = await shown();
+    await page.keyboard.press('Escape');
+    check('the color popup writes color=, shows it again on reopening and clears it with Default',
+        written && reopened.join() === '#123456,#123456' && cleared && afterDefault[0] !== '#123456',
+        `${written} ${reopened} ${cleared} ${afterDefault}`);
+}
 
 // Per-conductor metal and finish: own conductivity, roughness and plating material on
 // the trace row.

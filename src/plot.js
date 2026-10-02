@@ -2,6 +2,7 @@ import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB,
          isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
 import { svgShapePath, shapePoly, isPolyShape, shapeContains, visibleLoops } from './shapes.js';
+import { CONDUCTOR_COLOR, dielectricRGB, overAir, hexToRGB } from './body_colors.js';
 
 // A polygon or ring shape as a Plotly path shape with `style`.
 const polyPathShape = (shape, style) => ({ type: 'path', path: svgShapePath(shape), fillrule: 'evenodd', ...style });
@@ -153,7 +154,7 @@ function rectLoopPath(x0, y0, x1, y1) {
 // this just masks the zsmooth/contour interpolation that spills the steep boundary field inward).
 function conductorFillShapes(solver, maxY) {
     const out = [];
-    const FILL = 'rgba(217, 119, 6, 1.0)';
+    const FILL = CONDUCTOR_COLOR;
     const EDGE = { color: 'rgba(0, 0, 0, 0.5)', width: 1 };
     const GOLD = { color: 'rgba(255, 215, 0, 1.0)', width: 3 };
 
@@ -183,7 +184,7 @@ function conductorFillShapes(solver, maxY) {
     for (const cond of (solver.conductors || [])) {
         const sh = cond.shape;
         if (isPolyShape(sh)) {
-            out.push(polyPathShape(sh, { fillcolor: FILL, line: EDGE, layer: 'above' }));
+            out.push(polyPathShape(sh, { fillcolor: cond.color || FILL, line: EDGE, layer: 'above' }));
             if (cond.plating) out.push(...platedEdgeLines(sh, cond.plating, GOLD));
             continue;
         }
@@ -193,7 +194,7 @@ function conductorFillShapes(solver, maxY) {
             type: 'rect',
             x0: cond.x_min * 1000, y0: cond.y_min * 1000,
             x1: cond.x_max * 1000, y1: yMax * 1000,
-            fillcolor: FILL, line: EDGE, layer: 'above'
+            fillcolor: cond.color || FILL, line: EDGE, layer: 'above'
         });
         if (cond.plating) {   // yellow lines on plated edges
             const x0 = cond.x_min * 1000, x1 = cond.x_max * 1000, y0 = cond.y_min * 1000, y1 = yMax * 1000;
@@ -209,29 +210,25 @@ function conductorFillShapes(solver, maxY) {
     return out;
 }
 
-// Air as the geometry view shows it: white at 0.8 over the plot background #1a1a1a.
-const AIR_GREY = 0.8 * 255 + 0.2 * 0x1a;
-
-// Dielectric fill shapes, colored by ε_r (air ≈1 → white/transparent, higher ε_r → green
-// shades). Shared by the geometry view (opaque, below the contours) and the Modes tab
+// Dielectric fill shapes, in their own color or colored by ε_r (air ≈1 → white/transparent,
+// higher ε_r → green shades). Shared by the geometry view (opaque, below the contours) and the Modes tab
 // (faint, above the field heatmap) so the two tabs use the same color mapping. Where
 // dielectrics overlap the later one fills the overlap, as in the solvers, so each is
 // drawn cut to its visible part and overlaps never stack their colors. `opaque` draws
-// the colors blended over air instead of with alpha.
+// the colors blended over air instead of with alpha, and an own color as it is.
 function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, layer = 'below',
     lineColor = 'rgba(128, 128, 128, 0.3)', opaque = false } = {}) {
     const out = [];
     const diels = solver.dielectrics || [];
     const visible = visibleLoops(diels);
-    const fillOf = (r, g, b, a) => opaque
-        ? `rgb(${[r, g, b].map(c => Math.round(a * c + (1 - a) * AIR_GREY)).join(', ')})`
-        : `rgba(${r}, ${g}, ${b}, ${a})`;
+    const fillOf = (rgb, a) => (opaque ? `rgb(${overAir(rgb, a).join(', ')})` : `rgba(${rgb.join(', ')}, ${a})`);
     diels.forEach((diel, i) => {
         if (!diel.shape && diel.y_min > maxY) return;
         const yMax = Math.min(diel.y_max, maxY);
         const er = diel.epsilon_r;
-        const fillcolor = er <= 1.01 ? fillOf(255, 255, 255, airAlpha)
-            : fillOf(100, Math.min(255, 100 + (er - 1) * 30), 100, alpha);
+        const own = hexToRGB(diel.color);
+        const fillcolor = own ? (opaque ? diel.color : fillOf(own, alpha))
+            : fillOf(dielectricRGB(er), er <= 1.01 ? airAlpha : alpha);
         const line = { color: lineColor, width: 0.5 };
         if (visible[i]) {
             // The visible pieces as one path, so their shared cuts leave no seams, and the

@@ -674,6 +674,8 @@
                         <dd>Conductor's own conductivity (S/m) and roughness. Left out: the sidebar values.</dd>
                         <dt><code>plating=top,sides,bottom</code></dt>
                         <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq= plating_rq_iface=</code> on the line. Model Thick Plating in Advanced Options sets for every conductor whether the plating is a layer of metal inside the outline (meshed on the full-wave solver) or a layered surface impedance.</dd>
+                        <dt><code>color=#c0c0c0</code></dt>
+                        <dd>Fill color of the rectangle or shape in the plots, <code>#rrggbb</code> or <code>#rgb</code>. Left out: conductors orange, dielectrics shaded by <code>er</code>.</dd>
                         <dt><code>mirror=1</code></dt>
                         <dd>Adds the mirror image about <code>x=0</code>, a <code>sig+</code> imaged as <code>sig-</code>. A rectangle touching or crossing <code>x=0</code> becomes one rectangle symmetric about it: <code>diel x=0 w=inf ... mirror=1</code> is a full-width layer.</dd>
                         <dt><code>plating sigma= t= rq= rq_iface=</code></dt>

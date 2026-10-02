@@ -122,7 +122,8 @@ const ERR = [
     ['diel x=0 y=0 w=1 h=1', 1, 'er'],
     ['diel x=0 y=0 w=1 h=1 er=0.5', 1, 'er'],
     ['sig+ x=-inf y=0 w=1 h=1', 1, 'w=inf'],
-    ['sig+ x=0 y=0 w=1 h=1 color=red', 1, 'unknown'],
+    ['sig+ x=0 y=0 w=1 h=1 colour=red', 1, 'unknown'],
+    ['sig+ x=0 y=0 w=1 h=1 color=red', 1, '#rrggbb'],
     ['a = b\nb = 1', 1, 'defined below'],
     ['a = zz', 1, "unknown parameter 'zz'"],
     ['w = w + 1', 1, 'refers to itself'],
@@ -706,6 +707,25 @@ const U = 'units mm\n';
         check('coax: plating on the centre conductor only', !!(inner.plating && inner.plating.all) && !shield.plating);
         check('coax: dielectric material', custom.dielectrics[0].epsilon_r === 2.1 && custom.dielectrics[0].tan_delta === 2e-4);
     }
+}
+
+// --- Fill colors ---
+{
+    const text = 'diel x=-inf w=inf y=0 h=1 er=4 color=#1E3A78  # SiO2 # note\n'
+        + 'gnd x=-inf w=inf y=0 h=-0.1 color=#ccc\nsig+ x=1 w=1 y=1 h=0.1 mirror=1 color=#c80';
+    const model = parseGeometryText(text);
+    const rects = model.statements.filter(s => s.type === 'rect');
+    check('color: a # after = is the value, the next # the comment', model.errors.length === 0
+        && rects[0].fields.color === '#1E3A78' && rects[0].comment === 'SiO2 # note', JSON.stringify(model.errors));
+    const geo = evaluateGeometry(model);
+    check('color: normalized to #rrggbb, mirror images keep it',
+        JSON.stringify(geo.rects.map(r => r.color)) === JSON.stringify(['#1e3a78', '#cccccc', '#cc8800', '#cc8800']));
+    const solver = new CustomGeometrySolver({ text });
+    check('color: carried to the solver bodies', solver.dielectrics[0].color === '#1e3a78'
+        && solver.conductors.map(c => c.color).join() === '#cccccc,#cc8800,#cc8800');
+    const edited = replaceStatementInText(text, rects[1], rectStatementText('gnd', { ...rects[1].fields, color: '#abcdef' }));
+    check('color: an edit keeps the colors and comments of the other lines', edited.split('\n')[0] === text.split('\n')[0]
+        && /color=#abcdef/.test(edited.split('\n')[1]));
 }
 
 done();
