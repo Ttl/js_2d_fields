@@ -418,13 +418,22 @@ export class FieldSolver2D {
         // Decay scale: substrate stack thickness (non-air dielectrics); if there is
         // none (all-air line), fall back to the conductor stack height.
         // A dielectric that runs into an open top or bottom wall is exterior fill, not
-        // a substrate, and sets no decay scale.
+        // a substrate, and sets no decay scale. Dielectric height counts only within one
+        // conductor-system size of the conductors, as in the custom geometry auto domain:
+        // a substrate much thicker than the line holds no field far below it.
+        let cxLo = Infinity, cxHi = -Infinity, cyLo = Infinity, cyHi = -Infinity;
+        for (const c of this.conductors) {
+            cxLo = Math.min(cxLo, c.x_min); cxHi = Math.max(cxHi, c.x_max);
+            cyLo = Math.min(cyLo, c.y_min); cyHi = Math.max(cyHi, c.y_max);
+        }
+        const reach = Math.max(cxHi - cxLo, cyHi - cyLo);
+        const yNear = v => Math.max(cyLo - reach, Math.min(cyHi + reach, v));
         let lo = Infinity, hi = -Infinity;
         const yTol = (yMax - yMin) * 1e-9;
         for (const d of (this.dielectrics || [])) {
             if ((d.epsilon_r || 1) <= 1.001) continue;
             if ((b[2] === 'open' && d.y_max >= yMax - yTol) || (b[3] === 'open' && d.y_min <= yMin + yTol)) continue;
-            lo = Math.min(lo, d.y_min); hi = Math.max(hi, d.y_max);
+            lo = Math.min(lo, yNear(d.y_min)); hi = Math.max(hi, yNear(d.y_max));
         }
         if (!(hi > lo)) {
             for (const c of this.conductors) { lo = Math.min(lo, c.y_min); hi = Math.max(hi, c.y_max); }

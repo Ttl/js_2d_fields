@@ -188,7 +188,12 @@ class CustomGeometrySolver extends FieldSolver2D {
         for (const s of signals) for (const g of gnds) href = Math.min(href, bodyGap(s, g));
         const sx = finite(signals, 'x0', 'x1');
         const span = (sx.length ? Math.max(...sx) - Math.min(...sx) : 0) + 2 * href;
-        const sub = finite(rects.filter(r => r.kind === 'diel' && r.er > 1.001), 'y0', 'y1');
+        // Dielectric height counts only within one conductor-system width of the
+        // conductors: a substrate much thicker than the line holds no field far below it.
+        const reach = Math.max(cHi - cLo, span);
+        const cy = finite(conds, 'y0', 'y1');
+        const yNear = v => (cy.length ? Math.max(Math.min(...cy) - reach, Math.min(Math.max(...cy) + reach, v)) : v);
+        const sub = finite(rects.filter(r => r.kind === 'diel' && r.er > 1.001), 'y0', 'y1').map(yNear);
         const hsub = sub.length ? Math.max(...sub) - Math.min(...sub) : 0;
         const margin = Math.max(4 * span, 15 * href, 8 * hsub);
         if (!(margin > 0)) throw new Error('Cannot size the domain: a signal touches a ground.');
