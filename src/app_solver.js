@@ -1600,7 +1600,7 @@ function plotModesField(grid, mode, idx, resetView = false) {
 function updateModesImage(container) {
     updateTriImage(container, () => {
         const mm = container._modesMesh;
-        return mm ? { blocks: mm.blocks, zmin: 0, zmax: mm.zmax, db: false } : { blocks: null };
+        return mm ? { blocks: mm.blocks, zmin: 0, zmax: mm.zmax, db: false, bleed: 2 } : { blocks: null };
     });
 }
 

@@ -444,6 +444,10 @@ function setScaleRange(min, max) {
             Plotly.restyle(container, restyle, [hIdx]);
         }
     }
+    if (currentView.startsWith("efield")) {
+        Plotly.relayout(container, { 'coloraxis.cmin': min, 'coloraxis.cmax': max });
+        updateDensityImage(container);
+    }
 }
 
 // The solver's plot grid in mm, for the mesh overlay of the views with no field grid
@@ -668,8 +672,9 @@ function fieldMeshContourTrace(M, limits) {
 // axis ranges (mm) at w x h pixels: each triangle Gouraud-shaded from its vertex values,
 // so a skin layer or a field jump on a slanted or curved face stays sharp and smooth at
 // any zoom. Returns a layout image above the shapes of layer 'below' (the dielectric
-// fills) and under the traces (mesh overlay, contour lines), or null.
-function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
+// fills) and under the traces (mesh overlay, contour lines), or null. bleed > 0 carries
+// the colors that many pixels into the empty pixels (the conductor holes of an |E| mesh).
+function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0) {
     if (!(w > 0 && h > 0)) return null;
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
@@ -681,7 +686,12 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
     const sx = w / (xr[1] - xr[0]), sy = h / (yr[1] - yr[0]);
     const val = v => db ? (v > 0 ? 20 * Math.log10(v) : zmin) : v;
     let any = false;
+    const put = (o, v) => {
+        const c = LUT[Math.max(0, Math.min(255, Math.round((v - zmin) / span * 255)))];
+        px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 255;
+    };
     for (const b of blocks) {
+        if (!b.tris) { any = rasterizeGrid(b, w, h, xr, yr, val, put) || any; continue; }
         const T = b.tris, Jv = b.Jv, nT = T.length / 6;
         for (let t = 0; t < nT; t++) {
             const k = 6 * t;
@@ -702,50 +712,194 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db) {
                     const l2 = ((bx - ax) * (qy - ay) - (qx - ax) * (by - ay)) / det;
                     const l0 = 1 - l1 - l2;
                     if (l0 < -1e-9 || l1 < -1e-9 || l2 < -1e-9) continue;
-                    const u = (l0 * va + l1 * vb + l2 * vc - zmin) / span;
-                    const c = LUT[Math.max(0, Math.min(255, Math.round(u * 255)))];
-                    const o = 4 * (j * w + i);
-                    px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 255;
+                    put(4 * (j * w + i), l0 * va + l1 * vb + l2 * vc);
                     any = true;
                 }
             }
         }
     }
     if (!any) return null;
+    for (let pass = 0; pass < bleed; pass++) bleedPixels(px, w, h);
     ctx.putImageData(img, 0, 0);
     return { source: canvas.toDataURL(), xref: 'x', yref: 'y', x: xr[0], y: yr[1],
              sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer: 'below' };
 }
 
-// The triangle blocks the current view draws as an image: the shaped conductors' |J|,
-// or |E| on the mesh.
+// One pixel of bleed: every empty pixel of RGBA px (w x h) next to a filled one takes
+// that neighbour's color. A conductor hole of the image stays hidden under its opaque
+// shape even when Plotly stretches a coarse or stale image during a zoom.
+function bleedPixels(px, w, h) {
+    const src = px.slice();
+    for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+            const o = 4 * (j * w + i);
+            if (src[o + 3]) continue;
+            const n = i > 0 && src[o - 1] ? o - 4 : i < w - 1 && src[o + 7] ? o + 4
+                : j > 0 && src[o - 4 * w + 3] ? o - 4 * w : j < h - 1 && src[o + 4 * w + 3] ? o + 4 * w : -1;
+            if (n < 0) continue;
+            px[o] = src[n]; px[o + 1] = src[n + 1]; px[o + 2] = src[n + 2]; px[o + 3] = 255;
+        }
+    }
+}
+
+// Grid block { x, y (m, ascending), Z (rows over y) } bilinearly interpolated into the
+// w x h pixels of the axis ranges xr, yr (mm); put(o, v) colors pixel offset o. Returns
+// whether any pixel fell on the grid.
+function rasterizeGrid(b, w, h, xr, yr, val, put) {
+    const X = b.x, Y = b.y, nx = X.length, ny = Y.length;
+    if (nx < 2 || ny < 2) return false;
+    const V = new Float64Array(nx * ny);
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) V[j * nx + i] = val(b.Z[j][i]);
+    // Cell index (-1 outside the grid) and fraction of each pixel column and row.
+    const cells = (n, at, G, m) => {
+        const c = new Int32Array(n).fill(-1), f = new Float64Array(n);
+        let k = 0;
+        for (let p = 0; p < n; p++) {
+            const g = at(p) / 1000;
+            if (g < G[0] || g > G[m - 1]) continue;
+            while (k > 0 && G[k] > g) k--;
+            while (k < m - 2 && G[k + 1] < g) k++;
+            c[p] = k; f[p] = (g - G[k]) / (G[k + 1] - G[k] || 1);
+        }
+        return [c, f];
+    };
+    const [ci, fx] = cells(w, i => xr[0] + (i + 0.5) * (xr[1] - xr[0]) / w, X, nx);
+    const [cj, fy] = cells(h, j => yr[1] - (j + 0.5) * (yr[1] - yr[0]) / h, Y, ny);
+    let any = false;
+    for (let j = 0; j < h; j++) {
+        const r = cj[j];
+        if (r < 0) continue;
+        const t = fy[j], r0 = r * nx, r1 = r0 + nx;
+        for (let i = 0; i < w; i++) {
+            const c = ci[i];
+            if (c < 0) continue;
+            const u = fx[i];
+            const lo = V[r0 + c] + u * (V[r0 + c + 1] - V[r0 + c]);
+            const hi = V[r1 + c] + u * (V[r1 + c + 1] - V[r1 + c]);
+            put(4 * (j * w + i), lo + t * (hi - lo));
+            any = true;
+        }
+    }
+    return any;
+}
+
+// Grid blocks of the rectilinear backend the current view draws as an image (set by draw).
+let gridImageBlocks = [];
+
+// The blocks the current view draws as an image: the |J| of the conductors, or |E| on
+// the mesh or the grid.
 function imageBlocks() {
-    if (currentView === "density") return (getCurrentJ() || []).filter(b => b.tris);
-    const M = currentView.startsWith("efield") ? getFieldMesh() : null;
-    return M ? [{ tris: M.tris, Jv: M.E }] : [];
+    if (currentView === "density") return [...(getCurrentJ() || []).filter(b => b.tris), ...gridImageBlocks];
+    if (!currentView.startsWith("efield")) return [];
+    const M = getFieldMesh();
+    return M ? [{ tris: M.tris, Jv: M.E }] : gridImageBlocks;
+}
+
+// A |J| grid block as an image grid block, x ascending.
+function densityGridBlock(b) {
+    const flip = b.x[b.x.length - 1] < b.x[0];
+    return { x: flip ? Array.from(b.x).reverse() : b.x, y: b.y,
+             Z: flip ? b.J.map(row => row.slice().reverse()) : b.J };
+}
+
+// Hover and color axis of grid blocks drawn as an image: invisible markers at the grid
+// nodes, thinned to at most HOVER_MAX. value(b, j, i) is the color of node (i, j).
+function gridHoverTrace(blocks, value, hovertemplate) {
+    const n = blocks.reduce((a, b) => a + b.x.length * b.y.length, 0);
+    const stride = Math.max(1, Math.ceil(Math.sqrt(n / HOVER_MAX)));
+    const mx = [], my = [], mv = [];
+    for (const b of blocks) {
+        for (let j = 0; j < b.y.length; j += stride) {
+            for (let i = 0; i < b.x.length; i += stride) {
+                mx.push(b.x[i] * 1000); my.push(b.y[j] * 1000); mv.push(value(b, j, i));
+            }
+        }
+    }
+    return {
+        type: "scattergl", mode: "markers", x: mx, y: my,
+        marker: { size: 4, opacity: 0, color: mv, coloraxis: "coloraxis" },
+        hovertemplate, showlegend: false,
+    };
 }
 
 // Redraws the image of the triangle blocks for the current axis ranges and plot size.
 const updateDensityImage = container =>
-    updateTriImage(container, () => ({ blocks: imageBlocks(), zmin: zMin, zmax: zMax, db: getPlotOptions().efieldDb }));
+    updateTriImage(container, () => ({ blocks: imageBlocks(), zmin: zMin, zmax: zMax, db: getPlotOptions().efieldDb,
+        bleed: currentView.startsWith("efield") ? 2 : 0 }));
 
 // Redraws the image of triangle blocks in `container` on the next frame, for its axis
-// ranges and plot size. get() returns { blocks, zmin, zmax, db } at draw time.
+// ranges and plot size. get() returns { blocks, zmin, zmax, db, bleed } at draw time.
 // container._triImageUpdate is set while the relayout runs, so a relayout handler can
 // tell it from a zoom or pan.
+//
+// Under the sharp image of the view lies a coarse backdrop of the whole field: Plotly
+// scales the old image during a zoom or pan gesture and only redraws when it ends, so a
+// zoom out would otherwise show bare edges until then. The backdrop is redrawn only when
+// the field or color scale changes, after the view image.
+const BACKDROP_PIXELS = 2e6;
 function updateTriImage(container, get) {
     cancelAnimationFrame(container._triImageFrame || 0);
+    clearTimeout(container._triBackdropTimer);
+    // A relayout in the middle of a zoom or pan gesture upsets Plotly's gesture
+    // transform: an update waits for the gesture's closing relayout.
+    if (!container._triGestureBound && container.on) {
+        container._triGestureBound = true;
+        container.on('plotly_relayouting', () => {
+            container._triImageToken = (container._triImageToken || 0) + 1;
+            cancelAnimationFrame(container._triImageFrame || 0);
+            clearTimeout(container._triBackdropTimer);
+        });
+    }
     container._triImageFrame = requestAnimationFrame(() => {
-        const { blocks, zmin, zmax, db } = get();
+        const { blocks, zmin, zmax, db, bleed = 0 } = get();
         const fl = container._fullLayout;
         if (!blocks || !blocks.length || !fl || !fl.xaxis || !fl._size) return;
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
         const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
         const im = rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
-            zmin, zmax, db);
-        container._triImageUpdate = true;
-        getPlotly().relayout(container, { images: im ? [im] : [] }).finally(() => { container._triImageUpdate = false; });
+            zmin, zmax, db, bleed);
+        const key = { values: blocks.map(b => b.Jv || b.Z), zmin, zmax, db, bleed };
+        const bd = container._triBackdrop;
+        const fresh = bd && bd.key.zmin === zmin && bd.key.zmax === zmax && bd.key.db === db && bd.key.bleed === bleed
+            && bd.key.values.length === key.values.length && bd.key.values.every((v, i) => v === key.values[i]);
+        setTriImages(container, fresh ? bd.im : null, im);
+        if (fresh) return;
+        container._triBackdrop = null;
+        container._triBackdropTimer = setTimeout(() => {
+            const box = blocks.map(blockBox).reduce((a, b) => ({
+                x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) }));
+            const bx = [box.x0 * 1000, box.x1 * 1000], by = [box.y0 * 1000, box.y1 * 1000];
+            const s = Math.sqrt(BACKDROP_PIXELS / ((bx[1] - bx[0]) * (by[1] - by[0]) || 1));
+            const w = Math.max(1, Math.min(4096, Math.round((bx[1] - bx[0]) * s)));
+            const h = Math.max(1, Math.min(4096, Math.round((by[1] - by[0]) * s)));
+            container._triBackdrop = { key, im: rasterizeDensity(blocks, bx, by, w, h, zmin, zmax, db, bleed) };
+            setTriImages(container, container._triBackdrop.im, container._triView);
+        }, 100);
     });
+}
+
+// Sets the layout images of `container` to the backdrop and the view image (either may
+// be null), the view image on top. Plotly makes a new <image> element for an image that
+// moved, which the browser would decode a few frames late with the backdrop showing
+// meanwhile: the images are decoded first.
+const decodedImages = new WeakMap();
+function decodeImage(im) {
+    if (!decodedImages.has(im)) {
+        const img = new Image();
+        img.src = im.source;
+        decodedImages.set(im, img.decode().catch(() => {}).then(() => img));
+    }
+    return decodedImages.get(im);
+}
+async function setTriImages(container, backdrop, view) {
+    const token = container._triImageToken = (container._triImageToken || 0) + 1;
+    container._triView = view;
+    const images = [backdrop, view].filter(Boolean);
+    await Promise.all(images.map(decodeImage));
+    if (token !== container._triImageToken) return;
+    container._triImageUpdate = true;
+    getPlotly().relayout(container, { images })
+        .finally(() => { container._triImageUpdate = false; });
 }
 
 // A |J| block extended by a hair past each face with copies of its edge samples, so the
@@ -936,6 +1090,7 @@ function draw(resetZoom = false) {
     };
 
     let zData = [];
+    gridImageBlocks = [];
     let title = "";
     let colorscale = "Viridis";
     let zTitle = "";
@@ -1134,14 +1289,10 @@ function draw(resetZoom = false) {
         const blocks = getCurrentJ();
         const triBlocks = blocks.filter(b => b.tris);
         if (triBlocks.length) traces.push(densityHoverTrace(triBlocks, db));
-        for (const b of blocks.filter(b => !b.tris).map(padBlock)) {
-            traces.push({
-                type: "heatmap", coloraxis: "coloraxis", zsmooth: "best",
-                x: Array.from(b.x, v => v * 1000), y: Array.from(b.y, v => v * 1000),
-                z: db ? b.J.map(row => row.map(v => v > 0 ? 20 * Math.log10(v) : null)) : b.J,
-                hovertemplate: `x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>|J|: %{z:${db ? ".1f} dB(A/m²)" : ".4g} A/m²"}<extra></extra>`,
-            });
-        }
+        gridImageBlocks = blocks.filter(b => !b.tris).map(b => densityGridBlock(padBlock(b)));
+        if (gridImageBlocks.length) traces.push(gridHoverTrace(gridImageBlocks,
+            (b, j, i) => db ? (b.Z[j][i] > 0 ? 20 * Math.log10(b.Z[j][i]) : null) : b.Z[j][i],
+            `x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>|J|: %{marker.color:${db ? ".1f} dB(A/m²)" : ".4g} A/m²"}<extra></extra>`));
     } else if (currentView === "current" && getSurfaceK()) {
         if (override) { zMin = override.min; zMax = override.max; }
         traces.push(...surfaceCurrentTraces(getSurfaceK(), zMin, zMax, plotOptions.efieldDb));
@@ -1212,17 +1363,13 @@ function draw(resetZoom = false) {
             }
         } else if (currentView.startsWith("efield")) {
             const db = plotOptions.efieldDb;
-            // |E| heatmap (linear or dB) for the color + colorbar...
-            traces.push({
-                type: "heatmap",
-                zsmooth: "best",
-                x: xMM, y: yMM,
-                z: db ? zData.map(row => row.map(v => v > 0 ? toDb(v) : null)) : zData,
-                zmin: zMin, zmax: zMax,
-                colorscale: colorscale,
-                colorbar: { title: { text: zTitle }, len: 0.8 },
-                hovertemplate: db ? "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.1f} dB(V/m)<extra></extra>" : hoverTpl
-            });
+            // |E| (linear or dB) on the grid: the color is an image (updateDensityImage),
+            // the hover and colorbar ride on invisible markers at the grid nodes...
+            gridImageBlocks = [{ x: solver.x, y: solver.y, Z: zData }];
+            colorAxis = { cmin: zMin, cmax: zMax, colorscale: colorscale, colorbar: { title: { text: zTitle }, len: 0.8 } };
+            traces.push(gridHoverTrace(gridImageBlocks, (b, j, i) => db ? (b.Z[j][i] > 0 ? toDb(b.Z[j][i]) : null) : b.Z[j][i],
+                db ? "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{marker.color:.1f} dB(V/m)<extra></extra>"
+                    : "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{marker.color:.3e}<extra></extra>"));
             // ...overlaid with log-spaced contour lines: the geometry view's in linear, one per
             // n-th of the color range in dB.
             if (n > 0) {
@@ -1290,7 +1437,7 @@ function draw(resetZoom = false) {
     }
 
     // An |E| image below the traces sits under the grid lines, which the heatmap covered.
-    const gridOff = currentView.startsWith("efield") && !!getFieldMesh();
+    const gridOff = currentView.startsWith("efield");
 
     // UI menues
     const layout = {
