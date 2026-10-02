@@ -1294,6 +1294,34 @@ gnd  x=-0.25  w=0.5  y=-0.035 h=0.035
         reference, "Finite-ground microstrip");
 }
 
+// CPW on conductive silicon (Ansys 2D Extractor, 1 GHz): a 5 um x 5 um copper signal and
+// two 25 um grounds 10 um away on a 1 mm x 0.3 mm silicon substrate (er 11.9, 2 S/m),
+// air and open boundaries on all sides. G is set by the substrate conductivity.
+async function solve_cpw_silicon() {
+    const s = new CustomGeometrySolver({
+        text: `units um
+w = 5; t = 5; g = 10; wg = 25
+bounds open open open open
+diel x=-500      y=-300 w=1000 h=300 er=11.9 sigma=2
+sig+ x=-w/2      y=0    w=w    h=t
+gnd  x=-w/2-g-wg y=0    w=wg   h=t
+gnd  x=w/2+g     y=0    w=wg   h=t
+`,
+        sigma_cond: 5.8e7, freq: 1e9, nx: 10, ny: 10, mesh_backend: MESH_BACKEND,
+    });
+    if (_triOpts) s.tri_opts = _triOpts;
+    const results = await s.solve_adaptive({ energy_tol: 0.001 });
+    const m = results.modes[0].RLGC;
+    const reference = {
+        "C": 129.54e-12,
+        "R": 940.54,
+        "L": 474.54e-9,
+        "G": 2073.5e-3,
+    };
+    // Observed: triangular within 0.2% on all four, rectilinear R +3.5%.
+    test_microstrip_solution({ 'C': m.C, 'R': m.R, 'L': m.L, 'G': m.G }, reference, "CPW on silicon");
+}
+
 // Differential microstrip with traces of two metals (Ansys 2D Extractor, 2 GHz, causal
 // substrate). Geometry of solve_differential_microstrip_500mm_s4p with tand 0.02, left
 // trace 5.8e7 S/m, right trace 3.8e7 S/m.
@@ -1351,6 +1379,7 @@ async function runTests() {
         solve_differential_stripline_rlgc, solve_differential_microstrip,
         solve_broadside_stripline, solve_broadside_stripline_offset,
         solve_coplanar_strips_vacuum, solve_coplanar_strips_fr4, solve_finite_ground_microstrip,
+        solve_cpw_silicon,
         solve_differential_microstrip_500mm_s4p, solve_differential_microstrip_unequal_sigma,
         test_s2p_generation2, test_s2p_generation,
         test_s4p_generation_lossless, test_s4p_generation,
