@@ -151,16 +151,96 @@ function buildLocator(mesh) {
         }
         subs[k] = { cells, sx, sy, m };
     }
+    // Consecutive queries mostly land in the triangle of the previous one (grid rows,
+    // the interface bisection). A triangle passes the test below for points up to
+    // 1e-9 of its own heights outside it, at most 1e-9 * maxEdge away. A point
+    // farther than that from every edge of the previous triangle, and inside it, is
+    // accepted by no other triangle, so the scan would return that triangle too.
+    let maxEdge = 0;
+    for (let t = 0; t < nTris; t++) {
+        const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
+        maxEdge = Math.max(maxEdge,
+            Math.hypot(nodes[2*v1] - nodes[2*v0], nodes[2*v1+1] - nodes[2*v0+1]),
+            Math.hypot(nodes[2*v2] - nodes[2*v1], nodes[2*v2+1] - nodes[2*v1+1]),
+            Math.hypot(nodes[2*v0] - nodes[2*v2], nodes[2*v0+1] - nodes[2*v2+1]));
+    }
+    const clearDist = 2e-9 * maxEdge;
+    // Per-triangle barycentric margin that guarantees clearDist: the distance to the
+    // edge opposite vertex k is l_k times that vertex's height, at least l_k * hMin.
+    const marginCache = new Float64Array(nTris).fill(-1);
+    function marginOf(t) {
+        let m = marginCache[t];
+        if (m < 0) {
+            const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
+            const x0 = nodes[2*v0], y0 = nodes[2*v0+1], x1 = nodes[2*v1], y1 = nodes[2*v1+1];
+            const x2 = nodes[2*v2], y2 = nodes[2*v2+1];
+            const area2 = Math.abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+            const eMax = Math.max(Math.hypot(x1 - x0, y1 - y0), Math.hypot(x2 - x1, y2 - y1), Math.hypot(x0 - x2, y0 - y2));
+            const hMin = area2 / eMax;
+            m = marginCache[t] = hMin > 0 ? clearDist / hMin : Infinity;
+        }
+        return m;
+    }
+    // The coefficients of coeffOf copied flat, nine per triangle (NaN = not yet), for
+    // the containment tests.
+    const flat = new Float64Array(9 * nTris).fill(NaN);
+    function flatOf(t) {
+        const o = 9 * t;
+        if (flat[o] !== flat[o]) {
+            const c = coeffOf(t);
+            for (let r = 0; r < 3; r++) for (let q = 0; q < 3; q++) flat[o + 3 * r + q] = c[r][q];
+        }
+        return o;
+    }
+    const clearlyIn = (t, x, y) => {
+        const o = flatOf(t), m = marginOf(t), f = flat;
+        return f[o] + f[o + 1] * x + f[o + 2] * y > m
+            && f[o + 3] + f[o + 4] * x + f[o + 5] * y > m
+            && f[o + 6] + f[o + 7] * x + f[o + 8] * y > m;
+    };
+    // Edge neighbours of each triangle (-1 on the mesh boundary), for the queries
+    // that step just past the previous triangle.
+    const { triEdges } = mesh;
+    const nbr = triEdges ? new Int32Array(3 * nTris).fill(-1) : null;
+    if (nbr) {
+        let nE = 0;
+        for (let i = 0; i < 3 * nTris; i++) if (triEdges[i] >= nE) nE = triEdges[i] + 1;
+        const firstOf = new Int32Array(nE).fill(-1);
+        for (let t = 0; t < nTris; t++) {
+            for (let k = 0; k < 3; k++) {
+                const e = triEdges[3 * t + k], o = firstOf[e];
+                if (o < 0) { firstOf[e] = t; continue; }
+                nbr[3 * t + k] = o;
+                for (let q = 0; q < 3; q++) if (triEdges[3 * o + q] === e) nbr[3 * o + q] = t;
+            }
+        }
+    }
+    let last = -1;
     function locate(x, y) {
         if (x < xmin || x > xmax || y < ymin || y > ymax) return -1;
+        if (last >= 0) {
+            if (clearlyIn(last, x, y)) return last;
+            if (nbr) {
+                for (let k = 0; k < 3; k++) {
+                    const n = nbr[3 * last + k];
+                    if (n >= 0 && clearlyIn(n, x, y)) { last = n; return n; }
+                }
+            }
+        }
+        const t = scan(x, y);
+        if (t >= 0) last = t;
+        return t;
+    }
+    function scan(x, y) {
         const k = bx(x) * nb + by(y);
         const sub = subs[k];
         const list = sub ? sub.cells[sub.sx(x) * sub.m + sub.sy(y)] : buckets[k];
+        const f = flat;
         for (const t of list) {
-            const c = coeffOf(t);
-            const l0 = c[0][0] + c[0][1] * x + c[0][2] * y;
-            const l1 = c[1][0] + c[1][1] * x + c[1][2] * y;
-            const l2 = c[2][0] + c[2][1] * x + c[2][2] * y;
+            const o = flatOf(t);
+            const l0 = f[o] + f[o + 1] * x + f[o + 2] * y;
+            const l1 = f[o + 3] + f[o + 4] * x + f[o + 5] * y;
+            const l2 = f[o + 6] + f[o + 7] * x + f[o + 8] * y;
             if (l0 >= -1e-9 && l1 >= -1e-9 && l2 >= -1e-9) return t;
         }
         return -1;
