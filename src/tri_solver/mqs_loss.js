@@ -283,6 +283,9 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
         };
         const grade = aniso.cornerGrade ?? 0.25;
         const maxAspect = aniso.maxAspect ?? 64;
+        // airSide 'corners' (default) refines the air side of the band near corners
+        // only, 'all' everywhere within the band width.
+        const airCorners = (aniso.airSide ?? 'corners') === 'corners';
         // Unit normal of the nearest surface at (x, y), the gradient of its signed
         // distance, or null on a medial axis (the middle of a trace, the diagonal of a
         // corner) where the gradient collapses and there is no normal.
@@ -323,6 +326,7 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
                     if (d < dS) { dS = d; px = P[2*k]; py = P[2*k+1]; }
                 }
                 if (!(dS < bw)) continue;
+                const air = airCorners && !rects.some(r => distToRectBoundary(r, xc, yc) < 0);
                 let hn = grading ? targetAt(xc, yc) : targetH;
                 if (depthSlope > 0) hn = Math.max(hn, depthTarget(dS));
                 // The normal at the closest point, or at the centroid when that point is
@@ -331,6 +335,9 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
                 // Corner distance of the triangle's nearest point to a corner (of the
                 // centroid and the vertices).
                 const dc = Math.min(cornerDist(xc, yc), cornerDist(P[0], P[1]), cornerDist(P[2], P[3]), cornerDist(P[4], P[5]));
+                // Outside the metal the field is smooth along a face, the band only needs
+                // the air side where the corner grading still holds the elements short.
+                if (air && grade * dc >= maxAspect * hn) continue;
                 const ht = n ? Math.min(maxAspect * hn, Math.max(hn, grade * dc)) : hn;
                 let lMax = 0, kMax = 0;
                 for (let k = 0; k < 3; k++) {

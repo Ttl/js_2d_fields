@@ -2905,7 +2905,11 @@ export class TriBackend {
             // +0.6% at 10 GHz and +1.3% at 40 GHz on the reference differential GCPW).
             // The graded band converges inside the same budget at ~0.1%, with a smaller
             // mesh and a faster MQS solve.
-            const bandDelta = this.opts.mqsBandDelta ?? 1.25;
+            // The anisotropic band refines the air side only near corners (mqsBandAirSide),
+            // which leaves its smooth faces coarser along the surface, a 1.0*delta target
+            // makes up for it at about half the triangles of the two-sided 1.25*delta band.
+            const anisoBand = this.opts.mqsBandAniso ?? true;
+            const bandDelta = this.opts.mqsBandDelta ?? (anisoBand ? 1.0 : 1.25);
             // Skin-band triangle budget: how many triangles the size-aware band
             // refinement may add on top of the base mesh, a memory guard for
             // large-perimeter/small-δ geometries (hitting it leaves the band
@@ -2964,8 +2968,9 @@ export class TriBackend {
             // tens of GHz stay under mqsMaxTris. One bisection per pass instead of a
             // 1-to-4 split, so it takes more passes. mqsBandAniso: false restores the
             // isotropic band.
-            const bandAniso = (this.opts.mqsBandAniso ?? true) ? { cornerGrade: this.opts.mqsBandCornerGrade,
-                maxAspect: this.opts.mqsBandMaxAspect, cornerTurn: this.opts.mqsBandCornerTurn } : null;
+            const bandAniso = anisoBand ? { cornerGrade: this.opts.mqsBandCornerGrade,
+                maxAspect: this.opts.mqsBandMaxAspect, cornerTurn: this.opts.mqsBandCornerTurn,
+                airSide: this.opts.mqsBandAirSide } : null;
             const bandPasses = this.opts.mqsBandPasses ?? (bandAniso ? 60 : 20);
             // Rects sharing a skin depth refine together: [{ k: delta / dlt, rects }],
             // one entry unless conductors have their own conductivity.
