@@ -24,7 +24,7 @@ async function solveAndRead() {
         return { rows, log: document.getElementById('console_out').textContent };
     });
 }
-// Last "Z0: <value> Ohm" of the log, with the solver line that precedes it.
+// Last "Z0: <value> Ohm" of the log.
 const z0FromLog = (text) => {
     const m = [...text.matchAll(/Z0:\s*([\d.]+)\s*Ohm/gi)];
     return m.length ? parseFloat(m[m.length - 1][1]) : NaN;
@@ -489,7 +489,7 @@ if (shot) await page.screenshot({ path: `${shot}/custom_sweep.png` });
 
 // ---- Modes tab: the field plot covers the air above and below the conductors ----
 await page.click('[data-tab="geometry"]');
-await page.selectOption('#custom-template', 'CPW over air');
+await page.selectOption('#custom-template', 'Differential CPW over air');
 await page.waitForTimeout(600);
 await page.click('.tab-button[data-tab="modes"]');
 await page.waitForTimeout(500);

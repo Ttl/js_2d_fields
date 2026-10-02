@@ -65,17 +65,20 @@ diel  x=-w/2-tox_s     y=hox      w=w+2*tox_s       h=t+tox         er=4.1  tand
 gnd   x=-wgnd/2        y=0        w=wgnd            h=tg            sigma=3.5e7  color=#c0bfbc   # Al
 sig+  x=-w/2           y=hox      w=w               h=t
 `,
-    'CPW over air': `# Coplanar waveguide on a finite substrate, air above and below
-units mm
-w = 0.2; g = 0.1; t = 0.017; h = 0.635
-wgnd = 1.5; wsub = 5
+    'CPW over silicon': `# On-chip coplanar waveguide: copper metal embedded in SiO2 on a conductive silicon
+# substrate, air above and below. hb is the SiO2 under the metal, the gap sets about
+# 50 ohm above 10 GHz. Rounded metal corners, full-wave solver only.
+units um
+w = 5; g = 2.8; t = 1; wgnd = 20; rc = 0.5
+hsi = 300; hox = 10; hb = 3
 bounds open open open open
 domain auto   # sized from the conductors, or: domain x1 x2 y1 y2
 
-diel  x=-wsub/2      y=-h  w=wsub  h=h  er=9.8  tand=0.001
-gnd   x=-w/2-g-wgnd  y=0   w=wgnd  h=t
-gnd   x=w/2+g        y=0   w=wgnd  h=t
-sig+  x=-w/2         y=0   w=w     h=t
+diel  x=-inf          y=-hsi  w=inf   h=hsi  er=11.9  sigma=2  color=#5e5c64   # Si, 50 ohm*cm
+diel  x=-inf          y=0     w=inf   h=hox  er=4.1  tand=0.001  color=#62a0ea   # SiO2
+gnd   x=-w/2-g-wgnd   y=hb    w=wgnd  h=t    radius=rc
+gnd   x=w/2+g         y=hb    w=wgnd  h=t    radius=rc
+sig+  x=-w/2          y=hb    w=w     h=t    radius=rc
 `,
     'Differential CPW over air': `# Differential coplanar waveguide on a finite substrate, air above and below
 units mm

@@ -812,6 +812,26 @@ function _flushLog() {
     if (atBottom) c.scrollTop = c.scrollHeight;
 }
 
+// Frequency unit for a sweep, chosen from its highest frequency.
+const FREQ_UNITS = [{ name: 'THz', scale: 1e12 }, { name: 'GHz', scale: 1e9 },
+                    { name: 'MHz', scale: 1e6 }, { name: 'kHz', scale: 1e3 }, { name: 'Hz', scale: 1 }];
+function freqUnit(fMax) {
+    return FREQ_UNITS.find(u => fMax >= u.scale) ?? FREQ_UNITS[FREQ_UNITS.length - 1];
+}
+function formatFreq(f, unit) {
+    return String(parseFloat((f / unit.scale).toPrecision(4)));
+}
+
+// Im(Zc) is printed when it is at least this fraction of Re(Zc). Dielectric loss alone
+// gives Im/Re -> tand/2 at high frequency (1 % on FR4), conductor loss below a few
+// hundred MHz gives a negative Im of several percent and more.
+const ZC_IM_THRESHOLD = 0.02;
+function formatZc(Zc, threshold = ZC_IM_THRESHOLD) {
+    const re = Zc.re.toFixed(2);
+    if (!(Math.abs(Zc.im) >= threshold * Math.abs(Zc.re))) return re;
+    return `${re} ${Zc.im < 0 ? '−' : '+'} j${Math.abs(Zc.im).toFixed(2)}`;
+}
+
 // `status` replaces the last line of `msg` in the collapsed log bar.
 function log(msg, status = null) {
     _logQueue.push(msg + '\n');
@@ -1968,30 +1988,35 @@ async function runSimulation() {
         // Sort results by frequency
         frequencySweepResults.sort((a, b) => a.freq - b.freq);
 
-        // Display summary
-        const f0 = frequencies[0] / 1e9;
-        const mode0 = frequencySweepResults[0].result.modes[0];
-        const loss0 = mode0.alpha_total;
-        const isSingleFreq = frequencies.length === 1;
-        // Loss for the collapsed log bar: the first point, or the range of a sweep.
-        const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
-        const fN = frequencies[frequencies.length - 1] / 1e9;
-        const lossShort = isSingleFreq
-            ? `${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz`
-            : `${loss0.toFixed(3)}–${lossN.toFixed(3)} dB/m @ ${f0.toFixed(2)}–${fN.toFixed(2)} GHz`;
+        // Display summary. Zc = sqrt((R + jwL) / (G + jwC)) and eps_eff = (beta/k0)^2 at the
+        // first and last sweep point, Z0 = 1/(c sqrt(C C0)) once from the mesh solve. The
+        // first point skips DC (Zc infinite) and, for a waveguide, points below cutoff.
+        const rows = frequencySweepResults;
+        const propagates = r => r.freq > 0 && !Number.isNaN(r.result.modes[0].Z0);
+        const firstRow = rows.find(propagates);
+        const lastRow = rows[rows.length - 1];
+        const ends = !firstRow ? [] : (rows.length === 1 || firstRow === lastRow) ? [firstRow] : [firstRow, lastRow];
+        const unit = freqUnit(Math.max(...frequencies));
+        const fAt = f => `${formatFreq(f, unit)} ${unit.name}`;
+        const freqLine = `Frequency: ${ends.map(r => formatFreq(r.freq, unit)).join(' → ')} ${unit.name}\n`;
+        const fRange = ends.length ? ends.map(r => formatFreq(r.freq, unit)).join('–') + ` ${unit.name}` : '';
+        const span = (fmt) => ends.map(fmt).join(' → ');
+        const loss = r => r.result.modes[0].alpha_total.toFixed(3);
+        const lossShort = `${span(loss)} dB/m @ ${fRange}`;
+        const lossStr = `Loss: ${span(loss)} dB/m`;
+        let cutoffNote = '';
+        if (firstRow && rows[0].freq > 0 && firstRow !== rows[0])
+            cutoffNote = `\n(from ${fAt(firstRow.freq)}: the sweep starts below cutoff)`;
 
         // Check if differential results
         if (results.modes.length === 2) {
             const odd = results.modes.find(m => m.mode === 'odd');
             const even = results.modes.find(m => m.mode === 'even');
-            let lossStr;
-            if (isSingleFreq) {
-                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz`;
-            } else {
-                const fn = frequencies[frequencies.length - 1] / 1e9;
-                const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
-                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`;
-            }
+            const modeOf = (r, name) => r.result.modes.find(m => m.mode === name);
+            const zdiff = r => formatZc(modeOf(r, 'odd').Zc.mul(2));
+            const zcm = r => formatZc(modeOf(r, 'even').Zc.mul(0.5));
+            const eps = (r, name) => modeOf(r, name).eps_eff.toFixed(3);
+            const zcFull = (name, scale) => `${span(r => formatZc(modeOf(r, name).Zc.mul(scale), 0))} Ohm`;
             // For an asymmetric pair the two traces are not interchangeable: the physical self
             // terms differ (C11 ≠ C22) and S22 ≠ S11. Surface that here — otherwise the summary
             // looks identical to a symmetric line. odd/even are then only the approximate eigenmodes.
@@ -2010,45 +2035,34 @@ async function runSimulation() {
                 : '';
             log(`\nDIFFERENTIAL RESULTS:\n` +
                      `======================\n` +
-                     `Differential Impedance Z_diff: ${results.Z_diff.toFixed(2)} Ohm  (2 x Z_odd)\n` +
-                     `Common-Mode Impedance Z_common: ${results.Z_common.toFixed(2)} Ohm  (Z_even / 2)\n` +
+                     freqLine +
+                     `Differential Impedance Z_diff: ${zcFull('odd', 2)}  (2 x Zc_odd)\n` +
+                     `Common-Mode Impedance Z_common: ${zcFull('even', 0.5)}  (Zc_even / 2)\n` +
                      `\nModal Impedances:\n` +
-                     `  Odd-Mode  Z_odd:  ${odd.Z0.toFixed(2)} Ohm  (eps_eff = ${odd.eps_eff.toFixed(3)})\n` +
-                     `  Even-Mode Z_even: ${even.Z0.toFixed(2)} Ohm  (eps_eff = ${even.eps_eff.toFixed(3)})` +
+                     `  Odd-Mode  Z0_odd:  ${odd.Z0.toFixed(2)} Ohm\n` +
+                     `  Even-Mode Z0_even: ${even.Z0.toFixed(2)} Ohm\n` +
+                     `  Odd-Mode  Zc_odd:  ${zcFull('odd', 1)}\n` +
+                     `  Even-Mode Zc_even: ${zcFull('even', 1)}\n` +
+                     `  eps_eff odd:  ${span(r => eps(r, 'odd'))}\n` +
+                     `  eps_eff even: ${span(r => eps(r, 'even'))}` +
                      `${asymStr}${lineStr}\n` +
                      `\n${lossStr}`,
-                `Zdiff ${results.Z_diff.toFixed(2)} Ω · Zcm ${results.Z_common.toFixed(2)} Ω · ` +
-                `εeff odd ${odd.eps_eff.toFixed(3)} / even ${even.eps_eff.toFixed(3)} · ${lossShort}`);
+                `Zdiff ${span(zdiff)} Ω · Zcm ${span(zcm)} Ω · ` +
+                `εeff odd ${span(r => eps(r, 'odd'))} / even ${span(r => eps(r, 'even'))} · ${lossShort}`);
         } else {
-            let lossStr;
-            if (isSingleFreq) {
-                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz`;
-            } else {
-                const fn = frequencies[frequencies.length - 1] / 1e9;
-                const lossN = frequencySweepResults[frequencySweepResults.length - 1].result.modes[0].alpha_total;
-                lossStr = `Loss: ${loss0.toFixed(3)} dB/m @ ${f0.toFixed(2)} GHz - ${lossN.toFixed(3)} dB/m @ ${fn.toFixed(2)} GHz`;
-            }
-            // Z0/eps_eff are quoted at the first point, which for a waveguide can be below
-            // cutoff (where they are NaN by design). Quote the first propagating point
-            // instead, and say which one it is, rather than printing "NaN Ohm".
-            let sumMode = mode0, sumF = f0, cutoffNote = '';
-            if (Number.isNaN(mode0.Z0)) {
-                const firstProp = frequencySweepResults.find(r => !Number.isNaN(r.result.modes[0].Z0));
-                if (firstProp) {
-                    sumMode = firstProp.result.modes[0];
-                    sumF = firstProp.freq / 1e9;
-                    cutoffNote = ` (at ${sumF.toFixed(2)} GHz — the sweep starts below cutoff)`;
-                }
-            }
+            const zc = r => formatZc(r.result.modes[0].Zc);
+            const eps = r => r.result.modes[0].eps_eff.toFixed(3);
             log(`\nRESULTS:\n` +
                      `----------------------\n` +
-                     (Number.isNaN(sumMode.Z0)
+                     (!firstRow
                         ? `Below cutoff across the whole sweep — attenuation only.\n`
-                        : `Z0: ${sumMode.Z0.toFixed(2)} Ohm${cutoffNote}\n` +
-                          `eps_eff: ${sumMode.eps_eff.toFixed(3)}\n`) +
+                        : freqLine +
+                          `Z0: ${results.modes[0].Z0.toFixed(2)} Ohm\n` +
+                          `Zc: ${span(r => formatZc(r.result.modes[0].Zc, 0))} Ohm\n` +
+                          `eps_eff: ${span(eps)}${cutoffNote}\n`) +
                      `${lossStr}`,
-                (Number.isNaN(sumMode.Z0) ? 'Below cutoff'
-                    : `Z0 ${sumMode.Z0.toFixed(2)} Ω · εeff ${sumMode.eps_eff.toFixed(3)}`) + ` · ${lossShort}`);
+                !firstRow ? 'Below cutoff'
+                    : `Zc ${span(zc)} Ω · εeff ${span(eps)} · ${lossShort}`);
         }
 
         // Update plots

@@ -32,7 +32,7 @@ console.log('--- app console_out (tail) ---');
 console.log(consoleOut.split('\n').slice(-14).map(l => '   ' + l).join('\n'));
 printErrors(errors);
 
-const m = consoleOut.match(/Z0:\s*([\d.]+)\s*Ohm/i);
+const m = consoleOut.match(/Zc:\s*([\d.]+)/i);
 const solved = !!m && parseFloat(m[1]) > 0 && !/ERROR:/.test(consoleOut);
-console.log('parsed Z0:', m ? m[1] : '(none)');
+console.log('parsed Zc:', m ? m[1] : '(none)');
 await finish(browser, errors.length === 0 && solved && hasPlot >= 2);

@@ -63,7 +63,8 @@ check('logs the fundamental-mode-only limitation and the single-mode band',
     /fundamental mode only \(cutoff 6\.55\d GHz, single-mode up to 13\.11\d GHz\)/.test(out));
 check('warns about the below-cutoff points', /below the 6\.55\d GHz cutoff/.test(out));
 check('summary quotes the first PROPAGATING point, not NaN',
-    /Z0: \d+\.\d+ Ohm \(at 7\.00 GHz/.test(out) && !/Z0: NaN/.test(out), out.match(/Z0:.*/)?.[0]);
+    /Frequency: 7 → /.test(out) && /Zc: \d+\.\d+/.test(out) && /from 7 GHz: the sweep starts below cutoff/.test(out) &&
+    !/Zc: NaN/.test(out), out.match(/Zc:.*/)?.[0]);
 
 // ---- Results: the trace breaks at cutoff ----
 await page.click('[data-tab="results"]');
