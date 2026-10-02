@@ -237,13 +237,101 @@ static int solve_complex(
     SpMat A = buildSparseMatrix(n, nnz_a, a_rowPtr, a_colIdx, a_vals_re, a_vals_im);
     SpMat B = buildSparseMatrix(n, nnz_b, b_rowPtr, b_colIdx, b_vals_re, b_vals_im);
 
-    // Factor C = A - σB
+    // Factor C = A - σB. A pencil with radiating (first-order ABC) walls is complex
+    // symmetric, C^T = C, so it takes the complex-symmetric LDL^T of solve_real's
+    // scheme: cached symbolic analysis, a random-RHS residual probe with iterative
+    // refinement, and the pivoted complex SparseLU when the probe fails or the values
+    // are not symmetric.
     SpMat C = A - sigma * B;
-    Eigen::SparseLU<SpMat> solver;
-    solver.compute(C);
-    if (solver.info() != Eigen::Success) {
-        return -1; // Factorization failed
+    C.makeCompressed();
+    bool ldltOK = false;
+    bool ldltRefine = true;
+    SparsePatternCache* pc = nullptr;
+    SSpMat Cs;
+    {
+        static std::vector<SparsePatternCache*> store;
+        pc = findPatternCache(store, n, (int)C.nonZeros(), C.outerIndexPtr(), C.innerIndexPtr());
+        if (pc->patternSymmetric && std::abs(sigma) > 1.5 * pc->ldltFailSigmaMax) {
+            const Complex* cv = C.valuePtr();
+            const int cnnz = (int)C.nonZeros();
+            double scale = 0;
+            for (int k = 0; k < cnnz; k++) scale = std::max(scale, std::abs(cv[k]));
+            const double tol = 1e-12 * scale;
+            bool valueSym = true;
+            for (int k = 0; k < cnnz; k++) {
+                if (std::abs(cv[k] - cv[pc->transposeIdx[k]]) > tol) { valueSym = false; break; }
+            }
+            if (valueSym) {
+                Cs = C.cast<csym>();
+                if (!pc->cldlt) {
+                    pc->cldlt = new CSymLDLT();
+                    pc->cldlt->analyzePattern(Cs);
+                }
+                pc->cldlt->factorize(Cs);
+                if (pc->cldlt->info() == Eigen::Success) {
+                    SVector bp(n);
+                    uint64_t st = 0xDA3E39CB94B95BDBull;
+                    auto rnd = [&]() {
+                        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+                        return (double)(st & 0xFFFFFFull) / (double)0xFFFFFFull - 0.5;
+                    };
+                    for (int i = 0; i < n; i++) { const double re = rnd(); bp(i) = csym(re, rnd()); }
+                    double bn = 0;
+                    for (int i = 0; i < n; i++) bn += std::norm(bp(i).v);
+                    bn = std::sqrt(bn);
+                    SVector xp = pc->cldlt->solve(bp);
+                    auto resid = [&](SVector& r) {
+                        r = bp - Cs * xp;
+                        double rn = 0;
+                        for (int i = 0; i < n; i++) rn += std::norm(r(i).v);
+                        return std::sqrt(rn) / bn;
+                    };
+                    SVector r(n);
+                    double rn = resid(r);
+                    if (std::isfinite(rn) && rn < 1e-7) {
+                        ldltOK = true;
+                        ldltRefine = false;
+                    } else {
+                        for (int it = 0; it < 3; it++) {
+                            if (!std::isfinite(rn) || rn < 1e-11) break;
+                            xp += pc->cldlt->solve(r);
+                            rn = resid(r);
+                        }
+                        if (std::isfinite(rn) && rn < 1e-8) ldltOK = true;
+                    }
+                }
+                if (!ldltOK)
+                    pc->ldltFailSigmaMax = std::max(pc->ldltFailSigmaMax, std::abs(sigma));
+            }
+        }
     }
+    Eigen::SparseLU<SpMat> solver;
+    if (!ldltOK) {
+        solver.compute(C);
+        if (solver.info() != Eigen::Success) {
+            return -1; // Factorization failed
+        }
+    }
+    // Operator solve: LDL^T (refined when the raw factor is marginal), or LU.
+    auto solveC = [&](const CVector& v) -> CVector {
+        if (!ldltOK) return CVector(solver.solve(v));
+        Eigen::Map<const SVector> vs(reinterpret_cast<const csym*>(v.data()), n);
+        SVector x = pc->cldlt->solve(vs);
+        if (ldltRefine) {
+            const double vn = v.norm();
+            double prev = std::numeric_limits<double>::infinity();
+            for (int it = 0; it < 2; it++) {
+                SVector r = vs - Cs * x;
+                double rn = 0;
+                for (int i = 0; i < n; i++) rn += std::norm(r(i).v);
+                rn = std::sqrt(rn);
+                if (!(rn > 1e-10 * vn) || !(rn < 0.5 * prev)) break;
+                prev = rn;
+                x += pc->cldlt->solve(r);
+            }
+        }
+        return CVector(Eigen::Map<const CVector>(reinterpret_cast<const Complex*>(x.data()), n));
+    };
 
     // Arnoldi iteration with modified Gram-Schmidt (double orthogonalization).
     // V grows column-blocks on demand; H is small, allocate the ceiling up front.
@@ -332,7 +420,7 @@ static int solve_complex(
         bool breakdown = false;
         for (; j < mCur; j++) {
             CVector Bv = B * V.col(j);
-            CVector w = solver.solve(Bv);
+            CVector w = solveC(Bv);
 
             // Check for NaN/Inf from solver
             if (!w.allFinite()) {
@@ -929,7 +1017,7 @@ int solve_generalized_eigen_with_init(
 // Direct sparse solver: factorize once, solve for nRhs right-hand sides.
 // Uses SimplicialLDLT for symmetric matrices, falls back to SparseLU.
 // rhs_arr and x_arr are nRhs×N column-major (each RHS is contiguous N doubles).
-// Returns 0 on success, negative on error.
+// Returns 0 (LDL^T), 1 (solved by the SparseLU fallback), negative on error.
 EMSCRIPTEN_KEEPALIVE
 int solve_sparse_multi(
     int N, int nnz,
@@ -985,7 +1073,7 @@ int solve_sparse_multi(
         Eigen::Map<RVector> x(x_arr + r * N, N);
         x = lu.solve(b);
     }
-    return 0;
+    return 1;
   } catch (...) {
     return -9;
   }
@@ -1057,9 +1145,18 @@ int solve_complex_symmetric(
                 // report a bad pivot (NaN or a lost digit), and it costs one
                 // sparse product. 1e-8 relative is far above what a healthy
                 // factorization produces (~1e-15) and far below any physical use.
-                res = A * x - b;
-                double rn = 0, bn = 0;
-                for (int i = 0; i < N; i++) { rn += std::norm(res[i].v); bn += std::norm(b[i].v); }
+                // A factor that misses it (no metal wall: S is only semidefinite and
+                // some pivots lose digits) gets up to three refinement steps first.
+                double bn = 0;
+                for (int i = 0; i < N; i++) bn += std::norm(b[i].v);
+                double rn = 0;
+                for (int it = 0; ; it++) {
+                    res = b - A * x;
+                    rn = 0;
+                    for (int i = 0; i < N; i++) rn += std::norm(res[i].v);
+                    if (!(rn > 1e-16 * bn) || it == 3) break;
+                    x += ldlt->solve(res);
+                }
                 if (bn > 0 && !(rn <= 1e-16 * bn)) { ok = false; break; }
                 double* xr = x_arr + r * stride;
                 for (int i = 0; i < N; i++) { xr[i] = x[i].v.real(); xr[N + i] = x[i].v.imag(); }

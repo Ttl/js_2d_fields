@@ -558,9 +558,12 @@ export function mqsPrecompute(mesh, condRect, opts = {}) {
                 // K = S + jβM with β = ωμ₀σ the only frequency-dependent factor:
                 // the stiffness and the (metal-only) mass go into separate value
                 // templates on one shared index stream.
+                // An entry is dropped only when its transpose is zero too: rounding
+                // can leave one of S_ij, S_ji exactly zero (right-angle triangles),
+                // and a nonsymmetric pattern keeps the solvers off LDL^T.
                 const sv = Sl[6*i+j];
                 const mv = cond ? AreaS * P2_MASS[6*i+j] : 0;
-                if (sv === 0 && mv === 0) continue;
+                if (sv === 0 && Sl[6*j+i] === 0 && mv === 0) continue;
                 R[nCoo] = gi; Cc[nCoo] = gj; VS[nCoo] = sv; VM[nCoo] = mv; nCoo++;
             }
         }

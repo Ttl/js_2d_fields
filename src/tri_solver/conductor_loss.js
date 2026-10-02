@@ -241,8 +241,10 @@ export function projectH(mesh, fm, vecRe, vecIm, gamma, freq, wasmSolver, cache 
             const gi = hD[li], si = hS[li];
             rhsRe[gi] += si*rR[li]*Area; rhsIm[gi] += si*rI[li]*Area;
             if (needMass) for (let lj = 0; lj < 8; lj++) {
+                // Kept when the transpose entry is nonzero, so the pattern stays
+                // symmetric (rounding can zero only one of the pair).
                 const v = si*hS[lj]*MtEl[li*8+lj]*Area;
-                if (v !== 0) { MtR[nMt] = gi; MtC[nMt] = hD[lj]; MtV[nMt++] = v; }
+                if (v !== 0 || MtEl[lj*8+li] !== 0) { MtR[nMt] = gi; MtC[nMt] = hD[lj]; MtV[nMt++] = v; }
             }
         }
         // Assemble Hz system; its mass is the closed-form P2 mass

@@ -1280,8 +1280,9 @@ function assembleTriStatic(mesh, fm, epsRe, epsIm, condPotentials) {
         for (let li = 0; li < nLocal; li++) {
             const gi = globalDof[li]; if (gi < 0) continue;
             for (let lj = 0; lj < nLocal; lj++) {
+                // Dropped only when the transpose entry is zero too, see mqsPrecompute.
                 const sz = Sz[li * nLocal + lj];
-                if (sz === 0) continue;
+                if (sz === 0 && Sz[lj * nLocal + li] === 0) continue;
                 const v = eps * sz, vi = epsI * sz;
                 const gj = globalDof[lj];
                 if (gj >= 0) {

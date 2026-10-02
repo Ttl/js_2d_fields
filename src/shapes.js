@@ -113,19 +113,69 @@ export function shapeSignedDist(shape, x, y) {
 }
 
 function convexSignedDist(poly, x, y) {
-    const n = poly.length >> 1;
+    const e = edgeData(poly);
+    const { ax, ay, ex, ey, len } = e;
+    const n = len.length;
+    const edgeDist = i => ((x - ax[i]) * ey[i] - (y - ay[i]) * ex[i]) / len[i];
+    // A regular polygon: the edge whose normal points closest to the direction of the
+    // point holds the maximum, its neighbours cover ties. Near the centre every edge is
+    // a tie and the full loop runs.
+    const reg = e.regular;
+    if (reg) {
+        const dx = x - reg.cx, dy = y - reg.cy;
+        if (dx * dx + dy * dy > reg.r2Min) {
+            let k = Math.round((Math.atan2(dy, dx) - reg.phi0) / reg.step) % n;
+            if (k < 0) k += n;
+            const km = k === 0 ? n - 1 : k - 1, kp = k === n - 1 ? 0 : k + 1;
+            let best = -Infinity;
+            for (const i of [km, k, kp]) { if (!(len[i] > 0)) continue; const d = edgeDist(i); if (d > best) best = d; }
+            return best;
+        }
+    }
     let best = -Infinity;
     for (let i = 0; i < n; i++) {
-        const j = (i + 1) % n;
-        const ax = poly[2 * i], ay = poly[2 * i + 1];
-        const ex = poly[2 * j] - ax, ey = poly[2 * j + 1] - ay;
-        const len = Math.hypot(ex, ey);
-        if (!(len > 0)) continue;
+        if (!(len[i] > 0)) continue;
         // CCW polygon: outward normal is (ey, -ex)/len, so this is > 0 outside the edge.
-        const d = ((x - ax) * ey - (y - ay) * ex) / len;
+        const d = edgeDist(i);
         if (d > best) best = d;
     }
     return best;
+}
+
+// Per-edge start point, direction and length of a polygon, memoized on the array, and
+// for a regular polygon the centre and the angle of its first edge normal.
+const _edgeData = new WeakMap();
+function edgeData(poly) {
+    let e = _edgeData.get(poly);
+    if (e) return e;
+    const n = poly.length >> 1;
+    const ax = new Float64Array(n), ay = new Float64Array(n), ex = new Float64Array(n), ey = new Float64Array(n);
+    const len = new Float64Array(n);
+    let cx = 0, cy = 0;
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        ax[i] = poly[2 * i]; ay[i] = poly[2 * i + 1];
+        ex[i] = poly[2 * j] - ax[i]; ey[i] = poly[2 * j + 1] - ay[i];
+        len[i] = Math.hypot(ex[i], ey[i]);
+        cx += ax[i] / n; cy += ay[i] / n;
+    }
+    e = { ax, ay, ex, ey, len, regular: null };
+    if (n >= 8) {
+        const step = TWO_PI / n;
+        let ok = true, apothem = Infinity;
+        const phi0 = Math.atan2(-ex[0], ey[0]);
+        for (let i = 0; i < n && ok; i++) {
+            const phi = Math.atan2(-ex[i], ey[i]);
+            let dphi = (phi - phi0 - i * step) % TWO_PI;
+            if (dphi > Math.PI) dphi -= TWO_PI; else if (dphi < -Math.PI) dphi += TWO_PI;
+            ok = Math.abs(dphi) < 1e-9 && Math.abs(len[i] - len[0]) < 1e-9 * len[0];
+            // Distance of the centre inside edge i.
+            apothem = Math.min(apothem, -((cx - ax[i]) * ey[i] - (cy - ay[i]) * ex[i]) / len[i]);
+        }
+        if (ok && apothem > 0) e.regular = { cx, cy, phi0, step, r2Min: (1e-6 * apothem) ** 2 };
+    }
+    _edgeData.set(poly, e);
+    return e;
 }
 
 // Is (x, y) inside the object, within tol?

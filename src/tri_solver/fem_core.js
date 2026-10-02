@@ -304,8 +304,9 @@ export function createWasmHelpers(M) {
             const pX = M._malloc(8 * nRhs * N); ptrs.push(pX);
             const _t0 = _stats ? performance.now() : 0;
             const rc = M._solve_sparse_multi(N, csr.colIdx.length, pR, pC, pV, nRhs, pRhs, pX);
-            if (_stats) _stats.lin.push({ N, nnz: csr.colIdx.length, nRhs, ms: performance.now() - _t0 });
-            if (rc !== 0) throw new Error(`solve_sparse_multi failed: ${rc}`);
+            if (_stats) _stats.lin.push({ N, nnz: csr.colIdx.length, nRhs, ms: performance.now() - _t0,
+                                          luFallback: rc === 1 });
+            if (rc < 0) throw new Error(`solve_sparse_multi failed: ${rc}`);
             _dumpDone(dumpPath);
             const results = [];
             for (let r = 0; r < nRhs; r++)
