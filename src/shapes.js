@@ -308,6 +308,88 @@ function clipPolyX(poly, x0) {
     return right && kept.length >= 6 ? new Float64Array(kept) : new Float64Array(0);
 }
 
+// Part of the convex CCW polygon `poly` on one side of the line through (ax, ay) and
+// (bx, by): the left side (inside of a CCW edge) when `left`, else the right side,
+// or null when nothing is left. Points within `tol` of the line count as on it.
+function clipPolyLine(poly, ax, ay, bx, by, left, tol) {
+    const ex = bx - ax, ey = by - ay, len = Math.hypot(ex, ey);
+    const side = i => {
+        const d = (ex * (poly[2 * i + 1] - ay) - ey * (poly[2 * i] - ax)) / len;
+        return Math.abs(d) <= tol ? 0 : left ? d : -d;
+    };
+    const n = poly.length >> 1, out = [];
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n, si = side(i), sj = side(j);
+        if (si >= 0) out.push(poly[2 * i], poly[2 * i + 1]);
+        if ((si > 0 && sj < 0) || (si < 0 && sj > 0)) {
+            const t = si / (si - sj);
+            out.push(poly[2 * i] + t * (poly[2 * j] - poly[2 * i]), poly[2 * i + 1] + t * (poly[2 * j + 1] - poly[2 * i + 1]));
+        }
+    }
+    if (out.length < 6) return null;
+    // A sliver thinner than a few tol is rounding, not area.
+    let perim = 0;
+    for (let i = 0, k = out.length >> 1; i < k; i++) {
+        const j = (i + 1) % k;
+        perim += Math.hypot(out[2 * j] - out[2 * i], out[2 * j + 1] - out[2 * i + 1]);
+    }
+    return polyArea(out) > 4 * tol * perim ? out : null;
+}
+
+// Convex pieces of `poly` outside the convex CCW polygon `cut`, and its part inside.
+function splitConvex(poly, cut, tol) {
+    const outside = [];
+    let rest = poly;
+    const m = cut.length >> 1;
+    for (let k = 0; k < m && rest; k++) {
+        const l = (k + 1) % m;
+        const args = [cut[2 * k], cut[2 * k + 1], cut[2 * l], cut[2 * l + 1]];
+        const out = clipPolyLine(rest, ...args, false, tol);
+        if (out) outside.push(out);
+        rest = clipPolyLine(rest, ...args, true, tol);
+    }
+    return { outside, inside: rest };
+}
+
+// Convex loops covering a body { x_min.., shape? }: its rectangle or polygon, or a
+// ring cut into convex pieces around its hole.
+function convexPieces(o, tol) {
+    const sh = o.shape;
+    if (!isPolyShape(sh)) return [[o.x_min, o.y_min, o.x_max, o.y_min, o.x_max, o.y_max, o.x_min, o.y_max]];
+    if (sh.type !== 'ring') return [Array.from(sh.poly)];
+    return splitConvex(Array.from(sh.poly), sh.hole, tol).outside;
+}
+
+// Part of each body { x_min.., shape? } that no later body in the list covers, as
+// convex CCW loops (flat [x0, y0, x1, y1, ..]), or null for a body nothing covers.
+// This is what a list of overlapping media resolves to: the later one fills the overlap.
+export function visibleLoops(bodies) {
+    let ext = 0;
+    for (const b of bodies) ext = Math.max(ext, Math.abs(b.x_min), Math.abs(b.x_max), Math.abs(b.y_min), Math.abs(b.y_max));
+    const tol = ext * 1e-12;
+    return bodies.map((b, i) => {
+        const later = bodies.slice(i + 1).filter(c =>
+            Math.min(b.x_max, c.x_max) - Math.max(b.x_min, c.x_min) > tol && Math.min(b.y_max, c.y_max) - Math.max(b.y_min, c.y_min) > tol);
+        let pieces = convexPieces(b, tol), covered = false;
+        for (const c of later) {
+            const sh = c.shape;
+            const outer = isPolyShape(sh) ? sh.poly : convexPieces(c, tol)[0];
+            pieces = pieces.flatMap(p => {
+                const { outside, inside } = splitConvex(p, outer, tol);
+                if (!inside) return [p];
+                covered = true;
+                // Inside a ring's hole the earlier body still shows.
+                if (inside && sh?.type === 'ring') {
+                    const hole = splitConvex(inside, sh.hole, tol).inside;
+                    if (hole) outside.push(hole);
+                }
+                return outside;
+            });
+        }
+        return covered ? pieces : null;
+    });
+}
+
 // Closed loops of a shape for the mesher: [outer, hole] for a ring, [polygon] for the
 // others. On a half domain (x >= 0) a ring cut by the plane is one C-shaped loop:
 // the outer arc up, down the plane to the hole, the hole arc back down, and the plane

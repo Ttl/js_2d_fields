@@ -1,7 +1,7 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
 import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB,
          isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
-import { svgShapePath, shapePoly, isPolyShape, shapeContains } from './shapes.js';
+import { svgShapePath, shapePoly, isPolyShape, shapeContains, visibleLoops } from './shapes.js';
 
 // A polygon or ring shape as a Plotly path shape with `style`.
 const polyPathShape = (shape, style) => ({ type: 'path', path: svgShapePath(shape), fillrule: 'evenodd', ...style });
@@ -209,35 +209,54 @@ function conductorFillShapes(solver, maxY) {
     return out;
 }
 
-// Dielectric rect shapes, colored by ε_r (air ≈1 → white/transparent, higher ε_r → green
+// Air as the geometry view shows it: white at 0.8 over the plot background #1a1a1a.
+const AIR_GREY = 0.8 * 255 + 0.2 * 0x1a;
+
+// Dielectric fill shapes, colored by ε_r (air ≈1 → white/transparent, higher ε_r → green
 // shades). Shared by the geometry view (opaque, below the contours) and the Modes tab
-// (faint, above the field heatmap) so the two tabs use the same color mapping.
+// (faint, above the field heatmap) so the two tabs use the same color mapping. Where
+// dielectrics overlap the later one fills the overlap, as in the solvers, so each is
+// drawn cut to its visible part and overlaps never stack their colors. `opaque` draws
+// the colors blended over air instead of with alpha.
 function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, layer = 'below',
-    lineColor = 'rgba(128, 128, 128, 0.3)' } = {}) {
+    lineColor = 'rgba(128, 128, 128, 0.3)', opaque = false } = {}) {
     const out = [];
-    for (const diel of (solver.dielectrics || [])) {
-        if (!diel.shape && diel.y_min > maxY) continue;
+    const diels = solver.dielectrics || [];
+    const visible = visibleLoops(diels);
+    const fillOf = (r, g, b, a) => opaque
+        ? `rgb(${[r, g, b].map(c => Math.round(a * c + (1 - a) * AIR_GREY)).join(', ')})`
+        : `rgba(${r}, ${g}, ${b}, ${a})`;
+    diels.forEach((diel, i) => {
+        if (!diel.shape && diel.y_min > maxY) return;
         const yMax = Math.min(diel.y_max, maxY);
         const er = diel.epsilon_r;
-        let fillcolor;
-        if (er <= 1.01) {
-            fillcolor = `rgba(255, 255, 255, ${airAlpha})`;
-        } else {
-            const intensity = Math.min(255, 100 + (er - 1) * 30);
-            fillcolor = `rgba(100, ${intensity}, 100, ${alpha})`;
+        const fillcolor = er <= 1.01 ? fillOf(255, 255, 255, airAlpha)
+            : fillOf(100, Math.min(255, 100 + (er - 1) * 30), 100, alpha);
+        const line = { color: lineColor, width: 0.5 };
+        if (visible[i]) {
+            // The visible pieces as one path, so their shared cuts leave no seams, and the
+            // outline of the whole body.
+            const path = visible[i].map(p => {
+                let d = '';
+                for (let k = 0; k < p.length; k += 2) d += (k ? 'L' : 'M') + (p[k] * 1000).toFixed(9) + ',' + (Math.min(p[k + 1], maxY) * 1000).toFixed(9);
+                return d + 'Z';
+            }).join(' ');
+            out.push({ type: 'path', path, fillcolor, line: { width: 0 }, layer });
+            out.push(bodyShape(diel, maxY, { fillcolor: 'rgba(0,0,0,0)', line, layer }));
+            return;
         }
         const sh = diel.shape;
         if (isPolyShape(sh)) {
-            out.push(polyPathShape(sh, { fillcolor, line: { color: lineColor, width: 0.5 }, layer }));
-            continue;
+            out.push(polyPathShape(sh, { fillcolor, line, layer }));
+            return;
         }
         out.push({
             type: 'rect',
             x0: diel.x_min * 1000, y0: diel.y_min * 1000,
             x1: diel.x_max * 1000, y1: yMax * 1000,
-            fillcolor, line: { color: lineColor, width: 0.5 }, layer
+            fillcolor, line, layer
         });
-    }
+    });
     return out;
 }
 
@@ -943,7 +962,7 @@ function draw(resetZoom = false) {
                 fillcolor: 'rgba(255, 255, 255, 0.8)', line: { color: 'rgba(128, 128, 128, 0.6)', width: 1, dash: 'dot' }, layer: 'below' });
         }
         // Dielectrics (opaque, below the field contours) + conductors above.
-        shapes.push(...dielectricFillShapes(solver, maxY));
+        shapes.push(...dielectricFillShapes(solver, maxY, { opaque: true }));
         shapes.push(...conductorFillShapes(solver, maxY));
         shapes.push(...mirrorImageShapes(solver, maxY));
         shapes.push(...sourceLineHighlightShapes(solver, maxY));
@@ -1055,7 +1074,7 @@ function draw(resetZoom = false) {
         const ideal = (solver.idealGrounds && solver.idealGrounds[mi] ? ", ideal edge grounds" : "")
             + (bareMetalK(solver, getCurrentJ()) ? ", surface |K| (A/m) on metal without |J|" : "");
         title = `Current Density |J| per 1 A${modeLabel} (${db ? "dB A/m²" : "A/m²"})${fieldFreqLabel(solver)}${ideal}`;
-        shapes.push(...dielectricFillShapes(solver, maxY).map(s => ({ ...s, layer: 'below' })));
+        shapes.push(...dielectricFillShapes(solver, maxY, { opaque: true }));
         shapes.push(...densityConductorShapes(solver, getCurrentJ(), maxY));
         const auto = densityAutoscale(getCurrentJ(), db);
         zMin = auto.min; zMax = auto.max;
@@ -1079,7 +1098,7 @@ function draw(resetZoom = false) {
             : `Surface Current |K| = |H<sub>t</sub>| per 1 A${modeLabel} (${db ? "dB A/m" : "A/m"})` +
                 (fromMqs ? `${fieldFreqLabel(solver)}, MQS${ideal}` : ", perfect-conductor limit");
         const below = s => ({ ...s, layer: 'below' });
-        shapes.push(...dielectricFillShapes(solver, maxY).map(below));
+        shapes.push(...dielectricFillShapes(solver, maxY, { opaque: true }));
         shapes.push(...conductorFillShapes(solver, maxY).map(below));
         const auto = currentAutoscale(getSurfaceK(), db);
         zMin = auto.min; zMax = auto.max;
