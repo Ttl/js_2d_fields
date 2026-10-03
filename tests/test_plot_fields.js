@@ -11,6 +11,7 @@
 //   - MQS |K| (tangential H): 1 A on the trace, exactly 1 A returned by the ground wall,
 //     no collapse at the trace corners when the current fills the metal; the ideal-return
 //     ground model is taken below the blend midpoint
+//   - MQS |J| with meshed plating: one block per conductor, sharp at the plating/bulk interface
 //   - MQS |J| of shaped conductors (elliptical coax): each conductor's own triangles, the
 //     shield's block never picks up the centre conductor inside its bounding box
 //   - the solve at the plot frequency keeps its fields: plotting there solves nothing and
@@ -301,6 +302,26 @@ gnd   ellipse  x=0  y=0  rx=a+t_sh  ry=b+t_sh  rx_in=a  ry_in=b  n=128
         `${blocks.length} blocks`);
     check('shaped |J|: shield block holds only shield metal', centre === 2 && shield === 2,
         r.map(([lo, hi]) => `${(lo * 1e3).toFixed(3)}..${(hi * 1e3).toFixed(3)}`).join(' '));
+}
+
+// ---------------------------------------------------------------- MQS |J| with meshed plating
+// The plating layer and its core are one block: no unsampled hole where the core is,
+// and the doubled interface lines carry the jump of sigma.
+{
+    const pl = { sigma: 8.7e6, thickness: 3e-6, rq: 0, top: true, sides: true, bottom: false, thick_corners: true };
+    const s = new MicrostripSolver({ ...MS, plating: pl, mesh_backend: 'triangular' });
+    s.use_causal_materials = false;
+    const cached = await quiet(() => s.solve_adaptive({ max_nodes: 20000 }));
+    await quiet(() => s.plotFieldsAt(1e9, cached));
+    const blocks = s.getPlotFields().currentJ[0];
+    const nulls = blocks.reduce((a, b) => a + b.J.flat().filter(v => v == null).length, 0);
+    check('plated |J|: one block per trace half', blocks.length === 2, `${blocks.length} blocks`);
+    check('plated |J|: the block covers the core', nulls === 0, `${nulls} unsampled`);
+    const b = blocks[0], j = Math.floor(b.y.length / 2);
+    const i = b.x.findIndex((v, k) => v === b.x[k + 1]);
+    const ratio = i >= 0 ? b.J[j][i] / b.J[j][i + 1] : NaN;
+    check('plated |J|: sigma jump at the side interface', Math.abs(ratio - 5.8e7 / 8.7e6) < 0.05 * 5.8e7 / 8.7e6,
+        ratio.toFixed(3));
 }
 
 // ---------------------------------------------------------------- plot frequency cache

@@ -856,21 +856,26 @@ export function resampleModeField(mesh, fm, vRe, vIm, domain, opts = {}) {
 // { x, y, J[ny][nx] }, null outside the metal. A shaped conductor (polygon,
 // ring) is its own triangles with |J| at each centroid and each vertex, { tris: [x0, y0,
 // x1, y1, x2, y2, ...], J, Jv: [J0, J1, J2, ...] }: a grid cannot follow a slanted or
-// curved skin layer. symX mirrors a
-// half-domain solve (|J| is even about the plane in either mode).
+// curved skin layer. A meshed plating core (rect with coreOf) is drawn in the block of
+// its plating layer, with doubled grid lines on the interface so the jump of sigma
+// stays sharp. symX mirrors a half-domain solve (|J| is even about the plane in either
+// mode).
 export function sampleMqsCurrent(F, rects, n = 160, symX = null) {
     const { nodes, tris, nTris } = F.mesh;
     const ev = mqsFieldEval(F);
+    // Block of each rect: its own, or its plating layer's for a core.
+    const blockOf = rects.map((r, k) => r.coreOf ?? k);
     // |J| of conductor k at (x, y), null outside its metal. The bounding box of a ring
     // holds the conductors inside it, which have their own blocks.
     const evalJ = (k, x, y) => {
         const t = ev.locate(x, y);
-        if (t < 0 || F.triRect[t] !== k) return null;
+        if (t < 0 || F.triRect[t] < 0 || blockOf[F.triRect[t]] !== k) return null;
         const J = ev.J(t, x, y);
         return J ? Math.hypot(J[0], J[1]) : null;
     };
     const out = [];
     rects.forEach((r, k) => {
+        if (blockOf[k] !== k) return;
         if (r.shape) {
             const xy = [], Jt = [], Jv = [];
             const mag = (t, x, y) => { const J = ev.J(t, x, y); return J ? Math.hypot(J[0], J[1]) : 0; };
@@ -897,16 +902,21 @@ export function sampleMqsCurrent(F, rects, n = 160, symX = null) {
         // Grid lines follow the nodes of the conductor's own triangles.
         const xs = [], ys = [];
         for (let t = 0; t < nTris; t++) {
-            if (F.triRect[t] !== k) continue;
+            if (F.triRect[t] < 0 || blockOf[F.triRect[t]] !== k) continue;
             for (let a = 0; a < 3; a++) { const v = tris[3 * t + a]; xs.push(nodes[2 * v]); ys.push(nodes[2 * v + 1]); }
         }
         if (!xs.length) return;
-        const gx = quantileAxis(Float64Array.from(xs), xmin, r.xmax, n, []);
-        const gy = quantileAxis(Float64Array.from(ys), r.ymin, r.ymax, n, []);
-        // Samples on a face would land in the dielectric beside it.
+        const cores = rects.filter((c, i) => i !== k && blockOf[i] === k);
+        const fx = cores.flatMap(c => [c.xmin, c.xmax]), fy = cores.flatMap(c => [c.ymin, c.ymax]);
+        const gx = doubleLines(quantileAxis(Float64Array.from(xs), xmin, r.xmax, n, fx), fx);
+        const gy = doubleLines(quantileAxis(Float64Array.from(ys), r.ymin, r.ymax, n, fy), fy);
+        // Samples on a face would land in the dielectric beside it, the two lines of an
+        // interface sample either side of it.
         const ex = 1e-6 * (r.xmax - xmin), ey = 1e-6 * (r.ymax - r.ymin);
-        const J = Array.from(gy, y => Array.from(gx, x =>
-            evalJ(k, Math.min(Math.max(x, xmin + ex), r.xmax - ex), Math.min(Math.max(y, r.ymin + ey), r.ymax - ey))));
+        const side = (g, i, e) => g[i] === g[i - 1] ? g[i] + e : g[i] === g[i + 1] ? g[i] - e : g[i];
+        const J = Array.from(gy, (_, j) => Array.from(gx, (_, i) =>
+            evalJ(k, Math.min(Math.max(side(gx, i, ex), xmin + ex), r.xmax - ex),
+                Math.min(Math.max(side(gy, j, ey), r.ymin + ey), r.ymax - ey))));
         // No current in it (an ideal ground): the plot keeps its metal fill.
         if (!J.some(row => row.some(v => v !== null))) return;
         out.push({ x: gx, y: gy, J });
@@ -915,6 +925,16 @@ export function sampleMqsCurrent(F, rects, n = 160, symX = null) {
         }
     });
     return out;
+}
+
+// Axis lines g (ascending) with each interior line at one of the coordinates `at` doubled.
+function doubleLines(g, at) {
+    const out = [];
+    g.forEach((v, i) => {
+        out.push(v);
+        if (i > 0 && i < g.length - 1 && at.includes(v)) out.push(v);
+    });
+    return Float64Array.from(out);
 }
 
 // Point evaluation of an MQS solve (mqsConductorLoss opts.fieldOut): the complex J in a

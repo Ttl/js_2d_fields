@@ -289,7 +289,8 @@ function makePlatingZs(solver, condRect, freq) {
 // so a triangle in the core is bulk and one in the layer is plating. A face the
 // plating leaves bare is a face of the core. The layer keeps its plated faces and
 // the material under it in `platingIface`, for the plating/bulk interface roughness
-// the mesh holds smooth (buildFaceDZ). null without plating cores.
+// the mesh holds smooth (buildFaceDZ). A core carries `coreOf`, the index of its layer,
+// so the plots draw the two as one conductor. null without plating cores.
 function meshedPlatingCR(cr) {
     const cores = cr.platingCores;
     if (!cores) return null;
@@ -298,13 +299,15 @@ function meshedPlatingCR(cr) {
         const role = cr.rectRoles[i], core = cores[i];
         if (!core) { rects.push(r); rectRoles.push(role); return; }
         const pl = role.plating;
+        const outer = rects.length;
         rects.push(r);
         const rqIface = pl.rq_interface ?? pl.rq ?? 0;
         const platingIface = rqIface > 0 ? { ...pl, rq: pl.rq ?? 0, rq_interface: rqIface,
             sigmaBulk: role.sigma || null } : null;
         rectRoles.push({ ...role, plating: null, sigma: pl.sigma, rq: pl.rq ?? 0, platingIface });
         for (const k of core) {
-            rects.push({ ...k, symmetry: r.symmetry, xmin_domain: r.xmin_domain, ymin_domain: r.ymin_domain, is_signal: r.is_signal });
+            rects.push({ ...k, symmetry: r.symmetry, xmin_domain: r.xmin_domain, ymin_domain: r.ymin_domain, is_signal: r.is_signal,
+                coreOf: outer });
             rectRoles.push({ ...role, plating: null });
         }
     });

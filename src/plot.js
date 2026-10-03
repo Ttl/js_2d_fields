@@ -598,8 +598,10 @@ function blockBox(b) {
 // Hover and color axis of triangle blocks drawn as an image (rasterizeDensity): invisible
 // markers at the centroids of at most HOVER_MAX triangles, a marker per triangle (~1e5 on
 // a skin mesh) makes every pan and zoom slow. blocks: { tris: [x0, y0, x1, y1, x2, y2,
-// ...] }, value(b, t) the color of triangle t of block b.
+// ...] }, value(b, t) the color of triangle t of block b. Once the view image is drawn
+// the markers move to its pixels (imageHover), which keeps the hover dense at any zoom.
 const HOVER_MAX = 5000;
+const IMAGE_HOVER = 'imageHover';
 function centroidHoverTrace(blocks, value, hovertemplate) {
     const n = blocks.reduce((a, b) => a + b.tris.length / 6, 0);
     const stride = Math.max(1, Math.ceil(n / HOVER_MAX));
@@ -615,7 +617,7 @@ function centroidHoverTrace(blocks, value, hovertemplate) {
     return {
         type: "scattergl", mode: "markers", x: mx, y: my,
         marker: { size: 4, opacity: 0, color: mv, coloraxis: "coloraxis" },
-        hovertemplate, showlegend: false,
+        hovertemplate, showlegend: false, meta: IMAGE_HOVER,
     };
 }
 
@@ -674,7 +676,8 @@ function fieldMeshContourTrace(M, limits) {
 // any zoom. Returns a layout image above the shapes of layer 'below' (the dielectric
 // fills) and under the traces (mesh overlay, contour lines), or null. bleed > 0 carries
 // the colors that many pixels into the empty pixels (the conductor holes of an |E| mesh).
-function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0) {
+// hover: the image also carries `hover`, see imageHover.
+function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0, hover = false) {
     if (!(w > 0 && h > 0)) return null;
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
@@ -686,7 +689,9 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0) {
     const sx = w / (xr[1] - xr[0]), sy = h / (yr[1] - yr[0]);
     const val = v => db ? (v > 0 ? 20 * Math.log10(v) : zmin) : v;
     let any = false;
+    const vals = hover ? new Float32Array(w * h).fill(NaN) : null;
     const put = (o, v) => {
+        if (vals) vals[o >> 2] = v;
         const c = LUT[Math.max(0, Math.min(255, Math.round((v - zmin) / span * 255)))];
         px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 255;
     };
@@ -721,8 +726,30 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0) {
     if (!any) return null;
     for (let pass = 0; pass < bleed; pass++) bleedPixels(px, w, h);
     ctx.putImageData(img, 0, 0);
-    return { source: canvas.toDataURL(), xref: 'x', yref: 'y', x: xr[0], y: yr[1],
-             sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer: 'below' };
+    const im = { source: canvas.toDataURL(), xref: 'x', yref: 'y', x: xr[0], y: yr[1],
+                 sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer: 'below' };
+    if (vals) im.hover = imageHover(vals, w, h, xr, yr);
+    return im;
+}
+
+// Hover markers { x, y, v } of an image: the drawn values vals (w x h pixels, NaN where
+// empty) on a square lattice of pixels over the axis ranges xr, yr (mm), at most
+// 2 HOVER_MAX of them over the drawn pixels and at most 4 device pixels apart.
+function imageHover(vals, w, h, xr, yr) {
+    let filled = 0;
+    for (let o = 0; o < vals.length; o++) if (vals[o] === vals[o]) filled++;
+    const step = Math.max(4, Math.ceil(Math.sqrt(filled / (2 * HOVER_MAX))));
+    const x = [], y = [], v = [];
+    for (let j = step >> 1; j < h; j += step) {
+        for (let i = step >> 1; i < w; i += step) {
+            const z = vals[j * w + i];
+            if (z !== z) continue;
+            x.push(xr[0] + (i + 0.5) * (xr[1] - xr[0]) / w);
+            y.push(yr[1] - (j + 0.5) * (yr[1] - yr[0]) / h);
+            v.push(z);
+        }
+    }
+    return { x, y, v };
 }
 
 // One pixel of bleed: every empty pixel of RGBA px (w x h) next to a filled one takes
@@ -818,7 +845,7 @@ function gridHoverTrace(blocks, value, hovertemplate) {
     return {
         type: "scattergl", mode: "markers", x: mx, y: my,
         marker: { size: 4, opacity: 0, color: mv, coloraxis: "coloraxis" },
-        hovertemplate, showlegend: false,
+        hovertemplate, showlegend: false, meta: IMAGE_HOVER,
     };
 }
 
@@ -857,7 +884,7 @@ function updateTriImage(container, get) {
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
         const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
         const im = rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
-            zmin, zmax, db, bleed);
+            zmin, zmax, db, bleed, true);
         const key = { values: blocks.map(b => b.Jv || b.Z), zmin, zmax, db, bleed };
         const bd = container._triBackdrop;
         const fresh = bd && bd.key.zmin === zmin && bd.key.zmax === zmax && bd.key.db === db && bd.key.bleed === bleed
@@ -879,7 +906,7 @@ function updateTriImage(container, get) {
 }
 
 // Sets the layout images of `container` to the backdrop and the view image (either may
-// be null), the view image on top. Plotly makes a new <image> element for an image that
+// be null), the view image on top, and the image hover markers to the view's. Plotly makes a new <image> element for an image that
 // moved, which the browser would decode a few frames late with the backdrop showing
 // meanwhile: the images are decoded first.
 const decodedImages = new WeakMap();
@@ -898,20 +925,12 @@ async function setTriImages(container, backdrop, view) {
     await Promise.all(images.map(decodeImage));
     if (token !== container._triImageToken) return;
     container._triImageUpdate = true;
-    getPlotly().relayout(container, { images })
-        .finally(() => { container._triImageUpdate = false; });
-}
-
-// A |J| block extended by a hair past each face with copies of its edge samples, so the
-// heatmap reaches the conductor outline without an antialiasing seam.
-function padBlock(b) {
-    const w = Math.abs(b.x[b.x.length - 1] - b.x[0]), h = b.y[b.y.length - 1] - b.y[0];
-    const pad = 2e-3 * Math.min(w, h);
-    const dir = b.x[b.x.length - 1] >= b.x[0] ? 1 : -1;
-    const x = [b.x[0] - dir * pad, ...b.x, b.x[b.x.length - 1] + dir * pad];
-    const y = [b.y[0] - pad, ...b.y, b.y[b.y.length - 1] + pad];
-    const rows = b.J.map(row => [row[0], ...row, row[row.length - 1]]);
-    return { x, y, J: [rows[0], ...rows, rows[rows.length - 1]] };
+    const layout = { images: images.map(({ hover, ...im }) => im) };
+    const ti = view && view.hover ? (container.data || []).findIndex(t => t.meta === IMAGE_HOVER) : -1;
+    const done = ti >= 0
+        ? getPlotly().update(container, { x: [view.hover.x], y: [view.hover.y], 'marker.color': [view.hover.v] }, layout, [ti])
+        : getPlotly().relayout(container, layout);
+    done.finally(() => { container._triImageUpdate = false; });
 }
 
 // Autoscale of |J|: the linear max is the level 95 % of the current flows below (the
@@ -1323,7 +1342,7 @@ function draw(resetZoom = false) {
         const blocks = getCurrentJ();
         const triBlocks = blocks.filter(b => b.tris);
         if (triBlocks.length) traces.push(densityHoverTrace(triBlocks, db));
-        gridImageBlocks = blocks.filter(b => !b.tris).map(b => densityGridBlock(padBlock(b)));
+        gridImageBlocks = blocks.filter(b => !b.tris).map(b => densityGridBlock(b));
         if (gridImageBlocks.length) traces.push(gridHoverTrace(gridImageBlocks,
             (b, j, i) => db ? (b.Z[j][i] > 0 ? 20 * Math.log10(b.Z[j][i]) : null) : b.Z[j][i],
             `x: %{x:.4f} mm<br>y: %{y:.4f} mm<br>|J|: %{marker.color:${db ? ".1f} dB(A/m²)" : ".4g} A/m²"}<extra></extra>`));
