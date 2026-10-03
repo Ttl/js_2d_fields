@@ -577,13 +577,25 @@ function applyText(newText, structural) {
 // An expression input. `commit` writes a new expression. `value` says how the evaluated
 // value is shown under the field: 'length' and 'number' when the field holds more than a
 // plain number, 'small' (roughness, plating thickness) always, in a unit that suits it.
+// Flags a field whose value holds ';' or '#', which the text cannot take in a value.
+function markStatementBreak(input, bad) {
+    input.classList.toggle('invalid', bad);
+    input.title = bad ? 'A value cannot contain ; or #.' : (input.dataset.title || '');
+}
+
 function exprInput(label, value, commit, { placeholder = '', cls = '', title = '', kind = 'length' } = {}) {
     const input = el('input', { type: 'text', class: `custom-expr ${cls}`, value: value ?? '', placeholder,
         title: title || undefined, spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off' });
     input.dataset.value = kind;
+    input.dataset.title = title;
     // Values in a statement cannot hold spaces ("1 um", "w + 2"): the text gets the
-    // value without them, the field keeps what was typed.
-    input.addEventListener('input', () => commit(input.value.replace(/\s+/g, '')));
+    // value without them, the field keeps what was typed. ';' and '#' would end the
+    // statement there, so such a value stays in the field only.
+    input.addEventListener('input', () => {
+        const bad = /[;#]/.test(input.value);
+        markStatementBreak(input, bad);
+        if (!bad) commit(input.value.replace(/\s+/g, ''));
+    });
     return el('label', { class: 'custom-cell' }, el('span', { class: 'custom-cell-label', text: label }),
         el('span', { class: 'custom-cell-field' }, input, el('span', { class: 'custom-cell-value' })));
 }
@@ -977,7 +989,7 @@ function newRectFields(kind, model, geo) {
     const k = LENGTH_UNITS[geo.units];
     // An n-gon or ellipse has no position and size fields to place a rectangle from.
     const drawn = model.statements.filter(s => s.type === 'rect' && !ROUND_KEYS[s.shape])
-        .map(st => ({ st, r: geo.rects.find(r => r.line === st.line && !r.image) }))
+        .map(st => ({ st, r: geo.rects.find(r => r.line === st.line && r.part === st.part && !r.image) }))
         .filter(o => o.r);
     const stacked = drawn.filter(o => Number.isFinite(o.r.y.max));
     const base = stacked.find(o => o.st.line === selectedLine)
@@ -1037,8 +1049,9 @@ function renderForm(model, geo) {
 
     // Rectangles.
     const rects = model.statements.filter(s => s.type === 'rect');
-    const byLine = new Map(geo.rects.filter(r => !r.image)
-        .map(r => [r.line, { ...r, scale: LENGTH_UNITS[geo.units], units: geo.units }]));
+    // Keyed by line and position on it: a line may hold several statements.
+    const byStatement = new Map(geo.rects.filter(r => !r.image)
+        .map(r => [`${r.line}:${r.part}`, { ...r, scale: LENGTH_UNITS[geo.units], units: geo.units }]));
     const adders = Object.entries(KIND_LABELS).map(([kind, label]) => {
         const b = el('button', { class: 'secondary-btn', text: `+ ${label}`,
             title: kind === 'diel' ? 'Adds a layer on top of the rectangle selected last, or on top of the stack'
@@ -1058,7 +1071,7 @@ function renderForm(model, geo) {
     form.append(el('div', { class: 'custom-form-section' },
         el('div', { class: 'custom-form-title', text: 'Shapes' },
             el('span', { class: 'custom-hint', text: '  Fields take expressions of the sidebar parameters: w/2, h1+h2, 35um. -inf / inf runs an edge to the boundary, a negative size flips the rectangle to the other side of its position. ⇋ mirror adds the mirror image about x=0. A later dielectric covers an earlier one. Trapezoids, n-gons, ellipses and rounded or hollow shapes need the full-wave solver.' })),
-        el('div', { class: 'custom-rect-list' }, ...rects.map((r, i) => rectRow(model, r, byLine.get(r.line), i, rects.length))),
+        el('div', { class: 'custom-rect-list' }, ...rects.map((r, i) => rectRow(model, r, byStatement.get(`${r.line}:${r.part}`), i, rects.length))),
         el('div', { class: 'custom-adders' }, ...adders)));
 
     if (pendingFocus) {
@@ -1357,8 +1370,12 @@ export function initCustomGeometryEditor({ onGeometryChange, onHighlightChange, 
     $('btn-custom-add-param').addEventListener('click', () => addParameter());
     DOMAIN_KEYS.forEach(key => {
         $(`custom_domain_${key}`).addEventListener('input', () => {
-            // Values in a statement cannot hold spaces, an empty field is automatic.
-            const values = DOMAIN_KEYS.map(k => $(`custom_domain_${k}`).value.replace(/\s+/g, '') || 'auto');
+            // Values in a statement cannot hold spaces, an empty field is automatic, and
+            // ';' or '#' would end the statement.
+            const inputs = DOMAIN_KEYS.map(k => $(`custom_domain_${k}`));
+            inputs.forEach(i => markStatementBreak(i, /[;#]/.test(i.value)));
+            if (inputs.some(i => /[;#]/.test(i.value))) return;
+            const values = inputs.map(i => i.value.replace(/\s+/g, '') || 'auto');
             const stmt = values.every(v => v === 'auto') ? 'domain auto' : `domain ${values.join(' ')}`;
             text.value = setStatementInText(text.value, 'domain', stmt);
             scheduleChange('sidebar');

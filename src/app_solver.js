@@ -499,7 +499,7 @@ function settingsFromURL(encoded) {
         const json = decodeURIComponent(atob(encoded));
         return JSON.parse(json);
     } catch (e) {
-        log('Failed to parse URL parameters:', e);
+        log(`Failed to parse URL parameters: ${(e && e.message) || e}`);
         return null;
     }
 }
@@ -693,16 +693,38 @@ async function encodeLongSettings(settings) {
     return 'z.' + btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+// Largest decompressed link accepted. A geometry text is a few kB, while a crafted link
+// of a few kB can inflate to gigabytes.
+const MAX_LINK_BYTES = 1 << 20;
+
+// Reads a stream into bytes, giving up past `limit` bytes.
+async function streamBytesCapped(stream, limit) {
+    const reader = stream.getReader(), chunks = [];
+    let n = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        n += value.length;
+        if (n > limit) { reader.cancel().catch(() => {}); throw new Error(`the link decompresses to more than ${limit} bytes`); }
+        chunks.push(value);
+    }
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.length; }
+    return out;
+}
+
 async function decodeLongSettings(encoded) {
     if (!encoded.startsWith('z.')) return settingsFromURL(encoded);
     try {
         const b64 = encoded.slice(2).replace(/-/g, '+').replace(/_/g, '/');
         const bin = atob(b64 + '='.repeat((4 - b64.length % 4) % 4));
         const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
-        const out = await streamBytes(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw')));
+        const out = await streamBytesCapped(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw')),
+            MAX_LINK_BYTES);
         return JSON.parse(new TextDecoder().decode(out));
     } catch (e) {
-        log('Failed to parse URL parameters:', e);
+        log(`Failed to parse URL parameters: ${(e && e.message) || e}`);
         return null;
     }
 }
@@ -761,6 +783,9 @@ async function loadSettingsFromFragment() {
     const settings = await decodeLongSettings(m[1]);
     if (!settings || !restoreSettings(settings)) return;
     log('Settings restored from URL');
+    // The link has been applied: without it in the address bar a reload keeps the
+    // edits made since (the session copy of the geometry) instead of the link's text.
+    history.replaceState(null, '', window.location.pathname + window.location.search);
     updateGeometry();
     draw(true);
     updateSweepParamList();

@@ -65,9 +65,10 @@ const BOUND_VALUES = ['open', 'gnd'];
 // Order of the bounds values.
 export const WALLS = ['left', 'right', 'top', 'bottom'];
 const RESERVED = new Set(['inf', 'auto', 'min', 'max', 'abs', 'sqrt']);
-const FUNCTIONS = {
+// No prototype: a name like constructor or toString is not a function of the format.
+const FUNCTIONS = Object.assign(Object.create(null), {
     min: Math.min, max: Math.max, abs: Math.abs, sqrt: Math.sqrt,
-};
+});
 // Shape words after the kind. A rectangle has none ('rect' may be written).
 const SHAPES = ['rect', 'trap', 'ngon', 'ellipse'];
 const RECT_KEY_ORDER = ['x', 'w', 'y', 'h', 'r', 'r_in', 'rx', 'ry', 'rx_in', 'ry_in', 'n', 'rot', 'angle', 'angle2',
@@ -869,7 +870,7 @@ export function evaluateGeometry(model, overrides = {}) {
         if (s.type !== 'rect') continue;
         try {
             const f = s.fields;
-            const r = { kind: s.kind, line: s.line, shape: null,
+            const r = { kind: s.kind, line: s.line, part: s.part, shape: null,
                 er: 1, tand: 0, thin: false, plating: null, sigma: null, rq: null, platingMaterial: null, color: null };
             if (s.shape || f.radius !== undefined || f.radius_bottom !== undefined || f.wall !== undefined) {
                 Object.assign(r, evalShape(s, f, len, num));
@@ -1084,7 +1085,9 @@ export function solverToGeometryText(solver, { units = 'm', pinWalls = false } =
     }
     for (const c of (solver.conductors || [])) {
         const kind = c.is_signal ? (c.polarity < 0 ? 'sig-' : 'sig+') : 'gnd';
-        const faces = c.plating ? PLATING_FACES.filter(f => c.plating[f]) : [];
+        // A plating of no thickness or conductivity has no effect and writes nothing.
+        const real = c.plating && c.plating.sigma > 0 && c.plating.thickness > 0;
+        const faces = real ? PLATING_FACES.filter(f => c.plating[f]) : [];
         let extra = (c.sigma !== undefined && c.sigma !== null) ? ` sigma=${c.sigma}` : '';
         if (c.rq !== undefined && c.rq !== null) extra += ` rq=${fmtSmall(c.rq)}`;
         if (faces.length) {
@@ -1113,7 +1116,8 @@ export function coaxToGeometryText(solver, units) {
     const R = polyRadiusForArea;
     const { a, b, n_inner: ni, n_outer: no } = solver;
     const c = b + solver.shield_thickness;
-    const pl = solver.plating;
+    // A plating of no thickness or conductivity has no effect and writes nothing.
+    const pl = solver.plating && solver.plating.sigma > 0 && solver.plating.thickness > 0 ? solver.plating : null;
     const plated = which => (pl && pl[which] ? ' plating=all' : '');
     const lines = [
         `# Inner diameter ${fmt(2 * a)}, dielectric diameter ${fmt(2 * b)}, shield thickness ${fmt(c - b)} ${units}.`,

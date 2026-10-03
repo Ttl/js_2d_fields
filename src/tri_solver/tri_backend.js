@@ -3175,10 +3175,13 @@ export class TriBackend {
                 // X_total/omega would only be right for delta well below the
                 // conductor thickness (Zs = Rs(1+j)); a film thinner than delta has
                 // R/omega orders of magnitude above its true internal inductance.
+                // Keyed by the drive too: the mode currents of an asymmetric pair follow
+                // the frequency with causal materials.
                 const pc = mqsOpts.cache;
-                if (!(pc.pecMesh === mqsMesh && pc.pecMode === mode)) {
+                const pecKey = `${mode}|${mqsOpts.modeCurrents ? mqsOpts.modeCurrents.join(',') : ''}`;
+                if (!(pc.pecMesh === mqsMesh && pc.pecMode === pecKey)) {
                     pc.Lpec = mqsPecInductance(mqsMesh, crM, this.ctx.helpers.solveSparseMulti, mqsOpts);
-                    pc.pecMesh = mqsMesh; pc.pecMode = mode;
+                    pc.pecMesh = mqsMesh; pc.pecMode = pecKey;
                 }
                 L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
                 st.mqsSurface = { f, L: mqs.L_surface };

@@ -976,6 +976,7 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
     background: var(--panel-color); border: 1px solid var(--border-color); border-radius: 4px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5); }
 #custom-form input.custom-color-hex { width: 76px; padding: 4px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 #custom-form input.custom-color-hex.invalid { border-color: #f44336; }
+#custom-form input.custom-expr.invalid, #custom-params input.invalid { border-color: #f44336; }
 .custom-cell-value { position: absolute; top: 100%; left: 2px; right: -40px; margin-top: 1px; color: var(--text-muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 12px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }

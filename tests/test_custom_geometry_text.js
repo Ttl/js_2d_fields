@@ -307,6 +307,24 @@ sig+ x=-0.15 w=0.3 y=0.2 h=0.035 rq=0.0015 plating=top,sides
         && close(back.plating.thickness, 5e-6, 1e-9) && close(back.plating.rq, 0.2e-6, 1e-9));
 }
 
+// A plating switched on with zero thickness has no effect: conversion writes no
+// plating instead of failing on the missing plating statement.
+{
+    const { MicrostripSolver } = await import('../src/microstrip.js');
+    const { CoaxSolver } = await import('../src/coax.js');
+    const plating = { sigma: 1e7, thickness: 0, rq: 0, top: true, sides: true, bottom: false, inner: true };
+    let text = null, err = null;
+    try {
+        text = solverToGeometryText(new MicrostripSolver({ substrate_height: 0.2e-3, trace_width: 0.3e-3,
+            trace_thickness: 35e-6, epsilon_r: 4.3, plating }), { units: 'mm', pinWalls: true });
+    } catch (e) { err = e.message; }
+    check('conversion with a zero-thickness plating writes no plating', text !== null && !/plating/.test(text)
+        && parseAndEvaluate(text).errors.length === 0, err || text);
+    let coax = null;
+    try { coax = new CoaxSolver({ inner_diameter: 0.6e-3, dielectric_diameter: 2e-3, epsilon_r: 2.1, plating }); } catch (e) { err = e.message; }
+    check('a coax with a zero-thickness plating builds unplated', coax && coax.conductors.every(c => !c.plating), err);
+}
+
 // --- Change of units ---
 {
     const text = `units mm

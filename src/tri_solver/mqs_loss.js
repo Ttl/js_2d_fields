@@ -900,7 +900,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     let wallS2 = 0;
     // Per-face plating weights (∮|K|²dl and Σ Re/Im(Zs)·|K|²dl) over the ground and
     // conductor surfaces, used below to scale the smooth loss per face.
-    let gndS = 0, gndZreS = 0, gndZimS = 0;
+    // gndDXS: the reactance increment Im(Zs) - Rs of each segment against its own metal.
+    let gndS = 0, gndZreS = 0, gndDXS = 0;
     // Fallback for a caller with no wall map: bottom is ground on every
     // geometry the mesher builds, top came from opts.topGround, sides skipped.
     const wp = opts.wallPEC || { bottom: true, top: !!opts.topGround };
@@ -985,7 +986,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             wS2[wall] += K2 * GL3w[q] * L;
             if (Zg) {
                 const Sseg = G2[q] * GL3w[q] * L;   // ∝ |K|² (global factors cancel in the ratio)
-                gndS += Sseg; gndZreS += Zg.re * Sseg; gndZimS += Zg.im * Sseg;
+                gndS += Sseg; gndZreS += Zg.re * Sseg; gndDXS += (Zg.im - RsW) * Sseg;
             }
         }
     }
@@ -1040,11 +1041,13 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 Sseg += G2[q] * GL3w[q] * L;
             }
             if (opts.surfaceZs) {
-                // Weighted against the wall metal like the walls: Zs relative to the rect's own Rs.
+                // Weighted against the wall metal like the walls: Zs relative to the rect's
+                // own Rs for R. The reactance increment is against its own Rs.
                 const sR = pre.sRelRect ? pre.sRelRect[ri] : 1;
                 const Zs = opts.surfaceZs((x0 + x1) / 2, (y0 + y1) / 2, horiz ? 'h' : 'v');
-                const k = RsW * Math.sqrt(sR) / Rs;
-                gndS += Sseg; gndZreS += Zs.re * k * Sseg; gndZimS += Zs.im * k * Sseg;
+                const RsR = Rs / Math.sqrt(sR), k = RsW / RsR;
+                gndS += Sseg; gndZreS += Zs.re * k * Sseg;
+                gndDXS += (Zs.im - RsR) * Sseg;
             }
         }
         for (let ri = 0; ri < nR; ri++) {
@@ -1214,7 +1217,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         });
         if (sigS > 0) PsiR = sigPsi / sigS;
         if (gndS > 0) {
-            X_gw = X_gw_smooth + (gndZimS / gndS - RsW) * 2 * sym * wallS2;
+            X_gw = X_gw_smooth + gndDXS / gndS * 2 * sym * wallS2;
             R_gw *= gndZreS / (RsW * gndS);
         } else if (!opts.surfaceZs && Rq > 0) {
             const Zs = calculate_Zrough(freq, sigmaW, Rq);
@@ -1234,8 +1237,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             R_gr *= psiR;
         }
         if (gndS > 0) {
-            const psiR = gndZreS / (RsW * gndS), psiX = gndZimS / (RsW * gndS);
-            X_gw = X_gw_smooth + RsW * (psiX - 1) * 2 * sym * wallS2;
+            const psiR = gndZreS / (RsW * gndS);
+            X_gw = X_gw_smooth + gndDXS / gndS * 2 * sym * wallS2;
             R_gw *= psiR;
         }
     } else if (Rq > 0) {

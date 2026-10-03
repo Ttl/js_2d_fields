@@ -229,6 +229,18 @@ check('a form field edit rewrites its statement and keeps the focus', /sig\+\s+x
 check('the edited row is outlined and the preview follows', afterCell.hl === 1 && afterCell.width.includes(0.7), afterCell.width.join());
 await wCell.fill('w');
 await page.waitForTimeout(600);
+// ';' and '#' would end the statement: the field is flagged and the text keeps its value.
+{
+    const before = await geomText();
+    await wCell.fill('w#2');
+    await page.waitForTimeout(600);
+    check('a form value with # is flagged and not written', await geomText() === before
+        && await wCell.evaluate(i => i.classList.contains('invalid')));
+    await wCell.fill('w');
+    await page.waitForTimeout(600);
+    check('and the flag clears with a valid value', await geomText() === before
+        && !(await wCell.evaluate(i => i.classList.contains('invalid'))));
+}
 
 // A click on the row itself, outside its fields, outlines the rectangle too.
 await page.locator('#custom-form .custom-rect-row.kind-gnd').click({ position: { x: 12, y: 2 } });
@@ -479,7 +491,23 @@ const restored = await page2.evaluate(() => ({
 }));
 check('the link restores the geometry text', restored.type === 'custom' && restored.text === good.replace('wgnd = 2', 'wgnd = 0.5')
     && restored.wgnd === '0.5', JSON.stringify(restored).slice(0, 200));
+check('the applied link leaves the address bar, so a reload keeps later edits', !/#params=/.test(page2.url()), page2.url());
 await page2.close();
+
+// A link that inflates far past any geometry is refused, not decompressed into memory.
+{
+    const { deflateRawSync } = await import('zlib');
+    const bomb = 'z.' + deflateRawSync(Buffer.alloc(64 << 20, 32)).toString('base64')
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const pb = await browser.newPage();
+    await pb.goto(`${URL}#params=${bomb}`, { waitUntil: 'networkidle' });
+    await pb.waitForTimeout(1500);
+    const st = await pb.evaluate(() => ({ type: document.getElementById('tl_type').value,
+        log: document.getElementById('console_out').textContent }));
+    check('an oversized link is refused', st.type === 'microstrip' && /Failed to parse URL parameters: the link decompresses to more than/.test(st.log),
+        st.log.split('\n').filter(l => /URL/.test(l)).join(' | '));
+    await pb.close();
+}
 
 // The same link applied to a running page (pasted into its address bar: only the hash
 // changes) after a solve of the native type. Two geometry draws in one tick used to

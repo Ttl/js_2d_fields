@@ -194,7 +194,9 @@ async function jobSimulate({ params, frequencies, opts }) {
     // so a run that ends without the plot fields returns these. Quasi-static fields do not
     // depend on frequency and are shown while the sweep runs; full-wave ones are the
     // static field, not the field at the plot frequency, so the plot waits for the end.
-    solver.fieldFreq = maxFreq;
+    // The full-wave ones belong to no frequency: a failed plot below leaves them with
+    // the frequency unset, so a later request at f_max plots again.
+    solver.fieldFreq = solver.mesh_backend !== 'triangular' ? maxFreq : null;
     const fieldsAtMax = fieldPayload(solver);
     const liveFields = solver.mesh_backend !== 'triangular' ? fieldsAtMax : undefined;
     post({ id: currentId, type: 'partial', fields: liveFields,

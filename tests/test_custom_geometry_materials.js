@@ -10,6 +10,8 @@
 //   5. a pair with a different metal or finish on its two traces leaves the half domain
 //      (the fields mirror, the loss does not) and reads the mean of the two uniform
 //      pairs, whichever trace carries which
+//   6. full-wave, a rough ground reaching the open domain edge (the ideal-ground path
+//      at low frequency): sigma on every conductor = the solver-wide sigma, L included
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { parseAndEvaluate, solverToGeometryText } from '../src/custom_geometry_text.js';
 import { check, quiet, rel, APP, done } from './helpers.js';
@@ -151,6 +153,21 @@ for (const [name, extra] of BACKENDS) {
     const triMixed = build(pair(A, B), { mesh_backend: 'triangular' });
     await quiet(() => triMixed.solve_adaptive(SOLVE));
     check('full-wave: different finishes solve on the full domain', triMixed._triBackend.symmetry === false);
+}
+
+// --- 6. ideal ground of its own metal ---
+{
+    const geo = own => 'units mm\nbounds open open open open\ndiel x=-inf w=inf y=0 h=0.2 er=4\n'
+        + `sig+ x=-0.15 w=0.3 y=0.2 h=0.035${own}\ngnd x=-inf w=inf y=-0.035 h=0.035 rq=2um${own}\n`;
+    const run = async (own, sc) => {
+        const s = new CustomGeometrySolver({ text: geo(own), nx: 30, ny: 30, freq: 3e6, sigma_cond: sc, mesh_backend: 'triangular' });
+        s.use_causal_materials = false;
+        return (await quiet(() => s.solve_adaptive(APP))).modes[0];
+    };
+    const a = await run('', 1e7), b = await run(' sigma=1e7', 5.8e7);
+    check('full-wave ideal rough ground of its own sigma: R and L match the solver-wide sigma',
+        rel(a.RLGC.R, b.RLGC.R) < 1e-6 && rel(a.L_internal, b.L_internal) < 1e-6,
+        `R ${a.RLGC.R.toFixed(4)} / ${b.RLGC.R.toFixed(4)}, Lint ${(a.L_internal * 1e9).toFixed(3)} / ${(b.L_internal * 1e9).toFixed(3)} nH/m`);
 }
 
 done();
