@@ -79,9 +79,19 @@ function phaseEpsEff(Zser, Ysh, omega) {
 // setting — letting both backends accept the same max_nodes value (UI: Max Nodes
 // (thousands)). Without this the eigensolve can be handed an unbounded mesh (seen: a
 // 62k-triangle modes mesh) and the eigensolver heap-abort()s with an opaque assertion.
+//
+// Above roughly 100k Max Nodes the budget would let the mesh past the eigensolve
+// memory guard (MAX_SOLVE_BYTES): every eigensolve then fails and the result falls
+// back to the static eps_eff. So the budget is also capped at the triangle count the
+// guard admits, from the measured eigensolve bytes per triangle (EIG_BYTES_PER_TRI).
+// plainPencil: the Modes tab and waveguide solves assemble the ungauged pencil, which
+// carries 1/GAUGED_NNZ_SCALE more entries per triangle.
 const FW_NODES_PER_TRI = 4;
-function maxTrisForBudget(maxNodes) {
-    return Math.max(800, Math.floor((maxNodes || 18000) / FW_NODES_PER_TRI));
+function maxTrisForBudget(maxNodes, plainPencil = false) {
+    return Math.max(800, Math.min(maxSolveTris(plainPencil), Math.floor((maxNodes || 18000) / FW_NODES_PER_TRI)));
+}
+function maxSolveTris(plainPencil = false) {
+    return Math.floor(MAX_SOLVE_BYTES * (plainPencil ? GAUGED_NNZ_SCALE : 1) / EIG_BYTES_PER_TRI);
 }
 
 // Absolute backend ceiling, mirroring the FDM solver's "Problem too large" guard
@@ -102,6 +112,9 @@ function eigenSolveBytes(N, fem, nnzScale = 1) {
     return 2 * 10 * (12 * nnz + 20 * N);
 }
 const GAUGED_NNZ_SCALE = 1 / 1.2;
+// Gauged eigensolve estimate per triangle: 34-41 kB on microstrip, differential, GCPW
+// and coax meshes of 300 to 27k triangles, creeping up with size (test_dev/eig_bytes.mjs).
+const EIG_BYTES_PER_TRI = 42e3;
 
 // ---- WASM context (lazy singleton) ----
 let _ctxPromise = null;
@@ -669,8 +682,11 @@ function fullwaveMode(ctx, mesh, fm, abc, condRect, epsMap, f, phiEps, eps_stati
     // Absolute ceiling (mirrors the FDM "Problem too large" guard): refuse a solve that
     // would overrun the eigensolver heap with a clear error rather than an opaque abort().
     // The triangle budget keeps normal solves well under this; this backstops misuse.
-    if (eigenSolveBytes(N, fem, GAUGED_NNZ_SCALE) > MAX_SOLVE_BYTES)
-        throw new Error(`Problem too large for the full-wave solver (~${(eigenSolveBytes(N, fem, GAUGED_NNZ_SCALE) / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
+    const solveBytes = eigenSolveBytes(N, fem, GAUGED_NNZ_SCALE);
+    if (cache) cache.solveBytes = solveBytes;
+    if (globalThis.__EIG_BYTES__) globalThis.__EIG_BYTES__.push([mesh.nTris, solveBytes]);
+    if (solveBytes > MAX_SOLVE_BYTES)
+        throw new Error(`Problem too large for the full-wave solver (~${(solveBytes / 1e9).toFixed(1)} GB). Reduce Max Nodes or the domain/frequency.`);
     // solveGeneralized throws on solver failure (negative return code) — let it
     // propagate so the caller can warn. nconv === 0 (nothing converged) → null.
     // The shift sits a little off epsRef. A sweep guesses epsRef from a neighbouring
@@ -1267,7 +1283,9 @@ export class TriBackend {
         // high modesFreq → fine bulk), coarsen hFine/hCoarse by √(nTris/budget) and rebuild.
         // The refinement loop below also stops at this budget; capping the initial mesh too is
         // what prevents the very first eigensolve from running on an unbounded mesh.
-        const maxTris = maxTrisForBudget(this.opts.maxNodes ?? 18000);
+        const plainPencil = !!this.opts.modesFreq || this._isWG;
+        const maxTris = maxTrisForBudget(this.opts.maxNodes ?? 18000, plainPencil);
+        const solveTris = maxSolveTris(plainPencil);
         const nearField = this._nearFieldCap(hCoarse, maxTris);
         this.nearField = nearField;
         if (nearField) hCoarse = nearField.bulk;
@@ -1372,7 +1390,7 @@ export class TriBackend {
             // accepted at, say, 1.2x budget is still accepted identically rather than
             // paying a rebuild with relaxed grounds (keeps the meshes of every family
             // that never over-runs badly bit-for-bit unchanged).
-            if (mesh.nTris < maxTris * OVERSHOOT_OK) break;
+            if (mesh.nTris < maxTris * OVERSHOOT_OK && mesh.nTris <= solveTris) break;
             // Ground relaxation first (only when there are relaxable ground curves and
             // headroom below the hCoarse cap). Element count along a painted curve is
             // ~1/size, so scale by the overshoot, +5% to land under. If a relaxation
@@ -1506,6 +1524,13 @@ export class TriBackend {
                 let fw = null;
                 const femCache = {};
                 try { fw = fullwaveMode(this.ctx, mesh, fm, this._eigenAbc(abc, mesh.epsMap), this.condRect, mesh.epsMap, fRef, phiEps, eps_static, femCache); } catch { fw = null; }
+                // Far above the quasi-TEM regime (1 THz microstrip) the modes nearest the
+                // static shift can all be surface-wave modes: walk the shift ladder.
+                if (!fw) {
+                    const floating = this._eigenRadiates(abc, mesh.epsMap);
+                    const pseudo = { fm, abc, femCache: floating ? {} : femCache, femCacheAbc: floating ? femCache : {} };
+                    try { fw = this._eigenPick(pseudo, fRef, phiEps, eps_static, null, mesh).fw; } catch { fw = null; }
+                }
                 if (!fw) buildNote('refine-eigen', 'The full-wave eigensolve failed on a mesh refinement pass: that pass ' +
                     'refined on the static field alone, without the H-field metric of the loss.');
                 passWork.byMode[rm] = { fm, phiEps, phiAir, W_eps, W_air, femCache, fw, fRef, epsMap: mesh.epsMap };
@@ -1601,6 +1626,11 @@ export class TriBackend {
                 convergedCount = 0;   // gate was optimistic — keep refining
             }
             if (it === maxIters || projTris > maxTris) break;
+            // The same projection against the eigensolve memory guard, from this pass's
+            // own estimate: the per-triangle cost varies with the geometry.
+            let passBytes = 0;
+            for (const w of Object.values(passWork.byMode)) passBytes = Math.max(passBytes, (w.femCache && w.femCache.solveBytes) || 0);
+            if (projTris * passBytes / mesh.nTris > MAX_SOLVE_BYTES) break;
             const marked = markTrianglesForRefinement(metric, refineFrac);
             const refined = refineTriMesh(mesh, marked);
             refined.condRect = this.condRect;
@@ -2388,8 +2418,9 @@ export class TriBackend {
         return this._groundsFloat(abc) && this._fillInhomogeneous(epsMap);
     }
 
-    _eigenPick(st, f, phiEps, eps_eff_static, epsGuess = null) {
-        const { mesh } = this, cr = this.condRect, fm = st.fm;
+    // mesh: a refinement pass picks on its own mesh (this.mesh is set after the loop).
+    _eigenPick(st, f, phiEps, eps_eff_static, epsGuess = null, mesh = this.mesh) {
+        const cr = this.condRect, fm = st.fm;
         const floating = this._eigenRadiates(st.abc, mesh.epsMap);
         const tryShift = (epsShift, nev) => {
             let fw = null, fwErr = null;

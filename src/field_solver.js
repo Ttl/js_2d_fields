@@ -712,7 +712,11 @@ export class FieldSolver2D {
             // unsolvable is an electrically-large field region: a coarse background plus a
             // wavelength-resolved active patch that exceeds the triangle budget.
             const FW_NODES_PER_TRI = 4;
-            const triBudget = Math.max(800, maxNodes / FW_NODES_PER_TRI);
+            // Capped like TriBackend's maxTrisForBudget at what the eigensolve memory
+            // guard admits (1 GB at ~42 kB per triangle, 1.2x that for the Modes pencil).
+            const solveTris = Math.floor(1e9 / 42e3 / (modesOpts ? 1.2 : 1));
+            const triBudget = Math.max(800, Math.min(solveTris, maxNodes / FW_NODES_PER_TRI));
+            const memCapped = maxNodes / FW_NODES_PER_TRI > solveTris;
             // Background floor is optimistic (cells ~half the thin domain dimension):
             // the mesher grades field-free air far coarser than the geomCoarse used for
             // the FDM line estimate, so min(W,H)/5 falsely rejected high-aspect (wide,
@@ -747,7 +751,8 @@ export class FieldSolver2D {
                 throw new Error(
                     `Geometry cannot be meshed for the full-wave (triangular) solver within the node budget: ` +
                     `${triCause}, needing ~${Math.round(tris).toLocaleString()} triangles vs a budget of ` +
-                    `${Math.round(triBudget).toLocaleString()} (Max Nodes ${maxNodes.toLocaleString()}). To proceed, ${triRemedy}.`);
+                    `${Math.round(triBudget).toLocaleString()} (${memCapped ? 'the full-wave solver memory limit' : `Max Nodes ${maxNodes.toLocaleString()}`}). ` +
+                    `To proceed, ${memCapped ? triRemedy.replace(/, or raise Max Nodes$/, '').replace(/, (?=[^,]*$)/, ' or ') : triRemedy}.`);
             }
         } else {
             // Rectilinear tensor grid: nodes = nx·ny. The coarse geometric cell sets the

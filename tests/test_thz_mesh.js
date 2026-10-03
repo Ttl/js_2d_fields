@@ -22,6 +22,9 @@
 //      the near-field patch is kept on its own (the cap used to be dropped, leaving 455
 //      triangles), and the plotted |E| above the trace follows the mode (~2e-5 of the
 //      substrate field) instead of the static-minus-reference mesh mismatch (~1e-2).
+//   T8 a large Max Nodes (160k) at 1 THz: the triangle budget is capped at what the
+//      eigensolve memory guard admits; it used to refine to 26.7k triangles, trip the
+//      1 GB guard and fall back to the static eps_eff (3.19).
 //
 // Run: node tests/test_thz_mesh.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -158,6 +161,17 @@ const THIN = { trace_width: 0.15e-3, substrate_height: 0.1e-3, tan_delta: 0.002 
     const above = [25e-6, 100e-6, 200e-6].map(d => at(pf, 0, top + d) / sub);
     check('plotted |E| above the trace < 1e-4 of the substrate field', above.every(v => v < 1e-4), above.map(v => v.toExponential(1)).join(' '));
     check('and decays away from the trace', above[0] > above[1] && above[1] > above[2]);
+}
+
+// T8
+{
+    console.log('T8 1 THz at 160k Max Nodes: mesh held under the eigensolve memory guard');
+    const s = ms({ freq: 1e12 });
+    const r = await quiet(() => s.solve_adaptive({ ...APP, max_nodes: 160000 }));
+    const tb = await s._ensureTriBackend();
+    const warns = (s.modeWarnings || []).map(w => w.reason || w.type);
+    check('no eigensolve fallback or failed refinement pass', !warns.includes('eigensolve') && !warns.includes('refine-eigen'), warns.join(',') || 'none');
+    check('eps_eff dispersed (> 4.3)', r.modes[0].eps_eff > 4.3, `${r.modes[0].eps_eff.toFixed(4)}, ${tb.mesh.nTris} tris`);
 }
 
 done();
