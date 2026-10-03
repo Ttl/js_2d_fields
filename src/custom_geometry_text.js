@@ -397,16 +397,37 @@ export function setParamInText(text, name, expr) {
     }), true) ?? text;
 }
 
+// A parameter definition: nothing but a name before the first '='.
+const PARAM_DEF = /^(\s*)([A-Za-z_][A-Za-z_0-9]*)(\s*=)(.*)$/s;
+
 // Renames parameter `from` to `to`: its definition and every expression that uses it.
-// Field keys (the w of w=...) and comments are left alone.
+// Only expressions change: statement words (gnd, domain, ...), field keys (the w of
+// w=...), the face list of plating=, colors and comments are left alone, so a parameter
+// may share its name with any of them. Values hold no whitespace, so a statement splits
+// into words on it.
 export function renameParamInText(text, from, to) {
     const ident = new RegExp(`(?<![A-Za-z_0-9.])${from}(?![A-Za-z_0-9])`, 'g');
-    const keyed = new RegExp(`(?<![A-Za-z_0-9.])${from}(?![A-Za-z_0-9])(?!\\s*=)`, 'g');
+    const expr = e => e.replace(ident, to);
+    // Field values: key=value words, except the non-expression keys.
+    const fieldValue = w => w.replace(/^([A-Za-z_][A-Za-z_0-9]*=)(.*)$/s,
+        (m, key, v) => (key === 'plating=' || key === 'color=' ? m : key + expr(v)));
     return editStatements(text, parts => {
         parts.forEach((part, k) => {
-            // A parameter definition has a bare name left of the first '='.
-            const isParam = /^\s*[A-Za-z_][A-Za-z_0-9]*\s*=/.test(part);
-            parts[k] = part.replace(isParam ? ident : keyed, to);
+            const def = PARAM_DEF.exec(part);
+            if (def) {
+                parts[k] = def[1] + (def[2] === from ? to : def[2]) + def[3] + expr(def[4]);
+                return;
+            }
+            const words = part.split(/(\s+)/);
+            const head = words.find(w => w.trim());
+            if (head === 'units' || head === 'bounds') return;
+            let seenHead = false;
+            parts[k] = words.map(w => {
+                if (!w.trim()) return w;
+                if (!seenHead) { seenHead = true; return w; }
+                // The domain values are bare expressions, everything else key=value.
+                return head === 'domain' ? expr(w) : fieldValue(w);
+            }).join('');
         });
         return true;
     });
@@ -461,12 +482,13 @@ export function moveRectInText(text, model, st, dir) {
 // Replaces the first statement starting with `keyword` (bounds, domain, units, plating)
 // by `statement`, or inserts it after the units line (at the top without one).
 export function setStatementInText(text, keyword, statement) {
-    const starts = s => s.trim() === keyword || s.trim().startsWith(keyword + ' ');
+    // A parameter of the same name (domain = 3) is not the statement.
+    const startsWith = (s, word) => !PARAM_DEF.test(s) && (s.trim() === word || s.trim().startsWith(word + ' '));
     let unitsLine = -1;
     const out = editStatements(text, (parts, comment, i) => {
-        const k = parts.findIndex(starts);
+        const k = parts.findIndex(s => startsWith(s, keyword));
         if (k < 0) {
-            if (unitsLine < 0 && parts.some(s => s.trim().startsWith('units '))) unitsLine = i;
+            if (unitsLine < 0 && parts.some(s => startsWith(s, 'units'))) unitsLine = i;
             return false;
         }
         parts[k] = /^\s*/.exec(parts[k])[0] + statement + (k < parts.length - 1 || !comment ? '' : '  ');

@@ -108,12 +108,14 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
 // Coordinate tolerance for the x=0 mirror tests below (relative to the domain width).
 const symTol = (domainW) => domainW * 1e-6;
 
-// Metal and surface finish of a conductor as a comparable string: plating material and
-// faces, own roughness, own conductivity.
+// Metal and surface finish of a conductor as a comparable string: plating material,
+// interface roughness (left out it is the plating roughness) and faces, own roughness,
+// own conductivity.
 export function conductorFinishKey(c) {
     const p = c.plating;
     const plated = p && p.sigma > 0 && (p.top || p.sides || p.bottom || p.all);
-    return (plated ? `${p.sigma}:${p.thickness}:${p.rq ?? 0}:${!!p.top}${!!p.sides}${!!p.bottom}${!!p.all}${!!p.thick_corners}` : '-')
+    return (plated ? `${p.sigma}:${p.thickness}:${p.rq ?? 0}:${p.rq_interface ?? p.rq ?? 0}:`
+        + `${!!p.top}${!!p.sides}${!!p.bottom}${!!p.all}${!!p.thick_corners}` : '-')
         + '|' + (c.rq ?? '') + '|' + (c.sigma ?? '');
 }
 

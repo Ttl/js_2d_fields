@@ -264,6 +264,31 @@ check('mirrored rectangles painted asymmetrically use the full domain', sBad.sym
     check('the renamed geometry evaluates the same', b.errors.length === a.errors.length
         && JSON.stringify(b.rects.map(r => [r.x, r.y])) === JSON.stringify(a.rects.map(r => [r.x, r.y])));
 }
+// A parameter may share its name with a statement word, a plating face or a shape:
+// renaming it changes only expressions.
+{
+    const src = 'units mm\ntop = 0.3; gnd = 1; domain = 3; ngon = 0.1\nbounds open open open gnd\n'
+        + 'domain -domain domain auto auto\nplating sigma=1e7 t=top/100\n'
+        + 'diel x=-inf w=inf y=0 h=gnd er=4\nsig+ x=-top/2 w=top y=gnd h=0.035 plating=top,sides color=#abc\n'
+        + 'gnd ngon x=0 y=-2 r=ngon n=8\ngnd x=-gnd w=2*gnd y=-0.035 h=0.035';
+    const ok = (from, to) => {
+        const out = renameParamInText(src, from, to);
+        const a = parseAndEvaluate(src), b = parseAndEvaluate(out);
+        return { out, same: a.errors.length === 0 && b.errors.length === 0
+            && JSON.stringify(b.rects.map(r => [r.x, r.y, r.kind])) === JSON.stringify(a.rects.map(r => [r.x, r.y, r.kind])) };
+    };
+    const top = ok('top', 'wt'), gnd = ok('gnd', 'hs'), dom = ok('domain', 'dw'), ng = ok('ngon', 'rr');
+    check('renaming a parameter named top keeps plating=top,sides', top.same && /plating=top,sides/.test(top.out)
+        && /t=wt\/100/.test(top.out), top.out);
+    check('renaming a parameter named gnd keeps the gnd statements and bounds', gnd.same
+        && /bounds open open open gnd/.test(gnd.out) && /^gnd x=-hs w=2\*hs/m.test(gnd.out), gnd.out);
+    check('renaming a parameter named domain renames the domain values, not the statement', dom.same
+        && /^domain -dw dw auto auto/m.test(dom.out), dom.out);
+    check('renaming a parameter named ngon keeps the shape word', ng.same && /gnd ngon x=0 y=-2 r=rr/.test(ng.out), ng.out);
+    const d = setStatementInText(src, 'domain', 'domain -5 5 auto auto');
+    check('setStatementInText leaves a parameter named domain alone', /domain = 3/.test(d)
+        && /^domain -5 5 auto auto/m.test(d) && parseAndEvaluate(d).errors.length === 0, d);
+}
 
 // Conversion writes roughness and plating thickness in micrometres under any declared
 // unit, and the text rebuilds the same values.

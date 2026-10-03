@@ -92,6 +92,14 @@ import { check, quiet, APP, done } from './helpers.js';
         c && c.plating.rq_interface);
     const plain = solverToGeometryText(native(undefined));
     check('without an interface roughness the text has no rq_iface', !/rq_iface/.test(plain));
+    // Mirrored traces that differ only in the interface roughness are not symmetric:
+    // the half domain would report one trace's loss for both.
+    const pair = (a, b) => new CustomGeometrySolver({ nx: 30, ny: 30, freq: 1e9, text: 'units um\n'
+        + 'bounds open open open gnd\nplating sigma=1e7 t=4 rq=1\ndiel x=-inf w=inf y=0 h=200 er=4\n'
+        + `sig- x=-250 y=200 w=200 h=35 plating=top,sides ${a}\nsig+ x=50 y=200 w=200 h=35 plating=top,sides ${b}` });
+    check('pair differing only in rq_iface is not mirror symmetric', !pair('', 'plating_rq_iface=0').sym_half);
+    check('rq_iface equal to the plating rq keeps the pair symmetric', pair('', 'plating_rq_iface=1').sym_half);
+    check('and the full-domain pair carries the per-line difference', pair('', 'plating_rq_iface=0')._pair_finish_differs());
 }
 
 // --- 4 ---

@@ -143,4 +143,27 @@ for (const c of CASES) {
         `cached ${cached.map(f => (f / 1e6).toFixed(0) + ' MHz').join(', ')}, bias ${bias}`);
 }
 
+// An ambiguous main-path pick (possibly another mode) is not a dispersion anchor: a
+// second solve at the same frequency must solve again, not reuse it silently.
+{
+    const s = new MicrostripSolver({ trace_width: 0.3e-3, substrate_height: 0.2e-3, trace_thickness: 35e-6,
+        epsilon_r: 4.3, tan_delta: 0.02, sigma_cond: 5.8e7, freq: 5e9, nx: 30, ny: 30, mesh_backend: 'triangular' });
+    s.use_causal_materials = false;
+    const init = await quiet(() => s.solve_adaptive({ max_iters: 6, max_nodes: 20000 }));
+    const b = s._triBackend, orig = b._eigenPick;
+    let calls = 0;
+    b._eigenPick = function (st, f, ...rest) {
+        const r = orig.call(this, st, f, ...rest);
+        if (Math.abs(f / 3.3e9 - 1) < 1e-9 && r.fw) { calls++; r.fw = { ...r.fw, ambiguous: true }; }
+        return r;
+    };
+    await quiet(() => s.computeAtFrequency(3.3e9, init));
+    await quiet(() => s.computeAtFrequency(3.3e9, init));
+    b._eigenPick = orig;
+    const st = b._static.single;
+    const anchored = st.disp && st.disp.xs.some(x => Math.abs(Math.exp(x) / 3.3e9 - 1) < 1e-9);
+    check('main path: an ambiguous pick is not cached as a dispersion anchor', !anchored && calls === 2,
+        `anchored ${anchored}, eigensolves at 3.3 GHz ${calls}`);
+}
+
 done();

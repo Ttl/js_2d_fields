@@ -2759,7 +2759,9 @@ export class TriBackend {
             ({ fw, fwErr } = this._eigenPick(st, f, phiEps, eps_eff_static, dc ? dispersionNearest(dc, f) : null));
             if (fw && fw.eps > 0) {
                 eps_d = fw.eps; haveEigen = true;
-                if (dc) dispersionInsert(dc, f, fw.eps);
+                // An ambiguous pick may be another mode: not an anchor, which a later
+                // solve at the same f would reuse without the ambiguity warning.
+                if (dc && !fw.ambiguous) dispersionInsert(dc, f, fw.eps);
             }
             if (slot) {
                 slot.fw = fw;
