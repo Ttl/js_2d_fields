@@ -15,6 +15,9 @@
 //   7. a substrate whose skin depth is not large next to its size gets a warning
 //   8. the interpolating sweep of an asymmetric pair follows the frequency-dependent
 //      [C] of the complex solve between its samples
+//   9. DC: a parallel plate on two conductive layers in series has G = W / sum(h_i /
+//      sigma_i) and the Maxwell-Wagner C, and an asymmetric pair on them has a finite
+//      [G] at f = 0 equal to its low-frequency value
 //
 // Run: node tests/test_conductive_dielectric.js
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
@@ -239,6 +242,40 @@ for (const [name, extra] of BACKENDS) {
                 && Math.abs(a[0][1] - b[0][1]) < 0.005 * b[0][0],
             a ? `C11 ${fmt(a[0][0])} / ${fmt(b[0][0])}, C12 ${fmt(a[0][1])} / ${fmt(b[0][1])}` : 'no RLGC_matrix');
     });
+}
+
+// --- 9. DC conductance ---
+// Two conductive layers in series under a strip spanning the domain (one dimensional,
+// as in 2). At DC the current divides by conductivity: G = W / sum(h_i / sigma_i), and
+// the charge on the layer interface leaves C = eps0 W sum(h_i er_i / sigma_i^2) /
+// sum(h_i / sigma_i)^2 (Maxwell-Wagner).
+{
+    const W = 100e-6, L = [[20e-6, 11.9, 2], [5e-6, 4.1, 0.5]];
+    const R = L.reduce((a, [h, , sg]) => a + h / sg, 0);
+    const Gdc = W / R, Cdc = EPS0 * W * L.reduce((a, [h, er, sg]) => a + h * er / (sg * sg), 0) / (R * R);
+    const stack = `units um
+bounds open open open gnd
+domain -50 50 0 40
+diel x=-inf w=inf y=0 h=20 er=11.9 sigma=2
+diel x=-inf w=inf y=20 h=5 er=4.1 sigma=0.5
+`;
+    for (const [name, extra] of BACKENDS) {
+        const m = (await solve(stack + 'sig+ x=-50 w=100 y=25 h=2\n', 0, extra)).r.modes[0];
+        check(`${name}: parallel plate at DC, G = W / sum(h / sigma) and the Maxwell-Wagner C`,
+            rel(m.RLGC.G, Gdc) < 2e-4 && rel(m.RLGC.C, Cdc) < 2e-4,
+            `G ${fmt(m.RLGC.G)} vs ${fmt(Gdc)}, C ${fmt(m.RLGC.C)} vs ${fmt(Cdc)}`);
+        // Asymmetric pair: the strip split by a 5 um gap into 40 and 55 um traces.
+        const pair = stack + 'sig- x=-50 w=40 y=25 h=2\nsig+ x=-5 w=55 y=25 h=2\n';
+        const dc = (await solve(pair, 0, extra)).r, lf = (await solve(pair, 1e3, extra)).r;
+        const G0 = dc.RLGC_matrix.G, G1 = lf.RLGC_matrix.G;
+        check(`${name}: asymmetric pair at DC has the low-frequency [G]`,
+            !!dc.physMatrix && [[0, 0], [0, 1], [1, 1]].every(([i, j]) => Math.abs(G0[i][j] - G1[i][j]) < 1e-6 * G1[0][0]),
+            `G11 ${fmt(G0[0][0])} / ${fmt(G1[0][0])}, G12 ${fmt(G0[0][1])} / ${fmt(G1[0][1])}`);
+        // Both traces at 1 V: the plate less the gap, plus the gap's fringing.
+        const both = G0[0][0] + G0[1][1] + 2 * G0[0][1];
+        check(`${name}: asymmetric pair at DC, both traces driven conduct between the gapped and the whole plate`,
+            both > 0.95 * Gdc && both < Gdc, `${fmt(both)} vs plate ${fmt(Gdc)}`);
+    }
 }
 
 done();

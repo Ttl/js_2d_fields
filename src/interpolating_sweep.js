@@ -182,12 +182,14 @@ class InterpolatingSweep {
             C: m.RLGC.C,
             // Per-line loss data of a pair (R11 - R22 and L11 - L22, or the matrices Rm
             // and Lim), relative to the mode's own R and L so it splines as a smooth ratio.
-            aR: (m.RLGC.dR || 0) / m.RLGC.R,
-            aL: (m.RLGC.dL || 0) / m.RLGC.L,
+            // NaN where the sample has none (a symmetric line, or a failed per-line
+            // evaluation), which the splines skip.
+            aR: m.RLGC.dR !== undefined ? m.RLGC.dR / m.RLGC.R : NaN,
+            aL: m.RLGC.dL !== undefined ? m.RLGC.dL / m.RLGC.L : NaN,
             ...Object.fromEntries([0, 1, 2].flatMap(k => [
-                [`aRm${k}`, m.RLGC.Rm ? m.RLGC.Rm[k] / m.RLGC.R : 0],
-                [`aLm${k}`, m.RLGC.Lim ? m.RLGC.Lim[k] / m.RLGC.L : 0],
-                [`aGm${k}`, (m.RLGC.Gm && m.RLGC.G > 0) ? m.RLGC.Gm[k] / m.RLGC.G : 0]]))
+                [`aRm${k}`, m.RLGC.Rm ? m.RLGC.Rm[k] / m.RLGC.R : NaN],
+                [`aLm${k}`, m.RLGC.Lim ? m.RLGC.Lim[k] / m.RLGC.L : NaN],
+                [`aGm${k}`, (m.RLGC.Gm && m.RLGC.G > 0) ? m.RLGC.Gm[k] / m.RLGC.G : NaN]]))
         }));
         this.samplePoints.set(t, modeData);
         return result;
@@ -217,9 +219,13 @@ class InterpolatingSweep {
                     ? new LogSpline(ts, values)
                     : new CubicSpline(ts, values);
             }
+            // Each over the samples that have it: a sample whose per-line evaluation
+            // failed is left out rather than read as 0.
             for (const key of AUX_KEYS) {
-                const values = entries.map(e => e[1][mi][key] || 0);
-                modeSplines[key] = values.some(v => v !== 0) ? new CubicSpline(ts, values) : null;
+                const have = entries.map((e, i) => [ts[i], e[1][mi][key]]).filter(p => Number.isFinite(p[1]));
+                if (!have.length || have.every(p => p[1] === 0)) modeSplines[key] = null;
+                else if (have.length === 1) modeSplines[key] = { evaluate: () => have[0][1] };
+                else modeSplines[key] = new CubicSpline(have.map(p => p[0]), have.map(p => p[1]));
             }
             modeSplines.mode = entries[0][1][mi].mode;
             this.splines.push(modeSplines);

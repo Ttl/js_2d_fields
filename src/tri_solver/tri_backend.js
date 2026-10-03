@@ -2238,8 +2238,9 @@ export class TriBackend {
         return { C: k * W.re, G: -omega * k * W.im };
     }
 
-    // The physMatrix of an asymmetric pair with [C] and Gw = [G11, G12, G22] / omega from
-    // the complex per-trace solves at frequency f, the energy forms of _prepareStaticModal.
+    // The physMatrix of an asymmetric pair with [C] and G = [G11, G12, G22] from the
+    // complex per-trace solves at frequency f, the energy forms of _prepareStaticModal.
+    // G itself rather than G / omega, which a conductive substrate makes infinite at DC.
     _conductivePhys(f) {
         const st = this._static.odd;
         const roles = this.condRect.rectRoles;
@@ -2251,9 +2252,10 @@ export class TriBackend {
         const ksc = st.kC * eps0;
         const m12 = { re: wab.re - wa.re - wb.re, im: wab.im - wa.im - wb.im };
         const C = [[2 * wa.re * ksc, m12.re * ksc], [m12.re * ksc, 2 * wb.re * ksc]];
-        // C'' at the frequency of the result (the DC limit solves below it).
-        const g = f > 0 ? -A.omega / (2 * Math.PI * f) * ksc : 0;
-        return { ...this._modalPhys, C, Gw: [2 * wa.im * g, m12.im * g, 2 * wb.im * g] };
+        // G = omega C'' at the solve's omega (the DC limit solves at a small omega).
+        const g = -A.omega * ksc;
+        const { Gw, ...phys } = this._modalPhys;
+        return { ...phys, C, G: [2 * wa.im * g, m12.im * g, 2 * wb.im * g] };
     }
 
     // Per-line loss data of a pair from the eddy-current solve driven per trace (line 1 =
@@ -3700,8 +3702,8 @@ export class TriBackend {
             // Conductive dielectrics: [C] and [G] of the pair from the complex solve.
             const phys = this._modalPhys && hasConductiveDielectric(this.solver.dielectrics)
                 ? this._conductivePhys(f) : this._modalPhys;
-            if (phys && phys.Gw) {
-                for (const m of [odd, even]) m.RLGC.Gm = phys.Gw.map(v => v * 2 * Math.PI * f);
+            if (phys && (phys.G || phys.Gw)) {
+                for (const m of [odd, even]) m.RLGC.Gm = phys.G ? phys.G.slice() : phys.Gw.map(v => v * 2 * Math.PI * f);
             }
             if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
             else if (f > 0 && (this._modalPhys || this._pairFinishDiffers())

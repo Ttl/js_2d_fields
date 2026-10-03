@@ -3088,10 +3088,12 @@ export class FieldSolver2D {
         // Per-trace vacuum fields for the per-line loss matrices (_line_asymmetry), and
         // the dielectric loss matrix over omega, [G11, G12, G22] / omega: v^T G v is twice
         // the power of the potential of drive v, so G12 comes from the drive [1, 1].
-        let Gw, Gc = null;
+        // Conductive dielectrics give [G] itself (G), finite at DC where G / omega is not.
+        let Gw = null, Gc = null;
         if (hasConductiveDielectric(this.dielectrics)) {
-            // Conductive dielectrics: [C] and [G] / omega from the complex per-trace
-            // solves, C* = C' - j C'' (G = omega C'').
+            // Conductive dielectrics: [C] and [G] from the complex per-trace solves,
+            // C* = C' - j C'' with G = omega C'' at the solve's omega (the DC limit
+            // solves at a small omega where omega C'' is the conductance).
             const omega = conductiveOmega(this.dielectrics, this.freq);
             const { a, b } = this._complex_cells(omega);
             const [cA, cB] = await this._solve_laplace_complex(
@@ -3100,16 +3102,13 @@ export class FieldSolver2D {
             const qAp = q(cA, sp), qAn = q(cA, sn), qBp = q(cB, sp), qBn = q(cB, sn);
             const m12 = 0.5 * (qAn.re + qBp.re), g12 = -0.5 * (qAn.im + qBp.im);
             Cm = [[qAp.re, m12], [m12, qBn.re]];
-            // C'' scaled to the frequency of the result (the DC limit solves below it).
-            const k = this.freq > 0 ? omega / (2 * Math.PI * this.freq) : 0;
-            Gc = [[-qAp.im * k, g12 * k], [g12 * k, -qBn.im * k]];
-            Gw = [Gc[0][0], Gc[0][1], Gc[1][1]];
+            Gc = [[-qAp.im * omega, g12 * omega], [g12 * omega, -qBn.im * omega]];
         } else {
             const pA = this._dielectric_power(A.V, 1), pB = this._dielectric_power(B.V, 1);
             const pAB = this._dielectric_power(A.V.map((row, i) => row.map((v, j) => v + B.V[i][j])), 1);
             Gw = [2 * pA, pAB - pA - pB, 2 * pB];
         }
-        this._traceVac = { Av, Bv, Cm0, Gw };
+        this._traceVac = { Av, Bv, Cm0, Gw, G: Gc && [Gc[0][0], Gc[0][1], Gc[1][1]] };
         const quad = (M, v) => 0.5 * (v[0] * v[0] * M[0][0] + 2 * v[0] * v[1] * M[0][1] + v[1] * v[1] * M[1][1]);
         // Shared symmetric/degenerate/modal decision (thresholds, ordering — see
         // classifyModalDecomposition; the triangular backend uses the identical guard).
@@ -3134,7 +3133,7 @@ export class FieldSolver2D {
             const eps_eff = Ck / C0k;
             const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
             const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0, label);
-            const alpha_d = Gc ? 8.686 * 2 * Math.PI * this.freq * quad(Gc, v) * Z0 / 2
+            const alpha_d = Gc ? 8.686 * quad(Gc, v) * Z0 / 2
                 : this.calculate_dielectric_loss(V, Z0);
             const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, Ck, Z0);
             const alpha_c = 8.686 * R_total / (2 * Zc.re);
@@ -3985,9 +3984,10 @@ export class FieldSolver2D {
             const asym = this._line_asymmetry(odd, even);
             if (asym) for (const m of [odd, even]) Object.assign(m.RLGC, asym);
             // Asymmetric geometry: the exact dielectric loss matrix of the per-trace solves.
-            if (this._modalPhys && this._traceVac && this._traceVac.Gw) {
+            const tv = this._modalPhys && this._traceVac;
+            if (tv && (tv.G || tv.Gw)) {
                 const w = 2 * Math.PI * this.freq;
-                for (const m of [odd, even]) m.RLGC.Gm = this._traceVac.Gw.map(v => v * w);
+                for (const m of [odd, even]) m.RLGC.Gm = tv.G ? tv.G.slice() : tv.Gw.map(v => v * w);
             }
 
             // Add physical 2x2 RLGC matrix

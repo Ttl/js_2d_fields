@@ -170,6 +170,32 @@ const solver = new MicrostripSolver(options);
     console.log(`\n  Zc(re) max relative error: ${(maxZcErr * 100).toFixed(4)}% ${verdict(maxZcErr < 0.01)}`);
     console.log(`  eps_eff max relative error: ${(maxEpsErr * 100).toFixed(4)}% ${verdict(maxEpsErr < 0.01)}`);
 
+    // Per-line data missing at one sample (a failed per-line evaluation) is skipped by
+    // its spline, not read as 0: R11 = Rm[0] stays near the mode R everywhere.
+    {
+        let calls = 0;
+        const rlgc = (f, withRm) => {
+            const R = 10 * Math.sqrt(f / 1e9), L = 3e-7, G = 1e-3 * f / 1e9, C = 1.2e-10;
+            return { R, L, G, C, ...(withRm ? { Rm: [1.1 * R, 0.05 * R, 0.9 * R], Lim: [1e-9, 1e-11, 9e-10] } : {}) };
+        };
+        const mock = {
+            is_differential: true,
+            async computeAtFrequency(f) {
+                const withRm = calls++ !== 3;
+                return { modes: ['odd', 'even'].map(mode => ({ mode, RLGC: rlgc(f, withRm), L_external: 2.9e-7 })) };
+            },
+        };
+        const sw = new InterpolatingSweep(mock, null, { tolerance: 0.01 });
+        await sw.run(1e8, 1e10);
+        const fs = []; for (let i = 0; i <= 40; i++) fs.push(1e8 * Math.pow(100, i / 40));
+        let worst = 0;
+        for (const { freq, result } of sw.buildResults(fs)) {
+            const m = result.modes[0].RLGC;
+            worst = Math.max(worst, Math.abs((m.Rm ? m.Rm[0] : 0) / m.R - 1.1));
+        }
+        console.log(`\n  Per-line R11/R with one sample missing Rm: worst |dev| ${worst.toFixed(4)} ${verdict(worst < 1e-3)}`);
+    }
+
     console.log(failed ? '\nDone — FAILURES above.' : '\nDone.');
     if (failed) process.exitCode = 1;
 })();
