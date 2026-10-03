@@ -1066,6 +1066,40 @@ function fieldsHaveWantedView(fields) {
     return true;
 }
 
+// Config of the geometry and field plot, built once: Plotly.react compares the config
+// with the plot's, and a new one (new click closures) makes it replot from scratch and
+// then react again with that config. Two draws in one tick then replot each other's
+// config forever.
+let _geometryPlotConfig = null;
+function geometryPlotConfig(Plotly) {
+    return _geometryPlotConfig ??= {
+        responsive: true,
+        displayModeBar: true,
+        scrollZoom: true,
+        modeBarButtonsToRemove: ["select2d", "lasso2d"],
+        modeBarButtonsToAdd: [
+            {
+                name: "Toggle Mesh",
+                icon: GRID_ICON,
+                click: () => {
+                    showMesh = !showMesh;
+                    draw();
+                }
+            },
+            {
+                name: "Scale Range",
+                icon: Plotly.Icons.autoscale,
+                click: () => window.toggleScaleDialog && window.toggleScaleDialog()
+            },
+            {
+                name: "About this plot",
+                icon: Plotly.Icons.question,
+                click: () => window.showHelpModal && window.showHelpModal(plotHelpTopic())
+            }
+        ]
+    };
+}
+
 function draw(resetZoom = false) {
     const solver = get.solver();
     const Plotly = getPlotly();
@@ -1539,34 +1573,7 @@ function draw(resetZoom = false) {
         })()
     };
 
-    const config = {
-        responsive: true,
-        displayModeBar: true,
-        scrollZoom: true,
-        modeBarButtonsToRemove: ["select2d", "lasso2d"],
-        modeBarButtonsToAdd: [
-            {
-                name: "Toggle Mesh",
-                icon: GRID_ICON,
-                click: () => {
-                    showMesh = !showMesh;
-                    draw();
-                }
-            },
-            {
-                name: "Scale Range",
-                icon: Plotly.Icons.autoscale,
-                click: () => window.toggleScaleDialog && window.toggleScaleDialog()
-            },
-            {
-                name: "About this plot",
-                icon: Plotly.Icons.question,
-                click: () => window.showHelpModal && window.showHelpModal(plotHelpTopic())
-            }
-        ]
-    };
-
-    Plotly.react(container, traces, layout, config);
+    Plotly.react(container, traces, layout, geometryPlotConfig(Plotly));
     if (currentView === "density" || currentView.startsWith("efield")) updateDensityImage(container);
 
     if (!container._viewListenerBound) {

@@ -481,6 +481,27 @@ check('the link restores the geometry text', restored.type === 'custom' && resto
     && restored.wgnd === '0.5', JSON.stringify(restored).slice(0, 200));
 await page2.close();
 
+// The same link applied to a running page (pasted into its address bar: only the hash
+// changes) after a solve of the native type. Two geometry draws in one tick used to
+// replot each other's Plotly config forever and hang the tab.
+{
+    const p4 = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    await p4.goto(URL, { waitUntil: 'networkidle' });
+    p4.evaluate(() => {
+        const s = document.getElementById('tl_type');
+        for (const v of ['stripline', 'microstrip']) { s.value = v; s.dispatchEvent(new Event('change', { bubbles: true })); }
+    }).catch(() => {});
+    await p4.waitForTimeout(1500);
+    const alive = () => Promise.race([p4.evaluate(() => document.getElementById('tl_type').value),
+        new Promise(r => setTimeout(() => r('HUNG'), 5000))]);
+    check('two line type changes in one tick leave the page responsive', await alive() === 'microstrip');
+    p4.evaluate(h => { location.hash = h; }, link.split('#')[1]).catch(() => {});
+    await p4.waitForTimeout(1500);
+    const t = await alive();
+    check('a custom link applied to a running page restores it', t === 'custom', t);
+    await p4.close();
+}
+
 // An old-style link of a fixed type still loads.
 const page3 = await browser.newPage();
 await page3.goto(`${URL}?params=${Buffer.from(encodeURIComponent(JSON.stringify({ tl_type: 'gcpw', w: 0.5 }))).toString('base64')}`,
