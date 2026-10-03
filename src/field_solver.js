@@ -2163,13 +2163,14 @@ export class FieldSolver2D {
         // meshed part). A single line or a mode of a symmetric pair carries 1/Z0 per
         // trace for the unit drive the fields are per, which the discrete contour sum
         // netI reads to 1-2%: it only gives the sign there. Per-line drives and the modes
-        // of an asymmetric pair keep netI.
+        // of an asymmetric pair keep netI. Only a differential pair has a whole 1/Z0 on
+        // the meshed trace; a single-ended line's mirrored traces are halves of it.
         const m = this.sym_half ? 2 : 1;
         let I0 = m * netI[0], I1 = m * netI[1];
         if (line === null && !this._modalPhys && vacuum_fields && Z0 > 0) {
             const whole = pol => !(this.conductors || []).some(c => c.is_signal
                 && (this.is_differential && c.polarity < 0 ? -1 : 1) === pol && c.x_min < 0 && c.x_max > 0);
-            const mult = pol => (this.sym_half && whole(pol) ? 2 : 1) / Z0;
+            const mult = pol => (this.sym_half && this.is_differential && whole(pol) ? 2 : 1) / Z0;
             I0 = I0 ? Math.sign(I0) * mult(1) : 0;
             I1 = I1 ? Math.sign(I1) * mult(-1) : 0;
         }
@@ -4112,7 +4113,10 @@ export class FieldSolver2D {
                 }
             }
         }
-        const I = Math.max(Math.abs(net[0]) * (straddles[0] ? 2 : 1), Math.abs(net[1]) * (straddles[1] ? 2 : 1));
+        // A single-ended line on a half domain carries twice the meshed current, whether
+        // its trace straddles the plane or is mirrored.
+        const dbl = k => straddles[k] || (mirror && !this.is_differential);
+        const I = Math.max(Math.abs(net[0]) * (dbl(0) ? 2 : 1), Math.abs(net[1]) * (dbl(1) ? 2 : 1));
         if (!(I > 0)) return null;
         return seg.out(1 / I);
     }

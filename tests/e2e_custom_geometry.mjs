@@ -74,6 +74,27 @@ check('boundary selects follow the text', tpl.bounds.join() === 'open,open,open,
 check('sweep list offers the geometry parameters', tpl.sweep.includes('cgp_w') && tpl.sweep.includes('cgp_wgnd')
     && !tpl.sweep.includes('w') && tpl.sweep.includes('custom_sigma'), tpl.sweep.join());
 
+// ---- Solve right after a text edit solves the edited text ----
+// The edit is still waiting on the editor's debounce when Solve is clicked; the stale
+// sidebar input used to override it and the late refresh dropped the field plot.
+{
+    const zBefore = z0FromLog((await solveAndRead()).log);
+    const orig = await geomText();
+    // The text view may be hidden behind the form view: write it as a typed edit would.
+    const typeText = (v) => page.evaluate((v) => {
+        const t = document.getElementById('custom_geom_text');
+        t.value = v;
+        t.dispatchEvent(new Event('input'));
+    }, v);
+    await typeText(orig.replace(/^(\s*w\s*=\s*)0\.35/m, '$10.7'));
+    const zAfter = z0FromLog((await solveAndRead()).log);
+    check('Solve clicked during the edit debounce uses the edited width', zAfter < 0.9 * zBefore,
+        `Z0 ${zBefore} -> ${zAfter}`);
+    check('and the sidebar input follows the text', await page.inputValue('#inp_cgp_w') === '0.7');
+    await typeText(orig);
+    await page.waitForTimeout(600);
+}
+
 // ---- form view: one row per rectangle, editing the same text ----
 const form = await page.evaluate(() => ({
     visible: getComputedStyle(document.getElementById('custom-form')).display !== 'none'

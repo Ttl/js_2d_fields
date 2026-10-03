@@ -17,7 +17,7 @@ const C0 = 299792458.0;
  * @param {number} Rq - RMS Surface roughness (m)
  * @returns {Complex} Complex surface impedance (Re + jIm)
  */
-function calculate_Zrough(f, sigma, Rq) {
+function calculate_Zrough(f, sigma, Rq, hold = true) {
     // 1. Smooth Case
     const omega = 2 * Math.PI * f;
     const delta = Math.sqrt(2.0 / (omega * MU0 * sigma));
@@ -82,9 +82,10 @@ function calculate_Zrough(f, sigma, Rq) {
     // f_ref = ROUGH_LX_PEAK and decays below it, negative below about 1 Hz. The
     // roughness is then a thin surface layer far inside the skin depth, whose excess
     // inductance is a constant: it is held at the peak, which keeps L(f) monotone.
-    if (f_ref < ROUGH_LX_PEAK && omega > 0) {
+    if (hold && f_ref < ROUGH_LX_PEAK && omega > 0) {
         const fp = ROUGH_LX_PEAK / lambda_scale, wp = 2 * Math.PI * fp;
-        const Zp = calculate_Zrough(fp, sigma, Rq);
+        // hold=false: lambda_scale*fp can round just below the peak
+        const Zp = calculate_Zrough(fp, sigma, Rq, false);
         const Lx = (Zp.im - Math.sqrt(wp * MU0 / (2 * sigma))) / wp;
         return new Complex(Z.re, R_smooth + omega * Lx);
     }

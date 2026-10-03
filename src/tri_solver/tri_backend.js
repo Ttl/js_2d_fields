@@ -225,7 +225,7 @@ function makePlatingZs(solver, condRect, freq) {
         ? Zbare : zSingle(sigmaOf(ri), rqOf(ri)));
     const zForFace = (ri, face) => {
         const pl = roles[ri] && roles[ri].plating;
-        if (solidPlated(rects[ri], pl)) return zSingle(pl.sigma, pl.rq ?? 0);
+        if (solidPlated(roles[ri])) return zSingle(pl.sigma, pl.rq ?? 0);
         if (!(pl && pl[face] && pl.sigma > 0)) return bareOf(ri);
         const key = `${pl.sigma}|${pl.rq}|${pl.rq_interface}|${pl.thickness}|${sigmaOf(ri)}`;
         let z = layeredCache.get(key);
@@ -260,7 +260,7 @@ function makePlatingZs(solver, condRect, freq) {
     const zAt = (ri, face, x, y) => {
         const pl = roles[ri] && roles[ri].plating;
         const r = rects[ri];
-        if (pl && pl.sigma > 0 && r && !r.shape && (pl.thickness ?? 0) > 0 && !solidPlated(r, pl) &&
+        if (pl && pl.sigma > 0 && r && !r.shape && (pl.thickness ?? 0) > 0 && !solidPlated(roles[ri]) &&
             face === 'bottom' && pl.sides && !pl.bottom && pl.thick_corners) {
             const d = Math.min(x - r.xmin, r.xmax - x);
             if (d <= pl.thickness) return zSingle(pl.sigma, rqOf(ri));
@@ -299,9 +299,10 @@ function meshedPlatingCR(cr) {
 }
 
 // Plating through a conductor's whole cross-section (at least as thick as it, or
-// filling its width): it is plating metal, and the layered model has no bulk.
-function solidPlated(r, pl) {
-    return !!r && platedThrough(r, pl);
+// filling its width): it is plating metal, and the layered model has no bulk. Taken
+// from the rect's role, which decides it on the unclipped conductor.
+function solidPlated(role) {
+    return !!(role && role.plating && role.platedThrough);
 }
 
 // Thickness a conductor's surface reactance saturates on: the slab reactance
@@ -2528,7 +2529,7 @@ export class TriBackend {
                 this._dcExact = { key, sigma, byMode: {} };
             const byMode = this._dcExact.byMode;
             if (!(mode in byMode)) {
-                const thin = c => c.plating && !c.plating.thick_corners && !solidPlated(c, c.plating);
+                const thin = c => c.plating && !c.plating.thick_corners && !platedThrough(c, c.plating);
                 const dc = dcLineParameters(s.conductors.map(c => (thin(c) ? { ...c, plating: null } : c)), mode, {
                     sigmaDefault: sigma, unlimited: s._unlimited_grounds(), walls: s._wall_grounds(),
                     box: { x_min: -s.domain_width / 2, x_max: s.domain_width / 2, y_min: s.domain_y_min, y_max: s.domain_height } });
@@ -2877,20 +2878,20 @@ export class TriBackend {
             const bulkSigma = s.sigma_cond ?? 5.8e7;
             const sigIdx = crM.rectRoles.map((r, i) => r.is_signal ? i : -1).filter(i => i >= 0);
             const solidSig = anyPlatingM && sigIdx.length > 0
-                && sigIdx.every(i => solidPlated(crM.rects[i], crM.rectRoles[i].plating));
+                && sigIdx.every(i => solidPlated(crM.rectRoles[i]));
             const mqsSigma = solidSig ? crM.rectRoles[sigIdx[0]].plating.sigma
                 : (anyPlatingM || meshedPlating) ? bulkSigma : sigma;
             // A conductor of another metal: its own sigma, or solid plating while the
             // solve runs at the bulk sigma.
             const ownSigmaM = crM.rectRoles.some((r, i) => (r.sigma && r.sigma !== bulkSigma)
-                || (!solidSig && solidPlated(crM.rects[i], r.plating)));
+                || (!solidSig && solidPlated(r)));
             const mqsDelta = (anyPlatingM || meshedPlating) ? Math.sqrt(2 / (omu * mqsSigma)) : delta;
             // The walls are bulk metal whenever the solve runs at another sigma.
             const wallSigma = (solidSig || meshedPlating) ? bulkSigma : undefined;
             // Conductivity of each meshed rect when any conductor has its own.
             const rectSigma = ownSigmaM ? crM.rects.map((r, i) => {
                 const role = crM.rectRoles[i];
-                return solidPlated(r, role.plating) ? role.plating.sigma : (role.sigma || bulkSigma);
+                return solidPlated(role) ? role.plating.sigma : (role.sigma || bulkSigma);
             }) : null;
             // Skin-band element size at the conductor surface (xδ) and band width (xδ).
             // Resolve the skin layer to bandDelta*δ within mqsBand*δ of each surface,
@@ -3570,7 +3571,8 @@ export class TriBackend {
         const nets = st.modalVec ? 1 : new Set(this.condRect.rectRoles
             .filter((r, i) => r.is_signal && pot[i] === pMax).map(r => (r.polarity || 1) < 0)).size || 1;
         const K = st.phiAir ? surfaceCurrentPoints(this.mesh, st.fm, st.phiAir,
-            buildLossEdges(this.mesh, st.fm, this.condRect), this._plotSegLen(), symX, nets) : null;
+            buildLossEdges(this.mesh, st.fm, this.condRect), this._plotSegLen(), symX, nets,
+            !this.solver.is_differential) : null;
         const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
         // |E| on the triangles for the plot (meshFieldBlock): sharp at every interface,
         // curved ones included, which the grid can only draw as a staircase.

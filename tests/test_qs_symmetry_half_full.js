@@ -18,6 +18,7 @@
 // not merely a converging approximation of it.
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { check, quiet, done } from './helpers.js';
 
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
@@ -228,6 +229,23 @@ for (const fam of FAMILIES) {
         sigma_cond: 5.8e7, freq: 1e9,
     });
     check('broadside pair never takes the half domain', !bs.sym_half);
+}
+
+// Single-ended line of two mirrored traces (custom geometry): neither straddles the
+// plane, and each meshed trace carries half the line current, not a whole 1/Z0 like
+// a differential pair. The DC internal inductance used to come out 4x on the half domain.
+{
+    const text = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.5 er=4.3\n' +
+        'sig+ x=-0.4 w=0.3 y=0.5 h=0.035\nsig+ x=0.1 w=0.3 y=0.5 h=0.035\n';
+    const L = async (symmetry) => {
+        const s = new CustomGeometrySolver({ text, nx: 30, ny: 30, freq: 1e6, symmetry });
+        const r = await quiet(() => s.solve_adaptive({ max_iters: 10, energy_tol: 0.01, max_nodes: 20000 }));
+        return { L: r.modes[0].RLGC.L, half: s.sym_half };
+    };
+    const h = await L(true), f = await L(false);
+    check('mirrored single-ended traces take the half domain', h.half && !f.half);
+    check('mirrored single-ended traces: half L == full L at 1 MHz (1e-6)',
+        Math.abs(h.L - f.L) / f.L < 1e-6, `${h.L.toExponential(5)} vs ${f.L.toExponential(5)} H/m`);
 }
 
 done();

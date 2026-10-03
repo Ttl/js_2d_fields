@@ -21,7 +21,7 @@
 
 import { clipDomainWalls } from '../wall_grounds.js';
 import { shapeContains, shapeBBox, shapeArea, shapeSegments, shapeSignedDist, shapeLoops,
-         platingCoreOf, bodyDistance, rectOf, REL_SHAPE_TOL } from '../shapes.js';
+         platingCoreOf, platedThrough, bodyDistance, rectOf, REL_SHAPE_TOL } from '../shapes.js';
 
 // Domain-diagonal-relative geometric tolerance. Shared with the freedom map and the
 // refinement smoother (see REL_SHAPE_TOL) so all three agree on where a boundary is.
@@ -167,9 +167,12 @@ export function condRectsOf(conductors, { X0, X1, Y0, Y1 }, tol, meshOpts = {}) 
     };
     // sigma, rq: the conductor's own conductivity and surface roughness (custom geometry),
     // null for the solver-wide ones. ci: the conductor's index.
+    // platedThrough is decided on the whole conductor: a half-domain rect is clipped at
+    // the plane, and side plating would also eat into that fake side.
     const roleOf = (c, ci) => ({ is_signal: !!c.is_signal, polarity: c.polarity || 0, plating: c.plating || null,
                                  rq: c.rq ?? null,
-                                 sigma: c.sigma > 0 ? c.sigma : null, ci });
+                                 sigma: c.sigma > 0 ? c.sigma : null, ci,
+                                 platedThrough: !!c.plating && platedThrough(c, c.plating) });
     for (const [ci, c] of conductors.entries()) {
         // A polygon entirely left of the plane is not in a half domain.
         if (c.shape && meshOpts.half && !shapeLoops(c.shape, meshOpts).length) continue;

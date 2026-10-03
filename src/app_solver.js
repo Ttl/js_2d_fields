@@ -5,7 +5,7 @@ import { draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParame
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
     centroidHoverTrace, triMeanE, updateTriImage } from './plot.js';
 import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
-         getCustomOverrides, customSweepParams } from './custom_geometry_editor.js';
+         getCustomOverrides, customSweepParams, flushCustomGeometryEdits } from './custom_geometry_editor.js';
 import { solverToGeometryText } from './custom_geometry_text.js';
 import { initLayoutPanels, syncLogPanel, setLogStatus, logSolveStarted } from './layout_panels.js';
 import { buildSolverFromParams as _buildSolverFromParams, platingOptions } from './solver_factory.js';
@@ -1341,6 +1341,7 @@ function switchTab(tabName) {
 async function runModesSolve() {
     if (isSolvingModes) return;
     if (isSimulating || isSweeping) { setModesStatus('Cannot solve modes while a simulation is running.'); return; }
+    flushCustomGeometryEdits();
 
     const freq = getInputValue('modes-freq');
     let nev = parseInt(document.getElementById('modes-nev').value);
@@ -2404,6 +2405,7 @@ function bindEvents() {
             workerStop();
             log("Stop requested...");
         } else {
+            flushCustomGeometryEdits();
             // Before updateGeometry(), which replaces the solver the kept solve belongs to.
             if (replotInsteadOfSolve()) return;
             // Start the simulation
@@ -2429,6 +2431,7 @@ function bindEvents() {
             log('Cannot sweep while another solve is running.');
             return;
         }
+        flushCustomGeometryEdits();
         runParameterSweep();
     });
     document.getElementById('btn-stop-sweep').addEventListener('click', () => {

@@ -140,6 +140,8 @@ class InterpolatingSweep {
 
         // Map from log10(freq) -> { modes: [{ mode, R, L, G, C }] }
         this.samplePoints = new Map();
+        // Map from log10(freq) -> physMatrix of an asymmetric pair at that sample
+        this.physSamples = new Map();
         this.splines = null; // Built after adaptive refinement
     }
 
@@ -162,15 +164,16 @@ class InterpolatingSweep {
             if (!this.warnings) this.warnings = [];
             this.warnings.push(...result.warnings);
         }
-        // Asymmetric pair: keep the physical 2×2 {C, L, Tv} so buildResults() can carry it
-        // into every interpolated entry — the MTL 4-port S-parameter path keys on it, and
-        // interpolated results would otherwise silently fall back to the symmetric odd/even
-        // combination. The matrices are static (mesh-level), so any sample's copy is valid.
-        if (result && result.physMatrix) this.physMatrix = result.physMatrix;
         // Samples are keyed by the log-frequency the caller asked for: log10(10^t)
         // is not always t to the last bit, and the refinement loop looks its
         // midpoints up by key.
         const t = tKey ?? Math.log10(freq);
+        // Asymmetric pair: keep the physical 2×2 {C, L, Tv} of every sample so
+        // buildResults() can carry it into every interpolated entry — the MTL 4-port
+        // S-parameter path keys on it, and interpolated results would otherwise silently
+        // fall back to the symmetric odd/even combination. The matrices follow the
+        // frequency with causal materials and conductive dielectrics, so they are splined.
+        if (result && result.physMatrix) this.physSamples.set(t, result.physMatrix);
         const modeData = result.modes.map(m => ({
             mode: m.mode,
             R: m.RLGC.R,
@@ -221,6 +224,57 @@ class InterpolatingSweep {
             modeSplines.mode = entries[0][1][mi].mode;
             this.splines.push(modeSplines);
         }
+        this._buildPhysSplines();
+    }
+
+    /**
+     * Splines of the asymmetric-pair physMatrix entries ([C], [L] and the modal
+     * eigenvectors Tv) over the samples that have one.
+     */
+    _buildPhysSplines() {
+        const entries = [...this.physSamples.entries()].sort((a, b) => a[0] - b[0]);
+        this.physSplines = null;
+        if (!entries.length) return;
+        const ts = entries.map(e => e[0]);
+        const fit = (get) => {
+            const v = entries.map(e => get(e[1]));
+            return (v.length > 1 && v.some(x => x !== v[0])) ? new CubicSpline(ts, v) : { evaluate: () => v[0] };
+        };
+        const mat = (key) => entries.every(e => e[1][key])
+            ? [[0, 0], [0, 1], [1, 0], [1, 1]].map(([i, j]) => fit(p => p[key][i][j])) : null;
+        // Eigenvectors at unit norm, each sign-aligned to the previous sample's.
+        let Tv = null;
+        if (entries.every(e => e[1].Tv)) {
+            const vecs = entries.map(e => e[1].Tv.map(v => {
+                const n = Math.hypot(v[0], v[1]) || 1;
+                return [v[0] / n, v[1] / n];
+            }));
+            for (let k = 1; k < vecs.length; k++) {
+                for (let m = 0; m < 2; m++) {
+                    const a = vecs[k - 1][m], b = vecs[k][m];
+                    if (a[0] * b[0] + a[1] * b[1] < 0) vecs[k][m] = [-b[0], -b[1]];
+                }
+            }
+            Tv = [0, 1].map(m => [0, 1].map(c => {
+                const v = vecs.map(x => x[m][c]);
+                return v.length > 1 ? new CubicSpline(ts, v) : { evaluate: () => v[0] };
+            }));
+        }
+        this.physSplines = { C: mat('C'), L: mat('L'), Tv, base: entries[0][1] };
+    }
+
+    /**
+     * physMatrix of an asymmetric pair at log-frequency t, or null for a symmetric one.
+     */
+    _physAt(t) {
+        const ps = this.physSplines;
+        if (!ps) return null;
+        const m2 = (sp) => [[sp[0].evaluate(t), sp[1].evaluate(t)], [sp[2].evaluate(t), sp[3].evaluate(t)]];
+        const out = { ...ps.base };
+        if (ps.C) out.C = m2(ps.C);
+        if (ps.L) out.L = m2(ps.L);
+        if (ps.Tv) out.Tv = ps.Tv.map(v => v.map(sp => sp.evaluate(t)));
+        return out;
     }
 
     /**
@@ -519,8 +573,9 @@ class InterpolatingSweep {
                     // Mirror FieldSolver2D._build_results: the physical 2×2 RLGC (from the
                     // interpolated per-mode scalars) and, for an asymmetric pair, the
                     // physMatrix that routes exports/plots onto the MTL 4-port path.
-                    result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, this.physMatrix ?? null);
-                    if (this.physMatrix) result.physMatrix = this.physMatrix;
+                    const phys = this._physAt(t);
+                    result.RLGC_matrix = buildPhysicalRLGC(odd.RLGC, even.RLGC, phys);
+                    if (phys) result.physMatrix = phys;
                 }
             }
 

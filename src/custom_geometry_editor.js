@@ -187,7 +187,7 @@ const fmt = v => (Number.isFinite(v) ? String(parseFloat(v.toPrecision(6))) : (v
 
 let onChange = () => {};
 let onHighlight = () => {};
-let debounceTimer = null;
+let debounceTimer = null, pendingSource = 'text';
 // Highlight changes arrive in pairs (focus leaves one row and enters the next), so the
 // redraw they ask for is coalesced to one per frame. Only the plot is redrawn, the
 // geometry and any solution stay.
@@ -1204,7 +1204,17 @@ function refresh(source = 'text', notify = true) {
 
 function scheduleChange(source = 'text') {
     clearTimeout(debounceTimer);
+    pendingSource = source;
     debounceTimer = setTimeout(() => { debounceTimer = null; refresh(source); }, 250);
+}
+
+// Applies an edit still waiting on the debounce, so a solve started right after
+// typing sees it (and its solver is not replaced by the late refresh).
+export function flushCustomGeometryEdits() {
+    if (!debounceTimer) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+    refresh(pendingSource);
 }
 
 function showView(view) {

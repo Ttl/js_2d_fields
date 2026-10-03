@@ -13,11 +13,14 @@
 //   6. backends agree on the on-chip microstrip, half and full domain agree, the QS
 //      sweep path matches a direct solve, sigma=0 changes nothing
 //   7. a substrate whose skin depth is not large next to its size gets a warning
+//   8. the interpolating sweep of an asymmetric pair follows the frequency-dependent
+//      [C] of the complex solve between its samples
 //
 // Run: node tests/test_conductive_dielectric.js
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { parseAndEvaluate, solverToGeometryText } from '../src/custom_geometry_text.js';
 import { check, quiet, rel, APP, done } from './helpers.js';
+import { InterpolatingSweep } from '../src/interpolating_sweep.js';
 
 const EPS0 = 8.854187817e-12;
 const BACKENDS = [['QS', {}], ['full-wave', { mesh_backend: 'triangular' }]];
@@ -212,6 +215,30 @@ for (const [name, extra] of BACKENDS) {
     check(`${name}: a 50 ohm*cm substrate gets no conductive-dielectric warning`, !reasons(ok).includes('conductive-dielectric'));
     check(`${name}: a 0.001 ohm*cm substrate is warned about`, reasons(bad).includes('conductive-dielectric'),
         reasons(bad).join(', '));
+}
+
+// --- 8. interpolating sweep carries the per-frequency [C] ---
+{
+    // No ground between the traces and the silicon: [C] moves through the relaxation.
+    const text = 'units um\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=300 er=11.9 sigma=10\n' +
+        'diel x=-inf w=inf y=300 h=10 er=3.9\nsig- x=-60 w=40 y=310 h=2\nsig+ x=10 w=15 y=310 h=2\n';
+    const s = new CustomGeometrySolver({ text, nx: 30, ny: 30, freq: 1e10 });
+    const fs = [2.2e8, 1.3e9, 6e9];
+    const { ir, ex } = await quiet(async () => {
+        const base = await s.solve_adaptive({ max_iters: 6, max_nodes: 15000, param_tol: 0.03 });
+        const sw = new InterpolatingSweep(s, base, { tolerance: 0.01 });
+        await sw.run(1e8, 1e10);
+        const ex = [];
+        for (const f of fs) ex.push(await s.computeAtFrequency(f, base));
+        return { ir: sw.buildResults(fs), ex };
+    });
+    fs.forEach((f, i) => {
+        const a = ir[i].result.RLGC_matrix && ir[i].result.RLGC_matrix.C, b = ex[i].RLGC_matrix.C;
+        check(`interpolated asymmetric pair [C] at ${fmt(f)} Hz matches a direct solve (0.5%)`,
+            !!a && rel(a[0][0], b[0][0]) < 0.005 && rel(a[1][1], b[1][1]) < 0.005
+                && Math.abs(a[0][1] - b[0][1]) < 0.005 * b[0][0],
+            a ? `C11 ${fmt(a[0][0])} / ${fmt(b[0][0])}, C12 ${fmt(a[0][1])} / ${fmt(b[0][1])}` : 'no RLGC_matrix');
+    });
 }
 
 done();

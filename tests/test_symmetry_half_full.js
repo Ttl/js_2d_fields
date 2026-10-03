@@ -40,6 +40,18 @@ const FAMILIES = [
         },
     },
     {
+        // Side plating thicker than a quarter of the width: the half-domain rect is
+        // clipped at the plane, and plated-through must still be decided on the whole
+        // trace (layered Zs here, not solid plating metal).
+        name: 'narrow trace + thin side plating', diff: false, cTol: 0.01, rTol: 0.03,
+        geom: {
+            trace_width: 10e-6, substrate_height: 50e-6, trace_thickness: 8e-6, gnd_thickness: 18e-6,
+            epsilon_r: 3.5, tan_delta: 0.002, sigma_cond: 5.8e7, freq: 1e9, rq: 0,
+            boundaries: ['open', 'open', 'open', 'gnd'],
+            plating: { sigma: 1e7, thickness: 3e-6, rq: 0, top: true, sides: true, bottom: false, thick_corners: false },
+        },
+    },
+    {
         name: 'gcpw + vias + sm', diff: false, cTol: 0.01, rTol: 0.03,
         geom: {
             trace_width: 0.3e-3, substrate_height: 0.254e-3, trace_thickness: 35e-6, gnd_thickness: 35e-6,

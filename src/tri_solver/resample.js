@@ -1034,9 +1034,10 @@ export function mqsSurfaceCurrent(F, maxLen, symX = null) {
 // K = |H_t| is proportional to the normal field on the surface, so normalizing by the
 // charge on the driven conductor gives K / I. Each edge is sampled every maxLen at most.
 // symX mirrors a half-domain solve onto x < symX; a driven conductor cut by the plane
-// carries twice the half-domain current. nets: the number of separate nets at the
-// driving potential (the current is per net). Returns segments { x0, y0, x1, y1, K }.
-export function surfaceCurrentPoints(mesh, fm, phi, lossMask, maxLen, symX = null, nets = 1) {
+// carries twice the half-domain current, and so does a single-ended line (wholeLine)
+// whose mirrored traces are each one half of it. nets: the number of separate nets at
+// the driving potential (the current is per net). Returns segments { x0, y0, x1, y1, K }.
+export function surfaceCurrentPoints(mesh, fm, phi, lossMask, maxLen, symX = null, nets = 1, wholeLine = false) {
     const { nodes, tris, edges, triEdges, nTris, nEdges } = mesh;
     const pv = phi.phiVertex;
     const edgeTri = new Int32Array(nEdges).fill(-1);
@@ -1074,7 +1075,7 @@ export function surfaceCurrentPoints(mesh, fm, phi, lossMask, maxLen, symX = nul
             if (symX !== null && px > symX + TOL) seg.push(2 * symX - xa, ya, 2 * symX - xb, yb, E);
         }
     }
-    if (cutByPlane) I *= 2;
+    if (cutByPlane || (wholeLine && symX !== null)) I *= 2;
     I /= nets;
     if (!(I > 0)) return null;
     return seg.out(1 / I);
