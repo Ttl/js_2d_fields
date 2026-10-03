@@ -308,7 +308,8 @@ sig+ x=-5 w=10 y=3 h=1
         return { r: si / ox, im: im / all, mirrored: !P.ExIm || P.ExIm[0][0].length === x.length };
     };
     for (const [name, extra] of BACKENDS) {
-        const { s, r } = await solve(cpw(`sigma=${SIG}`), FR, extra);
+        // Solved up to the highest plot frequency: full-wave plots are limited to it.
+        const { s, r } = await solve(cpw(`sigma=${SIG}`), FR * 100, extra);
         const at = async f => { await quiet(() => s.plotFieldsAt(f, r)); return plotStats(s); };
         const lo = await at(FR / 100), mid = await at(FR), hi = await at(FR * 100);
         check(`${name}: the silicon screens the plotted field below f_r and not above`, hi.r > 100 * lo.r,

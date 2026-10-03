@@ -152,7 +152,7 @@ async function jobSimulate({ params, frequencies, opts }) {
     solver.freq = maxFreq;
     // The solve at the plot frequency keeps its fields for the plot after the sweep.
     const plotFreq = opts.plotFreq ?? maxFreq;
-    solver.plot_freq_target = plotFreq;
+    solver.plot_freq_target = Math.min(plotFreq, solver.plotFreqLimit(maxFreq));
 
     log('Calculating mesh...');
     solver.ensure_mesh();

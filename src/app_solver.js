@@ -1032,10 +1032,25 @@ function plotFrequency() {
     return isFinite(f) && f >= 0 ? f : null;
 }
 
+// The frequency the plot fields of the kept solve are drawn at: the Plot Options one,
+// limited like the worker limits it (full-wave plots stay within the solve range).
+// { f, limited }, limited when the Plot Options frequency was above the limit.
+function keptPlotFrequency() {
+    const want = plotFrequency() ?? plotFieldsMaxFreq;
+    const f = Math.min(want, solver.plotFreqLimit(plotFieldsMaxFreq));
+    return { f, limited: f < want };
+}
+
+function logPlotLimit(f) {
+    log(`Plot frequency is above the solved range: full-wave fields are plotted at most at `
+        + `${(f / 1e9).toPrecision(4)} GHz. Raise the stop frequency to plot higher.`);
+}
+
 // Re-solve the plot fields of the last solve at the Plot Options frequency. Needs the
 // worker's retained solve of the current geometry; requests arriving while one runs
-// collapse into one more run after it.
-async function updatePlotFields() {
+// collapse into one more run after it. afterSolve: called when a solve ends, which
+// already logged the plot frequency limit.
+async function updatePlotFields(afterSolve = false) {
     if (!solver || solver !== plotFieldsSolver || !solver.solution_valid) return;
     if (isSimulating || isSweeping || isSolvingModes) return;
     if (plotFieldsBusy) { plotFieldsPending = true; return; }
@@ -1043,8 +1058,11 @@ async function updatePlotFields() {
     try {
         do {
             plotFieldsPending = false;
-            const f = plotFrequency() ?? plotFieldsMaxFreq;
-            if (f === solver.fieldFreq) continue;
+            const { f, limited } = keptPlotFrequency();
+            if (f === solver.fieldFreq) {
+                if (limited && afterSolve !== true) logPlotLimit(f);
+                continue;
+            }
             const target = solver;
             const { fields } = await workerJob('plotFields', { freq: f });
             if (fields && target === solver && target === plotFieldsSolver) {
@@ -1082,9 +1100,10 @@ function replotInsteadOfSolve() {
     if (isSimulating || isSweeping || isSolvingModes) return false;
     const key = solveInputKey();
     if (!key || key !== plotFieldsSolveKey) return false;
-    const f = plotFrequency() ?? plotFieldsMaxFreq;
+    const { f, limited } = keptPlotFrequency();
     if (f === solver.fieldFreq) {
-        log('Nothing changed since the last solve.');
+        if (limited) logPlotLimit(f);
+        else log('Nothing changed since the last solve.');
     } else {
         log(`Only the plot frequency changed: updating the field plots at ${(f / 1e9).toPrecision(4)} GHz.`);
         updatePlotFields();
@@ -2120,7 +2139,7 @@ async function runSimulation() {
                     : outcome === 'stopped' ? `Stopped after ${elapsed}` : '');
         isSimulating = false;
         // A Plot Frequency edited during the run.
-        updatePlotFields();
+        updatePlotFields(true);
     }
 }
 
@@ -2886,7 +2905,7 @@ function bindEvents() {
         });
     }
     const plotFreqEl = document.getElementById('plot-freq');
-    if (plotFreqEl) plotFreqEl.addEventListener('change', updatePlotFields);
+    if (plotFreqEl) plotFreqEl.addEventListener('change', () => updatePlotFields());
     const plotEfieldDbEl = document.getElementById('plot-efield-db');
     if (plotEfieldDbEl) {
         // dB and linear keep separate scales, so the dialog reloads the new one.

@@ -4063,6 +4063,12 @@ export class FieldSolver2D {
                  triMesh: this.triMesh || null, ...extra };
     }
 
+    // Highest plot frequency when the solve range tops out at fTop: the full-wave fields
+    // need a mesh sized for their frequency, the quasi-static ones do not.
+    plotFreqLimit(fTop) {
+        return this.mesh_backend === 'triangular' && fTop > 0 ? fTop : Infinity;
+    }
+
     // Plot fields at frequency f: the fields of the solve at f (the static solve at the
     // causal permittivity of f, the full-wave quasi-TEM mode field on the triangular
     // backend) and the surface current per ampere, left on the solver for getPlotFields.

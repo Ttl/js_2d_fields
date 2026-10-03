@@ -16,6 +16,8 @@
 //     shield's block never picks up the centre conductor inside its bounding box
 //   - the solve at the plot frequency keeps its fields: plotting there solves nothing and
 //     matches a fresh solve, on both backends
+//   - a full-wave plot above the solve range is plotted at its top, a quasi-static one
+//     at the frequency asked for
 //
 // Run: node tests/test_plot_fields.js
 import { CoaxSolver } from '../src/coax.js';
@@ -72,7 +74,7 @@ async function solved(s, f) {
 
 // ---------------------------------------------------------------- microstrip
 for (const backend of ['rectilinear', 'triangular']) {
-    const s = new MicrostripSolver(MS);
+    const s = new MicrostripSolver({ ...MS, freq: 20e9 });
     s.mesh_backend = backend;
     s.use_causal_materials = false;
     const pf = await solved(s, 20e9);
@@ -113,7 +115,7 @@ for (const backend of ['rectilinear', 'triangular']) {
         }
         return Math.sqrt(num / den);
     };
-    const s = new MicrostripSolver({ ...MS, mesh_backend: 'triangular' });
+    const s = new MicrostripSolver({ ...MS, freq: 100e9, mesh_backend: 'triangular' });
     s.use_causal_materials = false;
     const cached = await quiet(() => s.solve_adaptive({ max_nodes: 20000 }));
     await quiet(() => s.plotFieldsAt(50e6, cached));
@@ -215,7 +217,7 @@ for (const backend of ['rectilinear', 'triangular']) {
 
 // ---------------------------------------------------------------- MQS current density
 {
-    const s = new MicrostripSolver({ ...MS, mesh_backend: 'triangular' });
+    const s = new MicrostripSolver({ ...MS, freq: 10e9, mesh_backend: 'triangular' });
     s.use_causal_materials = false;
     const cached = await quiet(() => s.solve_adaptive({ max_nodes: 20000 }));
     // Trapezoid integral of |J| over the sampled blocks (both halves of the trace).
@@ -371,6 +373,19 @@ gnd   ellipse  x=0  y=0  rx=a+t_sh  ry=b+t_sh  rx_in=a  ry_in=b  n=128
     check('rectilinear causal plot at the solved plot frequency: no solve', calls === 0, `${calls} calls`);
 }
 
+// Plot frequency above the solve range: full-wave plots at the top of the range the mesh
+// is sized for (with a note), quasi-static ones at the frequency asked for.
+for (const backend of ['triangular', 'rectilinear']) {
+    const s = new MicrostripSolver({ ...MS, freq: 10e9, mesh_backend: backend });
+    s.use_causal_materials = false;
+    const cached = await quiet(() => s.solve_adaptive({ max_nodes: 20000 }));
+    await quiet(() => s.plotFieldsAt(50e9, cached));
+    const pf = s.getPlotFields();
+    const fWant = backend === 'triangular' ? 10e9 : 50e9;
+    check(`${backend} plot above the solve range at ${fWant / 1e9} GHz`, pf.fieldFreq === fWant
+        && (backend === 'triangular') === !!s.plotNote, `${pf.fieldFreq / 1e9} GHz, note ${!!s.plotNote}`);
+}
+
 // ---------------------------------------------------------------- ideal-ground blend
 // Coplanar grounds reaching the domain edge are ideal returns towards DC: the plot takes
 // the field of the ground model with the larger blend weight, and says so.
@@ -395,7 +410,7 @@ gnd   ellipse  x=0  y=0  rx=a+t_sh  ry=b+t_sh  rx_in=a  ry_in=b  n=128
 // ---------------------------------------------------------------- differential pair
 for (const backend of ['rectilinear', 'triangular']) {
     for (const full of [false, true]) {
-        const s = new MicrostripSolver({ ...MS, trace_width: 0.2e-3, trace_spacing: 0.15e-3,
+        const s = new MicrostripSolver({ ...MS, freq: 5e9, trace_width: 0.2e-3, trace_spacing: 0.15e-3,
             mesh_backend: backend, ...(full ? { symmetry: false } : {}) });
         s.use_causal_materials = false;
         check(`${backend}${full ? ' full' : ''} diff: domain`, !!s.sym_half === (backend === 'rectilinear' && !full));

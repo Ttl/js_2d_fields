@@ -1186,6 +1186,8 @@ export class TriBackend {
             : { x_min: -s.domain_width / 2, x_max: s.domain_width / 2,
                 y_min: s.domain_y_min, y_max: s.domain_height };
         this.domain = dom;
+        // The top of the solve range the mesh is sized and refined for (plotFieldsAt).
+        this.meshFreq = Math.max(s.freq || 0, s._sweepFmax || 0);
         // Use a half-domain symmetry solve when the geometry is mirror-symmetric (the
         // shared halfDomainSymmetry disables symmetry for broadside).
         // A medium may also veto the half domain outright. A rectangular waveguide is
@@ -3550,6 +3552,15 @@ export class TriBackend {
         if (!this.mesh) throw new Error('TriBackend: buildMesh() must be awaited before solving (mesh not built).');
         const s = this.solver;
         s.plotNote = null;
+        // The mesh resolves the full-wave fields only up to the frequency it was sized
+        // and refined for: above it they are plotted there.
+        const fTop = s.plotFreqLimit(this.meshFreq);
+        if (f > fTop) {
+            s.plotNote = `Plot frequency ${(f / 1e9).toPrecision(4)} GHz is above the solved range: the full-wave `
+                + `mesh is sized for up to ${(fTop / 1e9).toPrecision(4)} GHz, fields plotted there. `
+                + `Raise the stop frequency to plot higher.`;
+            f = fTop;
+        }
         // A waveguide's mode pattern is geometric, the same at every frequency. Its wall
         // currents are not: the axial H grows relative to the transverse H towards cutoff.
         if (this._isWG) {
