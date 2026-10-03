@@ -1104,13 +1104,14 @@ export class TriBackend {
     }
 
     // Wavelength cap for the main solve at the highest frequency the solve will see
-    // (the sweep maximum): the whole domain at 3 cells per wavelength (the floor
-    // below which the finite-element eigenproblem returns spurious pairs around the
-    // shift, however fine the trace region is) plus a near-field patch at lamMin/N
-    // within three substrate-stack heights of the signal conductors, where the
-    // quasi-TEM field lives. Sized against the triangle budget: the patch density
-    // drops as far as 3 cells per wavelength to fit, and when even the bulk floor
-    // does not fit the cap is left off (the eigensolve then warns as before).
+    // (the sweep maximum): the whole domain at 3 cells per wavelength plus a
+    // near-field patch at lamMin/N within three substrate-stack heights of the
+    // signal conductors, where the quasi-TEM field lives. Sized against the triangle
+    // budget: the patch density drops as far as 3 cells per wavelength to fit. When
+    // the bulk floor does not fit, the patch is kept on its own: with the eigenPick
+    // shift ladder it resolves the mode (1 THz microstrip: same eps_eff and field
+    // above the trace as with the floor), where the geometric mesh leaves the air
+    // around the trace at several wavelengths per element.
     // Returns null when the geometric sizing already resolves the wavelength.
     _nearFieldCap(hCoarse, maxTris) {
         if (this.opts.modesFreq || this.opts.nearFieldCap === false) return null;
@@ -1130,16 +1131,18 @@ export class TriBackend {
         }
         if (!(yHi > yLo) || !(xHi > xLo)) return null;
         const G = yHi - yLo, dist = 3 * G;
-        const patchArea = (xHi - xLo + 2 * dist) * (yHi - yLo + 2 * dist);
         const dom = this.domain;
-        const domainArea = (dom.x_max - dom.x_min) * (dom.y_max - dom.y_min) * (this.symmetry ? 0.5 : 1);
-        const bulk = lamMin / 3;
+        const half = this.symmetry ? 0.5 : 1;
+        const patchArea = half * (Math.min(xHi + dist, dom.x_max) - Math.max(xLo - dist, dom.x_min))
+            * (Math.min(yHi + dist, dom.y_max) - Math.max(yLo - dist, dom.y_min));
+        const domainArea = (dom.x_max - dom.x_min) * (dom.y_max - dom.y_min) * half;
+        let bulk = lamMin / 3;
         let nLambda = this.opts.nearFieldDensity ?? 8;
         let size = lamMin / nLambda;
         if (size >= hCoarse) return null;
         const trisFor = (h, area) => 2 * area / (h * h);
-        // Bulk floor first: if it alone takes over half the budget, no cap.
-        if (bulk < hCoarse && trisFor(bulk, domainArea) > maxTris / 2) return null;
+        // Bulk floor first: if it alone takes over half the budget, the patch only.
+        if (bulk < hCoarse && trisFor(bulk, domainArea) > maxTris / 2) bulk = hCoarse;
         // Then the patch at or below a third of the budget; coarsen its density if needed.
         while (nLambda > 3 && trisFor(size, patchArea) > maxTris / 3) { nLambda -= 1; size = lamMin / nLambda; }
         if (trisFor(size, patchArea) > maxTris / 3) return null;
@@ -3628,18 +3631,32 @@ export class TriBackend {
         // because it is differenced from the continuous potential. So the plot is the
         // static field plus the change of the mode from F_STATIC_MAX, where it is the
         // static field up to discretization: the jumps cancel in the difference.
+        // The correction (static - reference) is scaled by the local amplitude ratio
+        // mode/reference, capped at 1: where the mode has left a region (the air above
+        // a microstrip at THz, field 1e-5 of the substrate) the unscaled mesh mismatch
+        // of the static field, ~1% of it, would be all that is plotted there.
         // Where the static field has no sample (the outermost rows and columns, the
         // metal), the mode field itself.
         const r = slot.fwRef ? fitted(slot.fwRef) : null;
         if (!r) return { x, y, V, Ex: m.Ex, Ey: m.Ey, K, fullwave: true, mesh: meshOf((t, q) => m.at(t, q)) };
         const none = (j, i) => Ex[j][i] === 0 && Ey[j][i] === 0;
+        const scale = (mx, my, rx, ry) => {
+            const rm = Math.hypot(rx, ry);
+            return rm > 0 ? Math.min(1, Math.hypot(mx, my) / rm) : 1;
+        };
         const mesh = meshOf((t, q, sx, sy) => {
             const a = m.at(t, q), b = r.at(t, q);
-            return [sx + a[0] - b[0], sy + a[1] - b[1]];
+            const k = scale(a[0], a[1], b[0], b[1]);
+            return [a[0] + k * (sx - b[0]), a[1] + k * (sy - b[1])];
         });
+        const comp = (j, i, c) => {
+            if (none(j, i)) return c === 0 ? m.Ex[j][i] : m.Ey[j][i];
+            const k = scale(m.Ex[j][i], m.Ey[j][i], r.Ex[j][i], r.Ey[j][i]);
+            return c === 0 ? m.Ex[j][i] + k * (Ex[j][i] - r.Ex[j][i]) : m.Ey[j][i] + k * (Ey[j][i] - r.Ey[j][i]);
+        };
         return { x, y, V, K, fullwave: true, mesh,
-                 Ex: m.Ex.map((row, j) => row.map((v, i) => none(j, i) ? v : Ex[j][i] + v - r.Ex[j][i])),
-                 Ey: m.Ey.map((row, j) => row.map((v, i) => none(j, i) ? v : Ey[j][i] + v - r.Ey[j][i])) };
+                 Ex: m.Ex.map((row, j) => row.map((_, i) => comp(j, i, 0))),
+                 Ey: m.Ey.map((row, j) => row.map((_, i) => comp(j, i, 1))) };
     }
 
     // Public: solve at one frequency, return the unified result object and write

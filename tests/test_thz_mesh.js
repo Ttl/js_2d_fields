@@ -18,6 +18,10 @@
 //      shifts up to it instead of falling back to the static value (a 25% kink).
 //   T6 Modes tab: with six modes requested the quasi-TEM is still listed at 800 GHz
 //      (the hunt appends it when the modes near the shift do not overlap the drive).
+//   T7 default microstrip at 1 THz, default budget: the whole-domain floor does not fit,
+//      the near-field patch is kept on its own (the cap used to be dropped, leaving 455
+//      triangles), and the plotted |E| above the trace follows the mode (~2e-5 of the
+//      substrate field) instead of the static-minus-reference mesh mismatch (~1e-2).
 //
 // Run: node tests/test_thz_mesh.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -138,6 +142,22 @@ const THIN = { trace_width: 0.15e-3, substrate_height: 0.1e-3, tan_delta: 0.002 
     check('a propagating mode with overlap >= 0.5 is listed', !!tem,
         tem ? `eps_eff ${tem.eps_eff.toFixed(4)}, overlap ${tem.overlap.toFixed(3)}, ${r.modes.length} modes, ${r.nTris} tris, ${((Date.now() - t0) / 1000).toFixed(1)} s` : r.modes.map(m => `${m.eps_eff?.toFixed(3)}(${m.overlap.toFixed(2)})`).join(' '));
     if (tem) check('its eps_eff is well above the static value', tem.eps_eff > 3.8, tem.eps_eff.toFixed(4));
+}
+
+// T7
+{
+    console.log('T7 1 THz microstrip at the default budget: patch kept, plot follows the mode');
+    const a = await main({ freq: 1e12 });
+    check('near-field patch applied without the bulk floor', !!a.tb.nearField && a.tb.mesh.nTris > 1500,
+        a.tb.nearField ? `size ${(a.tb.nearField.size * 1e6).toFixed(1)} um, ${a.tb.mesh.nTris} tris` : `null, ${a.tb.mesh.nTris} tris`);
+    check('eps_eff dispersed (> 4.3)', a.m.eps_eff > 4.3, a.m.eps_eff.toFixed(4));
+    await quiet(() => a.s.plotFieldsAt(1e12, a.r));
+    const pf = a.s.getPlotFields();
+    const at = (p, x, y) => { const xi = p.x.findIndex(v => v >= x), yi = p.y.findIndex(v => v >= y); return Math.hypot(p.Ex[0][yi][xi], p.Ey[0][yi][xi]); };
+    const sub = at(pf, 0, 0.105e-3), top = 0.21e-3 + 35e-6;
+    const above = [25e-6, 100e-6, 200e-6].map(d => at(pf, 0, top + d) / sub);
+    check('plotted |E| above the trace < 1e-4 of the substrate field', above.every(v => v < 1e-4), above.map(v => v.toExponential(1)).join(' '));
+    check('and decays away from the trace', above[0] > above[1] && above[1] > above[2]);
 }
 
 done();
