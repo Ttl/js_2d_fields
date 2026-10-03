@@ -18,6 +18,9 @@
 //   9. DC: a parallel plate on two conductive layers in series has G = W / sum(h_i /
 //      sigma_i) and the Maxwell-Wagner C, and an asymmetric pair on them has a finite
 //      [G] at f = 0 equal to its low-frequency value
+//  10. field plot: the plotted field is the complex static one, the silicon under a
+//      coplanar line screens it below f_r and not above; a lossless fill plots no
+//      imaginary part
 //
 // Run: node tests/test_conductive_dielectric.js
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
@@ -275,6 +278,48 @@ diel x=-inf w=inf y=20 h=5 er=4.1 sigma=0.5
         const both = G0[0][0] + G0[1][1] + 2 * G0[0][1];
         check(`${name}: asymmetric pair at DC, both traces driven conduct between the gapped and the whole plate`,
             both > 0.95 * Gdc && both < Gdc, `${fmt(both)} vs plate ${fmt(Gdc)}`);
+    }
+}
+
+// --- 10. Field plot ---
+{
+    // Coplanar line on oxide over conductive silicon, nothing below the silicon.
+    const cpw = si => `units um
+bounds open open open open
+diel x=-inf w=inf y=-50 h=50 er=11.9 ${si}
+diel x=-inf w=inf y=0 h=6 er=4.1
+gnd x=-30 w=22 y=3 h=1
+gnd x=8 w=22 y=3 h=1
+sig+ x=-5 w=10 y=3 h=1
+`;
+    // Peak |E|^2 in the silicon over that in the oxide below the line, and the largest
+    // |Im E| over the largest |E|, from the plotted grid of mode 0.
+    const plotStats = s => {
+        const P = s.getPlotFields(), { x, y } = P;
+        let si = 0, ox = 0, im = 0, all = 0;
+        for (let i = 0; i < y.length; i++) for (let j = 0; j < x.length; j++) {
+            const xi = P.ExIm ? P.ExIm[0][i][j] : 0, yi = P.EyIm ? P.EyIm[0][i][j] : 0;
+            const e2 = P.Ex[0][i][j] ** 2 + P.Ey[0][i][j] ** 2 + xi * xi + yi * yi;
+            im = Math.max(im, Math.hypot(xi, yi)); all = Math.max(all, Math.sqrt(e2));
+            if (Math.abs(x[j]) > 15e-6) continue;
+            if (y[i] < -1e-6 && y[i] > -20e-6) si = Math.max(si, e2);
+            else if (y[i] > 0.5e-6 && y[i] < 2.5e-6) ox = Math.max(ox, e2);
+        }
+        return { r: si / ox, im: im / all, mirrored: !P.ExIm || P.ExIm[0][0].length === x.length };
+    };
+    for (const [name, extra] of BACKENDS) {
+        const { s, r } = await solve(cpw(`sigma=${SIG}`), FR, extra);
+        const at = async f => { await quiet(() => s.plotFieldsAt(f, r)); return plotStats(s); };
+        const lo = await at(FR / 100), mid = await at(FR), hi = await at(FR * 100);
+        check(`${name}: the silicon screens the plotted field below f_r and not above`, hi.r > 100 * lo.r,
+            `Si / oxide |E|^2 ${fmt(lo.r)} at f_r/100, ${fmt(hi.r)} at 100 f_r`);
+        check(`${name}: the plotted field has an imaginary part at f_r`, mid.im > 10 * Math.max(lo.im, hi.im),
+            `|Im E| / |E| ${fmt(lo.im)}, ${fmt(mid.im)}, ${fmt(hi.im)}`);
+        check(`${name}: the imaginary field is mirrored with the rest`, mid.mirrored);
+        const plain = await solve(cpw(''), FR, extra);
+        await quiet(() => plain.s.plotFieldsAt(FR, plain.r));
+        check(`${name}: a lossless fill plots no imaginary part`, plotStats(plain.s).im < 1e-12,
+            fmt(plotStats(plain.s).im));
     }
 }
 

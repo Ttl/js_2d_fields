@@ -1009,6 +1009,8 @@ function applyFields(target, fields) {
     target.V = fields.V;
     target.Ex = fields.Ex;
     target.Ey = fields.Ey;
+    target.ExIm = fields.ExIm || null;
+    target.EyIm = fields.EyIm || null;
     target.surfaceK = fields.surfaceK || null;
     target.currentJ = fields.currentJ || null;
     target.currentMesh = fields.currentMesh || null;

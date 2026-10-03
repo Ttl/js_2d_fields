@@ -2250,6 +2250,24 @@ export class TriBackend {
         return true;
     }
 
+    // Conductor potentials of a mode's drive: the modal voltages of an asymmetric pair.
+    _modePotentials(mode, st) {
+        const v = st.modalVec;
+        return v ? this.condRect.rectRoles.map(r => (!r.is_signal ? 0 : (r.polarity || 1) > 0 ? v[0] : v[1]))
+            : drivePotentials(this.condRect, mode, this.symmetry);
+    }
+
+    // Static potential { re, im } of a mode for the field plot at f, under the complex
+    // permittivity of the current materials (_conductiveSolve). Solved in every case, a
+    // lossless or uniformly lossy fill just returns im = 0. This could be made faster:
+    // with no conductive dielectric and equal loss tangents the real static solve and
+    // its resampled st.fields are the same field, and different loss tangents alone
+    // change |E| by about dtand^2 / 2. The complex solve is cheap, the two resamples
+    // and mesh evaluations in _plotMode cost about 0.2-0.4 s per mode.
+    _plotStatic(mode, st, f) {
+        return this._conductiveSolve(st.fm, this._modePotentials(mode, st), f).sol;
+    }
+
     // Conductive dielectrics (conductive_dielectric.js): the static solve of the
     // conductor potentials pot at frequency f with the complex permittivity
     // er (1 - j tand) - j sigma / (omega eps0), and its complex energy W* = ½ C* V².
@@ -2266,10 +2284,7 @@ export class TriBackend {
 
     // Complex capacitance of a mode: { C, G } with C = Re C*, G = omega C'' (C* = C' - j C'').
     _conductiveMode(mode, st, f) {
-        const v = st.modalVec;
-        const pot = v ? this.condRect.rectRoles.map(r => (!r.is_signal ? 0 : (r.polarity || 1) > 0 ? v[0] : v[1]))
-            : drivePotentials(this.condRect, mode, this.symmetry);
-        const { sol, energy, omega } = this._conductiveSolve(st.fm, pot, f);
+        const { sol, energy, omega } = this._conductiveSolve(st.fm, this._modePotentials(mode, st), f);
         const W = energy(sol.re, sol.im), k = st.kC * eps0;
         return { C: k * W.re, G: -omega * k * W.im };
     }
@@ -2662,7 +2677,10 @@ export class TriBackend {
         // At the plot frequency the solves below keep their fields for plotFieldsAt, once:
         // a repeat of the frequency may take the anchors and the fields it kept.
         const slot = this._plotSlot(mode, f);
-        if (slot && !slot.fields) { slot.st = st; slot.fields = st.fields; slot.phiEps = st.phiEps; }
+        if (slot && !slot.fields) {
+            slot.st = st; slot.fields = st.fields; slot.phiEps = st.phiEps;
+            slot.plotPhi = this._plotStatic(mode, st, f);
+        }
 
         // Full-wave eigenmode above 100 MHz (dispersive eps + the mode field used
         // for the perturbation conductor loss); static solve near DC.
@@ -3569,6 +3587,8 @@ export class TriBackend {
         s.V = modes.map(m => m.V);
         s.Ex = modes.map(m => m.Ex);
         s.Ey = modes.map(m => m.Ey);
+        s.ExIm = modes.map(m => m.ExIm || null);
+        s.EyIm = modes.map(m => m.EyIm || null);
         s.fieldMesh = modes.map(m => m.mesh || null);
         // Surface current from the MQS solve at f where it ran, else the perfect-conductor
         // limit of the static solve.
@@ -3641,10 +3661,20 @@ export class TriBackend {
 
     // Plot fields of one mode from its plot slot (the static solve, fields and eigenmode
     // at f), falling back to the current static solve where the slot has none.
+    // The static part is the complex quasi-static field (_plotStatic): a conductive
+    // dielectric screens it below its relaxation frequency. V is its real part, the
+    // drive is real; ExIm, EyIm the imaginary E.
     _plotMode(mode, f, slot) {
         const st = (slot && slot.st) || this._static[mode];
-        const { x, y, V, Ex, Ey } = (slot && slot.fields) || st.fields;
+        // The real static field the eigenmode is fitted to.
+        const { x, y, Ex, Ey } = (slot && slot.fields) || st.fields;
         const symX = this._symX();
+        const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
+        const phi = (slot && slot.plotPhi) || this._plotStatic(mode, st, f);
+        const resampled = p => resampleStatic(this.mesh, p, this.domain,
+            { resolution: this.opts.resolution, parity, grid: this._staticGrid, rects: this._plotRects });
+        const cRe = resampled(phi.re), cIm = resampled(phi.im);
+        const V = cRe.V, ExIm = cIm.Ex, EyIm = cIm.Ey;
         // Nets at the driving potential: both traces of an even drive on the full domain.
         const pot = drivePotentials(this.condRect, mode, this.symmetry);
         const pMax = Math.max(...pot);
@@ -3653,14 +3683,15 @@ export class TriBackend {
         const K = st.phiAir ? surfaceCurrentPoints(this.mesh, st.fm, st.phiAir,
             buildLossEdges(this.mesh, st.fm, this.condRect), this._plotSegLen(), symX, nets,
             !this.solver.is_differential) : null;
-        const parity = this.symmetry ? (mode === 'odd' ? 'odd' : 'even') : null;
         // |E| on the triangles for the plot (meshFieldBlock): sharp at every interface,
         // curved ones included, which the grid can only draw as a staircase.
-        const sf = staticFieldOnMesh(this.mesh, (slot && slot.phiEps) || st.phiEps, this.domain,
-            { parity, rects: this._plotRects });
-        const meshOf = combine => meshFieldBlock(this.mesh, sf, combine, !!parity);
+        const sfOpts = { parity, rects: this._plotRects };
+        const sf = staticFieldOnMesh(this.mesh, phi.re, this.domain, sfOpts);
+        const sfIm = staticFieldOnMesh(this.mesh, phi.im, this.domain, sfOpts);
+        const meshOf = combine => meshFieldBlock(this.mesh, sf, combine, !!parity, sfIm);
         const fw = f >= F_STATIC_MAX && slot ? slot.fw : null;
-        if (!fw) return { x, y, V, Ex, Ey, K, fullwave: false, mesh: meshOf(null) };
+        const staticOnly = () => ({ x, y, V, Ex: cRe.Ex, Ey: cRe.Ey, ExIm, EyIm, K, fullwave: false, mesh: meshOf(null) });
+        if (!fw) return staticOnly();
         // An eigenvector has an arbitrary complex scale: fit it to the static field of
         // the same drive by least squares, area weighted on the graded grid.
         const fitted = (w) => {
@@ -3695,7 +3726,7 @@ export class TriBackend {
                      Ey: m.Ey.map((row, j) => row.map((v, i) => sr * v - si * m.EyIm[j][i])) };
         };
         const m = fitted(fw);
-        if (!m) return { x, y, V, Ex, Ey, K, fullwave: false, mesh: meshOf(null) };
+        if (!m) return staticOnly();
         // The mode field sampled per element keeps the jumps of its normal component
         // between elements, which kink the |E| contours; the static field is smooth
         // because it is differenced from the continuous potential. So the plot is the
@@ -3707,26 +3738,30 @@ export class TriBackend {
         // of the static field, ~1% of it, would be all that is plotted there.
         // Where the static field has no sample (the outermost rows and columns, the
         // metal), the mode field itself.
+        // The static field here is the complex one: its real part takes the place of the
+        // real static field and its imaginary part is scaled the same way. The eigenmode
+        // itself is solved with real permittivity.
         const r = slot.fwRef ? fitted(slot.fwRef) : null;
-        if (!r) return { x, y, V, Ex: m.Ex, Ey: m.Ey, K, fullwave: true, mesh: meshOf((t, q) => m.at(t, q)) };
-        const none = (j, i) => Ex[j][i] === 0 && Ey[j][i] === 0;
+        if (!r) return { x, y, V, Ex: m.Ex, Ey: m.Ey, ExIm: null, EyIm: null, K, fullwave: true,
+                         mesh: meshOf((t, q) => m.at(t, q)) };
+        const none = (j, i) => cRe.Ex[j][i] === 0 && cRe.Ey[j][i] === 0 && ExIm[j][i] === 0 && EyIm[j][i] === 0;
         const scale = (mx, my, rx, ry) => {
             const rm = Math.hypot(rx, ry);
             return rm > 0 ? Math.min(1, Math.hypot(mx, my) / rm) : 1;
         };
-        const mesh = meshOf((t, q, sx, sy) => {
+        const mesh = meshOf((t, q, sx, sy, sxi, syi) => {
             const a = m.at(t, q), b = r.at(t, q);
             const k = scale(a[0], a[1], b[0], b[1]);
-            return [a[0] + k * (sx - b[0]), a[1] + k * (sy - b[1])];
+            return [a[0] + k * (sx - b[0]), a[1] + k * (sy - b[1]), k * sxi, k * syi];
         });
-        const comp = (j, i, c) => {
-            if (none(j, i)) return c === 0 ? m.Ex[j][i] : m.Ey[j][i];
-            const k = scale(m.Ex[j][i], m.Ey[j][i], r.Ex[j][i], r.Ey[j][i]);
-            return c === 0 ? m.Ex[j][i] + k * (Ex[j][i] - r.Ex[j][i]) : m.Ey[j][i] + k * (Ey[j][i] - r.Ey[j][i]);
-        };
-        return { x, y, V, K, fullwave: true, mesh,
-                 Ex: m.Ex.map((row, j) => row.map((_, i) => comp(j, i, 0))),
-                 Ey: m.Ey.map((row, j) => row.map((_, i) => comp(j, i, 1))) };
+        const grid = c => m.Ex.map((row, j) => row.map((_, i) => {
+            const mx = m.Ex[j][i], my = m.Ey[j][i];
+            if (none(j, i)) return c === 0 ? mx : c === 1 ? my : 0;
+            const k = scale(mx, my, r.Ex[j][i], r.Ey[j][i]);
+            return c === 0 ? mx + k * (cRe.Ex[j][i] - r.Ex[j][i]) : c === 1 ? my + k * (cRe.Ey[j][i] - r.Ey[j][i])
+                : k * (c === 2 ? ExIm : EyIm)[j][i];
+        }));
+        return { x, y, V, K, fullwave: true, mesh, Ex: grid(0), Ey: grid(1), ExIm: grid(2), EyIm: grid(3) };
     }
 
     // Public: solve at one frequency, return the unified result object and write
@@ -3818,6 +3853,7 @@ export class TriBackend {
         this.solver.V = modes.map(m => m.V);
         this.solver.Ex = modes.map(m => m.Ex);
         this.solver.Ey = modes.map(m => m.Ey);
+        this.solver.ExIm = this.solver.EyIm = null;
         this.solver.fieldMesh = null;   // the plot fields of plotFieldsAt, not these
         this.solver.triMesh = { nodes: this.mesh.nodes, tris: this.mesh.tris, nTris: this.mesh.nTris };
         this.solver.solution_valid = true;

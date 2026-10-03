@@ -241,6 +241,9 @@ export class FieldSolver2D {
         // Computed fields - stored as array: [fields] for single-ended, [odd, even] for differential
         this.Ex = null;
         this.Ey = null;
+        // Imaginary E of the complex plot field (plotFieldsAt), null: real.
+        this.ExIm = null;
+        this.EyIm = null;
     }
 
     // Bottom of the solve domain. Rectangular line types put their bottom ground
@@ -3020,6 +3023,7 @@ export class FieldSolver2D {
         this.solution_valid = false;
         this.Ex = null;
         this.Ey = null;
+        this.ExIm = this.EyIm = null;
     }
 
     _compute_energy_error(Ex, Ey, prev_energy, vacuum = false) {
@@ -3678,6 +3682,7 @@ export class FieldSolver2D {
             this.V = modeResults.map(r => r.V);
             this.Ex = modeResults.map(r => r.Ex);
             this.Ey = modeResults.map(r => r.Ey);
+            this.ExIm = this.EyIm = null;
             this._plotModes = modeResults.map(r => r.mode);
             return this._build_results(modeResults);
         }
@@ -3917,6 +3922,7 @@ export class FieldSolver2D {
         this.V = modeResults.map(r => r.V);
         this.Ex = modeResults.map(r => r.Ex);
         this.Ey = modeResults.map(r => r.Ey);
+        this.ExIm = this.EyIm = null;
         this._plotModes = modeResults.map(r => r.mode);
 
         // Build unified result structure
@@ -4026,6 +4032,7 @@ export class FieldSolver2D {
                         fieldFreq: this.fieldFreq ?? null,
                         fieldKind: this.fieldKind || 'static' };
         const base = { x: this.x, y: this.y, V: this.V, Ex: this.Ex, Ey: this.Ey,
+                       ExIm: this.ExIm || null, EyIm: this.EyIm || null,
                        triMesh: this.triMesh || null, ...extra };
         // Mirror only a genuine half grid (x[0] === 0). Fields grafted by the
         // triangular backend already span the full domain (x[0] < 0).
@@ -4042,14 +4049,18 @@ export class FieldSolver2D {
             for (let j = 0; j < n; j++) out[n - 1 + j] = row[j];
             return out;
         });
-        const V = [], Ex = [], Ey = [];
+        const V = [], Ex = [], Ey = [], ExIm = [], EyIm = [];
         for (let m = 0; m < this.V.length; m++) {
             const sV = (this._plotModes && this._plotModes[m] === 'odd') ? -1 : 1;
             V.push(mirror(this.V[m], sV));
             Ex.push(mirror(this.Ex[m], -sV));
             Ey.push(mirror(this.Ey[m], sV));
+            const xi = this.ExIm && this.ExIm[m], yi = this.EyIm && this.EyIm[m];
+            ExIm.push(xi ? mirror(xi, -sV) : null);
+            EyIm.push(yi ? mirror(yi, sV) : null);
         }
-        return { x: xs, y: this.y, V, Ex, Ey, triMesh: this.triMesh || null, ...extra };
+        return { x: xs, y: this.y, V, Ex, Ey, ExIm: this.ExIm ? ExIm : null, EyIm: this.EyIm ? EyIm : null,
+                 triMesh: this.triMesh || null, ...extra };
     }
 
     // Plot fields at frequency f: the fields of the solve at f (the static solve at the
@@ -4064,11 +4075,17 @@ export class FieldSolver2D {
             return;
         }
         this.plot_freq_target = f;
-        const c = this._plotResult;
-        const r = c && c.freq === f && c.cached === cachedResults ? c.r : await this.computeAtFrequency(f, cachedResults);
-        this.V = r.modes.map(m => m.V);
-        this.Ex = r.modes.map(m => m.Ex);
-        this.Ey = r.modes.map(m => m.Ey);
+        let c = this._plotResult;
+        if (!(c && c.freq === f && c.cached === cachedResults)) {
+            await this.computeAtFrequency(f, cachedResults);   // keeps its result, _keep_plot_result
+            c = this._plotResult;
+        }
+        const r = c.r;
+        this.V = c.plot.map(p => p.V);
+        this.Ex = c.plot.map(p => p.Ex);
+        this.Ey = c.plot.map(p => p.Ey);
+        this.ExIm = c.plot.map(p => p.ExIm);
+        this.EyIm = c.plot.map(p => p.EyIm);
         this._plotModes = r.modes.map(m => m.mode);
         this.surfaceK = r.modes.map(m => this.surface_current(m.Ex0, m.Ey0));
         this.surfaceKSource = r.modes.map(() => 'pec');
@@ -4425,7 +4442,7 @@ export class FieldSolver2D {
             }
 
             const out = this._build_results(modeResults);
-            if (freq === this.plot_freq_target) this._plotResult = { freq, cached: cachedResults, r: out };
+            if (freq === this.plot_freq_target) await this._keep_plot_result(freq, cachedResults, out);
             return out;
         }
 
@@ -4461,6 +4478,36 @@ export class FieldSolver2D {
             });
         }
 
-        return this._build_results(modeResults);
+        const out = this._build_results(modeResults);
+        if (freq === this.plot_freq_target) await this._keep_plot_result(freq, cachedResults, out);
+        return out;
+    }
+
+    // Keeps the results of the solve at the plot frequency for plotFieldsAt, with their
+    // plot fields solved now, while the materials are those of freq.
+    async _keep_plot_result(freq, cachedResults, out) {
+        this._plotResult = { freq, cached: cachedResults, r: out, plot: await this._plot_fields(out.modes, freq) };
+    }
+
+    // Plot fields of solved modes at freq: the quasi-static field under the complex
+    // permittivity er (1 - j tand) - j sigma / (omega eps0), so a conductive dielectric
+    // screens it below its relaxation frequency. Per mode { V, Ex, Ey, ExIm, EyIm }, V the
+    // real part (the drive is real). Solved in every case, a lossless or uniformly lossy
+    // fill just gives a zero imaginary part. This could be made faster: with no conductive
+    // dielectric and equal loss tangents the mode's own real fields are the same field
+    // (different loss tangents alone change |E| by about dtand^2 / 2), and the complex
+    // factorization costs about 2x the real one, ~0.2 s at the default node budget.
+    async _plot_fields(modes, freq) {
+        const { a, b } = this._complex_cells(conductiveOmega(this.dielectrics, freq));
+        const out = [];
+        for (const m of modes) {
+            const planeBC = this._plane_bc(m.mode);
+            // The mode's potential carries its drive on the conductor nodes.
+            const Vd = m.V.map(row => Float64Array.from(row));
+            const [{ Vr, Vi }] = await this._solve_laplace_complex([Vd], a, b, planeBC);
+            const re = this.compute_fields(Vr, planeBC), im = this.compute_fields(Vi, planeBC);
+            out.push({ V: Vr, Ex: re.Ex, Ey: re.Ey, ExIm: im.Ex, EyIm: im.Ey });
+        }
+        return out;
     }
 }

@@ -85,7 +85,7 @@ function fieldPayload(solver) {
     if (solver.getPlotFields) return solver.getPlotFields();
     return {
         x: solver.x, y: solver.y,
-        V: solver.V, Ex: solver.Ex, Ey: solver.Ey,
+        V: solver.V, Ex: solver.Ex, Ey: solver.Ey, ExIm: solver.ExIm || null, EyIm: solver.EyIm || null,
         triMesh: solver.triMesh || null,
         surfaceK: solver.surfaceK || null, currentJ: solver.currentJ || null,
         currentMesh: solver.currentMesh || null, fieldMesh: solver.fieldMesh || null,

@@ -493,14 +493,20 @@ const shownModeLabel = () => (isDifferentialMode() ? (getSelectedModeIndex() ===
 // The user's scale range of the view on screen, or null.
 const storedScale = () => (window.getStoredScale ? window.getStoredScale(scaleView()) : null);
 
-// |E| on the solver grid, rows 0..ny-1, [] without fields.
+// |E| on the solver grid, rows 0..ny-1, [] without fields. The field is complex
+// (ExIm, EyIm its imaginary part) where a dielectric is lossy.
 function efieldMagnitude(ny, nx) {
-    const { Ex, Ey } = getFields();
+    const { Ex, Ey, ExIm, EyIm } = getFields();
     const z = [];
     if (!Ex || !Ey || Ex.length < ny) return z;
     for (let i = 0; i < ny; i++) {
         const row = [];
-        if (Ex[i] && Ey[i]) for (let j = 0; j < nx; j++) row.push(Math.hypot(Ex[i][j], Ey[i][j]));
+        const xi = ExIm && ExIm[i], yi = EyIm && EyIm[i];
+        if (Ex[i] && Ey[i]) {
+            for (let j = 0; j < nx; j++) {
+                row.push(Math.hypot(Ex[i][j], Ey[i][j], xi ? xi[j] : 0, yi ? yi[j] : 0));
+            }
+        }
         z.push(row);
     }
     return z;
@@ -2134,20 +2140,16 @@ function getSelectedModeIndex() {
     return modeSelect && modeSelect.value === 'even' ? 1 : 0;
 }
 
-// Helper function to get Ex/Ey fields (handles differential mode)
+// Helper function to get Ex/Ey fields (handles differential mode). ExIm, EyIm: the
+// imaginary part of a complex field, null when real.
 function getFields() {
     const solver = get.solver();
     if (!solver || !solver.Ex || !solver.Ey) {
-        return { Ex: null, Ey: null };
+        return { Ex: null, Ey: null, ExIm: null, EyIm: null };
     }
-
-    if (isDifferentialMode()) {
-        const modeIndex = getSelectedModeIndex();
-        return { Ex: solver.Ex[modeIndex], Ey: solver.Ey[modeIndex] };
-    } else {
-        // Single-ended mode
-        return { Ex: solver.Ex[0], Ey: solver.Ey[0] };
-    }
+    const m = isDifferentialMode() ? getSelectedModeIndex() : 0;
+    return { Ex: solver.Ex[m], Ey: solver.Ey[m],
+             ExIm: (solver.ExIm && solver.ExIm[m]) || null, EyIm: (solver.EyIm && solver.EyIm[m]) || null };
 }
 
 // Helper function to get voltage potential (handles differential mode)

@@ -607,15 +607,17 @@ export function staticFieldOnMesh(mesh, phi, domain, opts = {}) {
 
 // |E| on the dielectric triangles for a plot: each triangle of staticFieldOnMesh split in
 // four at its edge midpoints, { tris: [x0, y0, x1, y1, x2, y2, ...], E: [E0, E1, E2, ...] }.
-// combine(t, q, Ex, Ey) maps the static field at point q of triangle t to the plotted one
-// ([Ex, Ey]); mirror adds the image about x = 0 of a half-domain solve.
+// sfIm is the imaginary part of a complex static field on the same triangles (null: real).
+// combine(t, q, Ex, Ey, ExIm, EyIm) maps the static field at point q of triangle t to the
+// plotted one ([Ex, Ey, ExIm, EyIm]); |E| is the norm of all four. mirror adds the image
+// about x = 0 of a half-domain solve.
 //
 // Each triangle's field is its own, so a vertex or edge midpoint shared by triangles would
 // read a different |E| in each (by tens of percent at a conductor corner, where the field
 // is singular) and a contour line would end on the shared edge. The plotted value is the
 // mean over the triangles of the same material sharing the point: continuous within a
 // material, sharp across an interface.
-export function meshFieldBlock(mesh, sf, combine = null, mirror = false) {
+export function meshFieldBlock(mesh, sf, combine = null, mirror = false, sfIm = null) {
     const { tris, triEdges, nNodes, nEdges } = mesh;
     const { regionOf, nRegions: nR } = buildTriRegions(mesh);
     const n = sf.tri.length;
@@ -625,9 +627,11 @@ export function meshFieldBlock(mesh, sf, combine = null, mirror = false) {
     for (let k = 0; k < n; k++) {
         const t = sf.tri[k];
         for (let q = 0; q < 6; q++) {
-            const e = combine ? combine(t, q, sf.Ex[6 * k + q], sf.Ey[6 * k + q]) : [sf.Ex[6 * k + q], sf.Ey[6 * k + q]];
+            const p = 6 * k + q;
+            const xi = sfIm ? sfIm.Ex[p] : 0, yi = sfIm ? sfIm.Ey[p] : 0;
+            const e = combine ? combine(t, q, sf.Ex[p], sf.Ey[p], xi, yi) : [sf.Ex[p], sf.Ey[p], xi, yi];
             const i = slot(t, q);
-            sum[i] += Math.hypot(e[0], e[1]); cnt[i]++;
+            sum[i] += Math.hypot(e[0], e[1], e[2] || 0, e[3] || 0); cnt[i]++;
         }
     }
     return splitTriBlock(mesh, sf.tri, (k, t, mag) => {
