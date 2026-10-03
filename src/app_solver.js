@@ -2024,9 +2024,9 @@ async function runSimulation() {
         const ends = !firstRow ? [] : (rows.length === 1 || firstRow === lastRow) ? [firstRow] : [firstRow, lastRow];
         const unit = freqUnit(Math.max(...frequencies));
         const fAt = f => `${formatFreq(f, unit)} ${unit.name}`;
-        const freqLine = `Frequency: ${ends.map(r => formatFreq(r.freq, unit)).join(' → ')} ${unit.name}\n`;
-        const fRange = ends.length ? ends.map(r => formatFreq(r.freq, unit)).join('–') + ` ${unit.name}` : '';
-        const span = (fmt) => ends.map(fmt).join(' → ');
+        const freqLine = `Frequency: ${ends.map(r => formatFreq(r.freq, unit)).join(' - ')} ${unit.name}\n`;
+        const fRange = ends.length ? ends.map(r => formatFreq(r.freq, unit)).join('-') + ` ${unit.name}` : '';
+        const span = (fmt) => ends.map(fmt).join(' - ');
         const loss = r => r.result.modes[0].alpha_total.toFixed(3);
         const lossShort = `${span(loss)} dB/m @ ${fRange}`;
         const lossStr = `Loss: ${span(loss)} dB/m`;
@@ -2073,8 +2073,8 @@ async function runSimulation() {
                      `  eps_eff even: ${span(r => eps(r, 'even'))}` +
                      `${asymStr}${lineStr}\n` +
                      `\n${lossStr}`,
-                `Zdiff ${span(zdiff)} Ω · Zcm ${span(zcm)} Ω · ` +
-                `εeff odd ${span(r => eps(r, 'odd'))} / even ${span(r => eps(r, 'even'))} · ${lossShort}`);
+                `Zdiff ${span(zdiff)} Ω,   Zcm ${span(zcm)} Ω,  ` +
+                `εeff odd ${span(r => eps(r, 'odd'))} / even ${span(r => eps(r, 'even'))},  loss ${lossShort}`);
         } else {
             const zc = r => formatZc(r.result.modes[0].Zc);
             const eps = r => r.result.modes[0].eps_eff.toFixed(3);
@@ -2088,7 +2088,7 @@ async function runSimulation() {
                           `eps_eff: ${span(eps)}${cutoffNote}\n`) +
                      `${lossStr}`,
                 !firstRow ? 'Below cutoff'
-                    : `Zc ${span(zc)} Ω · εeff ${span(eps)} · ${lossShort}`);
+                    : `Zc ${span(zc)} Ω,   εeff ${span(eps)},  loss ${lossShort}`);
         }
 
         // Update plots
