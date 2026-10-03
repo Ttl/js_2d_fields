@@ -42,10 +42,12 @@ solver.js: solver.cpp | eigen
 # -fwasm-exceptions: C++ throws (Spectra invalid_argument, bad_alloc) must be
 # catchable inside the entry points' try/catch — without it any throw abort()s
 # and permanently poisons the module for the rest of the session.
+# -fcx-limited-range: std::complex * and / inline as plain formulas instead of the
+# NaN/Inf-recovering __muldc3 / __divdc3 calls. Complex LDLT / LU about 20 % faster.
 eigen_solver: eigen_solver.js
 eigen_solver.js: eigen_solver.cpp | eigen spectra
 	$(MAKE) eigen-patch
-	$(EMCC) eigen_solver.cpp -I eigen -I spectra/include -O3 -fwasm-exceptions \
+	$(EMCC) eigen_solver.cpp -I eigen -I spectra/include -O3 -fwasm-exceptions -fcx-limited-range \
 	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,node \
 	  -s EXPORTED_FUNCTIONS='["_solve_generalized_eigen","_solve_generalized_eigen_with_init","_solve_sparse_multi","_solve_rqi","_solve_qep_rqi","_solve_complex_symmetric","_malloc","_free"]' \
 	  -s EXPORTED_RUNTIME_METHODS='["HEAP32","HEAPF64"]' \
