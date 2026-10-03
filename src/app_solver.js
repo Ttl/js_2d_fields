@@ -3167,6 +3167,20 @@ function init() {
     initLayoutPanels();
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
+    // Panes shown or hidden without a window resize (custom geometry editor, log)
+    // change the plot size too; Plotly.react with an unchanged config does not re-measure.
+    if (typeof ResizeObserver !== 'undefined') {
+        let queued = false;
+        const observer = new ResizeObserver(() => {
+            if (queued) return;
+            queued = true;
+            requestAnimationFrame(() => { queued = false; resizeCanvas(); });
+        });
+        for (const id of ['sim_canvas', 'modes-plot']) {
+            const container = document.getElementById(id);
+            if (container) observer.observe(container);
+        }
+    }
     log("Ready. Click 'Solve' to start simulation.");
     loadSettingsFromFragment();
     window.addEventListener('hashchange', loadSettingsFromFragment);
