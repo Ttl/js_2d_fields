@@ -2577,7 +2577,7 @@ export class TriBackend {
         const uMax = Math.max(...cr.rects.map((r, i) => {
             if (!ideal[i]) return 0;
             const sg = roles[i].sigma || s.sigma_cond || sigma;
-            return 2 / (omega * MU0 * sg) / Math.min(r.xmax - r.xmin, r.ymax - r.ymin) / wLo;
+            return 2 / (omega * MU0 * sg) / condThinDim(r) / wLo;
         }));
         if (!(uMax > SPREAD_U_MIN)) return mqsConductorLoss(mesh, cr, f, sigma, solve, 0, opts);
         // A plot takes the field of the ground model with the larger blend weight.

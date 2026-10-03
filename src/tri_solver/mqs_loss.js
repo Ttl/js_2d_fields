@@ -929,10 +929,12 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         zWall[w] = { re: RsW * z.re, im: RsW * z.im };
     }
     // |dA/dn|^2 at the 3 Gauss points of the edge (x0, y0)-(x1, y1), from the P2 field
-    // of triangle t beside it; comp is the gradient component along the edge normal
-    // (1 on a horizontal edge, 0 on a vertical one).
+    // of triangle t beside it, with n the edge normal (exactly an axis on the faces of
+    // a rect, slanted on a polygon side).
     const lge = new Int32Array(6), g2 = new Float64Array(3);
-    const edgeGrad2 = (t, x0, y0, x1, y1, comp) => {
+    const edgeGrad2 = (t, x0, y0, x1, y1) => {
+        const len = Math.hypot(x1 - x0, y1 - y0);
+        const nx = (y0 - y1) / len, ny = (x1 - x0) / len;
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
         const { coeff } = triCoefficients(nodes, v0, v1, v2);
         lge[0] = dofOf[v0]; lge[1] = dofOf[v1]; lge[2] = dofOf[v2];
@@ -943,7 +945,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             for (let k = 0; k < 6; k++) {
                 const g = lge[k]; if (g < 0) continue;
                 const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
-                gR += gr[comp] * sol[g]; gI += gr[comp] * sol[nF + g];
+                const gn = gr[0] * nx + gr[1] * ny;
+                gR += gn * sol[g]; gI += gn * sol[nF + g];
             }
             g2[q] = gR*gR + gI*gI;
         }
@@ -973,7 +976,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
         if (adj < 0 || isCondTri[adj]) continue;
         const L = Math.hypot(x1 - x0, y1 - y0);
         // Tangential H comes from the gradient component along the wall normal.
-        const G2 = edgeGrad2(adj, x0, y0, x1, y1, orient === 'h' ? 1 : 0);
+        const G2 = edgeGrad2(adj, x0, y0, x1, y1);
         // Walls are bare metal (never plated). Evaluate Zs once at the edge midpoint.
         const Zg = opts.surfaceZs ? opts.surfaceZs((x0 + x1) / 2, (y0 + y1) / 2, orient) : null;
         for (let q = 0; q < 3; q++) {
@@ -1028,7 +1031,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             const horiz = Math.abs(y1 - y0) < Math.abs(x1 - x0);
             const L = Math.hypot(x1 - x0, y1 - y0);
             const ri = pre.triRect[cnd];
-            const G2 = edgeGrad2(ext, x0, y0, x1, y1, horiz ? 1 : 0);
+            const G2 = edgeGrad2(ext, x0, y0, x1, y1);
             let Sseg = 0;
             for (let q = 0; q < 3; q++) {
                 const K2 = Cmag2 * G2[q] / (MU0*MU0);
@@ -1050,7 +1053,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             const r = rects[ri];
             const sigmaR = sigma * (pre.sRelRect ? pre.sRelRect[ri] : 1);
             const deltaR = Math.sqrt(2 / (omega * MU0 * sigmaR)), RsR = 1 / (sigmaR * deltaR);
-            const d = Math.min(r.xmax - r.xmin, r.ymax - r.ymin);
+            const d = condThinDim(r);
             const z = slabCoth(d / deltaR), zr = RsR * z.re, zi = RsR * z.im;
             // A rect on the symmetry plane is seen by half.
             const straddles = sym === 2 && r.xmin <= xmin_d + 1e-12;
@@ -1066,7 +1069,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // Conductor-surface weights: the trace loss is a volume integral, so to apply a
     // per-face impedance we weight each face by its surface current ∮|K|²dl, taken
     // on the EXTERIOR (dielectric) side of the face — like the ground above. K is
-    // the tangential H: ∂A/∂y for a horizontal (top/bottom) face, ∂A/∂x for a side.
+    // the tangential H: ∂A/∂n along the face normal.
     // Signal faces and ground-rect faces accumulate separate buckets: each scales
     // its own volume loss (a plated trace next to a bare ground must not dilute).
     let trS = 0, trZreS = 0, trZimS = 0;
@@ -1113,8 +1116,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             }
             const Zs = opts.surfaceZs(qx, qy, horiz ? 'h' : 'v');
             const L = Math.hypot(x1 - x0, y1 - y0);
-            // The tangential-H-producing gradient component.
-            const G2 = edgeGrad2(ext, x0, y0, x1, y1, horiz ? 1 : 0);
+            // The normal gradient, which gives the tangential H.
+            const G2 = edgeGrad2(ext, x0, y0, x1, y1);
             let Sseg = 0;
             for (let q = 0; q < 3; q++) Sseg += G2[q] * GL3w[q] * L;
             if (isCondTri[cnd] === 1) { trS += Sseg; trZreS += Zs.re * Sseg; trZimS += Zs.im * Sseg; }
