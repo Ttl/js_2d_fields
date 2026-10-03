@@ -3164,6 +3164,42 @@ export class TriBackend {
             const lInterp = dispersionInterp(lc, f, rTol);
             // A current plot at the plot frequency needs the solved field, not the anchors.
             const keepField = !!slot && !slot.mqs;
+            // The plotted current comes from its own solve on a skin mesh built at f with
+            // a band deep enough for the plot's color range (|J| down 40 dB at 4.6 delta).
+            // The loss mesh is sized at the sweep's highest frequency and its band ends a
+            // few of those skin depths in, so at lower f the deep current falls on the
+            // coarse conductor interior, which draws a scalloped contour. R and L stay
+            // on the loss mesh; null when the plot solve fails.
+            const plotField = (lossOpts) => {
+                try {
+                    const plotBand = this.opts.mqsPlotBand ?? 5;
+                    const plotSlope = this.opts.mqsPlotDepthSlope ?? 0.3;
+                    const plotDelta = this.opts.mqsPlotBandDelta ?? 0.7;
+                    let pm = mesh;
+                    const sigCap = mesh.nTris + mqsMaxTris;
+                    for (const { k, rects } of sigBands) {
+                        pm = refineSkinBand(pm, { rects, symX }, k * mqsDelta, bandPasses, plotBand,
+                            plotDelta * k * mqsDelta, sigCap, null, plotSlope, bandAniso);
+                    }
+                    // The ground band is graded coarser away from the signal; past the
+                    // fine zone the drawn skin layer follows the coarse elements and
+                    // changes shape from one frequency to the next, so the plot widens it.
+                    const plotGrading = gndGrading && { ...gndGrading,
+                        Dfine: gndGrading.Dfine * (this.opts.mqsPlotGndFine ?? 4) };
+                    const gndCap = pm.nTris + gndBudget;
+                    for (const { k, rects } of gndBands) {
+                        pm = refineSkinBand(pm, { rects, symX }, k * mqsDelta, bandPasses, plotBand,
+                            plotDelta * k * mqsDelta, gndCap, plotGrading, plotSlope, bandAniso);
+                    }
+                    const o = mqsOptsWith({ oddSymmetry: lossOpts.oddSymmetry, diffPair: lossOpts.diffPair, cache: {} });
+                    if (lossOpts.modeCurrents) o.modeCurrents = lossOpts.modeCurrents;
+                    o.fieldOut = {};
+                    const m = this._mqsSolve(pm, crM, f, mqsSigma, o, {});
+                    return m && isFinite(m.R_total) && o.fieldOut.sol ? o.fieldOut : null;
+                } catch (e) {
+                    return null;
+                }
+            };
             if (!keepField && rInterp !== null && rInterp > 0 && lInterp !== null && lInterp > 0) {
                 R_total = rInterp;
                 L_internal = lInterp;
@@ -3222,7 +3258,7 @@ export class TriBackend {
                 }
                 L_internal = Math.max(0, mqs.L_loop - pc.Lpec + mqs.L_wall);
                 st.mqsSurface = { f, L: mqs.L_surface };
-                if (keepField) slot.mqs = { field: mqsOpts.fieldOut, cr: crM };
+                if (keepField) slot.mqs = { field: plotField(mqsOpts) || mqsOpts.fieldOut, cr: crM };
                 dispersionInsert(rc, f, R_total);
                 dispersionInsert(lc, f, L_internal);
             }
