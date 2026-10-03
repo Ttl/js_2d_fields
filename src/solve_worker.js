@@ -37,11 +37,13 @@ import { InterpolatingSweep } from './interpolating_sweep.js';
 let stopRequested = false;
 let currentId = null;
 let modesSolver = null;   // retained between 'modes' and its follow-up 'modeField' calls
-// The last simulate job's solver and converged solve, retained for 'plotFields', and
-// the id of that job.
-let simSolver = null, simCached = null, simJob = null;
+// The last simulate job's solver and converged solve, retained for 'plotFields', the id
+// of that job and its lowest frequency.
+let simSolver = null, simCached = null, simJob = null, simFMin = 0;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
+const fmtFreq = f => f >= 1e9 ? `${+(f / 1e9).toPrecision(4)} GHz` : f >= 1e6 ? `${+(f / 1e6).toPrecision(4)} MHz`
+    : f >= 1e3 ? `${+(f / 1e3).toPrecision(4)} kHz` : `${+f.toPrecision(4)} Hz`;
 const log = (msg) => post({ id: currentId, type: 'log', msg });
 const progress = (frac, text) => post({ id: currentId, type: 'progress', frac, text });
 const shouldStop = () => stopRequested;
@@ -95,12 +97,19 @@ function fieldPayload(solver) {
     };
 }
 
-// Plot fields of `solver` at frequency f. A failure keeps the fields it had and
-// returns false.
-async function plotFields(solver, cached, f) {
+// Plot fields of `solver` at frequency f, of a solve whose lowest frequency is fMin. A
+// failure keeps the fields it had and returns false.
+async function plotFields(solver, cached, f, fMin) {
     try {
         await solver.plotFieldsAt(f, cached);
         if (solver.plotNote) log(solver.plotNote);
+        // The solve warned about the ground return spreading at its own frequencies; a
+        // plot below them can be below the onset too. The plotted currents keep the ideal
+        // ground returns of the solve.
+        const spread = solver._ground_spreading_note ? solver._ground_spreading_note(f) : null;
+        if (spread && !solver._ground_spreading_note(fMin)) {
+            log(`\u26a0 Plot warning at ${fmtFreq(f)}: ${spread.message}`);
+        }
         return true;
     } catch (e) {
         log(`Plot fields at ${(f / 1e9).toFixed(3)} GHz failed: ${(e && e.message) || e}`);
@@ -313,7 +322,8 @@ async function jobSimulate({ params, frequencies, opts }) {
     const stopped = stopRequested;
     let plotted = false;
     if (!stopped) {
-        plotted = await plotFields(solver, cachedResults, plotFreq);
+        simFMin = Math.min(...frequencies);
+        plotted = await plotFields(solver, cachedResults, plotFreq, simFMin);
         simSolver = solver; simCached = cachedResults; simJob = currentId;
     }
     return {
@@ -348,7 +358,7 @@ async function jobModes({ params, freq, nev, refineOpts }) {
 
 async function jobPlotFields({ freq }) {
     if (!simSolver) return { fields: null };
-    await plotFields(simSolver, simCached, freq);
+    await plotFields(simSolver, simCached, freq, simFMin);
     return { fields: fieldPayload(simSolver) };
 }
 
