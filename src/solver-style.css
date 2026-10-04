@@ -1011,6 +1011,7 @@ body.tl-custom.custom-invalid #custom-stale-badge { display: block; }
 #custom-line-numbers .err { color: #ff8a80; font-weight: 600; }
 #custom-format-ref { flex: 0 0 340px; max-width: 45%; overflow-y: auto; padding: 8px 12px; border-left: 1px solid var(--border-color); font-size: 12.5px; color: var(--text-muted); }
 #custom-format-ref p { margin: 0 0 8px; }
+#custom-format-ref h4 { margin: 14px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text-color); border-bottom: 1px solid var(--border-color); padding-bottom: 2px; }
 #custom-format-ref dl { margin: 0; }
 #custom-format-ref dt { margin-top: 8px; color: var(--text-color); }
 #custom-format-ref dd { margin: 2px 0 0; line-height: 1.45; }

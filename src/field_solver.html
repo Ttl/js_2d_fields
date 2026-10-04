@@ -649,6 +649,7 @@
                 </div>
                 <div id="custom-format-ref" style="display: none;">
                     <p>One statement per line, or several separated by <code>;</code>. <code>#</code> starts a comment.</p>
+                    <h4>Setup</h4>
                     <dl>
                         <dt><code>units mm</code></dt>
                         <dd>Length unit: m, cm, mm, um, nm, mil, in. A number may carry its own: <code>35um</code>.</dd>
@@ -658,28 +659,41 @@
                         <dd>Each <code>open</code> or <code>gnd</code>.</dd>
                         <dt><code>domain x1 x2 y1 y2</code></dt>
                         <dd>Solved region, each value may be <code>auto</code>. <code>domain auto</code> sizes all four.</dd>
+                    </dl>
+                    <h4>Shapes</h4>
+                    <dl>
                         <dt><code>diel</code> <code>gnd</code> <code>sig+</code> <code>sig-</code></dt>
                         <dd>Rectangle, position and size per axis: <code>x= w=</code> and <code>y= h=</code>. <code>x=-inf w=inf</code> spans the domain, <code>w=inf</code> runs from <code>x</code> to the right boundary and <code>w=-inf</code> from <code>x</code> to the left one (<code>h</code> the same way). A negative size flips the rectangle to the other side of its position: <code>x</code> is then the right edge, <code>y</code> the top face. A pair is one <code>sig+</code> and one <code>sig-</code>. Touching or overlapping rectangles of one kind are one conductor; where two of different metal overlap, the later line's metal fills the overlap (a plated conductor drawn as a core over a shell). The quasi-static solver takes touching blocks of different metal but not overlapping ones.</dd>
                         <dt><code>sig+ trap x= w= y= h= angle= angle2=</code></dt>
                         <dd>Trapezoid, a trace with an etch angle: the base <code>x</code> to <code>x+w</code> at <code>y</code>, height <code>h</code>. The sides lean in by <code>angle</code> (left) and <code>angle2</code> (right, default <code>angle</code>) degrees from the vertical, so a positive angle narrows the face at <code>y+h</code> and a negative one widens it. A negative <code>h</code> puts that face below <code>y</code>. Full-wave solver only.</dd>
                         <dt><code>gnd ngon x= y= r= n= r_in= rot=</code></dt>
-                        <dd>Regular n-gon centred on <code>x, y</code>, vertex radius <code>r</code>, <code>n</code> vertices with one on top, turned by <code>rot</code> degrees. <code>r_in</code> cuts a concentric hole: a ring such as a coax shield. Plating covers the whole surface: <code>plating=all</code>. Full-wave solver only.</dd>
+                        <dd>Regular n-gon centred on <code>x, y</code>, vertex radius <code>r</code>, <code>n</code> vertices with one on top, turned by <code>rot</code> degrees. <code>r_in</code> cuts a concentric hole: a ring such as a coax shield. Full-wave solver only.</dd>
                         <dt><code>gnd ellipse x= y= rx= ry= n= rx_in= ry_in= rot=</code></dt>
-                        <dd>Ellipse centred on <code>x, y</code> with semi-axes <code>rx, ry</code>, <code>n</code> vertices spaced evenly along the outline, one on top. <code>rx_in ry_in</code> cut a concentric elliptical hole (a ring). Plating: <code>plating=all</code>. Full-wave solver only.</dd>
+                        <dd>Ellipse centred on <code>x, y</code> with semi-axes <code>rx, ry</code>, <code>n</code> vertices spaced evenly along the outline, one on top. <code>rx_in ry_in</code> cut a concentric elliptical hole (a ring). Full-wave solver only.</dd>
                         <dt><code>radius= radius_bottom= wall=</code></dt>
-                        <dd>On a rectangle or trapezoid: <code>radius</code> rounds every corner, <code>radius_bottom</code> the two lower ones (<code>0</code> keeps them sharp). A radius of half the height gives a stadium. <code>wall</code> hollows the shape into a shell of that thickness, such as a cable shield; a shell is plated with <code>plating=all</code>. Full-wave solver only.</dd>
-                        <dt><code>er= tand= sigma=</code></dt>
-                        <dd>Dielectric. Where dielectrics overlap the later line wins. <code>sigma</code> is a conductivity in S/m (a silicon substrate). <code>thin=1</code> marks a thin sheet for the mesher.</dd>
-                        <dt><code>sigma= rq=</code></dt>
-                        <dd>Conductor's own conductivity (S/m) and roughness. Left out: the sidebar values.</dd>
-                        <dt><code>plating=top,sides,bottom</code></dt>
-                        <dd>Plated faces, with <code>plating_sigma= plating_t= plating_rq= plating_rq_iface=</code> on the line. Model Thick Plating in Advanced Options sets for every conductor whether the plating is a layer of metal inside the outline (meshed on the full-wave solver) or a layered surface impedance.</dd>
-                        <dt><code>color=#c0c0c0</code></dt>
-                        <dd>Fill color of the rectangle or shape in the plots, <code>#rrggbb</code> or <code>#rgb</code>. Left out: conductors orange, dielectrics shaded by <code>er</code>.</dd>
+                        <dd>On a rectangle or trapezoid: <code>radius</code> rounds every corner, <code>radius_bottom</code> the two lower ones (<code>0</code> keeps them sharp). A radius of half the height gives a stadium. <code>wall</code> hollows the shape into a shell of that thickness, such as a cable shield. Full-wave solver only.</dd>
                         <dt><code>mirror=1</code></dt>
                         <dd>Adds the mirror image about <code>x=0</code>, a <code>sig+</code> imaged as <code>sig-</code>. A rectangle touching or crossing <code>x=0</code> becomes one rectangle symmetric about it: <code>diel x=0 w=inf ... mirror=1</code> is a full-width layer.</dd>
+                        <dt><code>color=#c0c0c0</code></dt>
+                        <dd>Fill color of the rectangle or shape in the plots, <code>#rrggbb</code> or <code>#rgb</code>. Left out: conductors orange, dielectrics shaded by <code>er</code>.</dd>
+                    </dl>
+                    <h4>Materials</h4>
+                    <dl>
+                        <dt><code>diel ... er= tand= sigma= thin=1</code></dt>
+                        <dd>Dielectric. Where dielectrics overlap the later line wins. <code>sigma</code> is a conductivity in S/m (a silicon substrate). <code>thin=1</code> marks a thin sheet for the mesher.</dd>
+                        <dt><code>gnd ... sigma= rq=</code></dt>
+                        <dd>Conductor's own conductivity (S/m) and roughness, on <code>gnd</code>, <code>sig+</code> and <code>sig-</code>. Left out: the sidebar values.</dd>
+                    </dl>
+                    <h4>Plating</h4>
+                    <dl>
+                        <dt><code>sig+ ... plating=top,sides,bottom</code></dt>
+                        <dd>Plated faces of a conductor, any of <code>top sides bottom</code>, or <code>all</code> or <code>none</code>. A ring, an n-gon, an ellipse or a shell has one outside and takes <code>plating=all</code>.</dd>
+                        <dt><code>plating_sigma= plating_t= plating_rq= plating_rq_iface=</code></dt>
+                        <dd>Plating material of that conductor: conductivity (S/m), thickness, surface roughness and the roughness of the plating/bulk interface (left out it is <code>plating_rq</code>).</dd>
                         <dt><code>plating sigma= t= rq= rq_iface=</code></dt>
-                        <dd>Statement: plating material of every conductor line that gives none. <code>rq_iface</code> is the roughness of the plating/bulk interface, left out it is <code>rq</code>.</dd>
+                        <dd>Statement: the default plating material, the same four values. A conductor's own <code>plating_</code> keys override it one value at a time. Plated faces need a material from one or the other.</dd>
+                        <dt>Model Thick Plating</dt>
+                        <dd>In Advanced Options, for every conductor: the plating is a layer of metal inside the outline (meshed on the full-wave solver), or a layered surface impedance.</dd>
                     </dl>
                 </div>
             </div>
