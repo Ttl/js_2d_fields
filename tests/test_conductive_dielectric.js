@@ -29,6 +29,10 @@
 //      infinite and eps_eff = c^2 L C
 //  13. the loss is the exact Re(gamma) of the RLGC line: a strip directly on silicon is
 //      an R-G line below the relaxation frequency, where G Z0 / 2 would read 2.7x high
+//  14. the adaptive refinement and the certificate follow the complex solve: on a strip
+//      over thin oxide on silicon (an MIS line) the certified error covers the actual C
+//      and G error against a tight reference, which the real-permittivity certificate
+//      underestimated 2-3x
 //
 // Run: node tests/test_conductive_dielectric.js
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
@@ -423,6 +427,27 @@ sig+ x=-25 w=50 y=200 h=2
     }
     check('strip on silicon at 1 GHz: the two backends agree on the loss', rel(res[0], res[1]) < 0.02,
         `QS ${res[0].toFixed(1)}, full-wave ${res[1].toFixed(1)} dB/m`);
+}
+
+// --- 14. Certificate of a conductive fill ---
+{
+    const mis = `units um
+bounds open open open gnd
+diel x=-inf w=inf y=0 h=200 er=11.9 sigma=10
+diel x=-inf w=inf y=200 h=1 er=3.9
+sig+ x=-10 w=20 y=201 h=2
+`;
+    const tight = { ...APP, energy_tol: 0.0005, param_tol: 0.002, max_nodes: 250000, max_iters: 24, certify: false };
+    for (const [name, extra] of BACKENDS) {
+        const ref = (await solve(mis, 1e8, extra, tight)).r.modes[0].RLGC;
+        const { s, r } = await solve(mis, 1e8, extra);
+        const m = r.modes[0].RLGC, cert = s.certification;
+        const err = Math.max(rel(m.C, ref.C), rel(m.G, ref.G));
+        check(`${name}: MIS line, the certified error covers the C and G error`, !!cert && cert.err > 0.8 * err,
+            `certified ${cert ? fmt(cert.err) : '-'}${cert && !cert.pass ? ' (fail)' : ''}, actual ${fmt(err)}`);
+        check(`${name}: MIS line, a passing certificate is within the tolerance`, !cert || !cert.pass || err < APP.energy_tol,
+            `actual ${fmt(err)}`);
+    }
 }
 
 done();

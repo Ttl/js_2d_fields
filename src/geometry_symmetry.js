@@ -63,6 +63,33 @@ function mirrorInvariant(rects, keyOf, axis, coord, tol) {
     return true;
 }
 
+// Same material of two dielectrics, as the painting compares them.
+export const sameDielectric = (a, c) => a.epsilon_r === c.epsilon_r && a.tan_delta === c.tan_delta
+    && (a.sigma || 0) === (c.sigma || 0);
+
+// The mirror tests compare rectangle sets and cannot see paint order: where two bodies of
+// different material (same(a, c) false) overlap, their mirror images across {axis}={coord}
+// must overlap in the same order, or the painted result is not symmetric. Bodies are
+// compared by their bounding boxes. True when the paint order mirrors.
+export function paintOrderMirrors(list, same, axis, coord, tol) {
+    const lo = axis === 'x' ? 'x_min' : 'y_min', hi = axis === 'x' ? 'x_max' : 'y_max';
+    const plo = axis === 'x' ? 'y_min' : 'x_min', phi = axis === 'x' ? 'y_max' : 'x_max';
+    const partner = list.map(d => list.findIndex(o => same(d, o)
+        && Math.abs(o[lo] + d[hi] - 2 * coord) <= tol && Math.abs(o[hi] + d[lo] - 2 * coord) <= tol
+        && Math.abs(o[plo] - d[plo]) <= tol && Math.abs(o[phi] - d[phi]) <= tol));
+    for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+            const a = list[i], c = list[j];
+            if (same(a, c)) continue;
+            const w = Math.min(a.x_max, c.x_max) - Math.max(a.x_min, c.x_min);
+            const h = Math.min(a.y_max, c.y_max) - Math.max(a.y_min, c.y_min);
+            if (!(w > tol && h > tol)) continue;
+            if (partner[i] < 0 || partner[j] < 0 || partner[i] > partner[j]) return false;
+        }
+    }
+    return true;
+}
+
 export function conductorSwapSymmetric(conductors, dielectrics) {
     if (!conductors || !dielectrics) return null;
     const signals = conductors.filter(c => c.is_signal);
@@ -102,7 +129,8 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
         if (!ok(conductors, condKey) || !ok(dielectrics, dielKey)) return false;
     }
     return mirrorInvariant(conductors, condKey, axis, coord, tol)
-        && mirrorInvariant(dielectrics, dielKey, axis, coord, tol);
+        && mirrorInvariant(dielectrics, dielKey, axis, coord, tol)
+        && paintOrderMirrors(dielectrics, sameDielectric, axis, coord, tol);
 }
 
 // Coordinate tolerance for the x=0 mirror tests below (relative to the domain width).

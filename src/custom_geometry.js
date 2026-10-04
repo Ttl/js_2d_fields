@@ -4,7 +4,7 @@
 // the lists.
 import { FieldSolver2D } from './field_solver.js';
 import { Dielectric, Conductor, Mesher } from './mesher.js';
-import { halfDomainSymmetry, isXSymmetric, conductorFinishKey } from './geometry_symmetry.js';
+import { halfDomainSymmetry, isXSymmetric, conductorFinishKey, paintOrderMirrors, sameDielectric } from './geometry_symmetry.js';
 import { parseAndEvaluate, formatErrors, SHAPE_NAMES, WALLS } from './custom_geometry_text.js';
 import { bodyDistance, translateShapeX, bodiesOverlap } from './shapes.js';
 
@@ -108,7 +108,8 @@ class CustomGeometrySolver extends FieldSolver2D {
         // Per-conductor finishes need the centred loss quadrature (see
         // calculate_conductor_loss): the default rule only balances over mirrored pairs
         // of equal finish. Geometries without a finish of their own keep the default
-        // rule, so a converted fixed type solves exactly as before.
+        // rule, so a converted fixed type solves exactly as before. An asymmetric grid
+        // takes the centred rule in any case.
         this.centred_loss_quadrature = this._own_finish || (mirrorShape && !mirror);
 
         this.mesher = new Mesher(
@@ -384,27 +385,15 @@ class CustomGeometrySolver extends FieldSolver2D {
         return super.ensure_mesh();
     }
 
-    // The mirror test compares rectangle sets and cannot see paint order. Where two
-    // dielectrics of different material overlap, their mirror images must overlap in
-    // the same order, or the painted result is not symmetric.
+    // The mirror test compares rectangle sets and cannot see paint order: dielectrics of
+    // different material, and conductors of one kind and different metal (full-wave
+    // only), must overlap in mirrored order.
     _paint_order_breaks_symmetry() {
         const tol = this.domain_width * 1e-6;
-        const ds = this.dielectrics;
-        const same = (a, c) => a.epsilon_r === c.epsilon_r && a.tan_delta === c.tan_delta && (a.sigma || 0) === (c.sigma || 0);
-        const partner = ds.map(d => ds.findIndex(o => same(d, o)
-            && Math.abs(o.x_min + d.x_max) <= tol && Math.abs(o.x_max + d.x_min) <= tol
-            && Math.abs(o.y_min - d.y_min) <= tol && Math.abs(o.y_max - d.y_max) <= tol));
-        for (let i = 0; i < ds.length; i++) {
-            for (let j = i + 1; j < ds.length; j++) {
-                const a = ds[i], c = ds[j];
-                if (same(a, c)) continue;
-                const w = Math.min(a.x_max, c.x_max) - Math.max(a.x_min, c.x_min);
-                const h = Math.min(a.y_max, c.y_max) - Math.max(a.y_min, c.y_min);
-                if (!(w > tol && h > tol)) continue;
-                if (partner[i] < 0 || partner[j] < 0 || partner[i] > partner[j]) return true;
-            }
-        }
-        return false;
+        const sameMetal = (a, c) => (a.is_signal ? a.polarity : 0) !== (c.is_signal ? c.polarity : 0)
+            || conductorFinishKey(a) === conductorFinishKey(c);
+        return !paintOrderMirrors(this.dielectrics, sameDielectric, 'x', 0, tol)
+            || !paintOrderMirrors(this.conductors, sameMetal, 'x', 0, tol);
     }
 
     // Signal conductors that reach a domain boundary. A ground boundary connects the

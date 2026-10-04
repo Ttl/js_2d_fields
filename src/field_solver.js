@@ -963,8 +963,9 @@ export class FieldSolver2D {
 
     // Complex capacitance { C, G } of a mode with conductive dielectrics: C = Re C*,
     // G = omega * C'' (C* = C' - j C''), per trace like _signal_capacitance. Null when
-    // no dielectric conducts.
-    async _conductive_mode(mode) {
+    // no dielectric conducts. fields adds Cpp = C'' (without the DC conductance rule)
+    // and the solution { Vr, Vi, a, b } for the adaptive refinement.
+    async _conductive_mode(mode, fields = false) {
         if (!hasConductiveDielectric(this.dielectrics)) return null;
         const omega = conductiveOmega(this.dielectrics, this.freq);
         const { a, b } = this._complex_cells(omega, !(this.freq > 0));
@@ -987,13 +988,16 @@ export class FieldSolver2D {
             q = { re: 0.5 * (p.re + n.re), im: 0.5 * (p.im + n.im) };
         }
         const G = -omega * q.im;
-        return { C: q.re, G: this.freq > 0 ? G : dcConductance(G, q.re, omega) };
+        const out = { C: q.re, G: this.freq > 0 ? G : dcConductance(G, q.re, omega) };
+        return fields ? { ...out, Cpp: -q.im, Vr, Vi, a, b } : out;
     }
 
     // Replaces the real-permittivity C (and Z0) of a mode result with the complex
     // solve's and keeps its G for _mode_alpha_d.
+    // The adaptive loop leaves the complex solve of the final grid in r.cond.
     async _apply_conductive(r) {
-        const c = await this._conductive_mode(r.mode);
+        const c = r.cond ?? await this._conductive_mode(r.mode);
+        delete r.cond;
         r.G_diel = c ? c.G : null;
         if (!c) return;
         r.C = c.C;
@@ -2095,6 +2099,10 @@ export class FieldSolver2D {
         // plane itself is not a conductor face (PEC pinning is not in
         // conductor_mask), so no spurious cut faces can enter the integral.
         const jlo = this.sym_half ? 0 : 1;
+        // The one-sided rule's error only cancels over mirrored pairs of equal finish on
+        // a symmetric grid.
+        const centredQuadrature = !this.sym_half
+            && (this.centred_loss_quadrature || !(this.mesher && this.mesher.symmetric));
         for (let i = 1; i < ny - 1; i++) {
             for (let j = jlo; j < nx - 1; j++) {
                 if (isConductor(i, j)) continue;
@@ -2146,10 +2154,11 @@ export class FieldSolver2D {
                                 : [[0, get_dx(0)]];
                             for (const [js, dseg] of segs)
                                 addFace(ci, direction, i, j, dseg, this.x[js], dseg / 2, H_tan, H_out);
-                        } else if (this.centred_loss_quadrature && !this.sym_half) {
-                            // Full-domain solve with different surface finishes: the one-sided
-                            // rule below gives mirrored conductors unequal shares of the
-                            // integral (they only add up right as a pair), so each node
+                        } else if (centredQuadrature) {
+                            // Full-domain solve with different surface finishes or an
+                            // asymmetric grid: the one-sided rule below gives mirrored
+                            // conductors unequal shares of the integral (they only add up
+                            // right as a pair on a symmetric grid), so each node
                             // takes half of the segment on either side instead. The total
                             // of a mirror-symmetric geometry is the same either way, and on a
                             // half domain mirrored conductors share their finish by construction.
@@ -2784,7 +2793,10 @@ export class FieldSolver2D {
     //
     // planeBC (half-domain solves): the symmetry-plane BC of this field, see the
     // j = 0 term below.
-    _compute_refine_metrics_jump(V, vacuum = false, planeBC = null) {
+    // cplx = { Vi, a, b }: V is the real part of a complex potential V + j Vi under the
+    // complex cell permittivity a + j b (conductive dielectrics), the jump is that of
+    // the complex flux.
+    _compute_refine_metrics_jump(V, vacuum = false, planeBC = null, cplx = null) {
         const ny = this.y.length, nx = this.x.length;
         const x_metrics = new Float64Array(nx - 1);
         const y_metrics = new Float64Array(ny - 1);
@@ -2797,19 +2809,25 @@ export class FieldSolver2D {
         // at any interface running along the jump direction, which shows up as a
         // spurious jump where the discrete flux is in fact continuous, the
         // indicator then spends refinement on interfaces that are already exact.
-        const ec = vacuum ? null : this.epsilon_cell;
-        const epsX = (i, cj) => {           // face at column cj, node row i
+        const faceX = ec => (i, cj) => {    // face at column cj, node row i
             if (!ec) return 1.0;
             const hd = i > 0 ? dy[i - 1] : dy[0], hu = i < ny - 1 ? dy[i] : dy[ny - 2];
             const cid = i > 0 ? i - 1 : 0, ciu = i < ny - 1 ? i : ny - 2;
             return (ec[cid][cj] * hd + ec[ciu][cj] * hu) / (hd + hu);
         };
-        const epsY = (ci, j) => {           // face at row ci, node column j
+        const faceY = ec => (ci, j) => {    // face at row ci, node column j
             if (!ec) return 1.0;
             const wl = j > 0 ? dx[j - 1] : dx[0], wr = j < nx - 1 ? dx[j] : dx[nx - 2];
             const cjl = j > 0 ? j - 1 : 0, cjr = j < nx - 1 ? j : nx - 2;
             return (ec[ci][cjl] * wl + ec[ci][cjr] * wr) / (wl + wr);
         };
+        const ec = vacuum ? null : (cplx ? cplx.a : this.epsilon_cell);
+        const epsX = faceX(ec), epsY = faceY(ec);
+        // Complex flux: (a + j b)(gr + j gi), the jump of its real and imaginary parts.
+        const bX = cplx ? faceX(cplx.b) : null, bY = cplx ? faceY(cplx.b) : null;
+        const Vi = cplx ? cplx.Vi : null;
+        const jumpC = (aL, aR, bL, bR, gL, gR, hL, hR) =>
+            Math.hypot(aR * gR - aL * gL - (bR * hR - bL * hL), aR * hR - aL * hL + bR * gR - bL * gL);
 
         for (let i = 0; i < ny; i++) {
             // transverse control width so the accumulation approximates an area integral
@@ -2818,8 +2836,12 @@ export class FieldSolver2D {
                 if (cm[i][j] || cm[i][j - 1] || cm[i][j + 1]) continue;
                 const eL = epsX(i, j - 1);
                 const eR = epsX(i, j);
-                const J = Math.abs(eR * (V[i][j + 1] - V[i][j]) / dx[j] -
-                                   eL * (V[i][j] - V[i][j - 1]) / dx[j - 1]);
+                const J = Vi
+                    ? jumpC(eL, eR, bX(i, j - 1), bX(i, j),
+                        (V[i][j] - V[i][j - 1]) / dx[j - 1], (V[i][j + 1] - V[i][j]) / dx[j],
+                        (Vi[i][j] - Vi[i][j - 1]) / dx[j - 1], (Vi[i][j + 1] - Vi[i][j]) / dx[j])
+                    : Math.abs(eR * (V[i][j + 1] - V[i][j]) / dx[j] -
+                               eL * (V[i][j] - V[i][j - 1]) / dx[j - 1]);
                 x_metrics[j - 1] += J * dx[j - 1] * wy;
                 x_metrics[j] += J * dx[j] * wy;
             }
@@ -2829,7 +2851,9 @@ export class FieldSolver2D {
             // borders here. The electric wall (odd mode) pins V[0] = 0 with an odd
             // mirror, so its jump is 0.
             if (planeBC === 'pmc' && nx > 1 && !cm[i][0] && !cm[i][1]) {
-                const J = 2 * epsX(i, 0) * Math.abs(V[i][1] - V[i][0]) / dx[0];
+                const J = Vi
+                    ? 2 * jumpC(0, epsX(i, 0), 0, bX(i, 0), 0, (V[i][1] - V[i][0]) / dx[0], 0, (Vi[i][1] - Vi[i][0]) / dx[0])
+                    : 2 * epsX(i, 0) * Math.abs(V[i][1] - V[i][0]) / dx[0];
                 x_metrics[0] += J * dx[0] * wy;
             }
         }
@@ -2839,8 +2863,12 @@ export class FieldSolver2D {
                 if (cm[i][j] || cm[i - 1][j] || cm[i + 1][j]) continue;
                 const eD = epsY(i - 1, j);
                 const eU = epsY(i, j);
-                const J = Math.abs(eU * (V[i + 1][j] - V[i][j]) / dy[i] -
-                                   eD * (V[i][j] - V[i - 1][j]) / dy[i - 1]);
+                const J = Vi
+                    ? jumpC(eD, eU, bY(i - 1, j), bY(i, j),
+                        (V[i][j] - V[i - 1][j]) / dy[i - 1], (V[i + 1][j] - V[i][j]) / dy[i],
+                        (Vi[i][j] - Vi[i - 1][j]) / dy[i - 1], (Vi[i + 1][j] - Vi[i][j]) / dy[i])
+                    : Math.abs(eU * (V[i + 1][j] - V[i][j]) / dy[i] -
+                               eD * (V[i][j] - V[i - 1][j]) / dy[i - 1]);
                 y_metrics[i - 1] += J * dy[i - 1] * wx;
                 y_metrics[i] += J * dy[i] * wx;
             }
@@ -2848,7 +2876,7 @@ export class FieldSolver2D {
         return { x_metrics, y_metrics };
     }
 
-    _compute_refine_metrics(V, Ex, Ey, vacuum = false, planeBC = null) {
+    _compute_refine_metrics(V, Ex, Ey, vacuum = false, planeBC = null, cplx = null) {
         /**
          * For each grid interval, compute a metric indicating how much
          * refinement would help. Default ('blend'): the flux-jump error
@@ -2860,15 +2888,16 @@ export class FieldSolver2D {
          *
          * vacuum: the fields are from the vacuum (C0) solve.
          * planeBC: the field's symmetry-plane BC on a half-domain solve.
+         * cplx: { Vi, a, b } of a complex solve, see _compute_refine_metrics_jump.
          */
         const metric = this.refine_metric ?? 'blend';
         if (metric === 'jump') {
-            return this._compute_refine_metrics_jump(V, vacuum, planeBC);
+            return this._compute_refine_metrics_jump(V, vacuum, planeBC, cplx);
         }
         if (metric === 'blend') {
             // Surface component restricted to conductor-adjacent cells.
             const alpha = this.refine_surface_weight ?? 0.35;
-            const j = this._compute_refine_metrics_jump(V, vacuum, planeBC);
+            const j = this._compute_refine_metrics_jump(V, vacuum, planeBC, cplx);
             const f = this._compute_refine_metrics_intensity(V, Ex, Ey, vacuum, true);
             const norm = (m) => {
                 const t = m.x_metrics.reduce((s, v) => s + v, 0) + m.y_metrics.reduce((s, v) => s + v, 0);
@@ -3097,8 +3126,8 @@ export class FieldSolver2D {
         const x_combined = new Float64Array(nx_intervals);
         const y_combined = new Float64Array(ny_intervals);
 
-        for (const { V, Ex, Ey, vacuum, planeBC } of modes) {
-            const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey, vacuum, planeBC);
+        for (const { V, Ex, Ey, vacuum, planeBC, cplx } of modes) {
+            const { x_metrics, y_metrics } = this._compute_refine_metrics(V, Ex, Ey, vacuum, planeBC, cplx);
             const total = x_metrics.reduce((s, v) => s + v, 0) +
                           y_metrics.reduce((s, v) => s + v, 0);
             const scale = total > 0 ? 1 / total : 1;
@@ -3551,9 +3580,18 @@ export class FieldSolver2D {
                 out.push(await this.solve_laplace(Vs[i], vacuum, this._plane_bc(modeNames[i])));
             return out;
         };
-        const signal = await solveSet(false);
         const vacuum = await solveSet(true);
         const out = [];
+        // A conductive dielectric reports C' and G = omega C'' of the complex solve,
+        // which are certified in place of the real-permittivity C.
+        if (hasConductiveDielectric(this.dielectrics)) {
+            for (let i = 0; i < modeNames.length; i++) {
+                const c = await this._conductive_mode(modeNames[i], true);
+                out.push(c.C, this._signal_capacitance(vacuum[i], true), c.Cpp);
+            }
+            return out;
+        }
+        const signal = await solveSet(false);
         for (let i = 0; i < modeNames.length; i++) {
             out.push(this._signal_capacitance(signal[i], false));
             out.push(this._signal_capacitance(vacuum[i], true));
@@ -3561,7 +3599,16 @@ export class FieldSolver2D {
         return out;
     }
 
-    // Richardson certificate for the static quantities (C, C0 per mode).
+    // Reference size of static quantity i of q (_staticCapacitances order) for relative
+    // changes. The C'' of a conductive solve is taken against at least 1e-3 |C*|: a
+    // nearly lossless fill must not hold up the certificate on its tiny imaginary part.
+    _static_scale(q, i) {
+        if (!hasConductiveDielectric(this.dielectrics) || i % 3 !== 2) return Math.abs(q[i]);
+        return Math.max(Math.abs(q[i]), 1e-3 * Math.hypot(q[i - 2], q[i]));
+    }
+
+    // Richardson certificate for the static quantities (C, C0 per mode, and C'' with a
+    // conductive dielectric, see _staticCapacitances).
     //
     // The comparison level halves one axis at a time rather than both at once.
     // For a tensor-product discretisation the error separates as
@@ -3595,8 +3642,8 @@ export class FieldSolver2D {
         const splitDiff = (qBase, qx, qy) => {
             let m = 0;
             for (let i = 0; i < qBase.length; i++) {
-                const dx = Math.abs(qBase[i] - qx[i]) / Math.max(Math.abs(qx[i]), 1e-300);
-                const dy = Math.abs(qBase[i] - qy[i]) / Math.max(Math.abs(qy[i]), 1e-300);
+                const dx = Math.abs(qBase[i] - qx[i]) / Math.max(this._static_scale(qx, i), 1e-300);
+                const dy = Math.abs(qBase[i] - qy[i]) / Math.max(this._static_scale(qy, i), 1e-300);
                 m = Math.max(m, dx + dy);
             }
             return m;
@@ -3632,8 +3679,8 @@ export class FieldSolver2D {
             const qyy = await this._withGrid(this.x, bisect(y1), () => this._staticCapacitances());
             let d2 = 0;
             for (let i = 0; i < q0.length; i++) {
-                const dx = Math.abs(qx[i] - qxx[i]) / Math.max(Math.abs(qxx[i]), 1e-300);
-                const dy = Math.abs(qy[i] - qyy[i]) / Math.max(Math.abs(qyy[i]), 1e-300);
+                const dx = Math.abs(qx[i] - qxx[i]) / Math.max(this._static_scale(qxx, i), 1e-300);
+                const dy = Math.abs(qy[i] - qyy[i]) / Math.max(this._static_scale(qyy, i), 1e-300);
                 d2 = Math.max(d2, dx + dy);
             }
             return d2 / d1;
@@ -3791,7 +3838,11 @@ export class FieldSolver2D {
         // The refinement pass that trips the gate has already computed exactly the
         // quantities the certificate compares against (C, C0 per mode via
         // _signal_capacitance), so the certificate's base level is free.
-        const certQ0 = () => modeResults ? modeResults.flatMap(r => [r.C, r.C0]) : null;
+        const certQ0 = () => modeResults ? modeResults.flatMap(r => (r.cond ? [r.cond.C, r.C0, r.cond.Cpp] : [r.C, r.C0])) : null;
+        // A conductive dielectric: each pass also solves the complex static field, which
+        // the gate, the refinement and the certificate follow in place of the real one.
+        const conductive = hasConductiveDielectric(this.dielectrics);
+        const prevCond = {};
 
         // Predictive re-certification: after a failed certificate the error must
         // still shrink by err*safety/tol before a pass is possible, so certifying
@@ -3833,6 +3884,7 @@ export class FieldSolver2D {
             modeResults = [];
             for (const modeName of modeNames) {
                 const result = await this._solve_single_mode(modeName, true, false);
+                if (conductive) result.cond = await this._conductive_mode(modeName, true);
                 modeResults.push(result);
             }
 
@@ -3844,7 +3896,17 @@ export class FieldSolver2D {
                 const modeName = modeNames[i];
                 const r = modeResults[i];
 
-                const { energy, rel_error: energy_err } = this._compute_energy_error(r.Ex, r.Ey, prevEnergy[modeName]);
+                let { energy, rel_error: energy_err } = this._compute_energy_error(r.Ex, r.Ey, prevEnergy[modeName]);
+                let Z0 = r.Z0;
+                if (r.cond) {
+                    // C' and C'' of the complex solve, C'' against at least 1e-3 |C*|.
+                    const c = r.cond, p = prevCond[modeName];
+                    const ref = Math.hypot(c.C, c.Cpp);
+                    energy_err = p ? Math.max(Math.abs(c.C - p.C) / Math.abs(c.C),
+                        Math.abs(c.Cpp - p.Cpp) / Math.max(Math.abs(c.Cpp), 1e-3 * ref)) : 1.0;
+                    prevCond[modeName] = { C: c.C, Cpp: c.Cpp };
+                    if (r.C0 !== undefined) Z0 = 1 / (CONSTANTS.C * Math.sqrt(c.C * r.C0));
+                }
                 // The vacuum field is scored too. It is not a duplicate of the
                 // dielectric one, it carries C0 (hence Z0) and it is the entire
                 // conductor-loss integrand (see _mode_conductor_loss), which is a
@@ -3857,14 +3919,14 @@ export class FieldSolver2D {
                 }
 
                 const param_err = prevZ0[modeName] !== undefined
-                    ? Math.abs(r.Z0 - prevZ0[modeName]) / Math.max(Math.abs(prevZ0[modeName]), 1e-12)
+                    ? Math.abs(Z0 - prevZ0[modeName]) / Math.max(Math.abs(prevZ0[modeName]), 1e-12)
                     : 1.0;
 
                 max_energy_err = Math.max(max_energy_err, energy_err, energy0_err);
                 max_param_err = Math.max(max_param_err, param_err);
 
                 prevEnergy[modeName] = energy;
-                prevZ0[modeName] = r.Z0;
+                prevZ0[modeName] = Z0;
             }
 
             // Call progress callback
@@ -3940,7 +4002,12 @@ export class FieldSolver2D {
             if (it !== max_iters - 1) {
                 const refineSets = modeResults.flatMap(m => {
                     const planeBC = this._plane_bc(m.mode);
-                    const sets = [{ V: m.V, Ex: m.Ex, Ey: m.Ey, planeBC }];
+                    let sets = [{ V: m.V, Ex: m.Ex, Ey: m.Ey, planeBC }];
+                    if (m.cond) {
+                        const { Vr, Vi, a, b } = m.cond;
+                        const { Ex, Ey } = this.compute_fields(Vr, planeBC);
+                        sets = [{ V: Vr, Ex, Ey, planeBC, cplx: { Vi, a, b } }];
+                    }
                     if (m.V0 && m.Ex0 && m.Ey0) {
                         sets.push({ V: m.V0, Ex: m.Ex0, Ey: m.Ey0, vacuum: true, planeBC });
                     }
@@ -3951,8 +4018,7 @@ export class FieldSolver2D {
             }
         }
 
-        // The certificate compares real-permittivity C: take it before a conductive
-        // dielectric replaces C with the complex solve's.
+        // The certificate's base level, before the losses replace the mode results.
         const finalQ0 = certQ0();
         for (let i = 0; i < modeResults.length; i++) modeResults[i] = await this._mode_loss_results(modeResults[i]);
 

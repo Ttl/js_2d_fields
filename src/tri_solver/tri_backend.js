@@ -544,7 +544,9 @@ function perElementEnergy(phi, mesh, epsMap) {
 // whose midpoint DOF is constrained (fm.edgeNodeF < 0: conductor surfaces and
 // interiors, PEC walls) are skipped because the flux jump at a Dirichlet
 // surface is the physical surface charge, not an error.
-function perElementKelly(phi, mesh, epsMap, fm) {
+// cplx = { phiIm, epsRe(t), epsIm(t) }: phi is the real part of a complex potential under
+// a complex permittivity (conductive dielectrics), the jump is that of the complex flux.
+function perElementKelly(phi, mesh, epsMap, fm, cplx = null) {
     const { nodes, tris, triEdges, edges, nTris, nEdges } = mesh;
     const { phiVertex, phiEdge } = phi;
     const edgeVerts = [[0, 1], [1, 2], [2, 0]];
@@ -564,7 +566,7 @@ function perElementKelly(phi, mesh, epsMap, fm) {
         (coeffs[t] = triCoefficients(nodes, tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]).coeff);
 
     // ∇φ of triangle t's P2 solution at (x, y)
-    const gradAt = (t, x, y) => {
+    const gradAt = (t, x, y, phiVertex = phi.phiVertex, phiEdge = phi.phiEdge) => {
         const coeff = coeffOf(t);
         let gx = 0, gy = 0;
         for (let k = 0; k < 3; k++) {
@@ -595,9 +597,29 @@ function perElementKelly(phi, mesh, epsMap, fm) {
         const h = Math.hypot(ex, ey);
         if (!(h > 0)) continue;
         const nxu = ey / h, nyu = -ex / h;           // unit normal (orientation cancels in J²)
+        let I = 0;
+        if (cplx) {
+            const { phiIm, epsRe, epsIm } = cplx;
+            const flux = (t, x, y) => {
+                const g = gradAt(t, x, y), h = gradAt(t, x, y, phiIm.phiVertex, phiIm.phiEdge);
+                const gn = g[0] * nxu + g[1] * nyu, hn = h[0] * nxu + h[1] * nyu;
+                const a = epsRe(t), b = epsIm(t);
+                return [a * gn - b * hn, a * hn + b * gn];
+            };
+            for (const s of GP) {
+                const x = x0 + s * ex, y = y0 + s * ey;
+                const f1 = flux(t1, x, y);
+                let Jr = f1[0], Ji = f1[1];
+                if (t2 >= 0) { const f2 = flux(t2, x, y); Jr -= f2[0]; Ji -= f2[1]; }
+                I += 0.5 * (Jr * Jr + Ji * Ji);
+            }
+            const eta2 = h * h * I;
+            if (t2 >= 0) { m[t1] += 0.5 * eta2; m[t2] += 0.5 * eta2; }
+            else m[t1] += eta2;
+            continue;
+        }
         const e1 = epsMap ? epsMap[t1].re : 1;
         const e2 = (t2 >= 0 && epsMap) ? epsMap[t2].re : 1;
-        let I = 0;
         for (const s of GP) {
             const x = x0 + s * ex, y = y0 + s * ey;
             const g1 = gradAt(t1, x, y);
@@ -1500,6 +1522,7 @@ export class TriBackend {
         for (let it = 0; it <= maxIters; it++) {
             let metric = null;
             const conv = [];   // convergence quantities (eps + loss surface integral per mode)
+            const convScale = [];   // lower bound of a quantity's reference size, where set
             const energy = []; // total field energy per mode (for the reported energy error)
             const certQ0 = []; // this pass's (W_eps, W_air) per mode, for the certificate
             this._passEnergies = null;
@@ -1522,10 +1545,16 @@ export class TriBackend {
                 const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
                 const W_air = computeTriEnergy(phiAir, mesh, null);
                 const eps_static = W_eps / W_air;
-                energy.push(W_eps);
+                // A conductive dielectric: the reported C and G come from the complex
+                // static solve, which the gate, the static marking metric and the
+                // certificate follow in place of the real one.
+                const cs = this._conductiveFill() ? this._conductiveSolve(fm, pot, s.freq || 0, mesh) : null;
+                const Wc = cs ? cs.energy(cs.sol.re, cs.sol.im) : null;
+                energy.push(Wc ? Wc.re : W_eps);
                 // Same (mesh, mode, drive) pair _staticEnergies would recompute as the
                 // certificate's level-0 solve, hand it over instead (see _certifyStatic).
-                certQ0.push(W_eps, W_air);
+                if (Wc) certQ0.push(Wc.re, W_air, Wc.im);
+                else certQ0.push(W_eps, W_air);
                 // Full-wave eigenmode at fRef: source of the reported dispersive ε_eff
                 // (fw.eps) and the H-field for the ZZ refinement metric. Computed every pass.
                 let fw = null;
@@ -1548,13 +1577,17 @@ export class TriBackend {
                 // adaptive keep refining until the number the user sees has settled. Fall back
                 // to the static C-ratio when the eigensolve fails on a pass, so the convergence
                 // vector keeps a consistent length across passes.
-                conv.push(1 / Math.sqrt(Math.max(W_eps * W_air, 1e-300)));
+                conv.push(1 / Math.sqrt(Math.max((Wc ? Wc.re : W_eps) * W_air, 1e-300)));
                 conv.push(fw && fw.eps > 0 ? fw.eps : eps_static);
+                if (Wc) { conv.push(Wc.im); convScale[conv.length - 1] = 1e-3 * Math.hypot(Wc.re, Wc.im); }
                 // Static marking metric: Kelly flux-jump error indicator (refines where
                 // the discretization error is), falling back to the legacy field-energy
                 // metric if it degenerates (e.g. every edge constrained).
                 let metricS = null;
-                try { metricS = perElementKelly(phiEps, mesh, mesh.epsMap, fm); } catch { metricS = null; }
+                try {
+                    metricS = cs ? perElementKelly(cs.sol.re, mesh, null, fm, { phiIm: cs.sol.im, epsRe: cs.epsRe, epsIm: cs.epsIm })
+                        : perElementKelly(phiEps, mesh, mesh.epsMap, fm);
+                } catch { metricS = null; }
                 if (!metricS || !metricS.some(v => v > 0)) {
                     metricS = perElementEnergy(phiEps, mesh, mesh.epsMap);
                     buildNote('refine-metric', 'The flux-jump error indicator failed on a mesh refinement pass, which ' +
@@ -1576,7 +1609,7 @@ export class TriBackend {
             let maxRel = Infinity, energyRel = Infinity;
             if (prev && prev.length === conv.length) {
                 maxRel = 0;
-                for (let i = 0; i < conv.length; i++) maxRel = Math.max(maxRel, Math.abs(conv[i] - prev[i]) / Math.max(Math.abs(prev[i]), 1e-300));
+                for (let i = 0; i < conv.length; i++) maxRel = Math.max(maxRel, Math.abs(conv[i] - prev[i]) / Math.max(Math.abs(prev[i]), convScale[i] || 0, 1e-300));
             }
             if (prevEnergy && prevEnergy.length === energy.length) {
                 energyRel = 0;
@@ -1788,18 +1821,39 @@ export class TriBackend {
             const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
             const pot = drivePotentials(this.condRect, rm, this.symmetry);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
-            const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
             const phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
+            // A conductive dielectric reports C' and G = omega C'' of the complex solve,
+            // which are certified in place of the real-permittivity energy.
+            if (this._conductiveFill()) {
+                const cs = this._conductiveSolve(fm, pot, s.freq || 0, mesh);
+                const W = cs.energy(cs.sol.re, cs.sol.im);
+                out.push(W.re, computeTriEnergy(phiAir, mesh, null), W.im);
+                continue;
+            }
+            const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
             out.push(computeTriEnergy(phiEps, mesh, mesh.epsMap), computeTriEnergy(phiAir, mesh, null));
         }
         return out;
+    }
+
+    _conductiveFill() {
+        return !this._isWG && hasConductiveDielectric(this.solver.dielectrics);
+    }
+
+    // Reference size of static quantity i of q (_staticEnergies order) for relative
+    // changes. The imaginary energy of a conductive solve is taken against at least
+    // 1e-3 |W*|: a nearly lossless fill must not hold up convergence on its tiny
+    // imaginary part.
+    _staticScale(q, i) {
+        if (!this._conductiveFill() || i % 3 !== 2) return Math.abs(q[i]);
+        return Math.max(Math.abs(q[i]), 1e-3 * Math.hypot(q[i - 2], q[i]));
     }
 
     _certifyStatic(mesh, tol) {
         const maxDiff = (a, b) => {
             let m = 0;
             for (let i = 0; i < a.length; i++)
-                m = Math.max(m, Math.abs(a[i] - b[i]) / Math.max(Math.abs(b[i]), 1e-300));
+                m = Math.max(m, Math.abs(a[i] - b[i]) / Math.max(this._staticScale(b, i), 1e-300));
             return m;
         };
         const GROW = 4;                                   // red split: 4 children per triangle
@@ -2277,8 +2331,7 @@ export class TriBackend {
     // Conductive dielectrics (conductive_dielectric.js): the static solve of the
     // conductor potentials pot at frequency f with the complex permittivity
     // er (1 - j tand) - j sigma / (omega eps0), and its complex energy W* = ½ C* V².
-    _conductiveSolve(fm, pot, f) {
-        const { mesh } = this;
+    _conductiveSolve(fm, pot, f, mesh = this.mesh) {
         const omega = conductiveOmega(this.solver.dielectrics, f);
         const em = mesh.epsMap, lm = mesh.lossMap, k = 1 / (omega * eps0);
         // The DC limit solves at a small omega > 0 and leaves the loss tangent out.
@@ -2287,7 +2340,7 @@ export class TriBackend {
         const epsIm = t => -(tandScale * lm[t].re + (lm[t].sigma || 0) * k);
         const sol = solveTriStaticComplex(mesh, fm, epsRe, epsIm, pot, this.ctx.helpers.solveComplexSymmetric);
         const energy = (re, im) => computeTriEnergyComplex(re, im, mesh, epsRe, epsIm);
-        return { sol, energy, omega };
+        return { sol, energy, omega, epsRe, epsIm };
     }
 
     // Complex capacitance of a mode with modal vector v: { C, G } with C = Re C*,
