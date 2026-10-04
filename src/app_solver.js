@@ -6,7 +6,7 @@ import { draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParame
     centroidHoverTrace, triMeanE, updateTriImage } from './plot.js';
 import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
          getCustomOverrides, customSweepParams, flushCustomGeometryEdits } from './custom_geometry_editor.js';
-import { solverToGeometryText } from './custom_geometry_text.js';
+import { solverToGeometryText, setParamInText } from './custom_geometry_text.js';
 import { initLayoutPanels, syncLogPanel, setLogStatus, logSolveStarted } from './layout_panels.js';
 import { buildSolverFromParams as _buildSolverFromParams, platingOptions } from './solver_factory.js';
 
@@ -2626,6 +2626,23 @@ function bindEvents() {
         btn.addEventListener('click', toggleFreeze);
     }
 
+    // Touchstone header lines of a custom geometry: the defaults for conductors without
+    // their own metal, then the geometry text as solved, with the sidebar parameter
+    // values that differ from the text written into it.
+    const customGeometryLines = p => {
+        let text = p.custom_geom;
+        for (const [name, v] of Object.entries(p.custom_overrides || {})) {
+            text = setParamInText(text, name, String(+v.toPrecision(12)));
+        }
+        return [
+            `!   Default conductivity: ${p.sigma.toExponential(2)} S/m`,
+            `!   Default surface roughness RMS: ${(p.rq * 1e6).toFixed(2)} um`,
+            ...(p.plating_thick_corners ? ['!   Model thick plating: on'] : []),
+            '!   Geometry:',
+            ...text.replace(/\s+$/, '').split('\n').map(l => (l.trim() ? `!     ${l}` : '!')),
+        ];
+    };
+
     // Export SnP button
     const exportSnpBtn = document.getElementById('export-snp');
     if (exportSnpBtn) {
@@ -2659,11 +2676,11 @@ function bindEvents() {
                 epsilonR: p.er,
                 tanDelta: p.tand,
                 sigma: p.sigma,
-                traceSpacing: p.trace_spacing,
-                surfaceRoughness: p.rq,
-                // Coax and waveguide are not trace-on-substrate stackups, so they
-                // describe themselves.
-                geometryLines: p.tl_type === 'coax' ? [
+                traceSpacing: p.tl_type.startsWith('diff_') ? p.trace_spacing : null,
+                surfaceRoughness: p.tl_type === 'custom' ? null : p.rq,
+                // Coax, waveguide and custom geometry are not trace-on-substrate
+                // stackups, so they describe themselves.
+                geometryLines: p.tl_type === 'custom' ? customGeometryLines(p) : p.tl_type === 'coax' ? [
                     `!   Inner conductor diameter: ${(p.coax_d * 1e6).toFixed(1)} um`,
                     `!   Dielectric diameter (shield ID): ${(p.coax_D * 1e6).toFixed(1)} um`,
                     `!   Dielectric permittivity: ${p.coax_er}`,
@@ -2680,7 +2697,8 @@ function bindEvents() {
                 // Mirror what the solver actually built, not the raw checkboxes: a coax
                 // selects conductors and a waveguide plates its whole wall, so the
                 // top/sides/bottom boxes (hidden for both) would misdescribe the run.
-                plating: platingOptions(p,
+                // Custom geometry carries its plating per conductor in the text.
+                plating: p.tl_type === 'custom' ? null : platingOptions(p,
                     p.tl_type === 'coax' ? { inner: p.coax_plating_inner, outer: p.coax_plating_outer }
                     : p.tl_type === 'rect_waveguide' ? { all: true }
                     : null),

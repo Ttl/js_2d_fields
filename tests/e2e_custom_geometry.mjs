@@ -57,6 +57,22 @@ const convRun = await solveAndRead();
 const zConv = z0FromLog(convRun.log);
 check('converted geometry solves to the native impedance', Math.abs(zConv - zNative) / zNative < 2e-3,
     `${zConv} vs ${zNative}`);
+// The Touchstone header carries the geometry text, not the hidden fixed-type sidebar.
+{
+    // The file is a Blob handed to a download link: keep the Blob and read it here.
+    const snp = await page.evaluate(async () => {
+        const create = URL.createObjectURL;
+        let blob = null;
+        URL.createObjectURL = b => { blob = b; return create.call(URL, b); };
+        try { document.getElementById('export-snp').click(); } finally { URL.createObjectURL = create; }
+        return blob ? blob.text() : '';
+    });
+    const text = await geomText();
+    const sig = text.split('\n').find(l => l.startsWith('sig+'));
+    check('the Touchstone export of a custom geometry carries its text',
+        /!   Type: custom/.test(snp) && /!   Geometry:/.test(snp) && snp.includes(`!     ${sig}`)
+        && !/Trace width|Substrate height|Trace spacing/.test(snp), snp.split('\n').slice(0, 16).join(' | '));
+}
 if (shot) await page.screenshot({ path: `${shot}/custom_converted.png` });
 
 // ---- template, parameters, live validation ----
