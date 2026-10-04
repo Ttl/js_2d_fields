@@ -10,7 +10,7 @@ import { parseGeometryText, evaluateGeometry, parseAndEvaluate, serializeGeometr
     axisEdges, addExpr } from '../src/custom_geometry_text.js';
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { buildSolverFromParams } from '../src/solver_factory.js';
-import { isXSymmetric, conductorSwapSymmetric } from '../src/geometry_symmetry.js';
+import { isXSymmetric, conductorSwapSymmetric, halfDomainSymmetry } from '../src/geometry_symmetry.js';
 import { bodyDistance, shapeLoops, shapeArea, shapeSegments, shapeContains, shapeFaceAt, platingArea, platedThrough, insideRingHole } from '../src/shapes.js';
 import { check, done } from './helpers.js';
 
@@ -707,6 +707,22 @@ const U = 'units mm\n';
         && conductorSwapSymmetric(m.conductors, m.dielectrics) === true);
     check('symmetry: copied (unmirrored) trapezoid pair is not', !isXSymmetric(c.conductors, c.dielectrics, c.domain_width)
         && conductorSwapSymmetric(c.conductors, c.dielectrics) === false);
+}
+
+// --- Half domain of a differential pair: mirror partners must have opposite polarity ---
+{
+    const U = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.2 er=4.3\n';
+    const half = text => {
+        const s = new CustomGeometrySolver({ text: U + text });
+        return { s, ok: halfDomainSymmetry(s.conductors, s.dielectrics, s.domain_width, s.is_differential).ok };
+    };
+    // + - - +: each net maps onto itself, the odd mode is x-symmetric
+    const inter = half('sig+ x=-1.1 w=0.2 y=0.2 h=0.035\nsig- x=-0.5 w=0.2 y=0.2 h=0.035\n' +
+        'sig- x=0.3 w=0.2 y=0.2 h=0.035\nsig+ x=0.9 w=0.2 y=0.2 h=0.035\n');
+    check('symmetry: interleaved + - - + pair is mirror symmetric', isXSymmetric(inter.s.conductors, inter.s.dielectrics, inter.s.domain_width));
+    check('symmetry: interleaved + - - + pair gets no half domain', !inter.ok && !inter.s.sym_half);
+    const swapped = half('sig+ x=-0.4 w=0.3 y=0.2 h=0.035\nsig- x=0.1 w=0.3 y=0.2 h=0.035\n');
+    check('symmetry: pair with sig+ on the left keeps the half domain', swapped.ok && swapped.s.sym_half);
 }
 
 // --- Polygon helpers ---

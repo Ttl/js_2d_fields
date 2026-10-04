@@ -1,6 +1,6 @@
 // Line types the fixed templates cannot describe, built as custom geometry and checked
 // against a reference each, on both backends:
-//   1. microstrip on stacked dielectrics, single-ended and differential
+//   1. microstrip on stacked dielectrics, single-ended and differential, and an interleaved + - - + pair
 //   2. microstrip on a finite-width ground with air and open boundaries all around
 //   3. CPW on a finite substrate over air, against the conformal-mapping closed form
 //   4. slotline, full-wave effective permittivity against Janaswamy-Schaubert
@@ -46,6 +46,17 @@ agree('two layers of one material = native microstrip', await solve(stack('er=4.
     check('stacked microstrip: low-eps layer lowers eps_eff', q[0].eps < native[0].eps - 0.5, `${q[0].eps.toFixed(3)} vs ${native[0].eps.toFixed(3)}`);
     const qd = await solve(stack('er=2.2 tand=0.001', PAIR)), td = await solve(stack('er=2.2 tand=0.001', PAIR), TRI);
     agree('stacked differential microstrip, QS vs full-wave', qd, td, 0.015, 0.12);
+}
+
+// Interleaved + - - + pair: mirror symmetric, but each net maps onto itself, so the odd
+// mode is x-symmetric and the half domain (antisymmetric plane) does not apply.
+{
+    const INTER = 'units mm\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=0.2 er=4.3 tand=0.02\n' +
+        'sig+ x=-1.1 w=0.2 y=0.2 h=0.035\nsig- x=-0.5 w=0.2 y=0.2 h=0.035\n' +
+        'sig- x=0.3 w=0.2 y=0.2 h=0.035\nsig+ x=0.9 w=0.2 y=0.2 h=0.035\n';
+    const q = await solve(INTER), t = await solve(INTER, TRI);
+    agree('interleaved pair, QS vs full-wave', q, t, 0.015);
+    agree('interleaved pair, QS = QS without symmetry', q, await solve(INTER, { symmetry: false }), 1e-9);
 }
 
 // --- 2. Finite ground, open on all sides ---

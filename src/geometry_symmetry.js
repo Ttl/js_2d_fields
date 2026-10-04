@@ -175,7 +175,18 @@ export function halfDomainSymmetry(conductors, dielectrics, domainW, isDifferent
     const tol = symTol(domainW);
     const straddles = conductors.some(c => c.is_signal && c.x_min < -tol && c.x_max > tol);
     return { straddles,
-             ok: !(isDifferential && straddles) && isXSymmetric(conductors, dielectrics, domainW) };
+             ok: !(isDifferential && straddles) && isXSymmetric(conductors, dielectrics, domainW)
+                 && (!isDifferential || signalsMirrorOpposite(conductors, tol)) };
+}
+
+// The odd mode of a pair is antisymmetric about x=0 only when every signal conductor
+// mirrors onto one of the opposite polarity. An interleaved + - - + layout is mirror
+// symmetric too, but each net maps onto itself and its odd mode is x-symmetric.
+function signalsMirrorOpposite(conductors, tol) {
+    const signals = conductors.filter(c => c.is_signal);
+    return signals.every(c => signals.some(p => p.polarity === -c.polarity
+        && Math.abs(p.x_min + c.x_max) < tol && Math.abs(p.x_max + c.x_min) < tol
+        && Math.abs(p.y_min - c.y_min) < tol && Math.abs(p.y_max - c.y_max) < tol));
 }
 
 // Modal-decomposition classifier for a differential pair, shared by BOTH backends
