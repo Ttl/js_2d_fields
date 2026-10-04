@@ -683,14 +683,14 @@ export function buildTriRegions(mesh) {
     // Cached per mesh and material map: the conductor test is a polygon test per
     // triangle, and every plot field of a solve needs the same regions.
     const hit = regionCache.get(mesh);
-    if (hit && hit.epsMap === mesh.epsMap) return hit.value;
+    if (hit && hit.epsMap === mesh.epsMap && hit.lossMap === mesh.lossMap) return hit.value;
     const value = triRegions(mesh);
-    regionCache.set(mesh, { epsMap: mesh.epsMap, value });
+    regionCache.set(mesh, { epsMap: mesh.epsMap, lossMap: mesh.lossMap, value });
     return value;
 }
 
 function triRegions(mesh) {
-    const { nodes, tris, nTris, epsMap, condRect } = mesh;
+    const { nodes, tris, nTris, epsMap, lossMap, condRect } = mesh;
     const regionOf = new Int32Array(nTris);
     if (!epsMap || epsMap.length !== nTris) return { regionOf, nRegions: 1, condRegion: -1 };
     const rects = (condRect && condRect.rects) || [];
@@ -705,8 +705,11 @@ function triRegions(mesh) {
             if (shapeContains(r, xc, yc, 0)) { inCond = true; break; }
         }
         if (!inCond) {
-            const e = epsMap[t];
-            key = e.re.toPrecision(6) + ',' + (e.im ? e.im.toPrecision(6) : '0');
+            // The whole complex permittivity: layers of one er and a different loss
+            // tangent or conductivity meet at an interface the normal E jumps across.
+            const e = epsMap[t], l = lossMap && lossMap[t];
+            key = e.re.toPrecision(6) + ',' + (e.im ? e.im.toPrecision(6) : '0')
+                + (l ? ',' + (l.re || 0).toPrecision(6) + ',' + (l.sigma || 0).toPrecision(6) : '');
         }
         let id = ids.get(key);
         if (id === undefined) { id = ids.size; ids.set(key, id); }

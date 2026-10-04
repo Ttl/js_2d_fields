@@ -228,7 +228,7 @@ function dielectricFillShapes(solver, maxY, { alpha = 0.8, airAlpha = alpha, lay
         const er = diel.epsilon_r;
         const own = hexToRGB(diel.color);
         const fillcolor = own ? (opaque ? diel.color : fillOf(own, alpha))
-            : fillOf(dielectricRGB(er), er <= 1.01 ? airAlpha : alpha);
+            : fillOf(dielectricRGB(er, diel.sigma), er <= 1.01 && !(diel.sigma > 0) ? airAlpha : alpha);
         const line = { color: lineColor, width: 0.5 };
         if (visible[i]) {
             // The visible pieces as one path, so their shared cuts leave no seams, and the
@@ -1221,7 +1221,10 @@ function draw(resetZoom = false) {
         } else if (currentView === "potential_even") {
             modeLabel = " (Even Mode)";
         }
-        title = `Electric Potential${modeLabel} (V)${fieldFreqLabel(solver)}`;
+        // The potential is the real part, the instant the drive peaks. A conducting
+        // dielectric shifts the phase of the field in it, which this does not show.
+        const peak = instantField(getFields()).imagShare > 1e-3 ? ', at the peak of the drive' : '';
+        title = `Electric Potential${modeLabel} (V)${fieldFreqLabel(solver)}${peak}`;
         zTitle = "Volts";
 
         const V = getPotential();
@@ -1356,7 +1359,8 @@ function draw(resetZoom = false) {
         if (override) { zMin = override.min; zMax = override.max; }
         traces.push(...surfaceCurrentTraces(getSurfaceK(), zMin, zMax, plotOptions.efieldDb));
     } else if (currentView === "geometry" && zData.length > 0) {
-        const { Ex, Ey } = getFields();
+        // Streamlines of one instant of a complex field (instantField).
+        const { Ex, Ey } = instantField(getFields());
 
         const eMin = override ? override.min : contourFloor;
         const eMax = override ? override.max : zMax;
@@ -2150,6 +2154,31 @@ function getFields() {
     const m = isDifferentialMode() ? getSelectedModeIndex() : 0;
     return { Ex: solver.Ex[m], Ey: solver.Ey[m],
              ExIm: (solver.ExIm && solver.ExIm[m]) || null, EyIm: (solver.EyIm && solver.EyIm[m]) || null };
+}
+
+// A complex field E = Er + j Ei as the real field of one instant, Re(E e^(j phi)), at the
+// phase where that field carries the most energy, so streamlines follow the field the
+// |E| plot shows. A real field keeps phi = 0, the instant of the peak drive. Returns
+// { Ex, Ey, imagShare }, imagShare the fraction of sum |E|^2 in the imaginary part.
+function instantField({ Ex, Ey, ExIm, EyIm }) {
+    if (!Ex || !Ey || !ExIm || !EyIm) return { Ex, Ey, imagShare: 0 };
+    let A = 0, B = 0, C = 0;
+    for (let i = 0; i < Ex.length; i++) {
+        const xr = Ex[i], yr = Ey[i], xi = ExIm[i], yi = EyIm[i];
+        if (!xr || !yr || !xi || !yi) continue;
+        for (let j = 0; j < xr.length; j++) {
+            A += xr[j] * xr[j] + yr[j] * yr[j];
+            B += xi[j] * xi[j] + yi[j] * yi[j];
+            C += xr[j] * xi[j] + yr[j] * yi[j];
+        }
+    }
+    const imagShare = A + B > 0 ? B / (A + B) : 0;
+    if (!(B > 0)) return { Ex, Ey, imagShare };
+    // sum |Re(E e^(j phi))|^2 = A cos^2 + B sin^2 - 2 C sin cos, largest at this phi.
+    const phi = 0.5 * Math.atan2(-2 * C, A - B);
+    const c = Math.cos(phi), s = Math.sin(phi);
+    const mix = (R, I) => R.map((row, i) => (row && I[i] ? row.map((v, j) => c * v - s * I[i][j]) : row));
+    return { Ex: mix(Ex, ExIm), Ey: mix(Ey, EyIm), imagShare };
 }
 
 // Helper function to get voltage potential (handles differential mode)

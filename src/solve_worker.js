@@ -34,6 +34,7 @@
 
 import { buildSolverFromParams } from './solver_factory.js';
 import { InterpolatingSweep } from './interpolating_sweep.js';
+import { hasConductiveDielectric } from './conductive_dielectric.js';
 
 let stopRequested = false;
 let currentId = null;
@@ -206,11 +207,14 @@ async function jobSimulate({ params, frequencies, opts }) {
     // so a run that ends without the plot fields returns these. Quasi-static fields do not
     // depend on frequency and are shown while the sweep runs; full-wave ones are the
     // static field, not the field at the plot frequency, so the plot waits for the end.
-    // The full-wave ones belong to no frequency: a failed plot below leaves them with
-    // the frequency unset, so a later request at f_max plots again.
-    solver.fieldFreq = solver.mesh_backend !== 'triangular' ? maxFreq : null;
+    // So do quasi-static ones with a conducting dielectric, whose screening the real
+    // mesh solve leaves out. Fields that belong to no frequency keep it unset: a stopped
+    // sweep or a failed plot below shows them unlabelled, and a later request at f_max
+    // plots again.
+    const atMax = solver.mesh_backend !== 'triangular' && !hasConductiveDielectric(solver.dielectrics);
+    solver.fieldFreq = atMax ? maxFreq : null;
     const fieldsAtMax = fieldPayload(solver);
-    const liveFields = solver.mesh_backend !== 'triangular' ? fieldsAtMax : undefined;
+    const liveFields = atMax ? fieldsAtMax : undefined;
     post({ id: currentId, type: 'partial', fields: liveFields,
            sweepResults: stripSweep(sweepResults) });
 

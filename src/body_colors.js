@@ -9,8 +9,13 @@ export const AIR_GREY = 0.8 * 255 + 0.2 * PLOT_BG;
 
 // Default color of a dielectric as [r, g, b]: white for air, green shades getting lighter
 // with er. Drawn with transparency.
-export function dielectricRGB(er) {
-    return er <= 1.01 ? [255, 255, 255] : [100, Math.min(255, 100 + (er - 1) * 30), 100];
+// A conducting dielectric (sigma in S/m) is tinted towards brown, more the more it
+// conducts: 1 S/m a little, 1e4 S/m fully.
+export function dielectricRGB(er, sigma = 0) {
+    const s = sigma > 0 ? Math.min(1, 0.25 + Math.log10(1 + sigma) / 5.3) : 0;
+    if (er <= 1.01 && !s) return [255, 255, 255];
+    const g = er <= 1.01 ? 160 : Math.min(255, 100 + (er - 1) * 30);
+    return [100 + 60 * s, g - (g - 90) * 0.5 * s, 100 - 40 * s];
 }
 
 // [r, g, b] drawn at `alpha` over air, as an opaque color.

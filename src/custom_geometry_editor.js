@@ -969,7 +969,7 @@ function rectRow(model, st, geoRect, index, count) {
         }),
         rowButton('✕', 'Delete', edit((t, m, s) => replaceStatementInText(t, s, null))));
 
-    const band = colorBand(fields.color, isDiel() ? rgbToHex(overAir(dielectricRGB(geoRect ? geoRect.er : parseFloat(fields.er)), 0.8))
+    const band = colorBand(fields.color, isDiel() ? rgbToHex(overAir(dielectricRGB(geoRect ? geoRect.er : parseFloat(fields.er), geoRect ? geoRect.sigma : parseFloat(fields.sigma)), 0.8))
         : CONDUCTOR_COLOR, v => { if (v === null) delete fields.color; else fields.color = v; write(v === null); });
     const row = el('div', { class: `custom-rect-row kind-${st.kind.replace('+', 'p').replace('-', 'n')}`, 'data-line': st.line },
         band, kindSel, shapeSel, ...geometryCells, mirrorBtn, ...extra, actions, ...(cornerPanel ? [cornerPanel] : []), ...(below ? [below] : []));
