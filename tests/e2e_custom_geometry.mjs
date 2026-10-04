@@ -568,10 +568,12 @@ await page.click('#btn-solve-modes');
 await page.waitForFunction(() => document.querySelectorAll('#modes-list tr[data-idx]').length > 0, null, { timeout: 180000 });
 await page.waitForTimeout(1500);
 const modes = await page.evaluate(() => {
-    // The field is an image, its hover markers sit at the triangle centroids.
-    const d = (document.getElementById('modes-plot').data || []).find(tr => tr.type === 'scattergl');
-    const y = d ? Array.from(d.y) : [];
-    return { yMin: Math.min(...y), yMax: Math.max(...y), n: y.length };
+    // The field is an image of the mode mesh (the hover markers follow the view, not the mesh).
+    const m = document.getElementById('modes-plot')._modesMesh;
+    const T = m ? m.blocks[0].tris : [];
+    const y = [];
+    for (let k = 1; k < T.length; k += 2) y.push(T[k] * 1000);
+    return { yMin: Math.min(...y), yMax: Math.max(...y), n: T.length / 6 };
 });
 // Conductors span y = 0 ... 0.017 mm, the substrate reaches down to -0.635 mm.
 check('the mode field extends into the air above and below the structure', modes.n > 10 && modes.yMax > 1 && modes.yMin < -1,
