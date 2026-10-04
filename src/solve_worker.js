@@ -20,7 +20,7 @@
 //   { id, type: 'plotFields', freq }         (after a 'simulate' job, same worker)
 //   { id, type: 'plotRelease', job }          (drops the solve 'plotFields' reads, if
 //                                              it is still the one of simulate job `job`)
-//   {     type: 'stop' }                     (no id: cancels whatever is running)
+//   {     type: 'stop', job }                (cancels job `job`, running or queued)
 // worker to main:
 //   { id, type: 'log'     , msg }
 //   { id, type: 'progress', frac, text }
@@ -28,14 +28,16 @@
 //   { id, type: 'done'    , ... }
 //   { id, type: 'error'   , message }
 //
-// Cancellation: `stop` sets a flag that the existing shouldStop callbacks poll. The
-// worker only sees the message between WASM calls.
+// Cancellation: `stop` marks a job id stopped and sets the flag that the shouldStop
+// callbacks poll when that job is the running one. A job still queued behind another
+// (a plot) starts stopped. The worker only sees the message between WASM calls.
 
 import { buildSolverFromParams } from './solver_factory.js';
 import { InterpolatingSweep } from './interpolating_sweep.js';
 
 let stopRequested = false;
 let currentId = null;
+const stoppedJobs = new Set();
 let modesSolver = null;   // retained between 'modes' and its follow-up 'modeField' calls
 // The last simulate job's solver and converged solve, retained for 'plotFields', the id
 // of that job and its lowest frequency.
@@ -143,6 +145,7 @@ const MESH_FRACTION = (EST_MESH_PASSES * MESH_PASS_COST) /
     (EST_MESH_PASSES * MESH_PASS_COST + EST_SWEEP_POINTS);
 
 async function jobSimulate({ params, frequencies, opts }) {
+    if (stopRequested) return { stopped: true, sweepResults: [], fields: null };
     simSolver = null; simCached = null; simJob = null;
     const solver = makeSolver(params);
     const p = params;
@@ -394,20 +397,28 @@ async function jobParamSweep({ points, freqHz, opts }) {
             log(`Point ${i + 1}: solver init failed, skipping.`);
             continue;
         }
-        solver.ensure_mesh();
-        const cached = await solver.solve_adaptive({
-            max_iters: params.max_iters,
-            energy_tol: params.tolerance,
-            param_tol: 0.05,
-            max_nodes: params.max_nodes * 1000,
-            min_converged_passes: params.min_converged_passes,
-            // Verify the first point only. Adjacent sweep points share the geometry
-            // family and mesh behavior, so one certificate is representative, while
-            // verifying every point would multiply the whole sweep by the overhead.
-            certify: !!opts.estimateError && i === 0,
-            onProgress: () => {},
-            shouldStop,
-        });
+        let cached;
+        try {
+            solver.ensure_mesh();
+            cached = await solver.solve_adaptive({
+                max_iters: params.max_iters,
+                energy_tol: params.tolerance,
+                param_tol: 0.05,
+                max_nodes: params.max_nodes * 1000,
+                min_converged_passes: params.min_converged_passes,
+                // Verify the first point only. Adjacent sweep points share the geometry
+                // family and mesh behavior, so one certificate is representative, while
+                // verifying every point would multiply the whole sweep by the overhead.
+                certify: !!opts.estimateError && i === 0,
+                onProgress: () => {},
+                shouldStop,
+            });
+        } catch (err) {
+            // One point the solver rejects (a mesh budget, a geometry it cannot solve)
+            // leaves the rest of the sweep.
+            log(`Point ${i + 1} skipped: ${(err && err.message) || err}`);
+            continue;
+        }
         if (stopRequested) { log('Sweep stopped.'); break; }
 
         if (i === 0 && opts.estimateError) {
@@ -439,7 +450,7 @@ async function runJob(msg) {
     if (!job) { post({ id: msg.id, type: 'error', message: `unknown job "${msg.type}"` }); return; }
 
     currentId = msg.id;
-    stopRequested = false;
+    stopRequested = stoppedJobs.has(msg.id);
     try {
         const payload = await job(msg);
         post({ id: msg.id, type: 'done', ...payload });
@@ -447,12 +458,13 @@ async function runJob(msg) {
         post({ id: msg.id, type: 'error', message: (err && err.message) || String(err) });
     } finally {
         currentId = null;
+        stoppedJobs.delete(msg.id);
     }
 }
 
 // Jobs run one at a time. The handler is async, so without this chain a message
 // arriving while a job is awaiting would start a second handler concurrently, and since
-// each job begins by clearing `stopRequested` and claiming `currentId`, an overlap would
+// each job begins by setting `stopRequested` and claiming `currentId`, an overlap would
 // silently cancel a pending Stop and misroute the first job's log/progress messages. Now
 // that the UI stays interactive during a solve, overlapping requests are reachable (e.g.
 // clicking a mode row while the main solve runs), so the ordering has to be explicit.
@@ -460,8 +472,12 @@ let jobQueue = Promise.resolve();
 
 self.onmessage = (e) => {
     const msg = e.data;
-    // Stop is control, not work: it must take effect on the job that is running now, so
-    // it bypasses the queue entirely.
-    if (msg.type === 'stop') { stopRequested = true; return; }
+    // Stop is control, not work: it must reach the job that is running now, so it
+    // bypasses the queue entirely.
+    if (msg.type === 'stop') {
+        stoppedJobs.add(msg.job);
+        if (msg.job === currentId) stopRequested = true;
+        return;
+    }
     jobQueue = jobQueue.then(() => runJob(msg));
 };

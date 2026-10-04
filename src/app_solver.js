@@ -946,9 +946,11 @@ function workerJob(type, payload, handlers = {}) {
 }
 
 // Cancellation is cooperative: the worker polls this between WASM calls, exactly where
-// the old main-thread code polled `stopRequested`.
+// the old main-thread code polled `stopRequested`. Stop targets the solve or sweep job by
+// id, so it also holds when that job is still queued behind a plot job.
+let _stoppableJob = null;
 function workerStop() {
-    if (_worker) _worker.postMessage({ type: 'stop' });
+    if (_worker && _stoppableJob !== null) _worker.postMessage({ type: 'stop', job: _stoppableJob });
 }
 
 // Liveness indicator.
@@ -2002,6 +2004,7 @@ async function runSimulation() {
             },
         });
         const simJobId = _workerJobId;
+        _stoppableJob = simJobId;
         const out = await simJob;
 
         if (solver === solvedSolver) applyFields(solver, out.fields);
@@ -2130,9 +2133,11 @@ async function runSimulation() {
         console.error(e);
         log("Error: " + e.message);
     } finally {
-        // Restore button to "Solve" mode
+        // Restore button to "Solve" mode. The custom geometry editor keeps Solve off while
+        // its text has errors, which it may have gained during the solve.
         btn.textContent = 'Solve';
         btn.classList.remove('stop-mode');
+        btn.disabled = btn.dataset.customInvalid === '1';
         // A full bar and a "Done" only for a run that actually produced results; a
         // cancelled or failed solve rewinds the bar instead of claiming completion.
         pbar.style.width = outcome === 'done' ? '100%' : '0%';
@@ -2392,7 +2397,7 @@ async function runParameterSweep() {
         inputEl.value = originalValue;
         updateGeometry();
 
-        const out = await workerJob('paramSweep', {
+        const sweepJob = workerJob('paramSweep', {
             points, freqHz, opts: { estimateError: !!p.estimate_error },
         }, {
             // Surface the first point's verification outcome once. Later points run the
@@ -2417,6 +2422,8 @@ async function runParameterSweep() {
                 redrawSweepPlot();
             },
         });
+        _stoppableJob = _workerJobId;
+        const out = await sweepJob;
 
         parameterSweepResults = out.results.map(r => ({ ...r, result: reviveResult(r.result) }));
         redrawSweepPlot();
@@ -2429,8 +2436,8 @@ async function runParameterSweep() {
         updateGeometry();
         runBtn.style.display = '';
         stopBtn.style.display = 'none';
-        // The custom geometry editor keeps Solve off while its text has errors.
-        solveBtn.disabled = solveBtn.dataset.customInvalid === '1';
+        // The custom geometry editor keeps Solve and Run Sweep off while its text has errors.
+        solveBtn.disabled = runBtn.disabled = solveBtn.dataset.customInvalid === '1';
         isSweeping = false;
         heartbeatStop('');
     }

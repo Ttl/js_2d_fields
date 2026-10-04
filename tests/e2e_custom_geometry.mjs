@@ -374,6 +374,7 @@ const bad = await page.evaluate(() => ({
     errors: document.getElementById('custom-geom-errors').textContent,
     shown: document.getElementById('custom-geom-errors').style.display,
     solveDisabled: document.getElementById('btn_solve').disabled,
+    sweepDisabled: document.getElementById('btn-run-sweep').disabled,
     log: document.getElementById('console_out').textContent,
     badge: getComputedStyle(document.getElementById('custom-stale-badge')).display,
 }));
@@ -381,6 +382,7 @@ check('the editor error stays out of the log and the preview is marked stale',
     !/oops/.test(bad.log) && bad.badge === 'block', bad.log.slice(-200));
 check('an invalid text lists the error with its line and blocks Solve',
     /line \d+: unknown parameter 'oops'/.test(bad.errors) && bad.shown === 'block' && bad.solveDisabled === true, bad.errors);
+check('an invalid text blocks Run Sweep too', bad.sweepDisabled === true);
 await page.fill('#custom_geom_text', good.replace(/^(gnd .*)y=-t/m, '$1y=h-t/2'));
 await page.waitForTimeout(600);
 const shorted = await page.evaluate(() => document.getElementById('custom-geom-errors').textContent);
@@ -411,7 +413,20 @@ await page.waitForTimeout(600);
     await page.waitForTimeout(600);
 }
 check('a valid text clears the errors and enables Solve', await page.evaluate(() =>
-    document.getElementById('custom-geom-errors').style.display === 'none' && !document.getElementById('btn_solve').disabled));
+    document.getElementById('custom-geom-errors').style.display === 'none' && !document.getElementById('btn_solve').disabled
+    && !document.getElementById('btn-run-sweep').disabled));
+// A text made invalid while a solve runs keeps Solve off once the solve ends.
+{
+    const good3 = await geomText();
+    await page.click('#btn_solve');
+    await page.fill('#custom_geom_text', good3.replace('w=wgnd', 'w=oops'));
+    await page.waitForFunction(() => document.getElementById('btn_solve').textContent === 'Solve', null, { timeout: 180000 });
+    check('a text made invalid during a solve keeps Solve off after it', await page.evaluate(() =>
+        document.getElementById('btn_solve').disabled));
+    await page.fill('#custom_geom_text', good3);
+    await page.waitForTimeout(600);
+    check('fixing that text enables Solve again', await page.evaluate(() => !document.getElementById('btn_solve').disabled));
+}
 check('the stale badge goes with the errors', await page.evaluate(() =>
     getComputedStyle(document.getElementById('custom-stale-badge')).display === 'none'));
 
@@ -555,6 +570,27 @@ const sweep = await page.evaluate(() => {
 check('sweeping the ground width lowers the impedance', sweep.y.length >= 3 && sweep.y[0] > sweep.y[sweep.y.length - 1] + 5,
     `${sweep.y[0].toFixed(2)} -> ${sweep.y[sweep.y.length - 1].toFixed(2)} over ${sweep.y.length} plot points`);
 check('the sweep leaves the text and the input as they were', /wgnd = 0\.5\b/.test(sweep.text) && sweep.input === '0.5');
+// Points the solver rejects are skipped, the sweep goes on: an n-gon is valid text but
+// full-wave only, so every quasi-static point fails at the mesh.
+{
+    const plain = sweep.text;
+    const setText = t => page.evaluate(v => {
+        const el = document.getElementById('custom_geom_text');
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, t);
+    await setText(plain + '\ndiel ngon x=0 y=3 r=0.2 n=6 er=2\n');
+    await page.waitForTimeout(600);
+    const from = (await logText()).length;
+    await page.click('#btn-run-sweep');
+    await page.waitForFunction(n => /Sweep complete: \d+ points|Sweep error/.test(
+        document.getElementById('console_out').textContent.slice(n)), from, { timeout: 240000 });
+    const tail = (await logText()).slice(from);
+    check('a sweep skips the points the solver rejects', /Point 1 skipped: /.test(tail) && /Point 3 skipped: /.test(tail)
+        && /Sweep complete: 0 points/.test(tail), tail.slice(-400));
+    await setText(plain);
+    await page.waitForTimeout(600);
+}
 if (shot) await page.screenshot({ path: `${shot}/custom_sweep.png` });
 
 // ---- Modes tab: the field plot covers the air above and below the conductors ----

@@ -413,6 +413,9 @@ function renderMessages({ errors, warnings }) {
     if (btn && $('tl_type').value === 'custom') {
         btn.dataset.customInvalid = errors.length ? '1' : '';
         if (!btn.classList.contains('stop-mode')) btn.disabled = errors.length > 0;
+        // Hidden while a sweep runs, the sweep restores it when it ends.
+        const sweepBtn = $('btn-run-sweep');
+        if (sweepBtn) sweepBtn.disabled = errors.length > 0;
     }
 }
 

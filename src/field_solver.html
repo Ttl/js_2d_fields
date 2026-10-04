@@ -1414,6 +1414,7 @@
         if (!isCustom && solveBtn.dataset.customInvalid) {
             solveBtn.dataset.customInvalid = '';
             if (!solveBtn.classList.contains('stop-mode')) solveBtn.disabled = false;
+            document.getElementById('btn-run-sweep').disabled = false;
         }
         const microstripParams = document.getElementById('microstrip-params');
         const diffParams = document.getElementById('diff-params');
