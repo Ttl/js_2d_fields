@@ -70,7 +70,7 @@ cp src/.htaccess dist/.htaccess
 # directory, dist/tri-<hash>/, so the immutable cache policy can never serve a
 # mixed-version module graph after a deployment: when any file changes, every
 # URL in the subtree changes. The only reference from outside is the bundle's
-# lazy import('./tri_solver/tri_backend.js'), rewritten below. The layout
+# lazy imports of './tri_solver/*', rewritten below. The layout
 # mirrors src/ shifted one level down, so all relative imports resolve inside
 # the versioned tree:
 #   tri-<hash>/complex.js …                          ← `../foo.js` from tri_solver/*
@@ -95,9 +95,9 @@ cp src/wasm_solver/eigen_solver.js src/wasm_solver/eigen_solver.wasm \
    src/wasm_solver/gmsh.js src/wasm_solver/gmsh.wasm "$TRI_STAGE/wasm_solver/"
 TRI_HASH=$(cd "$TRI_STAGE" && find . -type f | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-8)
 mv "$TRI_STAGE" "dist/tri-${TRI_HASH}"
-# Point both bundles' lazy import at the versioned tree. The worker sits next to the app
-# bundle, so the same relative path resolves for both.
-sed -i "s|\./tri_solver/tri_backend\.js|./tri-${TRI_HASH}/tri_solver/tri_backend.js|g" \
+# Point both bundles' lazy imports (tri_backend.js, eigen_module.js) at the versioned
+# tree. The worker sits next to the app bundle, so the same relative path resolves for both.
+sed -i -E "s#([\"'])\./tri_solver/#\1./tri-${TRI_HASH}/tri_solver/#g" \
   dist/app_solver.js dist/solve_worker.js
 
 # Cache-busting: append content hashes as query strings so browsers fetch
