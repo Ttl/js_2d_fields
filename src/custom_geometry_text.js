@@ -1283,8 +1283,10 @@ export function changeUnitsInText(text, to) {
     if (before.errors.length) return null;
     const f = LENGTH_UNITS[before.units] / LENGTH_UNITS[to];
     const names = model.statements.filter(s => s.type === 'param').map(s => s.name);
-    // Sets of plain-factor parameters, smallest first, at most a few thousand tries.
-    const MAX_TRIES = 4096;
+    // Sets of plain-factor parameters, smallest first, at most a few thousand tries and
+    // half a second: each try evaluates the whole text, on the UI thread.
+    const MAX_TRIES = 4096, MAX_MS = 500;
+    const t0 = Date.now();
     let tries = 0;
     const subsets = function* (start, size, chosen) {
         if (chosen.length === size) { yield new Set(chosen); return; }
@@ -1292,7 +1294,7 @@ export function changeUnitsInText(text, to) {
     };
     for (let size = 0; size <= names.length; size++) {
         for (const factors of subsets(0, size, [])) {
-            if (++tries > MAX_TRIES) return null;
+            if (++tries > MAX_TRIES || Date.now() - t0 > MAX_MS) return null;
             const degreeOf = name => (names.includes(name) ? (factors.has(name) ? 0 : 1) : null);
             let out;
             try { out = rewriteUnits(text, model, f, to, degreeOf); } catch { continue; }

@@ -352,6 +352,16 @@ sig+  x=s/2     y=h1+h2  w=w    h=t  rq=0.001; gnd x=-1 w=max(2*w,0.5)+0.1 y=-0.
     check('unit change mm -> mil keeps the geometry', !!mil && same(a, parseAndEvaluate(mil)));
     check('unit change without a units line adds one', /^units um$/m.test(changeUnitsInText('w = 0.3\nsig+ x=0 w=w y=0 h=0.035', 'um') ?? ''));
     check('unit change of a text with errors gives null', changeUnitsInText('units mm\nw = oops', 'um') === null);
+    {
+        // k is a length in x=k and a factor in w=k*p0: no consistent rewrite, and with 14
+        // parameters and 300 shapes the full search would take tens of seconds.
+        const params = Array.from({ length: 13 }, (_, i) => `p${i} = 0.${i + 1}`).join('\n');
+        const shapes = Array.from({ length: 300 }, (_, i) => `diel x=k+${i} y=p${i % 13} w=k*p0 h=p1 er=4`).join('\n');
+        const t0 = Date.now();
+        const r = changeUnitsInText(`units mm\nk = 2\n${params}\n${shapes}`, 'um');
+        const ms = Date.now() - t0;
+        check('unit change without a consistent rewrite gives up within its time budget', r === null && ms < 2000, `${ms} ms`);
+    }
 }
 
 // --- Names and literals ---
