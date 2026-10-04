@@ -155,7 +155,7 @@ bounds open open open open
 domain -1.2*(hw+t_sh) 1.2*(hw+t_sh) -1.5*(hh+t_sh) 1.5*(hh+t_sh)
 
 diel  ngon  x=s/2  y=0  r=di/2  n=64  er=2.1  tand=0.0003  mirror=1
-sig+  ngon  x=s/2  y=0  r=d/2  n=32  mirror=1
+sig+  ngon  x=s/2  y=0  r=d/2  n=64  mirror=1
 gnd   x=-hw-t_sh  w=2*(hw+t_sh)  y=-hh-t_sh  h=2*(hh+t_sh)  radius=hh+t_sh  wall=t_sh
 `,
     'Coplanar strips / slotline': `# Two strips on a finite substrate, the slot between them is a slotline.

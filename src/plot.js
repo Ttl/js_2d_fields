@@ -682,8 +682,9 @@ function fieldMeshContourTrace(M, limits) {
 // any zoom. Returns a layout image above the shapes of layer 'below' (the dielectric
 // fills) and under the traces (mesh overlay, contour lines), or null. bleed > 0 carries
 // the colors that many pixels into the empty pixels (the conductor holes of an |E| mesh).
-// hover: the image also carries `hover`, see imageHover.
-function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0, hover = false) {
+// hover: the image also carries `hover`, see imageHover. erode: clears the filled pixels
+// next to an empty one, see erodePixels.
+function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0, hover = false, erode = false) {
     if (!(w > 0 && h > 0)) return null;
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
@@ -731,6 +732,7 @@ function rasterizeDensity(blocks, xr, yr, w, h, zmin, zmax, db, bleed = 0, hover
     }
     if (!any) return null;
     for (let pass = 0; pass < bleed; pass++) bleedPixels(px, w, h);
+    if (erode) erodePixels(px, w, h);
     ctx.putImageData(img, 0, 0);
     const im = { source: canvas.toDataURL(), xref: 'x', yref: 'y', x: xr[0], y: yr[1],
                  sizex: xr[1] - xr[0], sizey: yr[1] - yr[0], sizing: 'stretch', layer: 'below' };
@@ -771,6 +773,26 @@ function bleedPixels(px, w, h) {
                 : j > 0 && src[o - 4 * w + 3] ? o - 4 * w : j < h - 1 && src[o + 4 * w + 3] ? o + 4 * w : -1;
             if (n < 0) continue;
             px[o] = src[n]; px[o + 1] = src[n + 1]; px[o + 2] = src[n + 2]; px[o + 3] = 255;
+        }
+    }
+}
+
+// Clears every filled pixel of RGBA px (w x h) with an empty pixel among its 8
+// neighbours or on the image border. A pixel is filled when its centre lies on a block,
+// so it reaches up to half a pixel past the block's edge, and the browser's smoothing of
+// a stretched image fades it over another pixel: a coarse |J| backdrop seen through the
+// empty dielectric around a conductor would show as a colored rim outside the metal.
+function erodePixels(px, w, h) {
+    const src = px.slice();
+    const filled = (i, j) => i >= 0 && i < w && j >= 0 && j < h && src[4 * (j * w + i) + 3];
+    for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+            if (!src[4 * (j * w + i) + 3]) continue;
+            let keep = true;
+            for (let dj = -1; dj <= 1 && keep; dj++) for (let di = -1; di <= 1; di++) {
+                if (!filled(i + di, j + dj)) { keep = false; break; }
+            }
+            if (!keep) px[4 * (j * w + i) + 3] = 0;
         }
     }
 }
@@ -868,7 +890,10 @@ const updateDensityImage = container =>
 // Under the sharp image of the view lies a coarse backdrop of the whole field: Plotly
 // scales the old image during a zoom or pan gesture and only redraws when it ends, so a
 // zoom out would otherwise show bare edges until then. The backdrop is redrawn only when
-// the field or color scale changes, after the view image.
+// the field or color scale changes, after the view image. The view image leaves the
+// dielectric around a |J| block empty and the backdrop shows there, so the backdrop of
+// |J| is eroded to stay inside the metal (an |E| backdrop bleeds into the conductor
+// holes, which their opaque fills cover).
 const BACKDROP_PIXELS = 2e6;
 function updateTriImage(container, get) {
     cancelAnimationFrame(container._triImageFrame || 0);
@@ -905,7 +930,7 @@ function updateTriImage(container, get) {
             const s = Math.sqrt(BACKDROP_PIXELS / ((bx[1] - bx[0]) * (by[1] - by[0]) || 1));
             const w = Math.max(1, Math.min(4096, Math.round((bx[1] - bx[0]) * s)));
             const h = Math.max(1, Math.min(4096, Math.round((by[1] - by[0]) * s)));
-            container._triBackdrop = { key, im: rasterizeDensity(blocks, bx, by, w, h, zmin, zmax, db, bleed) };
+            container._triBackdrop = { key, im: rasterizeDensity(blocks, bx, by, w, h, zmin, zmax, db, bleed, false, !bleed) };
             setTriImages(container, container._triBackdrop.im, container._triView);
         }, 100);
     });
