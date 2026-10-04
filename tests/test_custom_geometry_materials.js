@@ -12,6 +12,8 @@
 //      pairs, whichever trace carries which
 //   6. full-wave, a rough ground reaching the open domain edge (the ideal-ground path
 //      at low frequency): sigma on every conductor = the solver-wide sigma, L included
+//   7. one net of two separate traces, one of a poor metal in its skin transition: QS
+//      blends each trace on its own and agrees with full-wave
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { parseAndEvaluate, solverToGeometryText } from '../src/custom_geometry_text.js';
 import { check, quiet, rel, APP, done } from './helpers.js';
@@ -168,6 +170,15 @@ for (const [name, extra] of BACKENDS) {
     check('full-wave ideal rough ground of its own sigma: R and L match the solver-wide sigma',
         rel(a.RLGC.R, b.RLGC.R) < 1e-6 && rel(a.L_internal, b.L_internal) < 1e-6,
         `R ${a.RLGC.R.toFixed(4)} / ${b.RLGC.R.toFixed(4)}, Lint ${(a.L_internal * 1e9).toFixed(3)} / ${(b.L_internal * 1e9).toFixed(3)} nH/m`);
+}
+
+// --- 7. a net of two metals in the skin transition ---
+{
+    // sigma = 1e6 at 1 GHz: delta = 16 um against t = 35 um, in the transition notch.
+    const text = HEAD + 'sig+ x=-0.8 w=0.2 y=0.2 h=0.035 sigma=1e6\nsig+ x=0.6 w=0.2 y=0.2 h=0.035\n';
+    const [q] = await solveR(text, { freq: 1e9 }), [f] = await solveR(text, { freq: 1e9, mesh_backend: 'triangular' });
+    check('one net of a copper and a poor trace: QS R agrees with full-wave', rel(q.R, f.R) < 0.05,
+        `QS ${q.R.toFixed(2)} vs full-wave ${f.R.toFixed(2)} ohm/m`);
 }
 
 done();

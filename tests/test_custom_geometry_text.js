@@ -132,6 +132,12 @@ const ERR = [
     ['units mm\nunits um', 2, 'more than one'],
     ['\n\nwibble 3', 3, 'unknown statement'],
     ['sig+ x=0 y=0 w=1 h=1 plating=left', 1, 'faces'],
+    ['sig+ x=0 y=0 w=1 h=1 plating=top plating_sigma=inf plating_t=0.01', 1, 'finite'],
+    ['sig+ x=0 y=0 w=1 h=1 plating=top plating_sigma=1e7 plating_t=inf', 1, 'finite'],
+    ['sig+ x=0 y=0 w=1 h=1 plating=top plating_sigma=1e7 plating_t=0.01 plating_rq=inf', 1, 'finite'],
+    ['sig+ x=0 y=0 w=1 h=1 plating=top plating_sigma=1e7 plating_t=0.01 plating_rq_iface=inf', 1, 'finite'],
+    ['plating sigma=inf t=0.01', 1, 'finite'],
+    ['plating sigma=1e7 t=0.01 rq=inf', 1, 'finite'],
 ];
 // A rectangle using a parameter that failed names that parameter, not an unknown one.
 {

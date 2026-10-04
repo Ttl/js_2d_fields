@@ -767,6 +767,13 @@ function shapeFields(fields, from, to, geoRect) {
     return f;
 }
 
+// The evaluated rectangles of geo keyed by line and position on it (a line may hold
+// several statements), with the length scale and unit of the text.
+function rectsByStatement(geo) {
+    return new Map(geo.rects.filter(r => !r.image)
+        .map(r => [`${r.line}:${r.part}`, { ...r, scale: LENGTH_UNITS[geo.units], units: geo.units }]));
+}
+
 function rectRow(model, st, geoRect, index, count) {
     let fields = { ...st.fields };
     let kind = st.kind;
@@ -800,7 +807,9 @@ function rectRow(model, st, geoRect, index, count) {
         ...Object.entries(SHAPE_NAMES).map(([k, name]) => el('option', { value: k, text: name[0].toUpperCase() + name.slice(1) })));
     shapeSel.value = shape;
     shapeSel.addEventListener('change', () => {
-        fields = shapeFields(fields, shape, shapeSel.value, geoRect);
+        // The rectangle as it is now: field edits since the row was built moved it.
+        const now = mine(analyse().model) ? rectsByStatement(analyse().geo).get(`${st.line}:${st.part}`) ?? null : null;
+        fields = shapeFields(fields, shape, shapeSel.value, now);
         shape = shapeSel.value;
         write(true, 'shape');
     });
@@ -1052,9 +1061,7 @@ function renderForm(model, geo) {
 
     // Rectangles.
     const rects = model.statements.filter(s => s.type === 'rect');
-    // Keyed by line and position on it: a line may hold several statements.
-    const byStatement = new Map(geo.rects.filter(r => !r.image)
-        .map(r => [`${r.line}:${r.part}`, { ...r, scale: LENGTH_UNITS[geo.units], units: geo.units }]));
+    const byStatement = rectsByStatement(geo);
     const adders = Object.entries(KIND_LABELS).map(([kind, label]) => {
         const b = el('button', { class: 'secondary-btn', text: `+ ${label}`,
             title: kind === 'diel' ? 'Adds a layer on top of the rectangle selected last, or on top of the stack'

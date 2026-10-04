@@ -847,6 +847,8 @@ export function evaluateGeometry(model, overrides = {}) {
         } catch (e) { fail(domainSt, e); }
     }
 
+    const finitePos = v => v > 0 && Number.isFinite(v);
+    const finiteNonNeg = v => v >= 0 && Number.isFinite(v);
     let plating = null;
     const platingSt = model.statements.find(s => s.type === 'plating');
     if (platingSt) {
@@ -858,9 +860,9 @@ export function evaluateGeometry(model, overrides = {}) {
                 rq: f.rq !== undefined ? len(f.rq) : 0,
             };
             if (f.rq_iface !== undefined) plating.rq_interface = len(f.rq_iface);
-            if (!(plating.sigma > 0) || !(plating.thickness > 0) || !(plating.rq >= 0)
-                || (plating.rq_interface !== undefined && !(plating.rq_interface >= 0))) {
-                throw new Error('plating sigma and t must be positive, rq and rq_iface non-negative');
+            if (!finitePos(plating.sigma) || !finitePos(plating.thickness) || !finiteNonNeg(plating.rq)
+                || (plating.rq_interface !== undefined && !finiteNonNeg(plating.rq_interface))) {
+                throw new Error('plating sigma and t must be positive and finite, rq and rq_iface non-negative and finite');
             }
         } catch (e) { fail(platingSt, e); }
     }
@@ -924,10 +926,10 @@ export function evaluateGeometry(model, overrides = {}) {
                 if (f.plating_rq !== undefined) pm.rq = len(f.plating_rq);
                 if (f.plating_rq_iface !== undefined) pm.rq_interface = len(f.plating_rq_iface);
                 if (Object.keys(pm).length) {
-                    if ((pm.sigma !== undefined && !(pm.sigma > 0)) || (pm.thickness !== undefined && !(pm.thickness > 0))
-                        || (pm.rq !== undefined && !(pm.rq >= 0))
-                        || (pm.rq_interface !== undefined && !(pm.rq_interface >= 0))) {
-                        throw new Error('plating_sigma and plating_t must be positive, plating_rq and plating_rq_iface non-negative');
+                    if ((pm.sigma !== undefined && !finitePos(pm.sigma)) || (pm.thickness !== undefined && !finitePos(pm.thickness))
+                        || (pm.rq !== undefined && !finiteNonNeg(pm.rq))
+                        || (pm.rq_interface !== undefined && !finiteNonNeg(pm.rq_interface))) {
+                        throw new Error('plating_sigma and plating_t must be positive and finite, plating_rq and plating_rq_iface non-negative and finite');
                     }
                     r.platingMaterial = pm;
                 }

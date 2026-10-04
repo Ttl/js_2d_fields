@@ -2259,6 +2259,17 @@ function updateSweepParamList() {
     if ([...sel.options].some(o => o.value === previousValue)) sel.value = previousValue;
 }
 
+// The sweep tab lists the parameters of the custom geometry text. Activating the type
+// fills the text without a geometry change, so it syncs here too.
+let customParamKeys = null;
+function syncCustomSweepParams() {
+    const keys = customSweepParams().map(c => c.key).join();
+    if (keys === customParamKeys) return;
+    customParamKeys = keys;
+    updateSweepParamList();
+    autoFillSweepRange();
+}
+
 function getZeroDefaultMax(displayUnit) {
     // Return a sensible max in display units for zero-valued params
     const maxInMeters = 2e-6; // 2 μm as reference
@@ -2848,15 +2859,13 @@ function bindEvents() {
 
     // Custom geometry editor: every edit rebuilds the preview, and the parameter list
     // of the sweep tab follows the parameters defined in the text.
-    let customParamKeys = '';
     initCustomGeometryEditor({
         log,
         onGeometryChange: (resetZoom = false) => {
             if (document.getElementById('tl_type').value !== 'custom') return;
             updateGeometry();
             draw(resetZoom === true);
-            const keys = customSweepParams().map(c => c.key).join();
-            if (keys !== customParamKeys) { customParamKeys = keys; updateSweepParamList(); autoFillSweepRange(); }
+            syncCustomSweepParams();
             updateResultNotices();
             updateSweepNotice();
             updateModesNotice();
@@ -2869,7 +2878,10 @@ function bindEvents() {
 
     // Transmission line type selector - reset zoom when type changes
     document.getElementById('tl_type').addEventListener('change', () => {
-        if (document.getElementById('tl_type').value === 'custom') activateCustomGeometry();
+        if (document.getElementById('tl_type').value === 'custom') {
+            activateCustomGeometry();
+            syncCustomSweepParams();
+        }
         updateGeometry();
         draw(true);  // Reset zoom/pan for new geometry
         updateResultNotices();
@@ -3192,7 +3204,10 @@ function init() {
 
     // A reload keeps the form state: the type may come back as custom, with the
     // geometry text the browser restored or, without one, the first template.
-    if (document.getElementById('tl_type').value === 'custom') activateCustomGeometry();
+    if (document.getElementById('tl_type').value === 'custom') {
+        activateCustomGeometry();
+        syncCustomSweepParams();
+    }
     updateGeometry();
     draw();
     initLayoutPanels();

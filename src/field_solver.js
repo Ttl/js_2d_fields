@@ -2020,6 +2020,9 @@ export class FieldSolver2D {
         const nCond = (this.conductors || []).length;
         const sumL = new Float64Array(nCond), faceBot = new Float64Array(nCond), faceTop = new Float64Array(nCond);
         const sumLref = new Float64Array(nCond), sumLdc = new Float64Array(nCond), netI = [0, 0];
+        // Per signal conductor: Re(Zs)|H|^2 dl and its current, for the body blend.
+        const sigR = new Float64Array(nCond), sigI = new Float64Array(nCond);
+        let sigOutside = false;
         let sumLDefault = 0;
         // Smooth reference reactance of a face: the bulk metal under any
         // plating, the smooth face impedance for blocks of different metals (which
@@ -2034,7 +2037,11 @@ export class FieldSolver2D {
             const Zs = getZsurf(ci, direction, i, j, span, xStart);
             const H2dl = H_tan * H_tan * dl;
             if (isGroundCond(ci)) addGnd(ci, Zs.re, H_tan, dl);
-            else sum_H2_dl_R += Zs.re * H2dl;
+            else {
+                sum_H2_dl_R += Zs.re * H2dl;
+                if (ci >= 0 && ci < nCond) { sigR[ci] += Zs.re * H2dl; sigI[ci] += H_out * dl; }
+                else sigOutside = true;
+            }
             if (!(ci >= 0 && ci < nCond)) { sumLDefault += Zs.im * H2dl; return; }
             sumL[ci] += Zs.im * H2dl;
             const c = this.conductors[ci];
@@ -2316,24 +2323,32 @@ export class FieldSolver2D {
         this._platingTransitionWarn = this._plating_transition_note(this.freq);
         // |t|: an embedded trace (negative thickness) has the same skin transition.
         const tAbs = Math.abs(this.t);
+        const notch = dlt => {
+            const lx = Math.log(dlt / tAbs / 0.4);
+            return 1 - 0.07 * Math.exp(-(lx * lx) / (2 * 0.45 * 0.45));
+        };
+        let bodyBlend = null;
         if (vacuum_fields && tAbs > 0 && this.freq > 0) {
-            const lx = Math.log(delta / tAbs / 0.4);
-            transitionCal = 1 - 0.07 * Math.exp(-(lx * lx) / (2 * 0.45 * 0.45));
+            transitionCal = notch(delta);
+            // Signal bodies of different metals take their own blend and skin depth.
+            bodyBlend = sigOutside ? null : this._signal_body_blend(sigR, sigI, power_factor * Z0_sq,
+                mode, line, deltaOf, dlt => notch(dlt ?? delta));
+            const deltaWarn = bodyBlend && bodyBlend.deltaMax > 0 ? bodyBlend.deltaMax : delta;
             const tMin = this.t_gnd > 0 ? Math.min(tAbs, this.t_gnd) : tAbs;
             // reason distinguishes loss-accuracy notes from certificate notes for
             // machine consumers (the fuzzer relaxes its R gate on loss reasons).
-            this._skinTransitionWarn = (delta > 0.5 * tMin)
+            this._skinTransitionWarn = (deltaWarn > 0.5 * tMin)
                 ? { type: 'accuracy', reason: 'skin-transition', mode: 'all', message:
                     `Conductor loss and internal-inductance accuracy is reduced in the DC-skin ` +
-                    `transition (skin depth ${(delta * 1e6).toFixed(1)} µm vs conductor thickness ` +
+                    `transition (skin depth ${(deltaWarn * 1e6).toFixed(1)} µm vs conductor thickness ` +
                     `${(tMin * 1e6).toFixed(1)} µm). The full-wave solver resolves the ` +
                     `transition-region current accurately.` }
                 : null;
         }
         // The signal blends its DC and skin terms; the ground term is already valid at
         // every delta and only floors at its geometric DC resistance.
-        const R_total = Math.max(R_dc_sig, transitionCal * Math.sqrt(R_dc_sig * R_dc_sig + R_ac_sig * R_ac_sig))
-            + Math.max(R_dc_gnd, R_ac_gnd);
+        const R_sig = bodyBlend ? bodyBlend.R : transitionCal * Math.sqrt(R_dc_sig * R_dc_sig + R_ac_sig * R_ac_sig);
+        const R_total = Math.max(R_dc_sig, R_sig) + Math.max(R_dc_gnd, R_ac_gnd);
 
         return { R_ac, R_dc, R_total, L_internal };
     }
@@ -2441,15 +2456,86 @@ export class FieldSolver2D {
     // the later one's metal.
     _dc_conductances() {
         const g = { pos: 0, neg: 0, gnd: 0 };
-        const visible = visibleAreas(this.conductors || []);
-        for (const [i, c] of (this.conductors || []).entries()) {
-            // A plating layer inside the outline conducts at its own sigma.
-            const a = visible && visible.has(i) ? visible.get(i) : shapeArea(c);
-            const ap = this._solid_plating(c) ? 0 : Math.min(platingArea(c), a);
-            const v = this._bulk_sigma(c) * (a - ap) + (ap > 0 ? c.plating.sigma * ap : 0);
+        for (const [i, { g: v }] of this._dc_conductance_list().entries()) {
+            const c = this.conductors[i];
             if (!c.is_signal) g.gnd += v; else if (c.polarity < 0) g.neg += v; else g.pos += v;
         }
         return g;
+    }
+
+    // DC conductance g (sigma times area) and visible area a of each conductor. A
+    // plating layer inside the outline conducts at its own sigma.
+    _dc_conductance_list() {
+        const visible = visibleAreas(this.conductors || []);
+        return (this.conductors || []).map((c, i) => {
+            const a = visible && visible.has(i) ? visible.get(i) : shapeArea(c);
+            const ap = this._solid_plating(c) ? 0 : Math.min(platingArea(c), a);
+            return { g: this._bulk_sigma(c) * (a - ap) + (ap > 0 ? c.plating.sigma * ap : 0), a };
+        });
+    }
+
+    // Skin-transition blend of the signal resistance per body (touching signal
+    // conductors of one net): sum over bodies of cal * sqrt(D^2 + A^2), A the body's
+    // part of the surface integral and D its DC resistance at the share f of its net's
+    // current the field gives it, pf f^2 / G. For a net of identical bodies this is the
+    // net blend sqrt(R_dc^2 + R_ac^2), a body of poorer metal keeps its own DC floor and
+    // transition. sigR and sigI are the per-conductor Re(Zs)|H|^2 dl and current sums,
+    // scale turns sigR into ohm/m, notch(delta) is the transition calibration. Full
+    // domain only (the half-domain sums miss the mirrored bodies), null where it does
+    // not apply. Returns { R, deltaMax }.
+    _signal_body_blend(sigR, sigI, scale, mode, line, deltaOf, notch) {
+        if (this.sym_half || !this.conductors) return null;
+        const list = this._dc_conductance_list();
+        const net = c => (this.is_differential && c.polarity < 0 ? 1 : 0);
+        const G = [0, 0];
+        this.conductors.forEach((c, i) => { if (c.is_signal) G[net(c)] += list[i].g; });
+        // Driven nets and their power factor, the convention of _dc_resistance.
+        let pf;
+        if (line === 0) pf = [1, 0];
+        else if (line === 1) pf = [0, 1];
+        else if (line === 2) pf = [1, 1];
+        else if (this.is_differential && (mode === 'odd' || mode === 'even')) {
+            if (!(G[0] > 0 && G[1] > 0)) return null;
+            pf = [0.5, 0.5];
+        } else pf = null;   // one net of every signal conductor
+        const netOf = c => (pf ? net(c) : 0);
+        if (!pf) { G[0] += G[1]; G[1] = 0; pf = [1, 0]; }
+        // Bodies: touching signal conductors of one net.
+        const sig = this.conductors.map((c, i) => i).filter(i => this.conductors[i].is_signal);
+        const root = new Map(sig.map(i => [i, i]));
+        const find = i => (root.get(i) === i ? i : find(root.get(i)));
+        const tol = 1e-9 * this.domain_width;
+        for (let p = 0; p < sig.length; p++) {
+            for (let q = p + 1; q < sig.length; q++) {
+                const a = this.conductors[sig[p]], b = this.conductors[sig[q]];
+                if (net(a) !== net(b)) continue;
+                if (a.x_min <= b.x_max + tol && b.x_min <= a.x_max + tol
+                    && a.y_min <= b.y_max + tol && b.y_min <= a.y_max + tol) root.set(find(sig[p]), find(sig[q]));
+            }
+        }
+        const bodies = new Map();
+        for (const i of sig) {
+            const k = find(i);
+            const b = bodies.get(k) || { n: netOf(this.conductors[i]), g: 0, a: 0, I: 0, R: 0 };
+            b.g += list[i].g; b.a += list[i].a; b.I += sigI[i]; b.R += sigR[i];
+            bodies.set(k, b);
+        }
+        const In = [0, 0];
+        for (const b of bodies.values()) In[b.n] += b.I;
+        const own = this._own_sigma();
+        let R = 0, deltaMax = 0;
+        for (const b of bodies.values()) {
+            const A = scale * b.R;
+            let D = 0;
+            if (pf[b.n] > 0 && b.g > 0 && G[b.n] > 0) {
+                const f = Math.abs(In[b.n]) > 0 ? b.I / In[b.n] : b.g / G[b.n];
+                D = pf[b.n] * f * f / b.g;
+            }
+            const dlt = own && b.a > 0 ? deltaOf(b.g / b.a) : null;
+            if (dlt !== null) deltaMax = Math.max(deltaMax, dlt);
+            R += notch(dlt) * Math.sqrt(D * D + A * A);
+        }
+        return { R, deltaMax };
     }
 
     // Per-unit-length DC resistance of the signal and of the ground in the per-line

@@ -798,6 +798,29 @@ check('leaving the custom type restores the fixed sidebar', await page.evaluate(
     await p5.close();
 }
 
+// First selection of the custom type in a fresh page: the template fills the text and
+// the sweep tab lists its parameters right away.
+{
+    const p6 = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    await p6.goto(URL, { waitUntil: 'networkidle' });
+    await p6.selectOption('#tl_type', 'custom');
+    await p6.waitForTimeout(500);
+    const opts = await p6.evaluate(() => [...document.getElementById('sweep-x-selector').options].map(o => o.value));
+    check('selecting the custom type lists the template parameters in the sweep tab',
+        opts.filter(v => v.startsWith('cgp_')).length >= 3 && opts[0].startsWith('cgp_'), opts.join());
+    // A shape change after a field edit of the same row starts from the edited box:
+    // the trace x=-w/2 w=2 (w = 0.3) spans -0.15 ... 1.85, an n-gon centred on it.
+    const sigRow = p6.locator('#custom-form .custom-rect-row.kind-sigp');
+    await cellInput(sigRow, /^w$/, p6).fill('2');
+    await p6.waitForTimeout(600);
+    await sigRow.locator('select.custom-shape').selectOption('ngon');
+    await p6.waitForTimeout(600);
+    const ngon = (await p6.evaluate(() => document.getElementById('custom_geom_text').value))
+        .split('\n').find(l => l.startsWith('sig+')) || '';
+    check('a shape change after a field edit starts from the edited box', /\bngon\b/.test(ngon) && /\bx=0\.85\b/.test(ngon), ngon);
+    await p6.close();
+}
+
 check('no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 await browser.close();
 done();
