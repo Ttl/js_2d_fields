@@ -940,13 +940,13 @@ export class FieldSolver2D {
         });
     }
 
-    // Complex cell permittivity a + j b at angular frequency omega.
-    _complex_cells(omega) {
+    // Complex cell permittivity a + j b at angular frequency omega, dc as in complexEps.
+    _complex_cells(omega, dc = false) {
         const a = this.epsilon_cell;
         const b = a.map((row, i) => {
             const t = this.tand_cell[i], sg = this.sigma_cell ? this.sigma_cell[i] : null;
             const out = new Float64Array(row.length);
-            for (let j = 0; j < row.length; j++) out[j] = complexEps(row[j], t[j], sg ? sg[j] : 0, omega).im;
+            for (let j = 0; j < row.length; j++) out[j] = complexEps(row[j], t[j], sg ? sg[j] : 0, omega, dc).im;
             return out;
         });
         return { a, b };
@@ -965,7 +965,7 @@ export class FieldSolver2D {
     async _conductive_mode(mode) {
         if (!hasConductiveDielectric(this.dielectrics)) return null;
         const omega = conductiveOmega(this.dielectrics, this.freq);
-        const { a, b } = this._complex_cells(omega);
+        const { a, b } = this._complex_cells(omega, !(this.freq > 0));
         const Vd = this._create_voltage_array(mode);
         const [{ Vr, Vi }] = await this._solve_laplace_complex([Vd], a, b, this._plane_bc(mode));
         // Charge per volt of the trace's drive.
@@ -3104,7 +3104,7 @@ export class FieldSolver2D {
             // C* = C' - j C'' with G = omega C'' at the solve's omega (the DC limit
             // solves at a small omega where omega C'' is the conductance).
             const omega = conductiveOmega(this.dielectrics, this.freq);
-            const { a, b } = this._complex_cells(omega);
+            const { a, b } = this._complex_cells(omega, !(this.freq > 0));
             const [cA, cB] = await this._solve_laplace_complex(
                 [this._create_voltage_array_drive(1, 0), this._create_voltage_array_drive(0, 1)], a, b);
             const q = (c, mask) => this._complex_flux(c.Vr, c.Vi, a, b, mask);
@@ -3861,6 +3861,9 @@ export class FieldSolver2D {
             }
         }
 
+        // The certificate compares real-permittivity C: take it before a conductive
+        // dielectric replaces C with the complex solve's.
+        const finalQ0 = certQ0();
         for (let i = 0; i < modeResults.length; i++) modeResults[i] = await this._mode_loss_results(modeResults[i]);
 
         // V0 is only needed by the refinement metrics above. Ex0/Ey0 are what
@@ -3879,7 +3882,7 @@ export class FieldSolver2D {
             if (!cert || (!cert.pass && cert.nodes !== nNodes)) {
                 try {
                     cert = await this._certifyStatic(energy_tol,
-                        { ...certOpts, q0: certQ0(), knownR: certR });
+                        { ...certOpts, q0: finalQ0, knownR: certR });
                     this.certification = cert;
                 }
                 catch { /* keep whatever we had */ }
@@ -4504,7 +4507,7 @@ export class FieldSolver2D {
     // (different loss tangents alone change |E| by about dtand^2 / 2), and the complex
     // factorization costs about 2x the real one, ~0.2 s at the default node budget.
     async _plot_fields(modes, freq) {
-        const { a, b } = this._complex_cells(conductiveOmega(this.dielectrics, freq));
+        const { a, b } = this._complex_cells(conductiveOmega(this.dielectrics, freq), !(freq > 0));
         const out = [];
         for (const m of modes) {
             const planeBC = this._plane_bc(m.mode);

@@ -31,8 +31,10 @@ export function conductiveOmega(dielectrics, f) {
 }
 
 // Complex relative permittivity { re, im } of a material at angular frequency omega.
-export function complexEps(er, tand, sigma, omega) {
-    return { re: er, im: -(er * (tand || 0) + (sigma > 0 ? sigma / (omega * EPS0) : 0)) };
+// dc drops the loss tangent: the DC limit solves at a small omega > 0, where omega times
+// the polarization loss would still add to G.
+export function complexEps(er, tand, sigma, omega, dc = false) {
+    return { re: er, im: -((dc ? 0 : er * (tand || 0)) + (sigma > 0 ? sigma / (omega * EPS0) : 0)) };
 }
 
 // Accuracy warning for a conductive dielectric whose skin depth at f is not large next

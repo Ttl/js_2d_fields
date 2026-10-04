@@ -35,4 +35,22 @@ printErrors(errors);
 const m = consoleOut.match(/Zc:\s*([\d.]+)/i);
 const solved = !!m && parseFloat(m[1]) > 0 && !/ERROR:/.test(consoleOut);
 console.log('parsed Zc:', m ? m[1] : '(none)');
-await finish(browser, errors.length === 0 && solved && hasPlot >= 2);
+
+// A DC-only solve: the summary reports the DC row (Zc infinite), not "below cutoff".
+await page.evaluate(() => {
+    document.getElementById('freq-points').value = '1';
+    document.getElementById('freq-start').value = '0';
+    document.getElementById('freq-stop').value = '0';
+});
+await page.click('#btn_solve');
+try {
+    await page.waitForFunction(() => document.getElementById('btn_solve')?.textContent === 'Solve', null, { timeout: 150000 });
+} catch {}
+await page.waitForTimeout(500);
+const dcOut = await page.$eval('#console_out', el => el.textContent).catch(() => '');
+const dcSummary = dcOut.slice(dcOut.lastIndexOf('RESULTS:'));
+const dcOk = /Frequency: 0 Hz/.test(dcSummary) && /Z0: \d+\.\d+ Ohm/.test(dcSummary) && /Zc: ∞ Ohm/.test(dcSummary)
+    && /eps_eff: \d+\.\d+/.test(dcSummary) && !/Below cutoff/.test(dcSummary);
+console.log('DC-only summary:', dcOk ? 'ok' : dcSummary.slice(0, 200));
+
+await finish(browser, errors.length === 0 && solved && hasPlot >= 2 && dcOk);

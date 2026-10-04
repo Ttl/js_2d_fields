@@ -2037,10 +2037,13 @@ async function runSimulation() {
 
         // Display summary. Zc = sqrt((R + jwL) / (G + jwC)) and eps_eff = (beta/k0)^2 at the
         // first and last sweep point, Z0 = 1/(c sqrt(C C0)) once from the mesh solve. The
-        // first point skips DC (Zc infinite) and, for a waveguide, points below cutoff.
+        // first point skips DC (Zc infinite) and, for a waveguide, points below cutoff. A
+        // DC-only solve reports its DC row.
         const rows = frequencySweepResults;
         const propagates = r => r.freq > 0 && !Number.isNaN(r.result.modes[0].Z0);
-        const firstRow = rows.find(propagates);
+        const dcOnly = rows.length > 0 && rows.every(r => r.freq === 0) && !Number.isNaN(rows[0].result.modes[0].Z0);
+        const firstRow = rows.find(propagates) ?? (dcOnly ? rows[0] : undefined);
+        const fmtZc = (r, Zc, threshold) => r.freq === 0 ? '∞' : formatZc(Zc, threshold);
         const lastRow = rows[rows.length - 1];
         const ends = !firstRow ? [] : (rows.length === 1 || firstRow === lastRow) ? [firstRow] : [firstRow, lastRow];
         const unit = freqUnit(Math.max(...frequencies));
@@ -2060,10 +2063,10 @@ async function runSimulation() {
             const odd = results.modes.find(m => m.mode === 'odd');
             const even = results.modes.find(m => m.mode === 'even');
             const modeOf = (r, name) => r.result.modes.find(m => m.mode === name);
-            const zdiff = r => formatZc(modeOf(r, 'odd').Zc.mul(2));
-            const zcm = r => formatZc(modeOf(r, 'even').Zc.mul(0.5));
+            const zdiff = r => fmtZc(r, modeOf(r, 'odd').Zc.mul(2));
+            const zcm = r => fmtZc(r, modeOf(r, 'even').Zc.mul(0.5));
             const eps = (r, name) => modeOf(r, name).eps_eff.toFixed(3);
-            const zcFull = (name, scale) => `${span(r => formatZc(modeOf(r, name).Zc.mul(scale), 0))} Ohm`;
+            const zcFull = (name, scale) => `${span(r => fmtZc(r, modeOf(r, name).Zc.mul(scale), 0))} Ohm`;
             // For an asymmetric pair the two traces are not interchangeable: the physical self
             // terms differ (C11 ≠ C22) and S22 ≠ S11. Surface that here — otherwise the summary
             // looks identical to a symmetric line. odd/even are then only the approximate eigenmodes.
@@ -2097,7 +2100,7 @@ async function runSimulation() {
                 `Zdiff ${span(zdiff)} Ω,   Zcm ${span(zcm)} Ω,  ` +
                 `εeff odd ${span(r => eps(r, 'odd'))} / even ${span(r => eps(r, 'even'))},  loss ${lossShort}`);
         } else {
-            const zc = r => formatZc(r.result.modes[0].Zc);
+            const zc = r => fmtZc(r, r.result.modes[0].Zc);
             const eps = r => r.result.modes[0].eps_eff.toFixed(3);
             log(`\nRESULTS:\n` +
                      `----------------------\n` +
@@ -2105,7 +2108,7 @@ async function runSimulation() {
                         ? `Below cutoff across the whole sweep — attenuation only.\n`
                         : freqLine +
                           `Z0: ${results.modes[0].Z0.toFixed(2)} Ohm\n` +
-                          `Zc: ${span(r => formatZc(r.result.modes[0].Zc, 0))} Ohm\n` +
+                          `Zc: ${span(r => fmtZc(r, r.result.modes[0].Zc, 0))} Ohm\n` +
                           `eps_eff: ${span(eps)}${cutoffNote}\n`) +
                      `${lossStr}`,
                 !firstRow ? 'Below cutoff'

@@ -21,6 +21,9 @@
 //  10. field plot: the plotted field is the complex static one, the silicon under a
 //      coplanar line screens it below f_r and not above; a lossless fill plots no
 //      imaginary part
+//  11. a pair made asymmetric by the silicon alone takes its modal vectors from the
+//      complex [C] on both backends, the QS certificate is not thrown off by the
+//      conductive C, and a lossy oxide adds no G at DC
 //
 // Run: node tests/test_conductive_dielectric.js
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
@@ -321,6 +324,44 @@ sig+ x=-5 w=10 y=3 h=1
         await quiet(() => plain.s.plotFieldsAt(FR, plain.r));
         check(`${name}: a lossless fill plots no imaginary part`, plotStats(plain.s).im < 1e-12,
             fmt(plotStats(plain.s).im));
+    }
+}
+
+// --- 11. Modal vectors, certificate, DC loss tangent ---
+{
+    // Mirror-symmetric traces, silicon under the negative one only: [C] is asymmetric
+    // through the screening while the real-permittivity [C] is symmetric.
+    const text = 'units um\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=200 er=11.9\n' +
+        'diel x=-200 w=190 y=0 h=200 er=11.9 sigma=10\ndiel x=-inf w=inf y=200 h=5 er=3.9\n' +
+        'sig- x=-40 w=20 y=205 h=2\nsig+ x=20 w=20 y=205 h=2\n';
+    const res = [];
+    for (const [, extra] of BACKENDS) res.push((await solve(text, 1e8, extra, { ...APP, max_nodes: 60000 })).r);
+    const z = r => r.modes.map(m => m.Z0);
+    const d = Math.max(...z(res[0]).map((v, i) => rel(v, z(res[1])[i])));
+    check('pair asymmetric through the silicon: odd and even Z0 of the two backends agree',
+        d < 0.03, `QS ${z(res[0]).map(v => v.toFixed(2))}, full-wave ${z(res[1]).map(v => v.toFixed(2))}`);
+    const tv = res[1].physMatrix && res[1].physMatrix.Tv;
+    check('pair asymmetric through the silicon: full-wave modal vectors follow the complex [C]',
+        !!tv && Math.abs(Math.abs(tv[0][0] / tv[0][1]) - 1) > 0.5, JSON.stringify(tv));
+
+    // Certificate of the final grid: the conductive C is not compared with real-eps C.
+    const cpwText = si => `units um\nbounds open open open open\ndiel x=-inf w=inf y=-50 h=50 er=11.9 ${si}\n` +
+        'diel x=-inf w=inf y=0 h=6 er=4.1\ngnd x=-30 w=22 y=3 h=1\ngnd x=8 w=22 y=3 h=1\nsig+ x=-5 w=10 y=3 h=1\n';
+    const cert = async si => {
+        const { s } = await solve(cpwText(si), 1e8, {}, { ...APP, max_nodes: 20000, certify: true });
+        return s.certification && s.certification.err;
+    };
+    const e0 = await cert(''), e1 = await cert('sigma=2');
+    check('QS: the certificate of a conductive fill matches the lossless one', e1 < 0.02 && rel(e1, e0) < 0.2,
+        `err ${fmt(e1)} vs lossless ${fmt(e0)}`);
+
+    // DC: the oxide loss tangent conducts nothing, the oxide isolates the strip.
+    for (const [name, extra] of BACKENDS) {
+        const { s, r } = await solve(chip(`sigma=${SIG}`), 1e9, extra);
+        const g = async f => (await quiet(() => s.computeAtFrequency(f, r))).modes[0].RLGC.G;
+        const g0 = await g(0), g1 = await g(1e6);
+        check(`${name}: on-chip microstrip has no G at DC from the oxide loss tangent`, g0 < 1e-4 * g1,
+            `G ${fmt(g0)} at DC, ${fmt(g1)} at 1 MHz`);
     }
 }
 

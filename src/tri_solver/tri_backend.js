@@ -2222,6 +2222,9 @@ export class TriBackend {
         const { physMatrix, modalVecs } = classifyModalDecomposition(
             sc2(C, ksc), sc2(C0m, ksc), s.conductors, s.dielectrics);
         this._modalPhys = physMatrix;
+        // Vacuum [C0] for the per-frequency decomposition of a conductive fill (_conductiveModal).
+        this._modalC0 = sc2(C0m, ksc);
+        this._condModalCache = null;
         // Dielectric loss matrix over omega, [G11, G12, G22] / omega, the same energy form
         // on the loss map (G = omega kC eps0 W_loss per mode).
         if (physMatrix) {
@@ -2252,9 +2255,8 @@ export class TriBackend {
         return true;
     }
 
-    // Conductor potentials of a mode's drive: the modal voltages of an asymmetric pair.
-    _modePotentials(mode, st) {
-        const v = st.modalVec;
+    // Conductor potentials of a mode's drive: the modal voltages v of an asymmetric pair.
+    _modePotentials(mode, st, v = st.modalVec) {
         return v ? this.condRect.rectRoles.map(r => (!r.is_signal ? 0 : (r.polarity || 1) > 0 ? v[0] : v[1]))
             : drivePotentials(this.condRect, mode, this.symmetry);
     }
@@ -2267,7 +2269,7 @@ export class TriBackend {
     // change |E| by about dtand^2 / 2. The complex solve is cheap, the two resamples
     // and mesh evaluations in _plotMode cost about 0.2-0.4 s per mode.
     _plotStatic(mode, st, f) {
-        return this._conductiveSolve(st.fm, this._modePotentials(mode, st), f).sol;
+        return this._conductiveSolve(st.fm, this._modePotentials(mode, st, this._modalVecAt(mode, st, f)), f).sol;
     }
 
     // Conductive dielectrics (conductive_dielectric.js): the static solve of the
@@ -2277,16 +2279,19 @@ export class TriBackend {
         const { mesh } = this;
         const omega = conductiveOmega(this.solver.dielectrics, f);
         const em = mesh.epsMap, lm = mesh.lossMap, k = 1 / (omega * eps0);
+        // The DC limit solves at a small omega > 0 and leaves the loss tangent out.
+        const tandScale = f > 0 ? 1 : 0;
         const epsRe = t => em[t].re;
-        const epsIm = t => -(lm[t].re + (lm[t].sigma || 0) * k);
+        const epsIm = t => -(tandScale * lm[t].re + (lm[t].sigma || 0) * k);
         const sol = solveTriStaticComplex(mesh, fm, epsRe, epsIm, pot, this.ctx.helpers.solveComplexSymmetric);
         const energy = (re, im) => computeTriEnergyComplex(re, im, mesh, epsRe, epsIm);
         return { sol, energy, omega };
     }
 
-    // Complex capacitance of a mode: { C, G } with C = Re C*, G = omega C'' (C* = C' - j C'').
-    _conductiveMode(mode, st, f) {
-        const { sol, energy, omega } = this._conductiveSolve(st.fm, this._modePotentials(mode, st), f);
+    // Complex capacitance of a mode with modal vector v: { C, G } with C = Re C*,
+    // G = omega C'' (C* = C' - j C'').
+    _conductiveMode(mode, st, f, v) {
+        const { sol, energy, omega } = this._conductiveSolve(st.fm, this._modePotentials(mode, st, v), f);
         const W = energy(sol.re, sol.im), k = st.kC * eps0;
         return { C: k * W.re, G: -omega * k * W.im };
     }
@@ -2309,6 +2314,32 @@ export class TriBackend {
         const g = -A.omega * ksc;
         const { Gw, ...phys } = this._modalPhys;
         return { ...phys, C, G: [2 * wa.im * g, m12.im * g, 2 * wb.im * g] };
+    }
+
+    // Asymmetric pair with a conductive dielectric at f: { phys, vecs } with the physMatrix
+    // of _conductivePhys and the modal vectors of its [C](f) against the vacuum [C0]. The
+    // screening changes [C] with frequency and the modes with it, the real-permittivity
+    // vectors of _prepareStaticModal do not follow. vecs is null when the decomposition is
+    // degenerate. Null without an asymmetric pair or a conductive dielectric.
+    _conductiveModal(f) {
+        if (!this._modalPhys || !this._modalC0 || !hasConductiveDielectric(this.solver.dielectrics)) return null;
+        const c = this._condModalCache;
+        if (c && c.f === f && c.mesh === this.mesh) return c.value;
+        const phys = this._conductivePhys(f);
+        const { modalVecs } = classifyModalDecomposition(phys.C, this._modalC0,
+            this.solver.conductors, this.solver.dielectrics);
+        delete phys.Tv;
+        if (modalVecs) phys.Tv = modalVecs;
+        const value = { phys, vecs: modalVecs, C0: this._modalC0 };
+        this._condModalCache = { f, mesh: this.mesh, value };
+        return value;
+    }
+
+    // Modal vector of a mode at f: the conductive decomposition where there is one, else
+    // the static one (null for an odd/even drive).
+    _modalVecAt(mode, st, f) {
+        const cm = this._conductiveModal(f);
+        return cm && cm.vecs ? cm.vecs[mode === 'odd' ? 0 : 1] : st.modalVec;
     }
 
     // Per-line loss data of a pair from the eddy-current solve driven per trace (line 1 =
@@ -2355,8 +2386,9 @@ export class TriBackend {
     // genuine modal current vector i \propto C*v (v = the modal voltage eigenvector,
     // C = the SI capacitance matrix, γI = YV makes i an eigenvector of YZ),
     // normalized to Σ|I|^2 = 2 so the per-line power convention matches +-1.
-    _mqsModeCurrents(mode, st) {
-        const v = st.modalVec, Cm = this._modalPhys && this._modalPhys.C;
+    _mqsModeCurrents(mode, st, f) {
+        const cm = this._conductiveModal(f);
+        const v = this._modalVecAt(mode, st, f), Cm = cm ? cm.phys.C : this._modalPhys && this._modalPhys.C;
         if (v && Cm) {
             const i0 = Cm[0][0] * v[0] + Cm[0][1] * v[1];
             const i1 = Cm[1][0] * v[0] + Cm[1][1] * v[1];
@@ -2869,15 +2901,20 @@ export class TriBackend {
         // dielectric loss: G from the lossy-permittivity energy integral
         let G = omega * kC * eps0 * W_loss;
         // Conductive dielectrics: C and G from the complex static solve. Its C scales the
-        // dispersion the eigensolve found for the real permittivity.
+        // dispersion the eigensolve found for the real permittivity. An asymmetric pair
+        // takes the modal vector of the conductive [C] at f and the vacuum C0 of that vector.
+        let C0f = C0;
         if (hasConductiveDielectric(s.dielectrics)) {
-            const cd = this._conductiveMode(mode, st, f);
-            eps_d *= cd.C / (eps_eff_static * C0);
+            const v = this._modalVecAt(mode, st, f);
+            const cd = this._conductiveMode(mode, st, f, v);
+            const cm = this._conductiveModal(f);
+            if (cm && v) C0f = 0.5 * (v[0] * v[0] * cm.C0[0][0] + 2 * v[0] * v[1] * cm.C0[0][1] + v[1] * v[1] * cm.C0[1][1]);
+            eps_d *= cd.C / (eps_eff_static * C0f);
             G = cd.G;
         }
-        const C = eps_d * C0;
-        const L_external = 1 / (c0 * c0 * C0);
-        const Z0 = 1 / (c0 * C0 * Math.sqrt(eps_d));
+        const C = eps_d * C0f;
+        const L_external = 1 / (c0 * c0 * C0f);
+        const Z0 = 1 / (c0 * C0f * Math.sqrt(eps_d));
         const alpha_d = Z0 > 0 ? (G * Z0 / 2) * NP_TO_DB : 0;
 
         // Conductor loss → R_total and the internal inductance L_internal (which adds
@@ -3232,7 +3269,7 @@ export class TriBackend {
             // there, so the second mode at each frequency skips the factorization.
             const mqsOpts = mqsOptsWith({ oddSymmetry: this.symmetry && mode === 'odd',
                 diffPair: !!s.is_differential, cache: mqsCache });
-            if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st);
+            if (mqsMulti) mqsOpts.modeCurrents = this._mqsModeCurrents(mode, st, f);
             if (keepField) mqsOpts.fieldOut = {};
             let mqs = null;
             try {
@@ -3838,8 +3875,8 @@ export class TriBackend {
             // pair (matrix, S-parameters, interpolating sweep) sees them.
             const asym = this._lineAsymmetry(f, modes);
             // Conductive dielectrics: [C] and [G] of the pair from the complex solve.
-            const phys = this._modalPhys && hasConductiveDielectric(this.solver.dielectrics)
-                ? this._conductivePhys(f) : this._modalPhys;
+            const cm = this._conductiveModal(f);
+            const phys = cm ? cm.phys : this._modalPhys;
             if (phys && (phys.G || phys.Gw)) {
                 for (const m of [odd, even]) m.RLGC.Gm = phys.G ? phys.G.slice() : phys.Gw.map(v => v * 2 * Math.PI * f);
             }
