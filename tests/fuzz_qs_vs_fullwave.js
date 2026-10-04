@@ -473,11 +473,11 @@ async function main() {
         }
         // Conductor-loss gate (R per mode). Relaxed when either backend flagged
         // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
-        // 'broadside-proximity', or any tri mqs-* warning — the backend downgrading
+        // 'broadside-proximity' / 'narrow-gap', or any tri mqs-* warning — the backend downgrading
         // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
         // band). Certificate warnings describe C, not R, and do NOT relax the gate.
         const lossRelaxed =
-            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity'
+            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity' || w.reason === 'narrow-gap'
                 || w.reason === 'plating-transition')
             || fw.warns.some(w => /^mqs-/.test(w.type) || w.reason === 'plating-transition');
         // Shunt conductance and total inductance, each at its own gate. G follows the

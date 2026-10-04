@@ -20,6 +20,9 @@
 //   Q7 a signal touching the domain walls keeps the charge of its wall nodes: a strip
 //      spanning the domain over a two-layer stack is an exact parallel plate, on the
 //      half and the full domain, and with the strip against the top wall too.
+//   Q8 conductors facing each other across a gap of about ten skin depths get the
+//      narrow-gap note (the surface-impedance loss overstates the facing faces), a
+//      wide gap does not, and the estimate grows with the skin depth.
 //
 // Run: node tests/test_qs_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -173,6 +176,22 @@ async function solve(opts, backend) {
         check(`Q7: strip spanning the domain (${what}) is an exact parallel plate`, rel(m.C, Cex) < 1e-9,
             `C ${m.C.toExponential(6)} vs ${Cex.toExponential(6)}`);
     }
+}
+
+// Q8: narrow-gap note.
+{
+    console.log('Q8 narrow-gap note');
+    const pair = gap => 'units um\nbounds open open open gnd\ndiel x=-inf w=inf y=0 h=100 er=4\n' +
+        `sig- x=${-gap / 2 - 50} w=50 y=100 h=35\nsig+ x=${gap / 2} w=50 y=100 h=35\n`;
+    const reasons = async (gap, f) => {
+        const s = new CustomGeometrySolver({ text: pair(gap), freq: f });
+        const r = await quiet(() => s.solve_adaptive(APP));
+        return (r.warnings || []).filter(w => w.reason === 'narrow-gap');
+    };
+    const close = await reasons(10, 5e9);
+    check('Q8 a 10 um gap at 5 GHz (11 skin depths) gets the narrow-gap note', close.length === 1,
+        close.map(w => w.message).join(' | '));
+    check('Q8 a 100 um gap at 5 GHz does not', (await reasons(100, 5e9)).length === 0);
 }
 
 done();

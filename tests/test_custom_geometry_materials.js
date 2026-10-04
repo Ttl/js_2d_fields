@@ -128,6 +128,12 @@ for (const [name, extra] of BACKENDS) {
     check(`${name}: solid plating on one trace of a pair = that trace in the plating metal`,
         [0, 1].every(i => rel(solidOne[i].R, ownOne[i].R) < 0.01),
         solidOne.map((m, i) => `${m.R.toFixed(3)} vs ${ownOne[i].R.toFixed(3)}`).join(', '));
+    // In the skin transition each trace takes its own skin depth in the DC-AC blend: a
+    // solid-plated trace the plating metal's, like a trace drawn in that metal.
+    const solidTr = await solveR(pair('', 'plating=top,sides,bottom plating_sigma=1e7 plating_t=0.04'), { ...extra, freq: 3e7 });
+    const ownTr = await solveR(pair('', 'sigma=1e7'), { ...extra, freq: 3e7 });
+    check(`${name}: in the skin transition too (30 MHz)`, [0, 1].every(i => rel(solidTr[i].R, ownTr[i].R) < 2e-3),
+        solidTr.map((m, i) => `${m.R.toFixed(3)} vs ${ownTr[i].R.toFixed(3)}`).join(', '));
     // A poorly conducting plating on one trace, a rough bare surface on the other.
     await mixedPair(name, 'two-finish', 'plating=top,sides,bottom plating_sigma=2e6 plating_t=0.004', 'rq=0.001',
         extra, extra.mesh_backend ? 0.04 : 0.03, 0.05);

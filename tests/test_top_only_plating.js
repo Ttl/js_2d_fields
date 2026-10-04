@@ -5,7 +5,7 @@ import { MicrostripSolver } from '../src/microstrip.js';
  *
  * When only top plating is enabled:
  * - Top surface: layered plating impedance
- * - Sides: from top to (top - plating.thickness): single-layer plating with plating.rq
+ * - Sides: from top to (top - plating.thickness): the layered plating of the top face
  * - Bottom: no plating (bulk impedance)
  */
 

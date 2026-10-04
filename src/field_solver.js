@@ -1789,8 +1789,10 @@ export class FieldSolver2D {
 
         // Helper: get surface impedance for a conductor boundary segment
         // Now with corner detection and geometric coverage from thick side plating
-        // xStart overrides the segment's x origin (half-domain solves evaluate the
-        // mirror image of a node's left segment [x[j-1], x[j]]).
+        // xStart overrides the start of the segment along its face, x on a horizontal
+        // face and y on a vertical one (half-domain solves evaluate the mirror image of a
+        // node's left segment [x[j-1], x[j]], the centred rule the segment below or left
+        // of the node).
         // Bare-metal surface impedance of conductor ci: its own conductivity and
         // roughness when it has them (custom geometry), the solver-wide ones otherwise.
         const sigmaOf = ci => {
@@ -1908,15 +1910,19 @@ export class FieldSolver2D {
             // Uses fractional coverage for smooth parameter sweeps
             if ((direction === 'l' || direction === 'r') && cond.plating.top && !cond.plating.sides) {
                 const t = cond.plating.thickness;
-                // Cell spans [y[i], y[i] + dl] in y-direction
-                const y_start = this.y[i];
+                // Cell spans [y_start, y_start + dl] in y-direction
+                const y_start = xStart ?? this.y[i];
                 const y_end = y_start + dl;
                 // Top plating covers [y_max - t, y_max]
                 const overlap = Math.max(0, Math.min(cond.y_max, y_end) - Math.max(cond.y_max - t, y_start));
                 const fraction = dl > 0 ? Math.min(overlap / dl, 1.0) : 0;
 
                 if (fraction > 0) {
-                    const Z_plating = platingOnlyZ(ci, `${ci}_top_side_plating`, cond.plating.rq, dc);
+                    // The edge of the top plating layer: the layered impedance of the top
+                    // face, which is the plating metal's own for a layer thick against
+                    // its skin depth. A thinner layer's edge leaves the current in the
+                    // bulk behind it, which the plating metal alone would overstate.
+                    const Z_plating = layeredZ(ci, cond.plating.rq);
                     if (fraction >= 1.0) return Z_plating;
                     // Weighted average with bulk side impedance for uncovered part
                     return blend(fraction, Z_plating, Z_bare);
@@ -2166,7 +2172,7 @@ export class FieldSolver2D {
                             const k = horiz ? j : i, get = horiz ? get_dx : get_dy;
                             const segs = k > 0 ? [[k, get(k)], [k - 1, get(k - 1)]] : [[0, get(0)]];
                             for (const [ks, dseg] of segs)
-                                addFace(ci, direction, i, j, dseg, horiz ? this.x[ks] : null, dseg / 2, H_tan, H_out);
+                                addFace(ci, direction, i, j, dseg, horiz ? this.x[ks] : this.y[ks], dseg / 2, H_tan, H_out);
                         } else {
                             const dl = dl_func(dl_idx);
                             addFace(ci, direction, i, j, dl, null, dl, H_tan, H_out);
@@ -2411,6 +2417,39 @@ export class FieldSolver2D {
             `finite grounds when this matters.` };
     }
 
+    // Accuracy note for conductors facing each other across a gap of a few tens of
+    // skin depths. The surface-impedance loss assumes the current of a face does not
+    // see the metal across the gap; with g / delta about 10 the current penetrating
+    // each face widens the gap noticeably and the model overstates the loss, by
+    // roughly 25 delta / g percent (2.2-2.5 % at g / delta = 11 for the mesh-converged
+    // surface integral against the full-wave eddy-current solve, on a narrow-gap GCPW
+    // and a close pair). Notes delta / g > 0.05.
+    _narrow_gap_note(f) {
+        if (!(f > 0) || !this.conductor_id || !this.conductors) return null;
+        const cs = this.conductors.filter(c => !c.shape);
+        let worst = null;
+        for (let a = 0; a < cs.length; a++) {
+            for (let b = a + 1; b < cs.length; b++) {
+                const A = cs[a], B = cs[b];
+                const gx = Math.max(A.x_min - B.x_max, B.x_min - A.x_max);
+                const gy = Math.max(A.y_min - B.y_max, B.y_min - A.y_max);
+                // Facing faces only: separated on one axis and overlapping on the other.
+                const g = gx > 0 && gy < 0 ? gx : gy > 0 && gx < 0 ? gy : 0;
+                if (!(g > 0)) continue;
+                const sg = Math.min(this._bulk_sigma(A), this._bulk_sigma(B));
+                const delta = Math.sqrt(2 / (2 * Math.PI * f * CONSTANTS.MU0 * sg));
+                const r = delta / g;
+                if (r > 0.05 && (!worst || r > worst.r)) worst = { r, g, delta };
+            }
+        }
+        if (!worst) return null;
+        const um = v => `${+(v * 1e6).toPrecision(3)} µm`;
+        return { type: 'accuracy', reason: 'narrow-gap', mode: 'all', freq: f, message:
+            `Conductors ${um(worst.g)} apart face each other across only ${(1 / worst.r).toFixed(0)} skin depths ` +
+            `(${um(worst.delta)}): the quasi-static surface-impedance model can be inaccurate in this case. ` +
+            `The full-wave solver models the current in the gap.` };
+    }
+
     _plating_transition_note(f, { meshedThick = false, fullWave = false } = {}) {
         if (!(f > 0) || !this.conductors) return null;
         let worst = null;
@@ -2534,7 +2573,9 @@ export class FieldSolver2D {
         }
         const In = [0, 0];
         for (const b of bodies.values()) In[b.n] += b.I;
-        const own = this._own_sigma();
+        // Bodies of their own metal (own conductivity or solid plating) take their own
+        // skin depth.
+        const own = this._own_sigma() || this.conductors.some(c => c.is_signal && this._solid_plating(c));
         let R = 0, deltaMax = 0;
         for (const b of bodies.values()) {
             const A = scale * b.R;
@@ -4129,6 +4170,8 @@ export class FieldSolver2D {
         // rectilinear results: the triangular backend returns from solveAt before
         // _build_results and models these regimes accurately (MQS).
         if (this._proximityWarn) warns.push(this._proximityWarn);
+        const gapWarn = this._narrow_gap_note(this.freq);
+        if (gapWarn) warns.push(gapWarn);
         if (this._causalWarn) warns.push(this._causalWarn);
         const condWarn = conductiveDielectricWarning(this.dielectrics, this.freq, {
             x_min: -this.domain_width / 2, x_max: this.domain_width / 2,
