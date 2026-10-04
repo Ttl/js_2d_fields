@@ -49,5 +49,30 @@ if (nRows > 1) {
 }
 console.log('clicking a mode selects it:', clickOk);
 
+// A row clicked right before a new modes solve: its field fetch still runs against the
+// old solve and must not end up in the new solve's cache. The new solve is of a wider
+// trace, so a stale field shows as a mesh different from the other rows'.
+let cacheOk = nRows < 3;
+if (nRows >= 3) {
+    await page.evaluate(() => {
+        document.getElementById('inp_w').value = '0.6 mm';
+        document.querySelector('#modes-list tr[data-idx="1"]').click();
+        document.getElementById('btn-solve-modes').click();
+    });
+    await page.waitForFunction(() => !document.getElementById('btn-solve-modes').disabled
+        && document.querySelectorAll('#modes-list tr[data-idx]').length >= 3, null, { timeout: 120000 });
+    const meshOf = async idx => {
+        await page.click(`#modes-list tr[data-idx="${idx}"]`);
+        await page.waitForTimeout(1000);
+        return page.evaluate(() => {
+            const m = document.getElementById('modes-plot')._modesMesh;
+            return m ? m.blocks[0].tris.length / 6 : -1;
+        });
+    };
+    const n1 = await meshOf(1), n2 = await meshOf(2);
+    cacheOk = n1 > 0 && n1 === n2;
+    console.log(`row clicked before a new solve shows the new solve's field: ${cacheOk} (${n1} vs ${n2} triangles)`);
+}
+
 printErrors(errors);
-await finish(browser, ok && nRows > 0 && hasPlot >= 1 && nSelected === 1 && (nRows <= 1 || clickOk) && errors.length === 0);
+await finish(browser, ok && nRows > 0 && hasPlot >= 1 && nSelected === 1 && (nRows <= 1 || clickOk) && cacheOk && errors.length === 0);

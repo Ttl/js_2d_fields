@@ -1563,6 +1563,9 @@ async function selectMode(idx, resetView = false) {
     highlightSelectedMode();
     let grid = modesFieldCache.get(idx);
     if (grid === undefined) {
+        // A modes solve started while this fetch waits replaces the cache, and the
+        // field that comes back belongs to the solve before it.
+        const cache = modesFieldCache;
         try {
             ({ grid } = await workerJob('modeField', { idx }));
         } catch (e) {
@@ -1572,7 +1575,8 @@ async function selectMode(idx, resetView = false) {
         // Cache successes only. Remembering a failure would leave the row permanently
         // blank with no way to retry short of re-solving. Re-asking on the next click
         // costs one worker round trip and lets a transient failure heal itself.
-        if (grid) modesFieldCache.set(idx, grid);
+        if (cache !== modesFieldCache) return;
+        if (grid) cache.set(idx, grid);
         // A click on another row while this one was in flight wins. Do not paint over it.
         if (modesSelectedIdx !== idx) return;
     }
