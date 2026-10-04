@@ -821,4 +821,10 @@ class Mesher {
     }
 }
 
-export { Dielectric, Conductor, Mesher };
+// Lines of the initial grid on each axis before adaptive refinement, the solver
+// default and what the app uses. The adaptive passes place the resolution: a dense
+// start spends its lines in the bulk and can exceed the node budget before the first
+// refinement.
+const DEFAULT_GRID_N = 30;
+
+export { Dielectric, Conductor, Mesher, DEFAULT_GRID_N };

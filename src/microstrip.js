@@ -1,5 +1,5 @@
 import { FieldSolver2D } from './field_solver.js';
-import { Dielectric, Conductor, Mesher } from './mesher.js';
+import { Dielectric, Conductor, Mesher, DEFAULT_GRID_N } from './mesher.js';
 import { halfDomainSymmetry } from './geometry_symmetry.js';
 
 // Auto domain width of a full-pour GCPW in slot apertures (trace span + both gaps).
@@ -64,8 +64,8 @@ class MicrostripSolver extends FieldSolver2D {
         this.sm_tand = options.sm_tand ?? 0.02;
 
         this.freq = options.freq ?? 1e9;
-        this.nx = options.nx ?? 300;
-        this.ny = options.ny ?? 300;
+        this.nx = options.nx ?? DEFAULT_GRID_N;
+        this.ny = options.ny ?? DEFAULT_GRID_N;
 
         // Surface roughness parameter (RMS roughness in meters)
         this.rq = options.rq ?? 0;

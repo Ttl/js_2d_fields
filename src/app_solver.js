@@ -9,6 +9,7 @@ import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometr
 import { solverToGeometryText, setParamInText } from './custom_geometry_text.js';
 import { initLayoutPanels, syncLogPanel, setLogStatus, logSolveStarted } from './layout_panels.js';
 import { buildSolverFromParams as _buildSolverFromParams, platingOptions } from './solver_factory.js';
+import { DEFAULT_GRID_N } from './mesher.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -1722,8 +1723,8 @@ function getParams() {
         tand: getInputValueUnitless('inp_tand'),
         sigma: getInputValueUnitless(isCustom ? 'inp_custom_sigma' : 'inp_sigma'),
         freq: getInputValue('freq-start'),
-        nx: 30,  // Fixed initial grid size
-        ny: 30,  // Fixed initial grid size
+        nx: DEFAULT_GRID_N,
+        ny: DEFAULT_GRID_N,
         // Differential parameters
         trace_spacing: getInputValue('inp_trace_spacing'),
         // GCPW specific parameters

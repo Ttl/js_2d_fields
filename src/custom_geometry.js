@@ -3,7 +3,7 @@
 // so this solver only has to resolve the domain, validate the rectangles and build
 // the lists.
 import { FieldSolver2D } from './field_solver.js';
-import { Dielectric, Conductor, Mesher } from './mesher.js';
+import { Dielectric, Conductor, Mesher, DEFAULT_GRID_N } from './mesher.js';
 import { halfDomainSymmetry, isXSymmetric, conductorFinishKey, paintOrderMirrors, sameDielectric } from './geometry_symmetry.js';
 import { parseAndEvaluate, formatErrors, SHAPE_NAMES, WALLS } from './custom_geometry_text.js';
 import { bodyDistance, translateShapeX, bodiesOverlap } from './shapes.js';
@@ -56,8 +56,8 @@ class CustomGeometrySolver extends FieldSolver2D {
 
         this.sigma_cond = options.sigma_cond ?? 5.8e7;
         this.freq = options.freq ?? 1e9;
-        this.nx = options.nx ?? 300;
-        this.ny = options.ny ?? 300;
+        this.nx = options.nx ?? DEFAULT_GRID_N;
+        this.ny = options.ny ?? DEFAULT_GRID_N;
         this.rq = options.rq ?? 0;
         this.mesh_backend = options.mesh_backend ?? 'rectilinear';
         this.boundaries = [...geo.bounds];

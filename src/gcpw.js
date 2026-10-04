@@ -1,4 +1,5 @@
 import { MicrostripSolver } from './microstrip.js';
+import { DEFAULT_GRID_N } from './mesher.js';
 
 /**
  * GroundedCPWSolver2D - Thin wrapper around MicrostripSolver for backward compatibility.
@@ -20,8 +21,8 @@ export class GroundedCPWSolver2D extends MicrostripSolver {
             sigma_diel: options.sigma_diel ?? 0.0,
             sigma_cond: options.sigma_cond ?? 5.8e7,
             freq: options.freq ?? 1e9,
-            nx: options.nx ?? 300,
-            ny: options.ny ?? 300,
+            nx: options.nx ?? DEFAULT_GRID_N,
+            ny: options.ny ?? DEFAULT_GRID_N,
             air_top: options.air_top ?? null,
             air_side: options.air_side ?? null,
             boundaries: options.boundaries ?? ["open", "open", "open", "gnd"],

@@ -1,5 +1,5 @@
 import { FieldSolver2D } from './field_solver.js';
-import { Dielectric, Conductor, Mesher } from './mesher.js';
+import { Dielectric, Conductor, Mesher, DEFAULT_GRID_N } from './mesher.js';
 
 /**
  * Broadside-coupled stripline.
@@ -52,8 +52,8 @@ class BroadsideStriplineSolver extends FieldSolver2D {
         this.x_offset = options.x_offset ?? 0;
 
         this.freq = options.freq ?? 1e9;
-        this.nx = options.nx ?? 300;
-        this.ny = options.ny ?? 300;
+        this.nx = options.nx ?? DEFAULT_GRID_N;
+        this.ny = options.ny ?? DEFAULT_GRID_N;
 
         this.rq = options.rq ?? 0;
         this.plating = options.plating ?? null;
