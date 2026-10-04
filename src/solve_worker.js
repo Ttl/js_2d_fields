@@ -228,7 +228,12 @@ async function jobSimulate({ params, frequencies, opts }) {
         const tolerance = opts.interpTolerance;
         const hasDC = frequencies.includes(0);
         if (hasDC) {
-            sweepResults.push({ freq: 0, result: await solver.computeAtFrequency(0, cachedResults) });
+            // The DC row is solved on its own, its notes (the ground-spreading one, which
+            // only the lowest frequencies get) reach the log like a discrete sweep's.
+            const dcResult = await solver.computeAtFrequency(0, cachedResults);
+            if (dcResult && dcResult.warnings)
+                post({ id: currentId, type: 'warnings', warnings: dcResult.warnings });
+            sweepResults.push({ freq: 0, result: dcResult });
         }
         log(`Interpolating sweep (tolerance ${(tolerance * 100)}%)...`);
 

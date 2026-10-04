@@ -77,4 +77,21 @@ const dcOk = /Frequency: 0 Hz/.test(dcSummary) && /Z0: \d+\.\d+ Ohm/.test(dcSumm
     && /eps_eff: \d+\.\d+/.test(dcSummary) && !/Below cutoff/.test(dcSummary);
 console.log('DC-only summary:', dcOk ? 'ok' : dcSummary.slice(0, 200));
 
-await finish(browser, errors.length === 0 && solved && hasPlot >= 2 && stopOk && dcOk);
+// An interpolating sweep from DC: the DC row is solved on its own and its ground-spreading
+// note (the microstrip ground return spreads below about 1 MHz) reaches the log.
+await page.evaluate(() => {
+    document.getElementById('chk_interp_sweep').checked = true;
+    document.getElementById('freq-points').value = '5';
+    document.getElementById('freq-start').value = '0';
+    document.getElementById('freq-stop').value = '10 GHz';
+    document.getElementById('inp_w').value = '0.351 mm';
+});
+const spreadFrom = (await page.$eval('#console_out', el => el.textContent)).length;
+await page.click('#btn_solve');
+try {
+    await page.waitForFunction(() => document.getElementById('btn_solve')?.textContent === 'Solve', null, { timeout: 150000 });
+} catch {}
+const spreadOk = /spreads sideways/.test((await page.$eval('#console_out', el => el.textContent)).slice(spreadFrom));
+console.log('interpolating sweep from DC logs the ground-spreading note:', spreadOk);
+
+await finish(browser, errors.length === 0 && solved && hasPlot >= 2 && stopOk && dcOk && spreadOk);
