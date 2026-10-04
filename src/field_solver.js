@@ -3,7 +3,9 @@ import { Complex } from "./complex.js";
 import { calculate_Zrough, calculate_Zrough_layered, wallSpreadFactor, slabCoth, SPREAD_U_MIN, spreadBlendWeight,
     spreadWidthFloor } from './surface_roughness.js';
 import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
-import { hasConductiveDielectric, conductiveOmega, complexEps, conductiveDielectricWarning } from './conductive_dielectric.js';
+import { hasConductiveDielectric, conductiveOmega, complexEps, conductiveDielectricWarning, dcConductance,
+    dcConductanceMatrix } from './conductive_dielectric.js';
+import { dcLineLimit, lineAttenuation } from './line_params.js';
 import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
 import { visibleAreas, platedThrough, platingArea, insideRingHole, bodyDistance, shapeArea } from './shapes.js';
@@ -984,7 +986,8 @@ export class FieldSolver2D {
             const p = perTrace(this.signal_p_mask), n = perTrace(this.signal_n_mask);
             q = { re: 0.5 * (p.re + n.re), im: 0.5 * (p.im + n.im) };
         }
-        return { C: q.re, G: -omega * q.im };
+        const G = -omega * q.im;
+        return { C: q.re, G: this.freq > 0 ? G : dcConductance(G, q.re, omega) };
     }
 
     // Replaces the real-permittivity C (and Z0) of a mode result with the complex
@@ -2699,6 +2702,10 @@ export class FieldSolver2D {
         return Pd;
     }
 
+    // RLGC and the reported line quantities of a mode. alpha_diel is the first-order
+    // dielectric loss G Z0 / 2 in dB/m, which carries G. The reported alpha_c and alpha_d
+    // (dB/m) are the exact attenuation split between conductor and dielectric
+    // (lineAttenuation).
     rlgc(R_total, L_internal, alpha_diel, C_mode, Z0_mode) {
 
         // Dielectric loss conductance
@@ -2712,35 +2719,30 @@ export class FieldSolver2D {
         // Total Inductance
         const L_total = L_ext + L_internal;
 
-        // Handle DC case (frequency = 0)
+        const omega = 2 * Math.PI * this.freq;
+        const att = lineAttenuation(R_total, L_total, G, C_mode, omega, L_ext);
+        const alpha_c = 8.686 * att.alpha_c, alpha_d = 8.686 * att.alpha_d;
+
+        // DC: the f -> 0 limit of Zc and eps_eff (line_params.js), Zc infinite without a
+        // shunt conductance.
         if (this.freq === 0) {
-            // At DC, Zc = sqrt(R/G) = sqrt(R/0) = infinity
-            // For S-parameter calculations, use a very large impedance
-            const Zc = new Complex(1e12, 0);  // Effectively infinite impedance
-
-            // eps_eff at DC is calculated from C/C0
-            // From Z0 = 1/(c*sqrt(C*C0)), we get C0 = 1/(c^2*Z0^2*C)
-            // Therefore eps_eff = C/C0 = c^2 * Z0^2 * C^2
-            const c2 = CONSTANTS.C * CONSTANTS.C;
-            const eps_eff_dc = c2 * Z0_mode * Z0_mode * C_mode * C_mode;
-
+            const dc = dcLineLimit(R_total, L_total, G, C_mode);
             return {
-                Zc: Zc,
+                Zc: new Complex(dc.Zc, 0),
                 rlgc: {
                     R: R_total,
                     L: L_total,
                     G: G,
                     C: C_mode
                 },
-                eps_eff_mode: eps_eff_dc,
+                eps_eff_mode: dc.eps_eff,
+                alpha_c, alpha_d,
                 L_internal: L_internal,
                 L_external: L_ext
             };
         }
 
         // Re-calculate complex Zc and Epsilon_eff with the new L and R
-        const omega = 2 * Math.PI * this.freq;
-
         // Zc = sqrt( (R + jwL) / (G + jwC) )
         const Z_num = new Complex(R_total, omega * L_total);
         const Z_den = new Complex(G, omega * C_mode);
@@ -2764,6 +2766,7 @@ export class FieldSolver2D {
                 C: C_mode
             },
             eps_eff_mode: eps_eff_new,
+            alpha_c, alpha_d,
             L_internal: L_internal,
             L_external: L_ext
         };
@@ -3198,6 +3201,10 @@ export class FieldSolver2D {
             const m12 = 0.5 * (qAn.re + qBp.re), g12 = -0.5 * (qAn.im + qBp.im);
             Cm = [[qAp.re, m12], [m12, qBn.re]];
             Gc = [[-qAp.im * omega, g12 * omega], [g12 * omega, -qBn.im * omega]];
+            if (!(this.freq > 0)) {
+                const [g11, g12dc, g22] = dcConductanceMatrix([Gc[0][0], Gc[0][1], Gc[1][1]], Cm, omega);
+                Gc = [[g11, g12dc], [g12dc, g22]];
+            }
         } else {
             const pA = this._dielectric_power(A.V, 1), pB = this._dielectric_power(B.V, 1);
             const pAB = this._dielectric_power(A.V.map((row, i) => row.map((v, j) => v + B.V[i][j])), 1);
@@ -3228,10 +3235,9 @@ export class FieldSolver2D {
             const eps_eff = Ck / C0k;
             const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
             const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0, label);
-            const alpha_d = Gc ? 8.686 * quad(Gc, v) * Z0 / 2
+            const alpha_d_pert = Gc ? 8.686 * quad(Gc, v) * Z0 / 2
                 : this.calculate_dielectric_loss(V, Z0);
-            const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, Ck, Z0);
-            const alpha_c = 8.686 * R_total / (2 * Zc.re);
+            const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, Ck, Z0);
             results.push({
                 mode: label, Z0, eps_eff: eps_eff_mode, C: Ck, C0: C0k, RLGC: rlgc, Zc,
                 alpha_c, alpha_d, alpha_total: alpha_c + alpha_d, L_internal, L_external,
@@ -3321,13 +3327,11 @@ export class FieldSolver2D {
         const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
         // Calculate dielectric loss (returns alpha in dB/m)
-        const alpha_d = this._mode_alpha_d(r);
+        const alpha_d_pert = this._mode_alpha_d(r);
 
         // Calculate RLGC using new surface roughness aware approach
-        const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, C, Z0);
+        const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, C, Z0);
 
-        // Calculate conductor loss alpha from R_total for reporting
-        const alpha_c = 8.686 * R_total / (2 * Zc.re);
         const alpha_total = alpha_c + alpha_d;
 
         return {
@@ -4487,12 +4491,12 @@ export class FieldSolver2D {
                 const recalc = (mode) => {
                     const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
                         mode.Ex, mode.Ey, mode.Z0, mode.C0, mode.Ex0, mode.Ey0, mode.mode);
-                    const alpha_d = this._mode_alpha_d(mode);
-                    const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, mode.C, mode.Z0);
+                    const alpha_d_pert = this._mode_alpha_d(mode);
+                    const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, mode.C, mode.Z0);
                     mode.RLGC = rlgc;
                     mode.Zc = Zc;
                     mode.eps_eff = eps_eff_mode;
-                    mode.alpha_c = 8.686 * R_total / (2 * Zc.re);
+                    mode.alpha_c = alpha_c;
                     mode.alpha_d = alpha_d;
                     mode.alpha_total = mode.alpha_c + alpha_d;
                     mode.L_internal = L_internal;
@@ -4521,13 +4525,13 @@ export class FieldSolver2D {
                 // Recalculate RLGC parameters with corrected Z0
                 const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
                     result.Ex, result.Ey, result.Z0, result.C0, result.Ex0, result.Ey0, result.mode);
-                const alpha_d = this._mode_alpha_d(result);
-                const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, result.C, result.Z0);
+                const alpha_d_pert = this._mode_alpha_d(result);
+                const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, result.C, result.Z0);
 
                 result.RLGC = rlgc;
                 result.Zc = Zc;
                 result.eps_eff = eps_eff_mode;
-                result.alpha_c = 8.686 * R_total / (2 * Zc.re);
+                result.alpha_c = alpha_c;
                 result.alpha_d = alpha_d;
                 result.alpha_total = result.alpha_c + alpha_d;
                 result.L_internal = L_internal;
@@ -4551,13 +4555,11 @@ export class FieldSolver2D {
             const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
 
             // Recalculate dielectric loss (affects omega)
-            const alpha_d = this.calculate_dielectric_loss(V, Z0);
+            const alpha_d_pert = this.calculate_dielectric_loss(V, Z0);
 
             // Recalculate RLGC with new frequency
-            const { Zc, rlgc, eps_eff_mode, L_external } = this.rlgc(R_total, L_internal, alpha_d, C, Z0);
+            const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, C, Z0);
 
-            // Calculate conductor loss alpha from R_total
-            const alpha_c = 8.686 * R_total / (2 * Zc.re);
             const alpha_total = alpha_c + alpha_d;
 
             modeResults.push({

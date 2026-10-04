@@ -80,11 +80,16 @@ TRI_STAGE=dist/.tri-stage
 mkdir -p "$TRI_STAGE/wasm_solver"
 cp -r src/tri_solver "$TRI_STAGE/tri_solver"
 rm -f "$TRI_STAGE/tri_solver/_smoke_test.mjs"
-# Shared src modules imported as `../*.js` from tri_solver/*.js — keep this list
-# in sync with those imports. (They are also inlined into the app bundle; the
-# external tree needs standalone copies.)
-cp src/complex.js src/surface_roughness.js src/djordjevic_sarkar.js src/matrix.js \
-   src/sparameters.js src/geometry_symmetry.js src/shapes.js "$TRI_STAGE/"
+# Shared src modules imported as `../*.js` from tri_solver/*.js, and the `./*.js` they
+# import in turn, found from the import lines. (They are also inlined into the app
+# bundle; the external tree needs standalone copies.)
+shared=$(grep -rhoE "from '\.\./[A-Za-z0-9_]+\.js'" src/tri_solver/*.js | grep -oE "[A-Za-z0-9_]+\.js" | sort -u)
+while :; do
+  next=$( { echo "$shared"; for f in $shared; do grep -hoE "from '\./[A-Za-z0-9_]+\.js'" "src/$f" | grep -oE "[A-Za-z0-9_]+\.js"; done; } | sort -u)
+  [ "$next" = "$shared" ] && break
+  shared=$next
+done
+for f in $shared; do cp "src/$f" "$TRI_STAGE/"; done
 # Each emscripten module locates its .wasm next to its own .js.
 cp src/wasm_solver/eigen_solver.js src/wasm_solver/eigen_solver.wasm \
    src/wasm_solver/gmsh.js src/wasm_solver/gmsh.wasm "$TRI_STAGE/wasm_solver/"

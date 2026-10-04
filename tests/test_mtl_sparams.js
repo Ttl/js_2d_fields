@@ -18,6 +18,9 @@
 //      equals far-far block.
 //   4. SYMMETRIC LIMIT — for a symmetric pair the MTL result reduces exactly to the
 //      odd/even combination (computeSParamsDifferential), with SDC/SCD = 0.
+//   5. DC — at f = 0 a conducting dielectric ([G] > 0) makes the line a distributed R-G
+//      network, γ = √([R][G]) ≠ 0, which matches the cascade at f = 0; without [G] the
+//      line is the series resistance. The symmetric limit (4) holds at DC as well.
 
 import { Complex } from '../src/complex.js';
 import { Matrix2x2 } from '../src/matrix.js';
@@ -55,10 +58,10 @@ const blockMul = (P, Q) => ({
 });
 
 // Cascade chain matrix for the whole line: one symmetric section, squared N_LOG2 times.
-function cascadeABCD(freq, Lmat) {
+function cascadeABCD(freq, Lmat, Gmat = G2) {
     const omega = 2 * Math.PI * freq;
     const Z = mC(R2, Lmat.map(r => r.map(v => v * omega)));
-    const Y = mC(G2, C2.map(r => r.map(v => v * omega)));
+    const Y = mC(Gmat, C2.map(r => r.map(v => v * omega)));
     const dz = LENGTH / Math.pow(2, N_LOG2);
     const serHalf = { A: I2M, B: Z.mul(dz / 2), C: Z2M, D: I2M };   // series Z·dz/2
     const shunt = { A: I2M, B: Z2M, C: Y.mul(dz), D: I2M };         // shunt Y·dz
@@ -161,8 +164,8 @@ for (const [Lmat, tag] of [[L2, ''], [L2deg, ', velocity-degenerate']]) for (con
 console.log('\n### Symmetric-pair limit reduces to odd/even combination ###');
 const Rs = [[10, 2], [2, 10]], Ls = [[3.0e-7, 6.0e-8], [6.0e-8, 3.0e-7]];
 const Gs = [[2.5e-4, -5.0e-5], [-5.0e-5, 2.5e-4]], Cs = [[1.2e-10, -2.4e-11], [-2.4e-11, 1.2e-10]];
-for (const freq of FREQS) {
-    const label = freq >= 1e9 ? `${freq / 1e9} GHz` : `${freq / 1e6} MHz`;
+for (const freq of [0, ...FREQS]) {
+    const label = freq === 0 ? 'DC' : freq >= 1e9 ? `${freq / 1e9} GHz` : `${freq / 1e6} MHz`;
     const sp = computeSParamsDifferentialMTL(freq, Rs, Ls, Gs, Cs, LENGTH, Z_REF);
     // Odd mode: opposite drive → X_odd = X11 − X12; even: X_even = X11 + X12.
     const rlgc = sign => ({ R: Rs[0][0] + sign * Rs[0][1], L: Ls[0][0] + sign * Ls[0][1],
@@ -174,6 +177,15 @@ for (const freq of FREQS) {
     const dConv = Math.max(sp.SDC11.abs(), sp.SDC21.abs(), sp.SCD11.abs(), sp.SCD21.abs());
     check(`${label}: SDD/SCC match odd/even combination`, dMM < TOL_EXACT, `max |Δ| ${dMM.toExponential(2)}`);
     check(`${label}: SDC/SCD vanish for symmetric pair`, dConv < TOL_EXACT, `max |S| ${dConv.toExponential(2)}`);
+}
+
+// (5) DC: a conducting dielectric, gamma*l ~ 0.1, and no shunt conductance at all.
+console.log('\n### DC ###');
+for (const [Gmat, tag] of [[G2.map(r => r.map(v => v * 1000)), 'conducting dielectric'],
+                           [[[0, 0], [0, 0]], 'no shunt conductance']]) {
+    const sp = computeSParamsDifferentialMTL(0, R2, L2, Gmat, C2, LENGTH, Z_REF);
+    const dGT = maxDiff(sp.S, abcdToS(cascadeABCD(0, L2, Gmat), Z_REF));
+    check(`DC, ${tag}: matches cascade ground truth (|ΔS| < ${TOL_GT})`, dGT < TOL_GT, `max |ΔS| ${dGT.toExponential(2)}`);
 }
 
 console.log(failed ? `\nSUMMARY: ${failed} check(s) failed` : '\nSUMMARY: all checks passed');

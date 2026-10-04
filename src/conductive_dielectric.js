@@ -30,6 +30,20 @@ export function conductiveOmega(dielectrics, f) {
     return 2 * Math.PI * fe;
 }
 
+// Conductance at DC from the complex solve at conductiveOmega(f = 0): a conduction path
+// between the conductors gives G far above omega C there, a path an insulator blocks
+// leaves G = omega C'' growing as omega^2, far below omega C. That is no conductance.
+export function dcConductance(G, C, omega) {
+    return G >= omega * C ? G : 0;
+}
+
+// The same for a pair, G = [G11, G12, G22] and C 2x2: a trace without a conduction path
+// drops its row and column.
+export function dcConductanceMatrix(G, C, omega) {
+    const on = [G[0] >= omega * C[0][0], G[2] >= omega * C[1][1]];
+    return [on[0] ? G[0] : 0, on[0] && on[1] ? G[1] : 0, on[1] ? G[2] : 0];
+}
+
 // Complex relative permittivity { re, im } of a material at angular frequency omega.
 // dc drops the loss tangent: the DC limit solves at a small omega > 0, where omega times
 // the polarization loss would still add to G.

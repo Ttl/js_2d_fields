@@ -53,7 +53,9 @@ import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar, causalModelWarning } from '../djordjevic_sarkar.js';
-import { hasConductiveDielectric, conductiveOmega, conductiveDielectricWarning } from '../conductive_dielectric.js';
+import { hasConductiveDielectric, conductiveOmega, conductiveDielectricWarning, dcConductance,
+    dcConductanceMatrix } from '../conductive_dielectric.js';
+import { dcLineLimit, lineAttenuation } from '../line_params.js';
 
 const c0 = 299792458;
 const eps0 = 8.854187817e-12;
@@ -2293,7 +2295,8 @@ export class TriBackend {
     _conductiveMode(mode, st, f, v) {
         const { sol, energy, omega } = this._conductiveSolve(st.fm, this._modePotentials(mode, st, v), f);
         const W = energy(sol.re, sol.im), k = st.kC * eps0;
-        return { C: k * W.re, G: -omega * k * W.im };
+        const C = k * W.re, G = -omega * k * W.im;
+        return { C, G: f > 0 ? G : dcConductance(G, C, omega) };
     }
 
     // The physMatrix of an asymmetric pair with [C] and G = [G11, G12, G22] from the
@@ -2312,8 +2315,9 @@ export class TriBackend {
         const C = [[2 * wa.re * ksc, m12.re * ksc], [m12.re * ksc, 2 * wb.re * ksc]];
         // G = omega C'' at the solve's omega (the DC limit solves at a small omega).
         const g = -A.omega * ksc;
+        const G = [2 * wa.im * g, m12.im * g, 2 * wb.im * g];
         const { Gw, ...phys } = this._modalPhys;
-        return { ...phys, C, G: [2 * wa.im * g, m12.im * g, 2 * wb.im * g] };
+        return { ...phys, C, G: f > 0 ? G : dcConductanceMatrix(G, C, A.omega) };
     }
 
     // Asymmetric pair with a conductive dielectric at f: { phys, vecs } with the physMatrix
@@ -2915,7 +2919,6 @@ export class TriBackend {
         const C = eps_d * C0f;
         const L_external = 1 / (c0 * c0 * C0f);
         const Z0 = 1 / (c0 * C0f * Math.sqrt(eps_d));
-        const alpha_d = Z0 > 0 ? (G * Z0 / 2) * NP_TO_DB : 0;
 
         // Conductor loss → R_total and the internal inductance L_internal (which adds
         // the conductor-roughness/skin ΔL to the phase ε_eff). ε_eff stays anchored to
@@ -3454,18 +3457,21 @@ export class TriBackend {
         // FDM backend and the interpolating sweep. It differs from c²·L·C once R/ωL or
         // G/ωC is not small (thin on-chip lines, very lossy substrates).
         const L_total = L_external + L_internal;
-        let Zc, alpha_c, eps_eff;
+        let Zc, eps_eff;
         if (f > 0) {
             const Znum = new Complex(R_total, omega * L_total);
             const Zden = new Complex(G, omega * C);
             Zc = Znum.div(Zden).sqrt();
-            alpha_c = Zc.re > 0 ? NP_TO_DB * R_total / (2 * Zc.re) : 0;
             eps_eff = phaseEpsEff(Znum, Zden, omega);
         } else {
-            Zc = new Complex(Z0, 0);
-            alpha_c = 0;
-            eps_eff = c0 * c0 * L_total * C;
+            // DC: the f -> 0 limit of the line (line_params.js), Zc infinite without G.
+            const dc = dcLineLimit(R_total, L_total, G, C);
+            Zc = new Complex(dc.Zc, 0);
+            eps_eff = dc.eps_eff;
         }
+        // The exact attenuation Re(gamma), split between conductor and dielectric.
+        const att = lineAttenuation(R_total, L_total, G, C, omega, L_external);
+        const alpha_c = NP_TO_DB * att.alpha_c, alpha_d = NP_TO_DB * att.alpha_d;
 
         return {
             mode, Z0, eps_eff, eps_eff_mode: eps_d, C, C0,

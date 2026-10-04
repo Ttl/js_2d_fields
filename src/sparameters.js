@@ -56,9 +56,10 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
         ? new Complex(Z_ref, 0)
         : new Complex(Z_ref.re, Z_ref.im);
 
-    // Handle DC case (frequency = 0)
-    // At DC, the transmission line behaves as a simple series resistance R*length
-    if (freq === 0 || omega === 0) {
+    // DC without shunt conductance: the line is a series resistance R*length. With a
+    // conducting dielectric (G > 0) it is a distributed R-G line, gamma = sqrt(RG), which
+    // the general formulas below give at omega = 0.
+    if ((freq === 0 || omega === 0) && !(G > 0 && R > 0)) {
         const R_total = R * length;
 
         // ABCD matrix for series resistance: A = 1, B = R_total, C = 0, D = 1
@@ -143,10 +144,9 @@ function computeZ0(freq, rlgc) {
     const omega = 2 * Math.PI * freq;
     const { R, L, G, C } = rlgc;
 
-    // Handle DC case (frequency = 0)
-    // At DC, Z0 = sqrt(R/G) with G=0 gives infinity
+    // DC: Z0 = sqrt(R/G), infinite without shunt conductance.
     if (freq === 0 || omega === 0) {
-        return 1e12;  // Return very large impedance for DC
+        return G > 0 && R > 0 ? Math.sqrt(R / G) : 1e12;  // very large for an infinite one
     }
 
     // Series impedance per unit length: Z = R + jwL
@@ -338,9 +338,11 @@ function computeSParamsDifferentialMTL(freq, R2, L2, G2, C2, length, Z_ref) {
     const omega = 2 * Math.PI * freq;
     const Z = mComplex(R2, L2.map(row => row.map(v => v * omega)));   // [R] + jω[L]
     const Y = mComplex(G2, C2.map(row => row.map(v => v * omega)));   // [G] + jω[C]
-    // At DC [γ] = 0 and γ⁻¹ sinh(γℓ) -> ℓ·I: the chain blocks reduce to A = D = I,
-    // B = ℓ[R], C = ℓ[G], a series-resistance network with shunt conductance.
-    const dc = omega === 0;
+    // At DC without shunt conductance [γ] = 0 and γ⁻¹ sinh(γℓ) -> ℓ·I: the chain blocks
+    // reduce to A = D = I, B = ℓ[R], C = ℓ[G] (exact for [G] = 0). A conducting dielectric
+    // makes [G] positive definite, [γ] = √([R][G]) and the general blocks apply at ω = 0.
+    const gDet = G2[0][0] * G2[1][1] - G2[0][1] * G2[1][0];
+    const dc = omega === 0 && !(G2[0][0] > 0 && gDet > 1e-12 * G2[0][0] * G2[1][1]);
     const gamma = dc ? null : Z.mul(Y).sqrt();                         // [γ] = √([Z][Y])
     // Attenuation cap as in computeSParamsSingleEnded: past e^-300 on the most
     // attenuated mode the matrix cosh overflows. The cap is exact when both modes

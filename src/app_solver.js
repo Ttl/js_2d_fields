@@ -2044,13 +2044,13 @@ async function runSimulation() {
 
         // Display summary. Zc = sqrt((R + jwL) / (G + jwC)) and eps_eff = (beta/k0)^2 at the
         // first and last sweep point, Z0 = 1/(c sqrt(C C0)) once from the mesh solve. The
-        // first point skips DC (Zc infinite) and, for a waveguide, points below cutoff. A
-        // DC-only solve reports its DC row.
+        // first point skips DC (Zc infinite without a conducting dielectric) and, for a
+        // waveguide, points below cutoff. A DC-only solve reports its DC row.
         const rows = frequencySweepResults;
         const propagates = r => r.freq > 0 && !Number.isNaN(r.result.modes[0].Z0);
         const dcOnly = rows.length > 0 && rows.every(r => r.freq === 0) && !Number.isNaN(rows[0].result.modes[0].Z0);
         const firstRow = rows.find(propagates) ?? (dcOnly ? rows[0] : undefined);
-        const fmtZc = (r, Zc, threshold) => r.freq === 0 ? '∞' : formatZc(Zc, threshold);
+        const fmtZc = (r, Zc, threshold) => Number.isFinite(Zc.re) ? formatZc(Zc, threshold) : '∞';
         const lastRow = rows[rows.length - 1];
         const ends = !firstRow ? [] : (rows.length === 1 || firstRow === lastRow) ? [firstRow] : [firstRow, lastRow];
         const unit = freqUnit(Math.max(...frequencies));

@@ -24,6 +24,11 @@
 //  11. a pair made asymmetric by the silicon alone takes its modal vectors from the
 //      complex [C] on both backends, the QS certificate is not thrown off by the
 //      conductive C, and a lossy oxide adds no G at DC
+//  12. the DC row is the f -> 0 limit of the line: with a conduction path Zc = sqrt(R/G)
+//      and eps_eff join the low-frequency points, an insulated line has G = 0, Zc
+//      infinite and eps_eff = c^2 L C
+//  13. the loss is the exact Re(gamma) of the RLGC line: a strip directly on silicon is
+//      an R-G line below the relaxation frequency, where G Z0 / 2 would read 2.7x high
 //
 // Run: node tests/test_conductive_dielectric.js
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
@@ -363,6 +368,61 @@ sig+ x=-5 w=10 y=3 h=1
         check(`${name}: on-chip microstrip has no G at DC from the oxide loss tangent`, g0 < 1e-4 * g1,
             `G ${fmt(g0)} at DC, ${fmt(g1)} at 1 MHz`);
     }
+}
+
+// --- 12. DC row ---
+{
+    const C0 = 299792458;
+    // Strip on two conductive layers over the ground wall: a DC conduction path.
+    const path = `units um
+bounds open open open gnd
+domain -50 50 0 40
+diel x=-inf w=inf y=0 h=20 er=11.9 sigma=2
+diel x=-inf w=inf y=20 h=5 er=4.1 sigma=0.5
+sig+ x=-10 w=20 y=25 h=2
+`;
+    for (const [name, extra] of BACKENDS) {
+        const { s, r } = await solve(path, 1e6, extra);
+        const at = async f => (await quiet(() => s.computeAtFrequency(f, r))).modes[0];
+        const dc = await at(0), lf = await at(1);
+        check(`${name}: conduction path, DC Zc = sqrt(R/G) and joins 1 Hz`,
+            rel(dc.Zc.re, Math.sqrt(dc.RLGC.R / dc.RLGC.G)) < 1e-12 && rel(dc.Zc.re, lf.Zc.re) < 1e-4,
+            `DC ${dc.Zc.re.toFixed(3)}, 1 Hz ${lf.Zc.re.toFixed(3)} ohm`);
+        // Full-wave takes L at DC from its own DC inductance solve, which differs from its
+        // low-frequency L, the QS L is the same at both.
+        if (name === 'QS') check('QS: conduction path, DC eps_eff joins 1 Hz', rel(dc.eps_eff, lf.eps_eff) < 1e-4,
+            `DC ${dc.eps_eff.toFixed(3)}, 1 Hz ${lf.eps_eff.toFixed(3)}`);
+        // The insulated on-chip line: the oxide blocks the DC path through the silicon.
+        const chipDc = (await solve(chip(`sigma=${SIG}`), 0, extra)).r.modes[0];
+        const lossless = C0 * C0 * chipDc.RLGC.L * chipDc.RLGC.C;
+        check(`${name}: insulated line at DC has G = 0, Zc infinite and eps_eff = c^2 L C`,
+            chipDc.RLGC.G === 0 && !Number.isFinite(chipDc.Zc.re) && rel(chipDc.eps_eff, lossless) < 1e-12,
+            `G ${chipDc.RLGC.G}, Zc ${chipDc.Zc.re}, eps ${chipDc.eps_eff.toFixed(3)} vs ${lossless.toFixed(3)}`);
+    }
+}
+
+// --- 13. Loss of an R-G line ---
+{
+    const text = `units um
+bounds open open open gnd
+diel x=-inf w=inf y=0 h=200 er=11.9 sigma=10
+sig+ x=-25 w=50 y=200 h=2
+`;
+    const res = [];
+    for (const [name, extra] of BACKENDS) {
+        const { r } = await solve(text, 1e9, extra);
+        const m = r.modes[0], { R, L, G, C } = m.RLGC, w = 2 * Math.PI * 1e9;
+        // Re(gamma) in dB/m.
+        const p = { re: R * G - w * w * L * C, im: w * (R * C + L * G) };
+        const exact = 8.686 * Math.sqrt((Math.hypot(p.re, p.im) + p.re) / 2);
+        // 2e-5: the backends convert Np to dB with 8.686 and 20 / ln(10).
+        check(`${name}: strip on silicon at 1 GHz, the loss is Re(gamma) of the line`,
+            rel(m.alpha_total, exact) < 2e-5 && rel(m.alpha_c + m.alpha_d, m.alpha_total) < 1e-12,
+            `${m.alpha_total.toFixed(1)} vs ${exact.toFixed(1)} dB/m`);
+        res.push(m.alpha_total);
+    }
+    check('strip on silicon at 1 GHz: the two backends agree on the loss', rel(res[0], res[1]) < 0.02,
+        `QS ${res[0].toFixed(1)}, full-wave ${res[1].toFixed(1)} dB/m`);
 }
 
 done();

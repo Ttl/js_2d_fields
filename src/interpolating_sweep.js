@@ -1,5 +1,6 @@
 import { Complex } from './complex.js';
 import { buildPhysicalRLGC } from './sparameters.js';
+import { lineAttenuation } from './line_params.js';
 
 // Per-line loss data carried next to R, L, G, C (see addSample).
 const AUX_KEYS = ['aR', 'aL', 'aRm0', 'aRm1', 'aRm2', 'aLm0', 'aLm1', 'aLm2', 'aGm0', 'aGm1', 'aGm2'];
@@ -544,12 +545,10 @@ class InterpolatingSweep {
                 const k0 = omega / 299792458.0;
                 const eps_eff = (beta / k0) * (beta / k0);
 
-                // alpha_c = R / (2 * Re(Zc))  in Np/m, convert to dB/m
-                const alpha_c = 8.686 * R / (2 * Zc.re);
-
-                // alpha_d from G with the static Z0, inverting the solve's G = 2 alpha_d / Z0.
-                const alpha_d = 8.686 * G * Z0 / 2;
-
+                // The exact attenuation Re(gamma), split between conductor and dielectric
+                // as the solves do (lineAttenuation), in dB/m.
+                const att = lineAttenuation(R, L, G, C, omega, L_external);
+                const alpha_c = 8.686 * att.alpha_c, alpha_d = 8.686 * att.alpha_d;
                 const alpha_total = alpha_c + alpha_d;
 
                 return {
