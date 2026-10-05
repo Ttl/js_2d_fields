@@ -505,6 +505,22 @@ function settingsFromURL(encoded) {
     }
 }
 
+// Show the option section of each advanced checkbox to match its state. Restoring a
+// setting sets .checked without firing change, so the sections need this afterwards.
+function syncCheckboxSections() {
+    [['chk_solder_mask', 'solder-mask-params'], ['chk_top_diel', 'top-diel-params'],
+     ['chk_gnd_cut', 'gnd-cut-params'], ['chk_enclosure', 'enclosure-params'],
+     ['chk_plating', 'plating-params']].forEach(([id, sectionId]) => {
+        const checkbox = document.getElementById(id);
+        const section = document.getElementById(sectionId);
+        if (checkbox && section) {
+            section.style.display = checkbox.checked ? 'block' : 'none';
+        }
+    });
+    // An enclosure is a physical boundary: the Modes tab cannot shrink it.
+    document.getElementById('modes-shrink-domain').disabled = document.getElementById('chk_enclosure').checked;
+}
+
 /**
  * Restore UI settings from a settings object
  * Merges with defaults to explicitly set all values, preventing browser-remembered inputs
@@ -668,6 +684,7 @@ function restoreSettings(settings) {
         // medium that does not support it.
         if (window.enforceBackendForType) window.enforceBackendForType();
         if (window.enforceSweepOptionsForType) window.enforceSweepOptionsForType();
+        syncCheckboxSections();
         syncLogPanel();
 
         return true;
@@ -3203,16 +3220,7 @@ function init() {
         toggleParameterVisibility();
     }
     // Update checkbox sections
-    ['chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_plating'].forEach(id => {
-        const checkbox = document.getElementById(id);
-        if (checkbox) {
-            const sectionId = id.replace('chk_', '') + '-params';
-            const section = document.getElementById(sectionId);
-            if (section) {
-                section.style.display = checkbox.checked ? 'block' : 'none';
-            }
-        }
-    });
+    syncCheckboxSections();
 
     // Interpolating sweep toggle
     const interpChk = document.getElementById('chk_interp_sweep');

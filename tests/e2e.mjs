@@ -3,7 +3,7 @@
 // console errors.
 import { launch, URL, printErrors, finish } from './e2e_helpers.mjs';
 
-const { browser, page, errors } = await launch();
+const { browser, page, errors } = await launch({ clipboard: '__copiedURL' });
 await page.goto(URL, { waitUntil: 'networkidle' });
 await page.selectOption('#mesh_backend', 'fullwave_mqs');
 console.log('selected backend:', await page.inputValue('#mesh_backend'));
@@ -94,4 +94,25 @@ try {
 const spreadOk = /spreads sideways/.test((await page.$eval('#console_out', el => el.textContent)).slice(spreadFrom));
 console.log('interpolating sweep from DC logs the ground-spreading note:', spreadOk);
 
-await finish(browser, errors.length === 0 && solved && hasPlot >= 2 && stopOk && dcOk && spreadOk);
+// A share link with the advanced options on opens with their sections shown: restoring
+// sets .checked without a change event, so the sections are synced after the restore.
+await page.selectOption('#tl_type', 'microstrip');
+await page.evaluate(() => {
+    for (const id of ['chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_plating']) {
+        const c = document.getElementById(id);
+        if (!c.checked) c.click();
+    }
+    document.getElementById('copy-link-btn').click();
+});
+await page.waitForTimeout(300);
+const linkPage = await browser.newPage();
+await linkPage.goto(await page.evaluate(() => window.__copiedURL || URL), { waitUntil: 'networkidle' });
+const linkSections = await linkPage.evaluate(() => ({
+    shown: ['solder-mask-params', 'top-diel-params', 'gnd-cut-params', 'enclosure-params', 'plating-params']
+        .filter(id => getComputedStyle(document.getElementById(id)).display !== 'none').length,
+    shrinkDisabled: document.getElementById('modes-shrink-domain').disabled,
+}));
+const linkOk = linkSections.shown === 5 && linkSections.shrinkDisabled;
+console.log('share link restores option sections:', linkOk, linkSections);
+
+await finish(browser, errors.length === 0 && solved && hasPlot >= 2 && stopOk && dcOk && spreadOk && linkOk);
