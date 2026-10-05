@@ -1504,9 +1504,8 @@
             for (const [name, row] of Object.entries(rows)) {
                 if (row) row.style.display = typeOptions.rows.includes(name) ? 'block' : 'none';
             }
-            // Locking the enclosure leaves its option section displayed as it was.
             const checkboxes = { sm: ['chk_solder_mask', solderMaskParams], topDiel: ['chk_top_diel', topDielParams],
-                                 gndCut: ['chk_gnd_cut', gndCutParams], enclosure: ['chk_enclosure', null] };
+                                 gndCut: ['chk_gnd_cut', gndCutParams], enclosure: ['chk_enclosure', enclosureParams] };
             for (const [name, [id, params]] of Object.entries(checkboxes)) {
                 const cb = document.getElementById(id);
                 if (!cb) continue;
@@ -1517,6 +1516,9 @@
                     if (params) params.style.display = 'none';
                 }
             }
+            // An enclosure is a physical boundary the Modes tab cannot shrink, so that
+            // option follows the checkbox, which a lock unticks without a change event.
+            document.getElementById('modes-shrink-domain').disabled = document.getElementById('chk_enclosure').checked;
         }
         enforceBackendForType();
         enforceSweepOptionsForType();

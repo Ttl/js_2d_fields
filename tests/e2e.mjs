@@ -94,6 +94,23 @@ try {
 const spreadOk = /spreads sideways/.test((await page.$eval('#console_out', el => el.textContent)).slice(spreadFrom));
 console.log('interpolating sweep from DC logs the ground-spreading note:', spreadOk);
 
+// The thick-plating and causal-material options change the result, so toggling either
+// marks the results stale.
+const noticeText = () => page.evaluate(() => getComputedStyle(document.getElementById('results-notice')).display !== 'none'
+    ? document.getElementById('results-notice-text').textContent : '');
+const freshNotice = await noticeText();
+await page.evaluate(() => document.getElementById('chk_plating_thick_corners').click());
+const staleNotice = await noticeText();
+await page.evaluate(() => document.getElementById('chk_plating_thick_corners').click());
+const restoredNotice = await noticeText();
+await page.evaluate(() => document.getElementById('chk_causal_materials').click());
+const causalNotice = await noticeText();
+await page.evaluate(() => document.getElementById('chk_causal_materials').click());
+const thickOk = !/changed/i.test(freshNotice) && /changed/i.test(staleNotice)
+    && !/changed/i.test(restoredNotice) && /changed/i.test(causalNotice);
+console.log('thick plating and causal toggles mark results stale:', thickOk,
+    JSON.stringify(staleNotice), JSON.stringify(causalNotice));
+
 // A share link with the advanced options on opens with their sections shown: restoring
 // sets .checked without a change event, so the sections are synced after the restore.
 await page.selectOption('#tl_type', 'microstrip');
@@ -115,4 +132,19 @@ const linkSections = await linkPage.evaluate(() => ({
 const linkOk = linkSections.shown === 5 && linkSections.shrinkDisabled;
 console.log('share link restores option sections:', linkOk, linkSections);
 
-await finish(browser, errors.length === 0 && solved && hasPlot >= 2 && stopOk && dcOk && spreadOk && linkOk);
+// A line type that locks the enclosure off hides its options and frees the Modes tab's
+// domain shrink.
+const enclosureState = () => page.evaluate(() => ({
+    shown: getComputedStyle(document.getElementById('enclosure-params')).display !== 'none',
+    shrinkDisabled: document.getElementById('modes-shrink-domain').disabled,
+}));
+await page.selectOption('#tl_type', 'microstrip');
+await page.evaluate(() => { const c = document.getElementById('chk_enclosure'); if (!c.checked) c.click(); });
+const encOn = await enclosureState();
+await page.selectOption('#tl_type', 'coax');
+const encLocked = await enclosureState();
+const lockOk = encOn.shown && encOn.shrinkDisabled && !encLocked.shown && !encLocked.shrinkDisabled;
+console.log('enclosure lock hides its options:', lockOk, encOn, encLocked);
+
+await finish(browser, errors.length === 0 && solved && hasPlot >= 2 && stopOk && dcOk && spreadOk && linkOk
+    && thickOk && lockOk);

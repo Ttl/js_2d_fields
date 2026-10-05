@@ -332,10 +332,10 @@ const SETTINGS_FIELDS = [
     ['plating_top', 'chk_plating_top', 'chk', 'sphl'],
     ['plating_sides', 'chk_plating_sides', 'chk', 'sphl'],
     ['plating_bottom', 'chk_plating_bottom', 'chk', 'sphl'],
-    ['plating_thick_corners', 'chk_plating_thick_corners', 'chk', 'spl'],
+    ['plating_thick_corners', 'chk_plating_thick_corners', 'chk', 'sphl'],
     ['sparam_length', 'sparam-length', 'unit', 's'],
     ['sparam_z_ref', 'sparam-z-ref', 'num', 's'],
-    ['use_causal_materials', 'chk_causal_materials', 'chk', 'sp'],
+    ['use_causal_materials', 'chk_causal_materials', 'chk', 'sph'],
     ['interp_sweep', 'chk_interp_sweep', 'chk', 's'],
     ['interp_tolerance', 'interp_tolerance', 'float', 's'],
     ['modes_freq', 'modes-freq', 'unit', 's'],
@@ -2510,6 +2510,17 @@ function bindEvents() {
     for (const [, id, kind] of fieldsFor('l')) {
         const ev = kind === 'chk' ? 'change' : 'input';
         document.getElementById(id)?.addEventListener(ev, () => geometryEdited());
+    }
+    // Hashed settings that leave the preview as it is (causal materials) only flag the
+    // results as stale.
+    for (const [, id, kind, use] of fieldsFor('h')) {
+        if (use.includes('l')) continue;
+        const ev = kind === 'chk' ? 'change' : 'input';
+        document.getElementById(id)?.addEventListener(ev, () => {
+            updateResultNotices();
+            updateSweepNotice();
+            updateModesNotice();
+        });
     }
 
     // Custom geometry editor: every edit rebuilds the preview, and the parameter list
