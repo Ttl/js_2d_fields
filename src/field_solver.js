@@ -1705,24 +1705,14 @@ export class FieldSolver2D {
      *   current, floored at the geometric DC resistance
      * R_ac and R_dc are returned as the sums over both.
      *
-     * Two integrand variants:
+     * Ex/Ey are the vacuum (C0) solve fields and Z0 is Z0_vac = 1/(c*C0). In the
+     * quasi-TEM skin-effect limit the H pattern is the harmonic conjugate of the vacuum
+     * potential (the same identity as L_ext = 1/(c^2*C0)), so H_t = E_n(vac)/eta0, the
+     * surface current distribution, which does not depend on the permittivity.
      *
-     * vacuum_fields = true (production for rect-based solvers): Ex/Ey are the
-     * vacuum (C0) solve fields and Z0 is Z0_vac = 1/(c*C0). In the quasi-TEM
-     * skin-effect limit the H pattern is the harmonic conjugate of the vacuum
-     * potential (the same identity as L_ext = 1/(c^2*C0)), so H_t = E_n(vac)/η0,
-     * the surface current distribution, which is permittivity independent.
-     *
-     * vacuum_fields = false (fallback): Ex/Ey are the dielectric solve fields,
-     * H_t = E_n*√εr(local)/η0, Z0 is the line impedance. For mixed dielectric
-     * this uses the charge distribution as a current proxy, it overestimates
-     * corner-dominated microstrip loss and its substrate-interface corner
-     * singularity makes the sum mesh-divergent.
-     *
-     * @param {Array<Array<number>>} Ex - Electric field x-component
-     * @param {Array<Array<number>>} Ey - Electric field y-component
-     * @param {number} Z0 - Vacuum impedance 1/(c*C0), or the line impedance (fallback)
-     * @param {boolean} vacuum_fields - Ex/Ey are vacuum-solve fields
+     * @param {Array<Array<number>>} Ex - Vacuum electric field x-component
+     * @param {Array<Array<number>>} Ey - Vacuum electric field y-component
+     * @param {number} Z0 - Vacuum impedance 1/(c*C0)
      * @returns {{R_ac: number, R_dc: number, R_total: number, L_internal: number}}
      */
     // line (0 = positive trace, 1 = negative trace, 2 = both): Ex/Ey are the fields of a
@@ -1730,7 +1720,7 @@ export class FieldSolver2D {
     // result is then the quadratic form I^T X I of R and of the internal L for those
     // currents: no differential power factor, the DC resistance and skin depth of the
     // driven trace(s).
-    calculate_conductor_loss(Ex, Ey, Z0, vacuum_fields = false, mode = null, line = null) {
+    calculate_conductor_loss(Ex, Ey, Z0, mode = null, line = null) {
         if (!this.solution_valid) throw new Error("Fields invalid");
 
         // Signal metal: the plating metal when every signal conductor is solid plating.
@@ -1744,7 +1734,7 @@ export class FieldSolver2D {
             // is the low-frequency plateau of the surface integral below (slab
             // reactance mu0 d/3 per face once delta >> d). Returning before the
             // skin-transition block, so its warning is cleared explicitly.
-            const L_internal = this._dc_internal_inductance(Ex, Ey, Z0, vacuum_fields, mode, line);
+            const L_internal = this._dc_internal_inductance(Ex, Ey, Z0, mode, line);
             this._skinTransitionWarn = null;
             this._platingTransitionWarn = null;
             return { R_ac: 0, R_dc, R_total: R_dc, L_internal };
@@ -2050,11 +2040,9 @@ export class FieldSolver2D {
             if (!(ci >= 0 && ci < nCond)) { sumLDefault += Zs.im * H2dl; return; }
             sumL[ci] += Zs.im * H2dl;
             const c = this.conductors[ci];
-            if (vacuum_fields) {
-                if (c.is_signal) netI[this.is_differential && c.polarity < 0 ? 1 : 0] += H_out * dl;
-                sumLref[ci] += refIm(ci, direction) * H2dl;
-                sumLdc[ci] += getZsurf(ci, direction, i, j, span, xStart, true).im * H2dl;
-            }
+            if (c.is_signal) netI[this.is_differential && c.polarity < 0 ? 1 : 0] += H_out * dl;
+            sumLref[ci] += refIm(ci, direction) * H2dl;
+            sumLdc[ci] += getZsurf(ci, direction, i, j, span, xStart, true).im * H2dl;
             if (direction === 'u') faceBot[ci] += H2dl;
             else if (direction === 'd') faceTop[ci] += H2dl;
         };
@@ -2077,7 +2065,7 @@ export class FieldSolver2D {
         // Signal conductors keep the semi-infinite Rs: their DC limit and transition
         // are handled by R_total below.
         const slabResistanceFactor = (d, dlt = delta) => slabCoth(d / dlt).re;
-        const kR = (this.conductors || []).map((c, ci) => (c.is_signal || !vacuum_fields) ? 1 : slabResistanceFactor(
+        const kR = (this.conductors || []).map((c, ci) => c.is_signal ? 1 : slabResistanceFactor(
             Math.min(Math.abs(c.width), stackH(c, ci)), deltaCond(c)));
         const isGroundCond = ci => ci >= 0 && ci < kR.length && !this.conductors[ci].is_signal;
         // Per ground conductor: Re(Zs)-weighted |H|^2 and the plain |H|, |H|^2 moments
@@ -2124,14 +2112,12 @@ export class FieldSolver2D {
                         else E_norm = Math.abs(Ey_val);
 
                         const Z0_freespace = 376.73;
-                        // Vacuum fields: H pattern is the vacuum dual, no eps factor.
-                        // Legacy: local plane-wave relation on the dielectric field.
-                        const eps_fac = vacuum_fields ? 1.0 : Math.sqrt(this.epsilon_r[i][j]);
-                        const H_tan = E_norm * eps_fac / Z0_freespace;
+                        // The H pattern is the vacuum dual of E.
+                        const H_tan = E_norm / Z0_freespace;
                         // Signed: the outward normal field, whose sign is the current's.
                         const E_out = direction === 'r' ? -Ex_val : direction === 'l' ? Ex_val
                             : direction === 'u' ? -Ey_val : Ey_val;
-                        const H_out = E_out * eps_fac / Z0_freespace;
+                        const H_out = E_out / Z0_freespace;
 
                         // Look up per-surface impedance (with plating if applicable)
                         const ci = this.conductor_id ? this.conductor_id[ni][nj] : -1;
@@ -2183,7 +2169,7 @@ export class FieldSolver2D {
         // stays on top. Without the DC value each signal face takes the slab factor of
         // its effective thickness (signalSlab).
         const omega = 2 * Math.PI * this.freq;
-        const dcM = vacuum_fields && omega > 0 ? this._dc_signal_matrix(line === null ? mode : null) : null;
+        const dcM = omega > 0 ? this._dc_signal_matrix(line === null ? mode : null) : null;
         // Trace currents of the drive, as the half-domain sums count them (m times the
         // meshed part). A single line or a mode of a symmetric pair carries 1/Z0 per
         // trace for the unit drive the fields are per, which the discrete contour sum
@@ -2192,7 +2178,7 @@ export class FieldSolver2D {
         // the meshed trace; a single-ended line's mirrored traces are halves of it.
         const m = this.sym_half ? 2 : 1;
         let I0 = m * netI[0], I1 = m * netI[1];
-        if (line === null && !this._modalPhys && vacuum_fields && Z0 > 0) {
+        if (line === null && !this._modalPhys && Z0 > 0) {
             const whole = pol => !(this.conductors || []).some(c => c.is_signal
                 && (this.is_differential && c.polarity < 0 ? -1 : 1) === pol && c.x_min < 0 && c.x_max > 0);
             const mult = pol => (this.sym_half && this.is_differential && whole(pol) ? 2 : 1) / Z0;
@@ -2201,7 +2187,7 @@ export class FieldSolver2D {
         }
         let Ldc = 0;
         if (dcM) Ldc = (I0 * I0 * dcM[0][0] + 2 * I0 * I1 * dcM[0][1] + I1 * I1 * dcM[1][1]) / m;
-        const dcEntry = vacuum_fields && omega > 0 ? this._dc_signal_entry(line === null ? mode : null) : null;
+        const dcEntry = omega > 0 ? this._dc_signal_entry(line === null ? mode : null) : null;
         if (dcEntry && dcEntry.failed) this._note_fallback('dc-inductance-failed',
             `The DC current solve of the traces failed (${dcEntry.failed}). The internal inductance ` +
             `below the skin transition comes from the surface model instead, about half the DC value ` +
@@ -2217,7 +2203,7 @@ export class FieldSolver2D {
         // the one inside would make L rise with frequency.
         const spreadG = kR.map(() => 1), spreadU = kR.map(() => 0);
         for (let c = 0; c < gndR.length; c++) {
-            if (!(gndS2[c] > 0) || !vacuum_fields) continue;
+            if (!(gndS2[c] > 0)) continue;
             const cond = this.conductors[c];
             const d = Math.min(Math.abs(cond.width), Math.abs(cond.height));
             const wMax = Math.max(Math.abs(cond.width), Math.abs(cond.height));
@@ -2243,7 +2229,7 @@ export class FieldSolver2D {
                 // The slab factor bounds the smooth metal's reactance. What roughness and
                 // plating add is a surface layer, kept whole like on the traces.
                 const slab = slabReactanceFactor(Math.min(Math.abs(c.width), stackH(c, ci)), deltaCond(c));
-                const v = vacuum_fields ? sumLref[ci] * slab + (sumLdc[ci] - sumLref[ci]) : sumL[ci] * slab;
+                const v = sumLref[ci] * slab + (sumLdc[ci] - sumLref[ci]);
                 if (idealGnd.has(ci)) sumLgnd += v; else sumLsheet += v;
                 return;
             }
@@ -2271,9 +2257,8 @@ export class FieldSolver2D {
         // This is because we integrate over both traces but report normalized loss
         const power_factor = (this.is_differential && line === null) ? 0.5 : 1.0;
 
-        // Vacuum variant: |H|^2 per unit current is |H_vac per 1V|^2*Z0_vac^2, since the
-        // vacuum drive at 1V carries I_vac = 1/Z0_vac (the fallback: the same with the
-        // line Z0).
+        // |H|^2 per unit current is |H_vac per 1V|^2*Z0_vac^2, since the vacuum drive at
+        // 1V carries I_vac = 1/Z0_vac.
         const Z0_sq = Z0 * Z0;
 
         // AC Resistance per unit length from skin effect (Ohm/m)
@@ -2292,9 +2277,9 @@ export class FieldSolver2D {
         // the surface model: fully above 0.2, blended on log(spread) down to 0.02, where
         // the two agree to a few tenths of a percent.
         const wSheet = spreadBlendWeight(spread);
-        const sheetZ = vacuum_fields && omega > 0 && wSheet > 0
+        const sheetZ = omega > 0 && wSheet > 0
             ? this._ground_sheet_cached(line === null ? mode : null) : null;
-        if (vacuum_fields && omega > 0 && wSheet > 0 && !sheetZ) {
+        if (omega > 0 && wSheet > 0 && !sheetZ) {
             const sheet = dcEntry && dcEntry.sheet;
             this._note_fallback('ground-sheet-failed', `The return current spreads sideways in the grounds ` +
                 `at this frequency, but the thin-sheet ground solve ${sheet && sheet.failed ? `failed (${sheet.failed})`
@@ -2316,7 +2301,7 @@ export class FieldSolver2D {
         // factor or the thin-sheet solve of the grounds above.
         const L_internal = power_factor * sum_H2_dl_L * Z0_sq / (2 * Math.PI * this.freq);
 
-        // DC-skin transition correction (vacuum-field path only): against
+        // DC-skin transition correction: against
         // tri-MQS the sqrt(R_dc^2+R_ac^2) is consistently high, a log-normal
         // notch in δ/t, = −7% at δ/t = 0.4, gone below δ/t = 0.12 and decaying
         // by δ/t = 1.3 (where R_dc takes over). Calibrated on ms/sl (w/h
@@ -2326,8 +2311,8 @@ export class FieldSolver2D {
         // every family, so the notch applies to all line types.
         let transitionCal = 1.0;
         // Cleared unconditionally: the warning describes this call's frequency, and
-        // the branch below is skipped on the fallback integrand and on solvers without
-        // a rectangular conductor thickness. Leaving it set would carry a stale note
+        // the branch below is skipped on solvers without a rectangular conductor
+        // thickness. Leaving it set would carry a stale note
         // into the next sweep point.
         this._skinTransitionWarn = null;
         this._platingTransitionWarn = this._plating_transition_note(this.freq);
@@ -2338,7 +2323,7 @@ export class FieldSolver2D {
             return 1 - 0.07 * Math.exp(-(lx * lx) / (2 * 0.45 * 0.45));
         };
         let bodyBlend = null;
-        if (vacuum_fields && tAbs > 0 && this.freq > 0) {
+        if (tAbs > 0 && this.freq > 0) {
             transitionCal = notch(delta);
             // Signal bodies of different metals take their own blend and skin depth.
             bodyBlend = sigOutside ? null : this._signal_body_blend(sigR, sigI, power_factor * Z0_sq,
@@ -2652,7 +2637,7 @@ export class FieldSolver2D {
                 const X = [[1, 0], [0, 1], [1, 1]].map((I, line) => {
                     const va = k * (M[1][1] * I[0] - M[0][1] * I[1]), vb = k * (M[0][0] * I[1] - M[1][0] * I[0]);
                     return this.calculate_conductor_loss(mix(va, tv.Av.Ex, vb, tv.Bv.Ex), mix(va, tv.Av.Ey, vb, tv.Bv.Ey),
-                        1, true, null, line);
+                        1, null, line);
                 });
                 const m3 = key => [X[0][key], (X[2][key] - X[0][key] - X[1][key]) / 2, X[1][key]];
                 return { Rm: m3('R_total'), Lim: m3('L_internal') };
@@ -2661,7 +2646,7 @@ export class FieldSolver2D {
             if (!odd || !even || !odd.Ex0 || !even.Ex0 || !(odd.C0 > 0) || !(even.C0 > 0)) return null;
             const zo = 1 / (CONSTANTS.C * odd.C0), ze = 1 / (CONSTANTS.C * even.C0);
             const lines = [1, -1].map((sb, line) => this.calculate_conductor_loss(
-                mix(0.5 * ze, even.Ex0, 0.5 * sb * zo, odd.Ex0), mix(0.5 * ze, even.Ey0, 0.5 * sb * zo, odd.Ey0), 1, true, null, line));
+                mix(0.5 * ze, even.Ex0, 0.5 * sb * zo, odd.Ex0), mix(0.5 * ze, even.Ey0, 0.5 * sb * zo, odd.Ey0), 1, null, line));
             return { dR: lines[0].R_total - lines[1].R_total, dL: lines[0].L_internal - lines[1].L_internal };
         } finally {
             [this._skinTransitionWarn, this._platingTransitionWarn] = warn;
@@ -2677,14 +2662,10 @@ export class FieldSolver2D {
         return this._finish_differs;
     }
 
-    // Conductor loss for a solved mode: the vacuum-field integrand when the mode has its
-    // vacuum fields (every solve path supplies them), else the dielectric-field one.
-    _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode = null) {
-        if (this.conductor_id && Ex0 && Ey0 && C0 > 0) {
-            const Z0_vac = 1 / (CONSTANTS.C * C0);
-            return this.calculate_conductor_loss(Ex0, Ey0, Z0_vac, true, mode);
-        }
-        return this.calculate_conductor_loss(Ex, Ey, Z0, false, mode);
+    // Conductor loss of a solved mode from its vacuum capacitance and fields.
+    _mode_conductor_loss(C0, Ex0, Ey0, mode = null) {
+        if (!(Ex0 && Ey0 && C0 > 0)) throw new Error('Conductor loss needs the vacuum solve of the mode');
+        return this.calculate_conductor_loss(Ex0, Ey0, 1 / (CONSTANTS.C * C0), mode);
     }
 
     calculate_dielectric_loss(V, Z0) {
@@ -3264,7 +3245,7 @@ export class FieldSolver2D {
             const C0k = quad(Cm0, v);
             const eps_eff = Ck / C0k;
             const Z0 = 1 / (CONSTANTS.C * Math.sqrt(Ck * C0k));
-            const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0k, Ex0, Ey0, label);
+            const { R_total, L_internal } = this._mode_conductor_loss(C0k, Ex0, Ey0, label);
             const alpha_d_pert = Gc ? 8.686 * quad(Gc, v) * Z0 / 2
                 : this.calculate_dielectric_loss(V, Z0);
             const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, Ck, Z0);
@@ -3359,8 +3340,8 @@ export class FieldSolver2D {
     // Conductor loss (surface roughness and DC resistance included), dielectric loss
     // and RLGC of a mode with its C, C0, Z0 and fields.
     _mode_parameters(r) {
-        const { mode, Z0, C, C0, Ex, Ey, Ex0, Ey0 } = r;
-        const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
+        const { mode, Z0, C, C0, Ex0, Ey0 } = r;
+        const { R_total, L_internal } = this._mode_conductor_loss(C0, Ex0, Ey0, mode);
         const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } =
             this.rlgc(R_total, L_internal, this._mode_alpha_d(r), C, Z0);
         return {
