@@ -1,4 +1,5 @@
 import { CustomGeometrySolver } from './custom_geometry.js';
+import { paramChecks, throwIfErrors } from './field_solver.js';
 import { coaxToGeometryText } from './custom_geometry_text.js';
 
 /**
@@ -82,16 +83,7 @@ function coaxModel(options) {
 
 function validateCoax(options) {
     const errors = [];
-    const isNum = (v) => typeof v === 'number' && !isNaN(v) && isFinite(v);
-    const positive = (v, name) => {
-        if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
-        else if (v <= 0) errors.push(`${name} must be positive, got ${v}`);
-    };
-    const nonneg = (v, name) => {
-        if (v == null) return;
-        if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
-        else if (v < 0) errors.push(`${name} must be non-negative, got ${v}`);
-    };
+    const { isNum, positive, nonneg } = paramChecks(errors);
 
     positive(options.inner_diameter, 'inner_diameter');
     positive(options.dielectric_diameter, 'dielectric_diameter');
@@ -113,9 +105,7 @@ function validateCoax(options) {
     nonneg(options.rq, 'rq');
     if (options.sigma_cond != null) positive(options.sigma_cond, 'sigma_cond');
 
-    if (errors.length > 0) {
-        throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
-    }
+    throwIfErrors(errors);
 }
 
 export { CoaxSolver };

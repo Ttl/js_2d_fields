@@ -111,6 +111,19 @@ function _cstr(G, str) {
     G.stringToUTF8(str, ptr, len);
     return ptr;
 }
+// Load and initialize the gmsh WASM module. Call once; the returned G is passed to
+// buildOccMeshFromGeometry for every mesh.
+export async function initGmsh() {
+    const gmshUrl = new URL('../wasm_solver/gmsh.js', import.meta.url).href;
+    const G = await (await import(gmshUrl)).default();
+    const stack = G.stackSave();
+    const ierr  = G.stackAlloc(4);
+    G._gmshInitialize(0, 0, 1, 0, ierr);
+    G._gmshOptionSetNumber(_cstr(G, 'General.Verbosity'), 0, ierr);
+    G.stackRestore(stack);
+    return G;
+}
+
 function _readDoubleArray(G, ptrPtr, nPtr) {
     const ptr = G.getValue(ptrPtr, 'i32'); const n = G.getValue(nPtr, 'i32');
     const arr = new Float64Array(n);
@@ -816,7 +829,7 @@ export function buildOccMeshFromGeometry(G, opts) {
     };
     condRect.rects.forEach(r => { r.symmetry = condRect.symmetry; });
 
-    // Constraint metadata (checkMeshQuality / refinement smoothing): a node on
+    // Constraint metadata (refinement smoothing): a node on
     // one of these lines may only move ALONG it. Constrained lines are the
     // CONDUCTOR faces (all four sides, over the rect's own extent — the freedom
     // map classifies PEC nodes/edges by the exact rect coordinates, and the

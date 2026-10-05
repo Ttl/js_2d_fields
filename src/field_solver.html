@@ -1192,23 +1192,6 @@
         }
     }
 
-    /**
-     * Get numeric value from input field, parsing units
-     * This should be used instead of parseFloat() for unit-aware inputs
-     * @param {string} inputId - ID of the input element
-     * @param {number} conversionFactor - Optional factor to multiply (for backward compatibility)
-     * @returns {number} - Parsed value in SI units (or multiplied by conversionFactor)
-     */
-    window.getInputValue = function(inputId, conversionFactor = 1) {
-        const element = document.getElementById(inputId);
-        if (!element) return NaN;
-
-        const defaultUnit = getDefaultUnit(inputId);
-        const valueSI = parseValueWithUnit(element.value, defaultUnit);
-
-        return valueSI * conversionFactor;
-    };
-
     // Export for use in modules
     window.parseValueWithUnit = parseValueWithUnit;
     window.formatValueWithUnit = formatValueWithUnit;
@@ -1414,6 +1397,32 @@
         rect_waveguide: 'wg-params',
     };
 
+    // Board-stackup options of each line type, see toggleParameterVisibility. blocks: the
+    // parameter blocks shown besides the common one ('self' = the SELF_BOUNDED_PARAM_DIVS
+    // block). rows: the advanced-option rows shown. locked: the checkboxes locked off.
+    const ALL_ROWS = ['sm', 'topDiel', 'gndCut', 'enclosure', 'topGnd', 'enclosureHeight'];
+    // Striplines already have a top ground, so the top-ground row and its height go.
+    // The top dielectric applies: a layer carved out of the bottom of the stripline's
+    // top dielectric (air beside the trace with eps_r = 1).
+    const STRIPLINE_ROWS = ['sm', 'topDiel', 'gndCut', 'enclosure'];
+    const TL_TYPE_OPTIONS = {
+        microstrip: { blocks: [], rows: ALL_ROWS, locked: [] },
+        diff_microstrip: { blocks: ['diff-params'], rows: ALL_ROWS, locked: [] },
+        stripline: { blocks: ['stripline-params'], rows: STRIPLINE_ROWS, locked: ['sm', 'gndCut'] },
+        diff_stripline: { blocks: ['diff-params', 'stripline-params'], rows: STRIPLINE_ROWS, locked: ['sm', 'gndCut'] },
+        gcpw: { blocks: ['gcpw-params'], rows: ALL_ROWS, locked: [] },
+        diff_gcpw: { blocks: ['diff-params', 'gcpw-params'], rows: ALL_ROWS, locked: [] },
+        // Only the enclosure and plating apply. Top/bottom grounds are intrinsic, so only
+        // the side ground of the enclosure makes sense.
+        broadside_stripline: { blocks: ['broadside-params'], rows: ['enclosure'], locked: ['sm', 'topDiel', 'gndCut'] },
+        // Self-bounded media (coax, rectangular waveguide): the shield / the walls ARE the
+        // domain boundary, so none of the board-stackup options apply. Plating and surface
+        // roughness do, and stay enabled.
+        self_bounded: { blocks: ['self'], rows: [], locked: ['sm', 'topDiel', 'gndCut', 'enclosure'] },
+        // Custom geometry describes its whole stackup and its boundaries in the text.
+        custom: { blocks: [], rows: [], locked: ['sm', 'topDiel', 'gndCut', 'enclosure'] },
+    };
+
     function toggleParameterVisibility() {
         const tlType = document.getElementById('tl_type').value;
         const isCustom = tlType === 'custom';
@@ -1481,163 +1490,33 @@
         // Always show advanced params
         advancedParams.style.display = 'block';
 
-        // Get the checkboxes
-        const chkSolderMask = document.getElementById('chk_solder_mask');
-        const chkTopDiel = document.getElementById('chk_top_diel');
-        const chkGndCut = document.getElementById('chk_gnd_cut');
-        const chkEnclosure = document.getElementById('chk_enclosure');
-
-        if (tlType === 'microstrip') {
-            // Enable all advanced options for microstrip
-            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
-            if (topDielGroup) topDielGroup.style.display = 'block';
-            if (gndCutGroup) gndCutGroup.style.display = 'block';
-            if (enclosureGroup) enclosureGroup.style.display = 'block';
-            if (topGndGroup) topGndGroup.style.display = 'block';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
-            if (chkSolderMask) chkSolderMask.disabled = false;
-            if (chkTopDiel) chkTopDiel.disabled = false;
-            if (chkGndCut) chkGndCut.disabled = false;
-            if (chkEnclosure) chkEnclosure.disabled = false;
-        } else if (tlType === 'diff_microstrip') {
-            diffParams.style.display = 'block';
-            // Enable all advanced options for diff microstrip
-            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
-            if (topDielGroup) topDielGroup.style.display = 'block';
-            if (gndCutGroup) gndCutGroup.style.display = 'block';
-            if (enclosureGroup) enclosureGroup.style.display = 'block';
-            if (topGndGroup) topGndGroup.style.display = 'block';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
-            if (chkSolderMask) chkSolderMask.disabled = false;
-            if (chkTopDiel) chkTopDiel.disabled = false;
-            if (chkGndCut) chkGndCut.disabled = false;
-            if (chkEnclosure) chkEnclosure.disabled = false;
-        } else if (tlType === 'stripline') {
-            striplineParams.style.display = 'block';
-            // Show all advanced options for stripline; solder mask and ground cutout are disabled
-            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
-            if (topDielGroup) topDielGroup.style.display = 'block';
-            if (gndCutGroup) gndCutGroup.style.display = 'block';
-            if (enclosureGroup) enclosureGroup.style.display = 'block';
-            // Hide top ground checkbox and height for stripline (already has top ground)
-            if (topGndGroup) topGndGroup.style.display = 'none';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
-            if (chkSolderMask) {
-                chkSolderMask.disabled = true;
-                chkSolderMask.checked = false;
-                solderMaskParams.style.display = 'none';
+        // Per type: the extra parameter blocks it shows, the advanced-option rows it
+        // shows, and the advanced checkboxes it locks off (disabled and unchecked, with
+        // their option section hidden). The rest of the rows are hidden and the rest of
+        // the checkboxes enabled.
+        const typeOptions = TL_TYPE_OPTIONS[isCustom ? 'custom' : SELF_BOUNDED_PARAM_DIVS[tlType] ? 'self_bounded' : tlType];
+        if (typeOptions) {
+            for (const block of typeOptions.blocks) {
+                document.getElementById(block === 'self' ? SELF_BOUNDED_PARAM_DIVS[tlType] : block).style.display = 'block';
             }
-            // Top dielectric applies: a layer carved out of the bottom of the
-            // stripline's top dielectric (air beside the trace with eps_r = 1).
-            if (chkTopDiel) chkTopDiel.disabled = false;
-            if (chkGndCut) {
-                chkGndCut.disabled = true;
-                chkGndCut.checked = false;
-                gndCutParams.style.display = 'none';
+            const rows = { sm: solderMaskGroup, topDiel: topDielGroup, gndCut: gndCutGroup, enclosure: enclosureGroup,
+                           topGnd: topGndGroup, enclosureHeight: enclosureHeightGroup };
+            for (const [name, row] of Object.entries(rows)) {
+                if (row) row.style.display = typeOptions.rows.includes(name) ? 'block' : 'none';
             }
-            if (chkEnclosure) {
-                chkEnclosure.disabled = false;
-            }
-        } else if (tlType === 'diff_stripline') {
-            diffParams.style.display = 'block';
-            striplineParams.style.display = 'block';
-            // Same as stripline
-            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
-            if (topDielGroup) topDielGroup.style.display = 'block';
-            if (gndCutGroup) gndCutGroup.style.display = 'block';
-            if (enclosureGroup) enclosureGroup.style.display = 'block';
-            // Hide top ground checkbox and height for diff stripline (already has top ground)
-            if (topGndGroup) topGndGroup.style.display = 'none';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
-            if (chkSolderMask) {
-                chkSolderMask.disabled = true;
-                chkSolderMask.checked = false;
-                solderMaskParams.style.display = 'none';
-            }
-            // Top dielectric applies: a layer carved out of the bottom of the
-            // stripline's top dielectric (air beside the trace with eps_r = 1).
-            if (chkTopDiel) chkTopDiel.disabled = false;
-            if (chkGndCut) {
-                chkGndCut.disabled = true;
-                chkGndCut.checked = false;
-                gndCutParams.style.display = 'none';
-            }
-            if (chkEnclosure) {
-                chkEnclosure.disabled = false;
-            }
-        } else if (tlType === 'gcpw') {
-            gcpwParams.style.display = 'block';
-            // Enable all advanced options for GCPW
-            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
-            if (topDielGroup) topDielGroup.style.display = 'block';
-            if (gndCutGroup) gndCutGroup.style.display = 'block';
-            if (enclosureGroup) enclosureGroup.style.display = 'block';
-            if (topGndGroup) topGndGroup.style.display = 'block';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
-            if (chkSolderMask) chkSolderMask.disabled = false;
-            if (chkTopDiel) chkTopDiel.disabled = false;
-            if (chkGndCut) chkGndCut.disabled = false;
-            if (chkEnclosure) chkEnclosure.disabled = false;
-        } else if (tlType === 'diff_gcpw') {
-            diffParams.style.display = 'block';
-            gcpwParams.style.display = 'block';
-            // Enable all advanced options for diff GCPW
-            if (solderMaskGroup) solderMaskGroup.style.display = 'block';
-            if (topDielGroup) topDielGroup.style.display = 'block';
-            if (gndCutGroup) gndCutGroup.style.display = 'block';
-            if (enclosureGroup) enclosureGroup.style.display = 'block';
-            if (topGndGroup) topGndGroup.style.display = 'block';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'block';
-            if (chkSolderMask) chkSolderMask.disabled = false;
-            if (chkTopDiel) chkTopDiel.disabled = false;
-            if (chkGndCut) chkGndCut.disabled = false;
-            if (chkEnclosure) chkEnclosure.disabled = false;
-        } else if (tlType === 'broadside_stripline') {
-            broadsideParams.style.display = 'block';
-            // Only enclosure + plating apply; hide solder mask, top dielectric, ground cutout.
-            if (solderMaskGroup) solderMaskGroup.style.display = 'none';
-            if (topDielGroup) topDielGroup.style.display = 'none';
-            if (gndCutGroup) gndCutGroup.style.display = 'none';
-            if (enclosureGroup) enclosureGroup.style.display = 'block';
-            // Top/bottom grounds are intrinsic; only side ground via enclosure makes sense.
-            if (topGndGroup) topGndGroup.style.display = 'none';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
-            if (chkSolderMask) {
-                chkSolderMask.disabled = true;
-                chkSolderMask.checked = false;
-                solderMaskParams.style.display = 'none';
-            }
-            if (chkTopDiel) {
-                chkTopDiel.disabled = true;
-                chkTopDiel.checked = false;
-                topDielParams.style.display = 'none';
-            }
-            if (chkGndCut) {
-                chkGndCut.disabled = true;
-                chkGndCut.checked = false;
-                gndCutParams.style.display = 'none';
-            }
-            if (chkEnclosure) chkEnclosure.disabled = false;
-        } else if (SELF_BOUNDED_PARAM_DIVS[tlType] || isCustom) {
-            // Self-bounded media (coax, rectangular waveguide): the shield / the walls ARE
-            // the domain boundary, so none of the board-stackup options apply. Plating and
-            // surface roughness do, and stay enabled.
-            // Custom geometry describes its whole stackup and its boundaries in the text.
-            if (!isCustom) document.getElementById(SELF_BOUNDED_PARAM_DIVS[tlType]).style.display = 'block';
-            if (solderMaskGroup) solderMaskGroup.style.display = 'none';
-            if (topDielGroup) topDielGroup.style.display = 'none';
-            if (gndCutGroup) gndCutGroup.style.display = 'none';
-            if (enclosureGroup) enclosureGroup.style.display = 'none';
-            if (topGndGroup) topGndGroup.style.display = 'none';
-            if (enclosureHeightGroup) enclosureHeightGroup.style.display = 'none';
-            for (const [cb, params] of [[chkSolderMask, solderMaskParams],
-                                        [chkTopDiel, topDielParams],
-                                        [chkGndCut, gndCutParams]]) {
+            // Locking the enclosure leaves its option section displayed as it was.
+            const checkboxes = { sm: ['chk_solder_mask', solderMaskParams], topDiel: ['chk_top_diel', topDielParams],
+                                 gndCut: ['chk_gnd_cut', gndCutParams], enclosure: ['chk_enclosure', null] };
+            for (const [name, [id, params]] of Object.entries(checkboxes)) {
+                const cb = document.getElementById(id);
                 if (!cb) continue;
-                cb.disabled = true; cb.checked = false;
-                if (params) params.style.display = 'none';
+                const locked = typeOptions.locked.includes(name);
+                cb.disabled = locked;
+                if (locked) {
+                    cb.checked = false;
+                    if (params) params.style.display = 'none';
+                }
             }
-            if (chkEnclosure) { chkEnclosure.disabled = true; chkEnclosure.checked = false; }
         }
         enforceBackendForType();
         enforceSweepOptionsForType();

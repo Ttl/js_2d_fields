@@ -172,8 +172,8 @@ for (const backend of ['rectilinear', 'triangular']) {
         const n = straddling(tb.mesh, lines);
         check(`${name}: no triangle straddles a dielectric interface`, n === 0, `${n} of ${tb.mesh.nTris}`);
         const q = s.meshQuality;
-        check(`${name}: mesh quality sane`, !!q && q.crossings === 0 && q.badFraction < 0.05 && q.maxQ < 50,
-            q ? `maxQ ${q.maxQ.toFixed(1)}, badFraction ${(q.badFraction * 100).toFixed(2)}%, crossings ${q.crossings}` : 'no meshQuality');
+        check(`${name}: mesh quality sane`, !!q && q.badFraction < 0.05 && q.maxQ < 50,
+            q ? `maxQ ${q.maxQ.toFixed(1)}, badFraction ${(q.badFraction * 100).toFixed(2)}%` : 'no meshQuality');
     }
 }
 

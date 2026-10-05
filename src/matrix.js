@@ -20,13 +20,6 @@ class Matrix2x2 {
         );
     }
 
-    static zero() {
-        return new Matrix2x2(
-            new Complex(0, 0), new Complex(0, 0),
-            new Complex(0, 0), new Complex(0, 0)
-        );
-    }
-
     static scalar(s) {
         // Create a scalar matrix (s * I)
         const sc = s instanceof Complex ? s : new Complex(s);

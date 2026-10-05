@@ -4,12 +4,11 @@ import { triQuality } from './fem_core.js';
 
 // --- Mesh quality check ---
 // Validates mesh quality before FEM solve. Returns { ok, warnings, errors, metrics }.
-// constraintYs/constraintXs: arrays of y/x values where material interfaces exist.
 // opts.skip: per-triangle mask (truthy = leave the triangle out of the shape
-// statistics: Q, badFraction, area ratio). The structural checks (crossings,
-// missing constraint edges, NaN nodes) always cover the whole mesh.
-export function checkMeshQuality(mesh, constraintYs, constraintXs, opts = {}) {
-    const { nodes, tris, edges, nTris, nEdges, nNodes } = mesh;
+// statistics: Q, badFraction, area ratio). The NaN node check always covers the
+// whole mesh.
+export function checkMeshQuality(mesh, opts = {}) {
+    const { nodes, tris, nTris, nNodes } = mesh;
     const warnings = [], errors = [];
     const skip = opts.skip || null;
 
@@ -27,61 +26,6 @@ export function checkMeshQuality(mesh, constraintYs, constraintXs, opts = {}) {
         sumQ += q;
         if (q > 5) badCount++;
     }
-
-    // --- Constraint crossings ---
-    let crossings = 0;
-    const cYs = constraintYs || [], cXs = constraintXs || [];
-    const cyR = mesh.constraintYRanges || {};
-    for (let t = 0; t < nTris; t++) {
-        const ys = [nodes[2*tris[3*t]+1], nodes[2*tris[3*t+1]+1], nodes[2*tris[3*t+2]+1]];
-        const xs = [nodes[2*tris[3*t]], nodes[2*tris[3*t+1]], nodes[2*tris[3*t+2]]];
-        const yMin = Math.min(...ys), yMax = Math.max(...ys);
-        const xMin = Math.min(...xs), xMax = Math.max(...xs);
-        for (const cy of cYs) {
-            if (yMin < cy - 1e-10 && yMax > cy + 1e-10) {
-                const r = cyR[cy];
-                if (!r || (xMax > r[0] + 1e-10 && xMin < r[1] - 1e-10)) { crossings++; break; }
-            }
-        }
-        for (const cx of cXs) {
-            if (xMin < cx - 1e-10 && xMax > cx + 1e-10) { crossings++; break; }
-        }
-    }
-
-    // --- Missing constraint edges ---
-    let missingEdges = 0;
-    const edgeSet = new Set();
-    for (let e = 0; e < nEdges; e++) {
-        const a = edges[2*e], b = edges[2*e+1];
-        edgeSet.add(Math.min(a,b)+','+Math.max(a,b));
-    }
-    function checkLine(axis, val, lo, hi) {
-        const pts = [];
-        for (let n = 0; n < nNodes; n++) {
-            const coord = axis === 'y' ? nodes[2*n+1] : nodes[2*n];
-            const pos = axis === 'y' ? nodes[2*n] : nodes[2*n+1];
-            if (Math.abs(coord - val) < 1e-10 && pos >= lo - 1e-10 && pos <= hi + 1e-10) {
-                pts.push({ pos, n });
-            }
-        }
-        pts.sort((a, b) => a.pos - b.pos);
-        for (let i = 0; i < pts.length - 1; i++) {
-            const a = pts[i].n, b = pts[i+1].n;
-            if (!edgeSet.has(Math.min(a,b)+','+Math.max(a,b))) missingEdges++;
-        }
-    }
-    const xRange = [Infinity, -Infinity], yRange = [Infinity, -Infinity];
-    for (let n = 0; n < nNodes; n++) {
-        xRange[0] = Math.min(xRange[0], nodes[2*n]);
-        xRange[1] = Math.max(xRange[1], nodes[2*n]);
-        yRange[0] = Math.min(yRange[0], nodes[2*n+1]);
-        yRange[1] = Math.max(yRange[1], nodes[2*n+1]);
-    }
-    for (const cy of cYs) {
-        const r = cyR[cy];
-        checkLine('y', cy, r ? r[0] : xRange[0], r ? r[1] : xRange[1]);
-    }
-    for (const cx of cXs) checkLine('x', cx, yRange[0], yRange[1]);
 
     // --- Extreme area ratio (indicates ill-conditioned FEM matrices) ---
     let minArea = Infinity, maxArea = 0;
@@ -105,12 +49,10 @@ export function checkMeshQuality(mesh, constraintYs, constraintXs, opts = {}) {
     // --- Build result ---
     const badFraction = nRated > 0 ? badCount / nRated : 0;
     const metrics = { maxQ, avgQ: nRated > 0 ? sumQ / nRated : 0, badCount, badFraction,
-                      degenerateCount, crossings, missingEdges, areaRatio, minArea, nanNodes };
+                      degenerateCount, areaRatio, minArea, nanNodes };
 
     if (nanNodes > 0) errors.push(`${nanNodes} nodes with NaN/Inf coordinates`);
-    if (crossings > 0) errors.push(`${crossings} triangles cross constraint lines`);
     if (degenerateCount > 0) errors.push(`${degenerateCount} degenerate triangles (zero area)`);
-    if (missingEdges > 0) errors.push(`${missingEdges} missing constraint edges`);
     if (areaRatio > 1e6) errors.push(`area ratio ${areaRatio.toExponential(1)} (extreme element size variation, will cause ill-conditioning)`);
     if (maxQ > 10) warnings.push(`max Q=${maxQ.toFixed(1)} (poor quality triangle)`);
     if (badFraction > 0.05) warnings.push(`${badCount}/${nRated} (${(badFraction*100).toFixed(1)}%) triangles with Q>5`);

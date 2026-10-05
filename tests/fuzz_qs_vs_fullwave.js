@@ -5,8 +5,7 @@
 //   • large discrepancies in the field-driven quantities (Z0, eps_eff, C) the two
 //     methods should agree on,
 //   • geometries whose triangular mesh comes out structurally poor (degenerate/NaN,
-//     constraint crossings, missing constraint edges, extreme area ratio, >5% bad
-//     triangles, or an extreme Q>2000 sliver),
+//     >5% bad triangles, or an extreme Q>2000 sliver),
 //   • geometries that make ONE backend throw while the other succeeds (a backend bug).
 //
 // Coverage:
@@ -55,8 +54,7 @@ const SEED   = process.argv[3] !== undefined ? parseInt(process.argv[3]) : 1;
 const THRESH = (parseFloat(process.argv[4]) || 15) / 100;
 // ONLY=4,11 solves just those case indices (the others are drawn and skipped).
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number)) : null;
-// Bad-mesh gate: structural errors (degenerate/NaN/constraint crossings/missing
-// constraint edges/extreme area ratio), systemic quality collapse (>5% of
+// Bad-mesh gate: structural errors (degenerate/NaN), systemic quality collapse (>5% of
 // triangles with Q>5 — checkMeshQuality's own warning threshold), or a single
 // extreme sliver. The singleton cap was 100 and is now 2000: coarse-budget
 // meshes on wide-domain thin-layer geometries (wide trace + solder mask)
@@ -368,8 +366,6 @@ async function solveOn(spec, backend) {
             degenerate: s.meshQuality ? s.meshQuality.degenerateCount : 0,
             nan: s.meshQuality ? s.meshQuality.nanNodes : 0,
             // Structural quality signals for the bad-mesh gate (see BAD_Q note).
-            crossings: s.meshQuality ? s.meshQuality.crossings : 0,
-            missingEdges: s.meshQuality ? s.meshQuality.missingEdges : 0,
             areaRatio: s.meshQuality ? s.meshQuality.areaRatio : 0,
             badFraction: s.meshQuality ? s.meshQuality.badFraction : 0,
         };
@@ -446,11 +442,11 @@ async function main() {
         // measured on cases with Qmax 3-6 and badFraction ~0 — and the direct
         // factorization handles it; the ratio separates nothing here.
         const badMesh = (fw.maxQ != null && fw.maxQ > BAD_Q) || fw.degenerate > 0 || fw.nan > 0
-            || fw.crossings > 0 || fw.missingEdges > 0 || fw.badFraction > 0.05;
+            || fw.badFraction > 0.05;
         if (badMesh) {
             flagged.badMesh.push({ spec, maxQ: fw.maxQ });
             console.log(`[${i}] ✗ BAD MESH (Qmax=${fw.maxQ?.toFixed(0)} degen=${fw.degenerate} nan=${fw.nan} ` +
-                `cross=${fw.crossings} missEdge=${fw.missingEdges} areaRatio=${fw.areaRatio?.toExponential(1)} ` +
+                `areaRatio=${fw.areaRatio?.toExponential(1)} ` +
                 `badFrac=${(fw.badFraction * 100).toFixed(1)}%)\n      ${fmtSpec(spec)}`);
         }
 

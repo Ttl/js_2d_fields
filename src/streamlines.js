@@ -306,34 +306,6 @@ function makeStreamlineTraceFromConductors(
     };
 }
 
-function sampleV(x, y, xArr, yArr, V) {
-    // Find surrounding indices
-    let i = yArr.findIndex(v => v > y) - 1;
-    let j = xArr.findIndex(v => v > x) - 1;
-
-    if (i < 0 || j < 0 || i >= yArr.length - 1 || j >= xArr.length - 1) {
-        return null;
-    }
-
-    const x1 = xArr[j], x2 = xArr[j + 1];
-    const y1 = yArr[i], y2 = yArr[i + 1];
-
-    const tx = (x - x1) / (x2 - x1);
-    const ty = (y - y1) / (y2 - y1);
-
-    function lerp(a, b, t) {
-        return a * (1 - t) + b * t;
-    }
-
-    const v =
-        lerp(
-            lerp(V[i][j], V[i][j + 1], tx),
-            lerp(V[i + 1][j], V[i + 1][j + 1], tx),
-            ty
-        );
-    return v;
-}
-
 function sampleField(x, y, xArr, yArr, Ex, Ey, conductors) {
     if (isInsideConductor(x, y, conductors)) return null;
 

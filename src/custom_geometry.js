@@ -124,10 +124,6 @@ class CustomGeometrySolver extends FieldSolver2D {
             this.sym_half
         );
 
-        this.x = null;
-        this.y = null;
-        this.dx = null;
-        this.dy = null;
         this.mesh_generated = false;
     }
 

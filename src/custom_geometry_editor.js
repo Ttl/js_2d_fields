@@ -9,6 +9,7 @@ import { parseGeometryText, evaluateGeometry, setParamInText, renameParamInText,
          changeUnitsInText, WALLS, ROUND_KEYS, PLATING_FACES as FACES, SHAPE_NAMES, CONDUCTOR_KEYS } from './custom_geometry_text.js';
 import { CustomGeometrySolver } from './custom_geometry.js';
 import { CONDUCTOR_COLOR, dielectricRGB, overAir, rgbToHex, hexToRGB } from './body_colors.js';
+import { downloadFile } from './snp_export.js';
 
 const CUSTOM_TEMPLATES = {
     'Stacked-dielectric microstrip': `# Microstrip on two dielectric layers. The ground boundary below the
@@ -821,12 +822,14 @@ function rectRow(model, st, geoRect, index, count) {
     const units = model.statements.find(o => o.type === 'units')?.value ?? 'mm';
     const lengthTip = (what, empty) => `${what}. Empty: ${empty}. A bare number is in ${units}, ` +
         'a suffix gives another unit: 1um, 500nm.';
+    // The centre of an n-gon or an ellipse.
+    const centreCells = () => el('span', { class: 'custom-axis' },
+        exprInput('x', fields.x, setField('x'), { title: 'Centre x' }),
+        exprInput('y', fields.y, setField('y'), { title: 'Centre y' }));
     let geometryCells, cornerPanel = null;
     if (shape === 'ngon') {
         geometryCells = [
-            el('span', { class: 'custom-axis' },
-                exprInput('x', fields.x, setField('x'), { title: 'Centre x' }),
-                exprInput('y', fields.y, setField('y'), { title: 'Centre y' })),
+            centreCells(),
             el('span', { class: 'custom-axis' },
                 exprInput('r', fields.r, setField('r'), { title: 'Vertex radius: the distance from the centre to each vertex' }),
                 exprInput('n', fields.n, setField('n'), { cls: 'narrow', kind: 'number', title: 'Number of vertices, 3 to 1024. One vertex is on top.' }),
@@ -835,9 +838,7 @@ function rectRow(model, st, geoRect, index, count) {
         ];
     } else if (shape === 'ellipse') {
         geometryCells = [
-            el('span', { class: 'custom-axis' },
-                exprInput('x', fields.x, setField('x'), { title: 'Centre x' }),
-                exprInput('y', fields.y, setField('y'), { title: 'Centre y' })),
+            centreCells(),
             el('span', { class: 'custom-axis' },
                 exprInput('rx', fields.rx, setField('rx'), { title: 'Horizontal semi-axis' }),
                 exprInput('ry', fields.ry, setField('ry'), { title: 'Vertical semi-axis' }),
@@ -1407,12 +1408,7 @@ export function initCustomGeometryEditor({ onGeometryChange, onHighlightChange, 
             setTimeout(() => { b.textContent = old; }, 1500);
         }).catch(() => log('Could not copy to the clipboard.'));
     });
-    $('btn-custom-save').addEventListener('click', () => {
-        const url = URL.createObjectURL(new Blob([text.value], { type: 'text/plain' }));
-        const a = el('a', { href: url, download: 'geometry.txt' });
-        a.click();
-        URL.revokeObjectURL(url);
-    });
+    $('btn-custom-save').addEventListener('click', () => downloadFile(text.value, 'geometry.txt'));
     $('btn-custom-load').addEventListener('click', () => $('custom-file-input').click());
     $('custom-file-input').addEventListener('change', (e) => {
         const file = e.target.files[0];

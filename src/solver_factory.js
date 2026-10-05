@@ -19,8 +19,6 @@ export const FULLWAVE_ONLY_TYPES = new Set(['coax', 'rect_waveguide']);
 
 function solverModeConfig(mode) {
     switch (mode) {
-        case 'fullwave_pert':
-            return { mesh_backend: 'triangular', tri_opts: { lossMethod: 'perturbation' } };
         case 'fullwave_mqs':
         case 'fullwave_occ':   // legacy saved value (the triangular backend now always uses OCC)
         case 'triangular':     // legacy saved value
@@ -29,6 +27,9 @@ function solverModeConfig(mode) {
             return { mesh_backend: 'rectilinear', tri_opts: null };
     }
 }
+
+const STRIPLINE_TYPES = new Set(['stripline', 'diff_stripline']);
+const DIFFERENTIAL_TYPES = new Set(['diff_microstrip', 'diff_stripline', 'diff_gcpw']);
 
 function addCommonOptions(options, p) {
     // Solder mask
@@ -122,95 +123,7 @@ export function platingOptions(p, extra = null) {
 export function buildSolverFromParams(p, onError = null) {
     let solver = null;
     try {
-        if (p.tl_type === 'gcpw') {
-            const options = {
-                substrate_height: p.h,
-                trace_width: p.w,
-                trace_thickness: p.t,
-                gnd_thickness: 35e-6,
-                epsilon_r: p.er,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Coplanar-specific
-                use_coplanar_gnd: true,
-                gap: p.gap,
-                via_gap: p.via_gap,
-                coplanar_gnd_width: p.gnd_width,
-                use_vias: true,
-                // Surface roughness
-                rq: p.rq,
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'diff_gcpw') {
-            const options = {
-                substrate_height: p.h,
-                trace_width: p.w,
-                trace_thickness: p.t,
-                trace_spacing: p.trace_spacing,  // Enables differential mode
-                gnd_thickness: 35e-6,
-                epsilon_r: p.er,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Coplanar-specific
-                use_coplanar_gnd: true,
-                gap: p.gap,
-                via_gap: p.via_gap,
-                coplanar_gnd_width: p.gnd_width,
-                use_vias: true,
-                // Surface roughness
-                rq: p.rq,
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'diff_microstrip') {
-            // Differential Microstrip
-            const options = {
-                trace_width: p.w,
-                substrate_height: p.h,
-                trace_thickness: p.t,
-                trace_spacing: p.trace_spacing,  // Enable differential mode
-                epsilon_r: p.er,
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Surface roughness
-                rq: p.rq
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'stripline') {
-            const options = {
-                trace_width: p.w,
-                substrate_height: p.h,
-                trace_thickness: p.t,
-                epsilon_r: p.er,
-                epsilon_r_top: p.er_top,
-                tan_delta_top: p.tand_top,
-                enclosure_height: striplineCoverHeight(p),
-                tan_delta: p.tand,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "gnd", "gnd"],
-                // Surface roughness
-                rq: p.rq
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
-        } else if (p.tl_type === 'custom') {
+        if (p.tl_type === 'custom') {
             // Geometry text plus parameter overrides (what a parameter sweep varies).
             // The board-stackup and plating options have no meaning here: the text
             // carries them, plating per conductor.
@@ -288,43 +201,13 @@ export function buildSolverFromParams(p, onError = null) {
                     options.boundaries = ["gnd", "gnd", "gnd", "gnd"];
                 }
             }
-            // Plating
-            if (p.use_plating) {
-                options.plating = {
-                    sigma: p.plating_sigma,
-                    thickness: p.plating_t,
-                    rq: p.plating_rq,
-                    rq_interface: platingInterfaceRq(p),
-                    top: p.plating_top,
-                    sides: p.plating_sides,
-                    bottom: p.plating_bottom,
-                    thick_corners: p.plating_thick_corners
-                };
-            }
+            const plating = platingOptions(p);
+            if (plating) options.plating = plating;
             solver = new BroadsideStriplineSolver(options);
-        } else if (p.tl_type === 'diff_stripline') {
-            const options = {
-                trace_width: p.w,
-                substrate_height: p.h,
-                trace_thickness: p.t,
-                trace_spacing: p.trace_spacing,  // Enable differential mode
-                epsilon_r: p.er,
-                epsilon_r_top: p.er_top,
-                enclosure_height: striplineCoverHeight(p),
-                tan_delta: p.tand,
-                tan_delta_top: p.tand_top,
-                sigma_cond: p.sigma,
-                freq: p.freq,
-                nx: p.nx,
-                ny: p.ny,
-                boundaries: ["open", "open", "gnd", "gnd"],
-                // Surface roughness
-                rq: p.rq
-            };
-            addCommonOptions(options, p);
-            solver = new MicrostripSolver(options);
         } else {
-            // Microstrip (with optional solder mask, top dielectric, ground cutout)
+            // Microstrip, stripline and GCPW families, single or differential. All take
+            // the solder mask, top dielectric, ground cutout, enclosure and plating.
+            const stripline = STRIPLINE_TYPES.has(p.tl_type);
             const options = {
                 trace_width: p.w,
                 substrate_height: p.h,
@@ -335,10 +218,22 @@ export function buildSolverFromParams(p, onError = null) {
                 freq: p.freq,
                 nx: p.nx,
                 ny: p.ny,
-                boundaries: ["open", "open", "open", "gnd"],
-                // Surface roughness
-                rq: p.rq
+                boundaries: ["open", "open", stripline ? "gnd" : "open", "gnd"],
+                rq: p.rq,
             };
+            if (DIFFERENTIAL_TYPES.has(p.tl_type)) options.trace_spacing = p.trace_spacing;
+            if (stripline) {
+                options.epsilon_r_top = p.er_top;
+                options.tan_delta_top = p.tand_top;
+                options.enclosure_height = striplineCoverHeight(p);
+            }
+            if (p.tl_type === 'gcpw' || p.tl_type === 'diff_gcpw') {
+                options.use_coplanar_gnd = true;
+                options.gap = p.gap;
+                options.via_gap = p.via_gap;
+                options.coplanar_gnd_width = p.gnd_width;
+                options.use_vias = true;
+            }
             addCommonOptions(options, p);
             solver = new MicrostripSolver(options);
         }
@@ -352,7 +247,6 @@ export function buildSolverFromParams(p, onError = null) {
             const backend = FULLWAVE_ONLY_TYPES.has(p.tl_type) ? 'fullwave_mqs' : p.mesh_backend;
             // Solver mode = numerical backend + triangular loss method:
             //   'rectilinear'   = quasi-static FDM (fastest)
-            //   'fullwave_pert' = triangular full-wave, perturbation loss (~2× faster)
             //   'fullwave_mqs'  = triangular full-wave, MQS volume loss (most accurate)
             const cfg = solverModeConfig(backend);
             solver.mesh_backend = cfg.mesh_backend;

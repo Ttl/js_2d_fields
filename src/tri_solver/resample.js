@@ -7,9 +7,8 @@
 // and Modes tab), the full-wave mode field on a grid, and the MQS current density and
 // surface current plots.
 
-import { triCoefficients } from './tri_fem.js';
+import { triCoefficients, evalFieldsAtPoint } from './tri_fem.js';
 import { shapeContains, distToShapeBoundary } from '../shapes.js';
-import { evalFieldsAtPoint } from './tri_ms_solver.js';
 import { segmentBuffer } from '../surface_segments.js';
 
 

@@ -401,6 +401,63 @@ export function getLzOffsets(fm) {
     return { lzOff, lzEdgeMidOff };
 }
 
+// --- Evaluate e_t and grad(ez) at point (px,py) inside triangle t ---
+// Returns the Lee-Jin eigenvector fields: e_t (= γ·Et) and ∇ez (= ∇Ez).
+// H can be computed from these as: jωμ₀Ht = ẑ×∇ez + ẑ×e_t (no γ multiply).
+export function evalFieldsAtPoint(t, px, py, mesh, fm, vecRe, vecIm) {
+    const { tris, triEdges, triSigns, nodes } = mesh;
+    const { edgeF, faceF, nodeF, edgeNodeF } = fm;
+    const { lzOff, lzEdgeMidOff } = getLzOffsets(fm);
+    const _edgeVerts = [[0, 1], [1, 2], [2, 0]];
+
+    const vv0 = tris[3*t], vv1 = tris[3*t+1], vv2 = tris[3*t+2];
+    const { coeff: cf } = triCoefficients(nodes, vv0, vv1, vv2);
+    const nNed = 8;
+    const nLag = 6;
+
+    // Gather transverse DOFs
+    const eR = new Float64Array(nNed), eI = new Float64Array(nNed);
+    for (let k = 0; k < 3; k++) {
+        const eIdx = triEdges[3*t+k], s = triSigns[3*t+k];
+        const ef1 = edgeF[2*eIdx]; if (ef1 >= 0) { eR[k] = s*vecRe[ef1]; eI[k] = s*vecIm[ef1]; }
+        const ef2 = edgeF[2*eIdx+1]; if (ef2 >= 0) { eR[k+4] = vecRe[ef2]; eI[k+4] = vecIm[ef2]; }
+    }
+    const ff1 = faceF[2*t]; if (ff1 >= 0) { eR[3] = vecRe[ff1]; eI[3] = vecIm[ff1]; }
+    const ff2 = faceF[2*t+1]; if (ff2 >= 0) { eR[7] = vecRe[ff2]; eI[7] = vecIm[ff2]; }
+
+    // Evaluate e_t from all Nedelec DOFs
+    let exr = 0, exi = 0, eyr = 0, eyi = 0;
+    for (let k = 0; k < 3; k++) {
+        const [p, q] = _edgeVerts[k];
+        {const [wx, wy] = ne1(cf, p, q, px, py); exr+=wx*eR[k]; exi+=wx*eI[k]; eyr+=wy*eR[k]; eyi+=wy*eI[k];}
+        {const [wx, wy] = ne2(cf, p, q, px, py); exr+=wx*eR[k+4]; exi+=wx*eI[k+4]; eyr+=wy*eR[k+4]; eyi+=wy*eI[k+4];}
+    }
+    { const [wx,wy] = nf1(cf, px, py); exr+=wx*eR[3]; exi+=wx*eI[3]; eyr+=wy*eR[3]; eyi+=wy*eI[3]; }
+    { const [wx,wy] = nf2(cf, px, py); exr+=wx*eR[7]; exi+=wx*eI[7]; eyr+=wy*eR[7]; eyi+=wy*eI[7]; }
+
+    // Gather longitudinal DOFs and evaluate grad(Ez)
+    const nDR = new Float64Array(nLag), nDI = new Float64Array(nLag);
+    const vts = [vv0, vv1, vv2];
+    for (let k = 0; k < 3; k++) { const nf = nodeF[vts[k]]; if (nf >= 0) { nDR[k] = vecRe[lzOff+nf]; nDI[k] = vecIm[lzOff+nf]; } }
+    for (let k = 0; k < 3; k++) { const enf = edgeNodeF[triEdges[3*t+k]]; if (enf >= 0) { nDR[k+3] = vecRe[lzEdgeMidOff+enf]; nDI[k+3] = vecIm[lzEdgeMidOff+enf]; } }
+
+    let dezdxr = 0, dezdxi = 0, dezdyr = 0, dezdyi = 0;
+    for (let k = 0; k < 3; k++) { const [gx,gy] = lvGrad(cf, k, px, py); dezdxr += gx*nDR[k]; dezdxi += gx*nDI[k]; dezdyr += gy*nDR[k]; dezdyi += gy*nDI[k]; }
+    for (let k = 0; k < 3; k++) { const [p,q] = _edgeVerts[k]; const [gx,gy] = leGrad(cf, p, q, px, py); dezdxr += gx*nDR[k+3]; dezdxi += gx*nDI[k+3]; dezdyr += gy*nDR[k+3]; dezdyi += gy*nDI[k+3]; }
+
+    // curl(Et)_z = ∂Ey/∂x - ∂Ex/∂y — computed from analytical Nedelec curl.
+    let curlEtRe = 0, curlEtIm = 0;
+    for (let k = 0; k < 3; k++) {
+        const [p, q] = _edgeVerts[k];
+        {const c = ne1Curl(cf, p, q); curlEtRe += c*eR[k]; curlEtIm += c*eI[k];}
+        {const c = ne2Curl(cf, p, q, px, py); curlEtRe += c*eR[k+4]; curlEtIm += c*eI[k+4];}
+    }
+    { const c = nf1Curl(cf, px, py); curlEtRe += c * eR[3]; curlEtIm += c * eI[3]; }
+    { const c = nf2Curl(cf, px, py); curlEtRe += c * eR[7]; curlEtIm += c * eI[7]; }
+
+    return { exr, exi, eyr, eyi, dezdxr, dezdxi, dezdyr, dezdyi, curlEtRe, curlEtIm };
+}
+
 // --- Freedom map ---
 // Global DOF layout (P2):
 // Transverse: [0, 2*nEdges) edge DOFs + [2*nEdges, 2*nEdges+2*nTris) face DOFs

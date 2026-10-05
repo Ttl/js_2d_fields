@@ -1,4 +1,4 @@
-import { FieldSolver2D } from './field_solver.js';
+import { FieldSolver2D, paramChecks, throwIfErrors } from './field_solver.js';
 import { Dielectric, Conductor, Mesher, DEFAULT_GRID_N } from './mesher.js';
 
 /**
@@ -108,10 +108,6 @@ class BroadsideStriplineSolver extends FieldSolver2D {
             this.domain_height
         );
 
-        this.x = null;
-        this.y = null;
-        this.dx = null;
-        this.dy = null;
         this.mesh_generated = false;
 
         // Strong broadside coupling: reduced conductor-loss accuracy on this
@@ -137,16 +133,7 @@ class BroadsideStriplineSolver extends FieldSolver2D {
 
     _validate_parameters(options) {
         const errors = [];
-        const isNum = (v) => typeof v === 'number' && !isNaN(v) && isFinite(v);
-        const positive = (v, name) => {
-            if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
-            else if (v <= 0) errors.push(`${name} must be positive, got ${v}`);
-        };
-        const nonneg = (v, name) => {
-            if (v == null) return;
-            if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
-            else if (v < 0) errors.push(`${name} must be non-negative, got ${v}`);
-        };
+        const { isNum, positive, nonneg } = paramChecks(errors);
         positive(options.trace_width, 'trace_width');
         const nonzero = (v, name) => {
             if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
@@ -189,9 +176,7 @@ class BroadsideStriplineSolver extends FieldSolver2D {
                     errors.push(`Active area width (${(active_width * 1000).toFixed(3)} mm, trace_width + 2 × |x_offset|) must be smaller than the enclosure inner width (${(options.enclosure_width * 1000).toFixed(3)} mm)`);
             }
         }
-        if (errors.length > 0) {
-            throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
-        }
+        throwIfErrors(errors);
     }
 
     _calculate_coordinates() {

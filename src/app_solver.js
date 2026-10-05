@@ -1,7 +1,7 @@
 import { Complex } from './complex.js';
-import { computeSParamsSingleEnded, computeSParamsDifferential, sParamTodB, usableSweepPoints } from './sparameters.js';
-import { exportSnP } from './snp_export.js';
-import { draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+import { usableSweepPoints } from './sparameters.js';
+import { exportSnP, downloadFile } from './snp_export.js';
+import { darkAxis, darkBackground, draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
     centroidHoverTrace, triMeanE, updateTriImage } from './plot.js';
 import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
@@ -275,122 +275,149 @@ function fmtErrPct(err) {
     return pct < 1e-3 ? pct.toExponential(2) : pct.toPrecision(3);
 }
 
+// The sidebar inputs behind the settings (getUISettings, share links, restoreSettings)
+// and the solve parameters (getParams), in settings key order.
+// kind: unit (a number in the input's unit: display units in the settings, SI in the
+//   params), num, int, float (parseFloat of the value, no placeholder), chk (1/0 in the
+//   settings, boolean in the params), bool (boolean in the settings), pct (percent in the
+//   input, a fraction in the settings and the params).
+// use: s = settings, p = params, h = geometry hash, l = edits redraw the geometry.
+const SETTINGS_FIELDS = [
+    ['custom_sigma', 'inp_custom_sigma', 'num', 'sl'],
+    ['w', 'inp_w', 'unit', 'sphl'],
+    ['h', 'inp_h', 'unit', 'sphl'],
+    ['t', 'inp_t', 'unit', 'sphl'],
+    ['er', 'inp_er', 'num', 'sphl'],
+    ['tand', 'inp_tand', 'num', 'sphl'],
+    ['sigma', 'inp_sigma', 'num', 'sphl'],
+    ['freq_start', 'freq-start', 'unit', 'spl'],
+    ['freq_stop', 'freq-stop', 'unit', 's'],
+    ['freq_points', 'freq-points', 'int', 's'],
+    ['trace_spacing', 'inp_trace_spacing', 'unit', 'sphl'],
+    ['gap', 'inp_gap', 'unit', 'sphl'],
+    ['via_gap', 'inp_via_gap', 'unit', 'sphl'],
+    ['gnd_width', 'inp_gnd_width', 'unit', 'sphl'],
+    ['stripline_top_h', 'inp_air_top', 'unit', 'sphl'],
+    ['er_top', 'inp_er_top', 'num', 'sphl'],
+    ['tand_top', 'inp_tand_top', 'num', 'sphl'],
+    ['use_sm', 'chk_solder_mask', 'chk', 'sphl'],
+    ['sm_t_sub', 'inp_sm_t_sub', 'unit', 'sphl'],
+    ['sm_t_trace', 'inp_sm_t_trace', 'unit', 'sphl'],
+    ['sm_t_side', 'inp_sm_t_side', 'unit', 'sphl'],
+    ['sm_er', 'inp_sm_er', 'num', 'sphl'],
+    ['sm_tand', 'inp_sm_tand', 'num', 'sphl'],
+    ['use_top_diel', 'chk_top_diel', 'chk', 'sphl'],
+    ['top_diel_h', 'inp_top_diel_h', 'unit', 'sphl'],
+    ['top_diel_er', 'inp_top_diel_er', 'num', 'sphl'],
+    ['top_diel_tand', 'inp_top_diel_tand', 'num', 'sphl'],
+    ['use_gnd_cut', 'chk_gnd_cut', 'chk', 'sphl'],
+    ['gnd_cut_w', 'inp_gnd_cut_w', 'unit', 'sphl'],
+    ['gnd_cut_h', 'inp_gnd_cut_h', 'unit', 'sphl'],
+    ['use_enclosure', 'chk_enclosure', 'chk', 'sphl'],
+    ['use_side_gnd', 'chk_side_gnd', 'chk', 'sphl'],
+    ['use_top_gnd', 'chk_top_gnd', 'chk', 'sphl'],
+    ['enclosure_width', 'inp_enclosure_width', 'unit', 'sphl'],
+    ['enclosure_height', 'inp_enclosure_height', 'unit', 'sphl'],
+    ['max_iters', 'inp_max_iters', 'int', 'sp'],
+    ['tolerance', 'inp_tolerance', 'pct', 'sp'],
+    ['min_converged_passes', 'inp_min_converged_passes', 'num', 'sp'],
+    ['estimate_error', 'chk_estimate_error', 'chk', 'sp'],
+    ['max_nodes', 'inp_max_nodes', 'int', 'sp'],
+    ['rq', 'inp_rq', 'unit', 'sphl'],
+    ['use_plating', 'chk_plating', 'chk', 'sphl'],
+    ['plating_sigma', 'inp_plating_sigma', 'num', 'sphl'],
+    ['plating_t', 'inp_plating_t', 'unit', 'sphl'],
+    ['plating_rq', 'inp_plating_rq', 'unit', 'sphl'],
+    ['plating_rq_iface', 'inp_plating_rq_iface', 'unit', 'sphl'],
+    ['plating_top', 'chk_plating_top', 'chk', 'sphl'],
+    ['plating_sides', 'chk_plating_sides', 'chk', 'sphl'],
+    ['plating_bottom', 'chk_plating_bottom', 'chk', 'sphl'],
+    ['plating_thick_corners', 'chk_plating_thick_corners', 'chk', 'spl'],
+    ['sparam_length', 'sparam-length', 'unit', 's'],
+    ['sparam_z_ref', 'sparam-z-ref', 'num', 's'],
+    ['use_causal_materials', 'chk_causal_materials', 'chk', 'sp'],
+    ['interp_sweep', 'chk_interp_sweep', 'chk', 's'],
+    ['interp_tolerance', 'interp_tolerance', 'float', 's'],
+    ['modes_freq', 'modes-freq', 'unit', 's'],
+    ['modes_nev', 'modes-nev', 'int', 's'],
+    ['modes_mesh_density', 'modes-mesh-density', 'int', 's'],
+    ['modes_shrink_domain', 'modes-shrink-domain', 'bool', 's'],
+    // Broadside coupled stripline
+    ['bs_w', 'inp_bs_w', 'unit', 'sphl'],
+    ['bs_t', 'inp_bs_t', 'unit', 'sphl'],
+    ['bs_x_offset', 'inp_bs_x_offset', 'unit', 'sphl'],
+    ['bs_sigma', 'inp_bs_sigma', 'num', 'sphl'],
+    ['bs_h_bottom', 'inp_bs_h_bottom', 'unit', 'sphl'],
+    ['bs_er_bottom', 'inp_bs_er_bottom', 'num', 'sphl'],
+    ['bs_tand_bottom', 'inp_bs_tand_bottom', 'num', 'sphl'],
+    ['bs_h_middle', 'inp_bs_h_middle', 'unit', 'sphl'],
+    ['bs_er_middle', 'inp_bs_er_middle', 'num', 'sphl'],
+    ['bs_tand_middle', 'inp_bs_tand_middle', 'num', 'sphl'],
+    ['bs_h_top', 'inp_bs_h_top', 'unit', 'sphl'],
+    ['bs_er_top', 'inp_bs_er_top', 'num', 'sphl'],
+    ['bs_tand_top', 'inp_bs_tand_top', 'num', 'sphl'],
+    // Coaxial (diameters in; CoaxSolver derives the radii)
+    ['coax_d', 'inp_coax_d', 'unit', 'sphl'],
+    ['coax_D', 'inp_coax_D', 'unit', 'sphl'],
+    ['coax_er', 'inp_coax_er', 'num', 'sphl'],
+    ['coax_tand', 'inp_coax_tand', 'num', 'sphl'],
+    ['coax_sigma', 'inp_coax_sigma', 'num', 'sphl'],
+    ['coax_plating_inner', 'chk_plating_inner', 'chk', 'sphl'],
+    ['coax_plating_outer', 'chk_plating_outer', 'chk', 'sphl'],
+    // Rectangular waveguide (inner wall dimensions)
+    ['wg_a', 'inp_wg_a', 'unit', 'sphl'],
+    ['wg_b', 'inp_wg_b', 'unit', 'sphl'],
+    ['wg_er', 'inp_wg_er', 'num', 'sphl'],
+    ['wg_tand', 'inp_wg_tand', 'num', 'sphl'],
+    ['wg_sigma', 'inp_wg_sigma', 'num', 'sphl'],
+];
+const fieldsFor = (use) => SETTINGS_FIELDS.filter(f => f[3].includes(use));
+
+// Value of an input as stored in the settings (display units).
+function readSetting(id, kind) {
+    const el = document.getElementById(id);
+    switch (kind) {
+        case 'unit': {
+            if (!el) return NaN;
+            const defaultUnit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
+            const siValue = window.parseValueWithUnit ?
+                window.parseValueWithUnit(el.value, defaultUnit) :
+                parseFloat(el.value);
+            // Convert back to display units for serialization
+            const unitMap = { 'mm': 1e3, 'μm': 1e6, 'GHz': 1e-9, 'm': 1 };
+            return siValue * (unitMap[defaultUnit] || 1);
+        }
+        case 'num': return getInputValueUnitless(id);
+        case 'int': return parseInt(el.value);
+        case 'float': return parseFloat(el.value);
+        case 'chk': return el.checked ? 1 : 0;
+        case 'bool': return el.checked;
+        // The input is in percent. The solvers (and saved settings / share links)
+        // use the fraction.
+        case 'pct': return getInputValueUnitless(id) / 100;
+    }
+}
+
+// Value of an input as passed to the solvers (SI units).
+function readParam(id, kind) {
+    switch (kind) {
+        case 'unit': return getInputValue(id);
+        case 'chk': return document.getElementById(id).checked;
+        default: return readSetting(id, kind);
+    }
+}
+
 /**
  * Get current UI settings as a serializable object (in display units)
  */
 function getUISettings() {
-    // Helper to get display value (strip unit and return raw number)
-    const getDisplayValue = (id) => {
-        const element = document.getElementById(id);
-        if (!element) return NaN;
-        const defaultUnit = window.getDefaultUnit ? window.getDefaultUnit(id) : '';
-        const siValue = window.parseValueWithUnit ?
-            window.parseValueWithUnit(element.value, defaultUnit) :
-            parseFloat(element.value);
-
-        // Convert back to display units for serialization
-        const unitMap = {
-            'mm': 1e3, 'μm': 1e6, 'GHz': 1e-9, 'm': 1
-        };
-        const scale = unitMap[defaultUnit] || 1;
-        return siValue * scale;
-    };
-
-    return {
+    const settings = {
         tl_type: document.getElementById('tl_type').value,
         mesh_backend: (document.getElementById('mesh_backend')?.value) ?? 'rectilinear',
         custom_geom: getCustomGeometryText(),
-        custom_sigma: getInputValueUnitless('inp_custom_sigma'),
-        w: getDisplayValue('inp_w'),
-        h: getDisplayValue('inp_h'),
-        t: getDisplayValue('inp_t'),
-        er: getInputValueUnitless('inp_er'),
-        tand: getInputValueUnitless('inp_tand'),
-        sigma: getInputValueUnitless('inp_sigma'),
-        freq_start: getDisplayValue('freq-start'),
-        freq_stop: getDisplayValue('freq-stop'),
-        freq_points: parseInt(document.getElementById('freq-points').value),
-        trace_spacing: getDisplayValue('inp_trace_spacing'),
-        gap: getDisplayValue('inp_gap'),
-        via_gap: getDisplayValue('inp_via_gap'),
-        gnd_width: getDisplayValue('inp_gnd_width'),
-        stripline_top_h: getDisplayValue('inp_air_top'),
-        er_top: getInputValueUnitless('inp_er_top'),
-        tand_top: getInputValueUnitless('inp_tand_top'),
-        use_sm: document.getElementById('chk_solder_mask').checked ? 1 : 0,
-        sm_t_sub: getDisplayValue('inp_sm_t_sub'),
-        sm_t_trace: getDisplayValue('inp_sm_t_trace'),
-        sm_t_side: getDisplayValue('inp_sm_t_side'),
-        sm_er: getInputValueUnitless('inp_sm_er'),
-        sm_tand: getInputValueUnitless('inp_sm_tand'),
-        use_top_diel: document.getElementById('chk_top_diel').checked ? 1 : 0,
-        top_diel_h: getDisplayValue('inp_top_diel_h'),
-        top_diel_er: getInputValueUnitless('inp_top_diel_er'),
-        top_diel_tand: getInputValueUnitless('inp_top_diel_tand'),
-        use_gnd_cut: document.getElementById('chk_gnd_cut').checked ? 1 : 0,
-        gnd_cut_w: getDisplayValue('inp_gnd_cut_w'),
-        gnd_cut_h: getDisplayValue('inp_gnd_cut_h'),
-        use_enclosure: document.getElementById('chk_enclosure').checked ? 1 : 0,
-        use_side_gnd: document.getElementById('chk_side_gnd').checked ? 1 : 0,
-        use_top_gnd: document.getElementById('chk_top_gnd').checked ? 1 : 0,
-        enclosure_width: getDisplayValue('inp_enclosure_width'),
-        enclosure_height: getDisplayValue('inp_enclosure_height'),
-        max_iters: parseInt(document.getElementById('inp_max_iters').value),
-        // The input is in percent. The solvers (and saved settings / share links)
-        // use the fraction.
-        tolerance: getInputValueUnitless('inp_tolerance') / 100,
-        min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
-        estimate_error: document.getElementById('chk_estimate_error').checked ? 1 : 0,
-        max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
-        rq: getDisplayValue('inp_rq'),
-        use_plating: document.getElementById('chk_plating').checked ? 1 : 0,
-        plating_sigma: getInputValueUnitless('inp_plating_sigma'),
-        plating_t: getDisplayValue('inp_plating_t'),
-        plating_rq: getDisplayValue('inp_plating_rq'),
-        plating_rq_iface: getDisplayValue('inp_plating_rq_iface'),
-        plating_top: document.getElementById('chk_plating_top').checked ? 1 : 0,
-        plating_sides: document.getElementById('chk_plating_sides').checked ? 1 : 0,
-        plating_bottom: document.getElementById('chk_plating_bottom').checked ? 1 : 0,
-        plating_thick_corners: document.getElementById('chk_plating_thick_corners').checked ? 1 : 0,
-        sparam_length: getDisplayValue('sparam-length'),
-        sparam_z_ref: getInputValueUnitless('sparam-z-ref'),
-        use_causal_materials: document.getElementById('chk_causal_materials').checked ? 1 : 0,
-        interp_sweep: document.getElementById('chk_interp_sweep').checked ? 1 : 0,
-        interp_tolerance: parseFloat(document.getElementById('interp_tolerance').value),
-        modes_freq: getDisplayValue('modes-freq'),
-        modes_nev: parseInt(document.getElementById('modes-nev').value),
-        modes_mesh_density: parseInt(document.getElementById('modes-mesh-density').value),
-        modes_shrink_domain: document.getElementById('modes-shrink-domain').checked,
-        bs_w: getDisplayValue('inp_bs_w'),
-        bs_t: getDisplayValue('inp_bs_t'),
-        bs_x_offset: getDisplayValue('inp_bs_x_offset'),
-        bs_sigma: getInputValueUnitless('inp_bs_sigma'),
-        bs_h_bottom: getDisplayValue('inp_bs_h_bottom'),
-        bs_er_bottom: getInputValueUnitless('inp_bs_er_bottom'),
-        bs_tand_bottom: getInputValueUnitless('inp_bs_tand_bottom'),
-        bs_h_middle: getDisplayValue('inp_bs_h_middle'),
-        bs_er_middle: getInputValueUnitless('inp_bs_er_middle'),
-        bs_tand_middle: getInputValueUnitless('inp_bs_tand_middle'),
-        bs_h_top: getDisplayValue('inp_bs_h_top'),
-        bs_er_top: getInputValueUnitless('inp_bs_er_top'),
-        bs_tand_top: getInputValueUnitless('inp_bs_tand_top'),
-
-        // Coaxial
-        coax_d: getDisplayValue('inp_coax_d'),
-        coax_D: getDisplayValue('inp_coax_D'),
-        coax_er: getInputValueUnitless('inp_coax_er'),
-        coax_tand: getInputValueUnitless('inp_coax_tand'),
-        coax_sigma: getInputValueUnitless('inp_coax_sigma'),
-        coax_plating_inner: document.getElementById('chk_plating_inner').checked ? 1 : 0,
-        coax_plating_outer: document.getElementById('chk_plating_outer').checked ? 1 : 0,
-
-        // Rectangular waveguide
-        wg_a: getDisplayValue('inp_wg_a'),
-        wg_b: getDisplayValue('inp_wg_b'),
-        wg_er: getInputValueUnitless('inp_wg_er'),
-        wg_tand: getInputValueUnitless('inp_wg_tand'),
-        wg_sigma: getInputValueUnitless('inp_wg_sigma'),
     };
+    for (const [key, id, kind] of fieldsFor('s')) settings[key] = readSetting(id, kind);
+    return settings;
 }
 
 /**
@@ -571,111 +598,19 @@ function restoreSettings(settings) {
             meshBackendSelect.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
-        setValueWithUnit('inp_w', fullSettings.w);
-        setValueWithUnit('inp_h', fullSettings.h);
-        setValueWithUnit('inp_t', fullSettings.t);
-        document.getElementById('inp_er').value = fullSettings.er;
-        document.getElementById('inp_tand').value = fullSettings.tand;
-        document.getElementById('inp_sigma').value = fullSettings.sigma;
-        setValueWithUnit('freq-start', fullSettings.freq_start);
-        setValueWithUnit('freq-stop', fullSettings.freq_stop);
-        document.getElementById('freq-points').value = fullSettings.freq_points;
-        setValueWithUnit('inp_trace_spacing', fullSettings.trace_spacing);
-        setValueWithUnit('inp_gap', fullSettings.gap);
-        setValueWithUnit('inp_via_gap', fullSettings.via_gap);
-        setValueWithUnit('inp_gnd_width', fullSettings.gnd_width);
-        setValueWithUnit('inp_air_top', fullSettings.stripline_top_h);
-        document.getElementById('inp_er_top').value = fullSettings.er_top;
-        document.getElementById('inp_tand_top').value = fullSettings.tand_top;
-
-        // Checkboxes
-        document.getElementById('chk_solder_mask').checked = !!fullSettings.use_sm;
-        setValueWithUnit('inp_sm_t_sub', fullSettings.sm_t_sub);
-        setValueWithUnit('inp_sm_t_trace', fullSettings.sm_t_trace);
-        setValueWithUnit('inp_sm_t_side', fullSettings.sm_t_side);
-        document.getElementById('inp_sm_er').value = fullSettings.sm_er;
-        document.getElementById('inp_sm_tand').value = fullSettings.sm_tand;
-
-        document.getElementById('chk_top_diel').checked = !!fullSettings.use_top_diel;
-        setValueWithUnit('inp_top_diel_h', fullSettings.top_diel_h);
-        document.getElementById('inp_top_diel_er').value = fullSettings.top_diel_er;
-        document.getElementById('inp_top_diel_tand').value = fullSettings.top_diel_tand;
-
-        document.getElementById('chk_gnd_cut').checked = !!fullSettings.use_gnd_cut;
-        setValueWithUnit('inp_gnd_cut_w', fullSettings.gnd_cut_w);
-        setValueWithUnit('inp_gnd_cut_h', fullSettings.gnd_cut_h);
-
-        document.getElementById('chk_enclosure').checked = !!fullSettings.use_enclosure;
-        document.getElementById('chk_side_gnd').checked = !!fullSettings.use_side_gnd;
-        document.getElementById('chk_top_gnd').checked = !!fullSettings.use_top_gnd;
-        setValueWithUnit('inp_enclosure_width', fullSettings.enclosure_width);
-        setValueWithUnit('inp_enclosure_height', fullSettings.enclosure_height);
-
-        document.getElementById('inp_max_iters').value = fullSettings.max_iters;
-        // Stored as a fraction (settings/link format), displayed in percent.
-        // toPrecision strips float noise (0.003 * 100 = 0.30000000000000004).
-        document.getElementById('inp_tolerance').value =
-            parseFloat((100 * fullSettings.tolerance).toPrecision(10));
-        if (fullSettings.min_converged_passes !== undefined)
-            document.getElementById('inp_min_converged_passes').value = fullSettings.min_converged_passes;
-        document.getElementById('chk_estimate_error').checked = !!fullSettings.estimate_error;
-        document.getElementById('inp_max_nodes').value = fullSettings.max_nodes;
-        setValueWithUnit('inp_rq', fullSettings.rq);
-
-        document.getElementById('chk_plating').checked = !!fullSettings.use_plating;
-        document.getElementById('inp_plating_sigma').value = fullSettings.plating_sigma;
-        setValueWithUnit('inp_plating_t', fullSettings.plating_t);
-        setValueWithUnit('inp_plating_rq', fullSettings.plating_rq);
-        setValueWithUnit('inp_plating_rq_iface', fullSettings.plating_rq_iface);
-        document.getElementById('chk_plating_top').checked = !!fullSettings.plating_top;
-        document.getElementById('chk_plating_sides').checked = !!fullSettings.plating_sides;
-        document.getElementById('chk_plating_bottom').checked = !!fullSettings.plating_bottom;
-        document.getElementById('chk_plating_thick_corners').checked = !!fullSettings.plating_thick_corners;
-
-        document.getElementById('chk_causal_materials').checked = !!fullSettings.use_causal_materials;
-
-        document.getElementById('chk_interp_sweep').checked = !!fullSettings.interp_sweep;
-        document.getElementById('interp_tolerance').value = fullSettings.interp_tolerance;
-
-        setValueWithUnit('modes-freq', fullSettings.modes_freq);
-        document.getElementById('modes-nev').value = fullSettings.modes_nev;
-        document.getElementById('modes-mesh-density').value = fullSettings.modes_mesh_density;
-        document.getElementById('modes-shrink-domain').checked = fullSettings.modes_shrink_domain !== false;
-
-        setValueWithUnit('sparam-length', fullSettings.sparam_length);
-        document.getElementById('sparam-z-ref').value = fullSettings.sparam_z_ref;
-
-        // Broadside coupled stripline
-        setValueWithUnit('inp_bs_w', fullSettings.bs_w);
-        setValueWithUnit('inp_bs_t', fullSettings.bs_t);
-        setValueWithUnit('inp_bs_x_offset', fullSettings.bs_x_offset);
-        document.getElementById('inp_bs_sigma').value = fullSettings.bs_sigma;
-        setValueWithUnit('inp_bs_h_bottom', fullSettings.bs_h_bottom);
-        document.getElementById('inp_bs_er_bottom').value = fullSettings.bs_er_bottom;
-        document.getElementById('inp_bs_tand_bottom').value = fullSettings.bs_tand_bottom;
-        setValueWithUnit('inp_bs_h_middle', fullSettings.bs_h_middle);
-        document.getElementById('inp_bs_er_middle').value = fullSettings.bs_er_middle;
-        document.getElementById('inp_bs_tand_middle').value = fullSettings.bs_tand_middle;
-        setValueWithUnit('inp_bs_h_top', fullSettings.bs_h_top);
-        document.getElementById('inp_bs_er_top').value = fullSettings.bs_er_top;
-        document.getElementById('inp_bs_tand_top').value = fullSettings.bs_tand_top;
-
-        setValueWithUnit('inp_coax_d', fullSettings.coax_d);
-        setValueWithUnit('inp_coax_D', fullSettings.coax_D);
-        document.getElementById('inp_coax_er').value = fullSettings.coax_er;
-        document.getElementById('inp_coax_tand').value = fullSettings.coax_tand;
-        document.getElementById('inp_coax_sigma').value = fullSettings.coax_sigma;
-        document.getElementById('chk_plating_inner').checked = !!fullSettings.coax_plating_inner;
-        document.getElementById('chk_plating_outer').checked = !!fullSettings.coax_plating_outer;
-
-        document.getElementById('inp_custom_sigma').value = fullSettings.custom_sigma;
+        for (const [key, id, kind] of fieldsFor('s')) {
+            const value = fullSettings[key];
+            if (kind === 'unit') { setValueWithUnit(id, value); continue; }
+            if (key === 'min_converged_passes' && value === undefined) continue;
+            const el = document.getElementById(id);
+            if (kind === 'chk') el.checked = !!value;
+            else if (kind === 'bool') el.checked = value !== false;
+            // Stored as a fraction (settings/link format), displayed in percent.
+            // toPrecision strips float noise (0.003 * 100 = 0.30000000000000004).
+            else if (kind === 'pct') el.value = parseFloat((100 * value).toPrecision(10));
+            else el.value = value;
+        }
         setCustomGeometryText(fullSettings.custom_geom || '');
-
-        setValueWithUnit('inp_wg_a', fullSettings.wg_a);
-        setValueWithUnit('inp_wg_b', fullSettings.wg_b);
-        document.getElementById('inp_wg_er').value = fullSettings.wg_er;
-        document.getElementById('inp_wg_tand').value = fullSettings.wg_tand;
-        document.getElementById('inp_wg_sigma').value = fullSettings.wg_sigma;
 
         // tl_type is restored above the backend dropdown and the sweep checkboxes, so both
         // locks have to run once every input is in place, otherwise a stale or
@@ -1155,9 +1090,6 @@ function getFrequencies() {
     return freqs;
 }
 
-/**
- * Get a hash of geometry parameters for change tracking
- */
 // Interpolating-sweep tolerance, as a fraction. Validated here (on the thread that owns
 // the input) so a bad value fails before the worker job starts.
 function interpTolerance() {
@@ -1168,78 +1100,12 @@ function interpTolerance() {
     return tolPercent / 100;
 }
 
+// Keys of getParams() that define the geometry, hashed for change tracking.
+const GEOMETRY_HASH_KEYS = ['tl_type', 'custom_geom', 'custom_overrides', ...fieldsFor('h').map(f => f[0])];
+
 function getGeometryHash() {
     const p = getParams();
-    return JSON.stringify({
-        tl_type: p.tl_type,
-        custom_geom: p.custom_geom,
-        custom_overrides: p.custom_overrides,
-        w: p.w,
-        h: p.h,
-        t: p.t,
-        er: p.er,
-        tand: p.tand,
-        sigma: p.sigma,
-        trace_spacing: p.trace_spacing,
-        gap: p.gap,
-        via_gap: p.via_gap,
-        gnd_width: p.gnd_width,
-        stripline_top_h: p.stripline_top_h,
-        er_top: p.er_top,
-        tand_top: p.tand_top,
-        use_sm: p.use_sm,
-        sm_t_sub: p.sm_t_sub,
-        sm_t_trace: p.sm_t_trace,
-        sm_t_side: p.sm_t_side,
-        sm_er: p.sm_er,
-        sm_tand: p.sm_tand,
-        use_top_diel: p.use_top_diel,
-        top_diel_h: p.top_diel_h,
-        top_diel_er: p.top_diel_er,
-        top_diel_tand: p.top_diel_tand,
-        use_gnd_cut: p.use_gnd_cut,
-        gnd_cut_w: p.gnd_cut_w,
-        gnd_cut_h: p.gnd_cut_h,
-        use_enclosure: p.use_enclosure,
-        use_side_gnd: p.use_side_gnd,
-        use_top_gnd: p.use_top_gnd,
-        enclosure_width: p.enclosure_width,
-        enclosure_height: p.enclosure_height,
-        rq: p.rq,
-        use_plating: p.use_plating,
-        plating_sigma: p.plating_sigma,
-        plating_t: p.plating_t,
-        plating_rq: p.plating_rq,
-        plating_rq_iface: p.plating_rq_iface,
-        plating_top: p.plating_top,
-        plating_sides: p.plating_sides,
-        plating_bottom: p.plating_bottom,
-        bs_w: p.bs_w,
-        bs_t: p.bs_t,
-        bs_x_offset: p.bs_x_offset,
-        bs_sigma: p.bs_sigma,
-        bs_h_bottom: p.bs_h_bottom,
-        bs_er_bottom: p.bs_er_bottom,
-        bs_tand_bottom: p.bs_tand_bottom,
-        bs_h_middle: p.bs_h_middle,
-        bs_er_middle: p.bs_er_middle,
-        bs_tand_middle: p.bs_tand_middle,
-        bs_h_top: p.bs_h_top,
-        bs_er_top: p.bs_er_top,
-        bs_tand_top: p.bs_tand_top,
-        coax_d: p.coax_d,
-        coax_D: p.coax_D,
-        coax_er: p.coax_er,
-        coax_tand: p.coax_tand,
-        coax_sigma: p.coax_sigma,
-        coax_plating_inner: p.coax_plating_inner,
-        coax_plating_outer: p.coax_plating_outer,
-        wg_a: p.wg_a,
-        wg_b: p.wg_b,
-        wg_er: p.wg_er,
-        wg_tand: p.wg_tand,
-        wg_sigma: p.wg_sigma
-    });
+    return JSON.stringify(Object.fromEntries(GEOMETRY_HASH_KEYS.map(k => [k, p[k]])));
 }
 
 /**
@@ -1257,102 +1123,56 @@ function getFrequencyHash() {
  * Update notices on Results and S-parameters tabs
  */
 function updateResultNotices() {
-    const resultsNotice = document.getElementById('results-notice');
-    const resultsNoticeText = document.getElementById('results-notice-text');
-    const sparamNotice = document.getElementById('sparam-notice');
-    const sparamNoticeText = document.getElementById('sparam-notice-text');
-    const exportBtn = document.getElementById('export-snp');
-    const resultsDiffCheckbox = document.getElementById('results-diff');
-    const sparamDiffCheckbox = document.getElementById('sparam-diff');
+    // Shows the notice with this text, or hides it when the text is null.
+    const setNotice = (id, text) => {
+        const notice = document.getElementById(id);
+        if (!notice) return;
+        if (text) document.getElementById(`${id}-text`).textContent = text;
+        notice.style.display = text ? 'block' : 'none';
+    };
+    const hasResults = frequencySweepResults && frequencySweepResults.length > 0;
+    let resultsText = null, sparamText = null;
+    // exportTitle stays undefined when the button keeps its current title.
+    let exportable = false, exportTitle;
 
-    if (!frequencySweepResults || frequencySweepResults.length === 0) {
-        // No results exist
-        if (resultsNotice) {
-            resultsNoticeText.textContent = 'No results available. Run solver to view results.';
-            resultsNotice.style.display = 'block';
-        }
-        if (sparamNotice) {
-            sparamNoticeText.textContent = 'No results available. Run solver to view S-parameters.';
-            sparamNotice.style.display = 'block';
-        }
-        if (exportBtn) {
-            exportBtn.disabled = true;
-        }
-        // Disable differential-mode checkboxes when no results
-        if (resultsDiffCheckbox) {
-            resultsDiffCheckbox.disabled = true;
-        }
-        if (sparamDiffCheckbox) {
-            sparamDiffCheckbox.disabled = true;
-        }
+    if (!hasResults) {
+        resultsText = 'No results available. Run solver to view results.';
+        sparamText = 'No results available. Run solver to view S-parameters.';
     } else {
-        const currentGeometry = getGeometryHash();
-        const currentFrequency = getFrequencyHash();
-        const geometryChanged = lastSolvedGeometry && currentGeometry !== lastSolvedGeometry;
-        const frequencyChanged = lastSolvedFrequency && currentFrequency !== lastSolvedFrequency;
-
-        // Enable/disable differential-mode checkboxes based on whether results are differential
-        const resultsAreDifferential = frequencySweepResults[0].result.modes.length === 2;
-        if (resultsDiffCheckbox) {
-            resultsDiffCheckbox.disabled = !resultsAreDifferential;
-        }
-        if (sparamDiffCheckbox) {
-            sparamDiffCheckbox.disabled = !resultsAreDifferential;
-        }
-
-        if (!isSimulating && geometryChanged) {
-            // Geometry changed - show notice but keep old results visible
-            if (resultsNotice) {
-                resultsNoticeText.textContent = 'Geometry changed. Solve to update results.';
-                resultsNotice.style.display = 'block';
-            }
-            if (sparamNotice) {
-                sparamNoticeText.textContent = 'Geometry changed. Solve to update results.';
-                sparamNotice.style.display = 'block';
-            }
-            if (exportBtn) {
-                exportBtn.disabled = true;
-                exportBtn.title = 'Cannot export - geometry or frequency changed';
-            }
-        } else if (!isSimulating && frequencyChanged) {
-            // Only frequency changed
-            if (resultsNotice) {
-                resultsNoticeText.textContent = 'Frequency changed. Solve to update results.';
-                resultsNotice.style.display = 'block';
-            }
-            if (sparamNotice) {
-                sparamNoticeText.textContent = 'Frequency changed. Solve to update results.';
-                sparamNotice.style.display = 'block';
-            }
-            if (exportBtn) {
-                exportBtn.disabled = true;
-                exportBtn.title = 'Cannot export - geometry or frequency changed';
-            }
+        const geometryChanged = lastSolvedGeometry && getGeometryHash() !== lastSolvedGeometry;
+        const frequencyChanged = lastSolvedFrequency && getFrequencyHash() !== lastSolvedFrequency;
+        if (!isSimulating && (geometryChanged || frequencyChanged)) {
+            // Keep the old results visible under the notice.
+            resultsText = sparamText =
+                `${geometryChanged ? 'Geometry' : 'Frequency'} changed. Solve to update results.`;
+            exportTitle = 'Cannot export - geometry or frequency changed';
         } else {
-            // No changes - hide notices, enable export
-            if (resultsNotice) {
-                resultsNotice.style.display = 'none';
-            }
             // A self-referenced medium drops its below-cutoff points (they have an
             // imaginary modal impedance), so the S-parameter tab can legitimately end up
             // with nothing to draw while the Results tab is full. Say why, rather than
             // leaving an empty plot and an export button that only fails when clicked.
-            const exportable = usableSweepPoints(frequencySweepResults).length > 0;
-            if (sparamNotice) {
-                if (!exportable) {
-                    sparamNoticeText.textContent = 'Every sweep point is below the cutoff — ' +
-                        'the mode is evanescent there, so there are no propagating ' +
-                        'S-parameters. Raise the sweep frequency above the cutoff.';
-                    sparamNotice.style.display = 'block';
-                } else {
-                    sparamNotice.style.display = 'none';
-                }
+            exportable = usableSweepPoints(frequencySweepResults).length > 0;
+            if (!exportable) {
+                sparamText = 'Every sweep point is below the cutoff — ' +
+                    'the mode is evanescent there, so there are no propagating ' +
+                    'S-parameters. Raise the sweep frequency above the cutoff.';
             }
-            if (exportBtn) {
-                exportBtn.disabled = !exportable;
-                exportBtn.title = exportable ? '' : 'Cannot export - no propagating sweep points';
-            }
+            exportTitle = exportable ? '' : 'Cannot export - no propagating sweep points';
         }
+    }
+
+    setNotice('results-notice', resultsText);
+    setNotice('sparam-notice', sparamText);
+    const exportBtn = document.getElementById('export-snp');
+    if (exportBtn) {
+        exportBtn.disabled = !exportable;
+        if (exportTitle !== undefined) exportBtn.title = exportTitle;
+    }
+    // The differential-mode checkboxes apply to two-mode results only.
+    const differential = hasResults && frequencySweepResults[0].result.modes.length === 2;
+    for (const id of ['results-diff', 'sparam-diff']) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !differential;
     }
 }
 
@@ -1713,11 +1533,11 @@ function buildGeometryShapes(maxY) {
 function modesPlotLayout(title, view, shapes) {
     return {
         title: { text: title, font: { color: '#fff' } },
-        xaxis: { title: { text: 'Width (mm)', font: { color: '#aaa' } }, scaleanchor: 'y', scaleratio: 1, range: view.xRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
-        yaxis: { title: { text: 'Height (mm)', font: { color: '#aaa' } }, range: view.yRange, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        xaxis: darkAxis('Width (mm)', { scaleanchor: 'y', scaleratio: 1, range: view.xRange }),
+        yaxis: darkAxis('Height (mm)', { range: view.yRange }),
         margin: { l: 70, r: 90, t: 50, b: 60 },
         showlegend: false, hovermode: 'closest', dragmode: 'pan',
-        paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' },
+        ...darkBackground(),
         shapes,
     };
 }
@@ -1726,108 +1546,30 @@ function modesPlotLayout(title, view, shapes) {
 // Accepts the legacy 'triangular' value (maps to the accurate MQS full-wave mode).
 function getParams() {
     const isCustom = document.getElementById('tl_type').value === 'custom';
-    return {
+    const p = {
         tl_type: document.getElementById('tl_type').value,
         mesh_backend: (document.getElementById('mesh_backend')?.value) ?? 'rectilinear',
         // Custom geometry: the text, plus sidebar parameter values that differ from it
         // (a parameter sweep sets the input without touching the text).
         custom_geom: isCustom ? getCustomGeometryText() : '',
         custom_overrides: isCustom ? getCustomOverrides() : {},
-        w: getInputValue('inp_w'),
-        h: getInputValue('inp_h'),
-        t: getInputValue('inp_t'),
-        er: getInputValueUnitless('inp_er'),
-        tand: getInputValueUnitless('inp_tand'),
-        sigma: getInputValueUnitless(isCustom ? 'inp_custom_sigma' : 'inp_sigma'),
-        freq: getInputValue('freq-start'),
-        nx: DEFAULT_GRID_N,
-        ny: DEFAULT_GRID_N,
-        // Differential parameters
-        trace_spacing: getInputValue('inp_trace_spacing'),
-        // GCPW specific parameters
-        gap: getInputValue('inp_gap'),
-        via_gap: getInputValue('inp_via_gap'),
-        gnd_width: getInputValue('inp_gnd_width'),
-        // Stripline parameters
-        stripline_top_h: getInputValue('inp_air_top'),
-        er_top: getInputValueUnitless('inp_er_top'),
-        tand_top: getInputValueUnitless('inp_tand_top'),
-        // Solder mask parameters
-        use_sm: document.getElementById('chk_solder_mask').checked,
-        sm_t_sub: getInputValue('inp_sm_t_sub'),
-        sm_t_trace: getInputValue('inp_sm_t_trace'),
-        sm_t_side: getInputValue('inp_sm_t_side'),
-        sm_er: getInputValueUnitless('inp_sm_er'),
-        sm_tand: getInputValueUnitless('inp_sm_tand'),
-        // Top dielectric parameters
-        use_top_diel: document.getElementById('chk_top_diel').checked,
-        top_diel_h: getInputValue('inp_top_diel_h'),
-        top_diel_er: getInputValueUnitless('inp_top_diel_er'),
-        top_diel_tand: getInputValueUnitless('inp_top_diel_tand'),
-        // Ground cutout parameters
-        use_gnd_cut: document.getElementById('chk_gnd_cut').checked,
-        gnd_cut_w: getInputValue('inp_gnd_cut_w'),
-        gnd_cut_h: getInputValue('inp_gnd_cut_h'),
-        // Enclosure parameters
-        use_enclosure: document.getElementById('chk_enclosure').checked,
-        use_side_gnd: document.getElementById('chk_side_gnd').checked,
-        use_top_gnd: document.getElementById('chk_top_gnd').checked,
-        enclosure_width: getInputValue('inp_enclosure_width'),
-        enclosure_height: getInputValue('inp_enclosure_height'),
-        max_iters: parseInt(document.getElementById('inp_max_iters').value),
-        // Percent in the UI, fraction in the settings object, keeps saved settings
-        // and share links (which diff against DEFAULT_SETTINGS.tolerance) unchanged.
-        tolerance: getInputValueUnitless('inp_tolerance') / 100,
-        min_converged_passes: getInputValueUnitless('inp_min_converged_passes'),
-        // 1/0 like every other checkbox here and in getUISettings, the same key must not
-        // be a boolean in one params object and a number in the other.
-        estimate_error: document.getElementById('chk_estimate_error').checked ? 1 : 0,
-        max_nodes: parseInt(document.getElementById('inp_max_nodes').value),
-        // Surface roughness parameter
-        rq: getInputValue('inp_rq'),
-        // Surface plating parameters
-        use_plating: document.getElementById('chk_plating').checked,
-        plating_sigma: getInputValueUnitless('inp_plating_sigma'),
-        plating_t: getInputValue('inp_plating_t'),
-        plating_rq: getInputValue('inp_plating_rq'),
-        plating_rq_iface: getInputValue('inp_plating_rq_iface'),
-        plating_top: document.getElementById('chk_plating_top').checked,
-        plating_sides: document.getElementById('chk_plating_sides').checked,
-        plating_bottom: document.getElementById('chk_plating_bottom').checked,
-        plating_thick_corners: document.getElementById('chk_plating_thick_corners').checked,
-        // Causal material parameters
-        use_causal_materials: document.getElementById('chk_causal_materials').checked,
-        // Broadside coupled stripline parameters
-        bs_w: getInputValue('inp_bs_w'),
-        bs_t: getInputValue('inp_bs_t'),
-        bs_x_offset: getInputValue('inp_bs_x_offset'),
-        bs_sigma: getInputValueUnitless('inp_bs_sigma'),
-        bs_h_bottom: getInputValue('inp_bs_h_bottom'),
-        bs_er_bottom: getInputValueUnitless('inp_bs_er_bottom'),
-        bs_tand_bottom: getInputValueUnitless('inp_bs_tand_bottom'),
-        bs_h_middle: getInputValue('inp_bs_h_middle'),
-        bs_er_middle: getInputValueUnitless('inp_bs_er_middle'),
-        bs_tand_middle: getInputValueUnitless('inp_bs_tand_middle'),
-        bs_h_top: getInputValue('inp_bs_h_top'),
-        bs_er_top: getInputValueUnitless('inp_bs_er_top'),
-        bs_tand_top: getInputValueUnitless('inp_bs_tand_top'),
-
-        // Coaxial (diameters in; CoaxSolver derives the radii)
-        coax_d: getInputValue('inp_coax_d'),
-        coax_D: getInputValue('inp_coax_D'),
-        coax_er: getInputValueUnitless('inp_coax_er'),
-        coax_tand: getInputValueUnitless('inp_coax_tand'),
-        coax_sigma: getInputValueUnitless('inp_coax_sigma'),
-        coax_plating_inner: document.getElementById('chk_plating_inner').checked,
-        coax_plating_outer: document.getElementById('chk_plating_outer').checked,
-
-        // Rectangular waveguide (inner wall dimensions)
-        wg_a: getInputValue('inp_wg_a'),
-        wg_b: getInputValue('inp_wg_b'),
-        wg_er: getInputValueUnitless('inp_wg_er'),
-        wg_tand: getInputValueUnitless('inp_wg_tand'),
-        wg_sigma: getInputValueUnitless('inp_wg_sigma'),
     };
+    for (const [key, id, kind] of fieldsFor('p')) {
+        if (key === 'sigma') {
+            p.sigma = getInputValueUnitless(isCustom ? 'inp_custom_sigma' : 'inp_sigma');
+        } else if (key === 'freq_start') {
+            p.freq = getInputValue(id);
+            p.nx = DEFAULT_GRID_N;
+            p.ny = DEFAULT_GRID_N;
+        } else if (key === 'estimate_error') {
+            // 1/0 like in getUISettings, the same key must not be a boolean in one
+            // params object and a number in the other.
+            p[key] = readSetting(id, kind);
+        } else {
+            p[key] = readParam(id, kind);
+        }
+    }
+    return p;
 }
 
 // Helper function to add common optional geometry parameters
@@ -2540,77 +2282,19 @@ function bindEvents() {
     updateSweepParamList();
     autoFillSweepRange();
 
-    // Results plot selector change
-    const resultsSelector = document.getElementById('results-plot-selector');
-    if (resultsSelector) {
-        resultsSelector.addEventListener('change', () => {
-            if (frequencySweepResults) {
-                drawResultsPlot();
-            }
-        });
-    }
-
-    // S-parameter controls
-    const sparamLength = document.getElementById('sparam-length');
-    const sparamZref = document.getElementById('sparam-z-ref');
-    const sparamMode = document.getElementById('sparam-plot-mode');
-    const sparamDiff = document.getElementById('sparam-diff');
-    if (sparamLength) {
-        sparamLength.addEventListener('input', () => {
-            if (frequencySweepResults) {
-                drawSParamPlot();
-            }
-        });
-    }
-    if (sparamZref) {
-        sparamZref.addEventListener('input', () => {
-            if (frequencySweepResults) {
-                drawSParamPlot();
-            }
-        });
-    }
-    if (sparamMode) {
-        sparamMode.addEventListener('change', () => {
-            if (frequencySweepResults) {
-                drawSParamPlot();
-            }
-        });
-    }
-    if (sparamDiff) {
-        sparamDiff.addEventListener('change', () => {
-            if (frequencySweepResults) {
-                drawSParamPlot();
-            }
-        });
-    }
-
-    // Log checkbox for results plot
-    const resultsLogX = document.getElementById('results-log-x');
-    if (resultsLogX) {
-        resultsLogX.addEventListener('change', () => {
-            if (frequencySweepResults) {
-                drawResultsPlot();
-            }
-        });
-    }
-
-    // Differential-mode checkbox for results plot
-    const resultsDiff = document.getElementById('results-diff');
-    if (resultsDiff) {
-        resultsDiff.addEventListener('change', () => {
-            if (frequencySweepResults) {
-                drawResultsPlot();
-            }
-        });
-    }
-
-    // Log checkbox for S-parameter plot
-    const sparamLogX = document.getElementById('sparam-log-x');
-    if (sparamLogX) {
-        sparamLogX.addEventListener('change', () => {
-            if (frequencySweepResults) {
-                drawSParamPlot();
-            }
+    // Results and S-parameter plot controls redraw their plot once there are results.
+    for (const [id, ev, redraw] of [
+        ['results-plot-selector', 'change', drawResultsPlot],
+        ['sparam-length', 'input', drawSParamPlot],
+        ['sparam-z-ref', 'input', drawSParamPlot],
+        ['sparam-plot-mode', 'change', drawSParamPlot],
+        ['sparam-diff', 'change', drawSParamPlot],
+        ['results-log-x', 'change', drawResultsPlot],
+        ['results-diff', 'change', drawResultsPlot],
+        ['sparam-log-x', 'change', drawSParamPlot],
+    ]) {
+        document.getElementById(id)?.addEventListener(ev, () => {
+            if (frequencySweepResults) redraw();
         });
     }
 
@@ -2749,55 +2433,25 @@ function bindEvents() {
                 return;
             }
             const isDifferential = frequencySweepResults[0].result.modes.length === 2;
-            const rows = [];
-            if (isDifferential) {
-                rows.push([
-                    'Freq_Hz',
-                    'Re_Z0_odd_Ohm', 'Im_Z0_odd_Ohm', 'eps_eff_odd',
-                    'conductor_loss_odd_dBpm', 'dielectric_loss_odd_dBpm', 'total_loss_odd_dBpm',
-                    'R_odd_Ohmpm', 'L_odd_Hpm', 'G_odd_Spm', 'C_odd_Fpm',
-                    'Re_Z0_even_Ohm', 'Im_Z0_even_Ohm', 'eps_eff_even',
-                    'conductor_loss_even_dBpm', 'dielectric_loss_even_dBpm', 'total_loss_even_dBpm',
-                    'R_even_Ohmpm', 'L_even_Hpm', 'G_even_Spm', 'C_even_Fpm'
-                ]);
-                for (const { freq, result } of frequencySweepResults) {
-                    const m0 = result.modes[0];
-                    const m1 = result.modes[1];
-                    rows.push([
-                        freq,
-                        m0.Zc.re, m0.Zc.im, m0.eps_eff,
-                        m0.alpha_c, m0.alpha_d, m0.alpha_total,
-                        m0.RLGC.R, m0.RLGC.L, m0.RLGC.G, m0.RLGC.C,
-                        m1.Zc.re, m1.Zc.im, m1.eps_eff,
-                        m1.alpha_c, m1.alpha_d, m1.alpha_total,
-                        m1.RLGC.R, m1.RLGC.L, m1.RLGC.G, m1.RLGC.C
-                    ]);
-                }
-            } else {
-                rows.push([
-                    'Freq_Hz',
-                    'Re_Z0_Ohm', 'Im_Z0_Ohm', 'eps_eff',
-                    'conductor_loss_dBpm', 'dielectric_loss_dBpm', 'total_loss_dBpm',
-                    'R_Ohmpm', 'L_Hpm', 'G_Spm', 'C_Fpm'
-                ]);
-                for (const { freq, result } of frequencySweepResults) {
-                    const m = result.modes[0];
-                    rows.push([
-                        freq,
-                        m.Zc.re, m.Zc.im, m.eps_eff,
-                        m.alpha_c, m.alpha_d, m.alpha_total,
-                        m.RLGC.R, m.RLGC.L, m.RLGC.G, m.RLGC.C
-                    ]);
-                }
+            // A pair gets the odd mode's columns, then the even mode's.
+            const suffixes = isDifferential ? ['_odd', '_even'] : [''];
+            const header = ['Freq_Hz'];
+            for (const m of suffixes) {
+                header.push(`Re_Z0${m}_Ohm`, `Im_Z0${m}_Ohm`, `eps_eff${m}`,
+                    `conductor_loss${m}_dBpm`, `dielectric_loss${m}_dBpm`, `total_loss${m}_dBpm`,
+                    `R${m}_Ohmpm`, `L${m}_Hpm`, `G${m}_Spm`, `C${m}_Fpm`);
             }
-            const csv = rows.map(r => r.join(',')).join('\n');
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'results.csv';
-            a.click();
-            URL.revokeObjectURL(url);
+            const rows = [header];
+            for (const { freq, result } of frequencySweepResults) {
+                const row = [freq];
+                for (const m of result.modes.slice(0, suffixes.length)) {
+                    row.push(m.Zc.re, m.Zc.im, m.eps_eff,
+                        m.alpha_c, m.alpha_d, m.alpha_total,
+                        m.RLGC.R, m.RLGC.L, m.RLGC.G, m.RLGC.C);
+                }
+                rows.push(row);
+            }
+            downloadFile(rows.map(r => r.join(',')).join('\n'), 'results.csv', 'text/csv');
             log('Exported results.csv');
         });
     }
@@ -2842,60 +2496,21 @@ function bindEvents() {
         }
     });
 
-    // Real-time geometry updates for all parameter inputs
-    const geometryInputs = [
-        'inp_w', 'inp_h', 'inp_t', 'inp_er', 'inp_tand', 'inp_sigma',
-        'inp_trace_spacing',
-        'inp_gap', 'inp_via_gap', 'inp_gnd_width',
-        'inp_air_top', 'inp_er_top', 'inp_tand_top',
-        'inp_sm_t_sub', 'inp_sm_t_trace', 'inp_sm_t_side', 'inp_sm_er', 'inp_sm_tand',
-        'inp_top_diel_h', 'inp_top_diel_er', 'inp_top_diel_tand',
-        'inp_gnd_cut_w', 'inp_gnd_cut_h',
-        'inp_enclosure_width', 'inp_enclosure_height',
-        'inp_rq',
-        'inp_plating_sigma', 'inp_plating_t', 'inp_plating_rq', 'inp_plating_rq_iface',
-        'inp_bs_w', 'inp_bs_t', 'inp_bs_x_offset', 'inp_bs_sigma',
-        'inp_bs_h_bottom', 'inp_bs_er_bottom', 'inp_bs_tand_bottom',
-        'inp_bs_h_middle', 'inp_bs_er_middle', 'inp_bs_tand_middle',
-        'inp_bs_h_top', 'inp_bs_er_top', 'inp_bs_tand_top',
-        'inp_coax_d', 'inp_coax_D', 'inp_coax_er', 'inp_coax_tand', 'inp_coax_sigma',
-        'inp_wg_a', 'inp_wg_b', 'inp_wg_er', 'inp_wg_tand', 'inp_wg_sigma',
-        'inp_custom_sigma',
-        'freq-start'
-    ];
+    // Rebuild the preview and flag the solved results, sweep and modes as stale.
+    const geometryEdited = (resetZoom = false, afterDraw = null) => {
+        updateGeometry();
+        draw(resetZoom);
+        afterDraw?.();
+        updateResultNotices();
+        updateSweepNotice();
+        updateModesNotice();
+    };
 
-    geometryInputs.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) {
-            el.addEventListener('input', () => {
-                updateGeometry();
-                draw();
-                updateResultNotices();
-                updateSweepNotice();
-                updateModesNotice();
-            });
-        }
-    });
-
-    // Real-time updates for checkboxes
-    const geometryCheckboxes = [
-        'chk_solder_mask', 'chk_top_diel', 'chk_gnd_cut', 'chk_enclosure', 'chk_side_gnd', 'chk_top_gnd',
-        'chk_plating', 'chk_plating_top', 'chk_plating_sides', 'chk_plating_bottom', 'chk_plating_thick_corners',
-        'chk_plating_inner', 'chk_plating_outer'
-    ];
-
-    geometryCheckboxes.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) {
-            el.addEventListener('change', () => {
-                updateGeometry();
-                draw();
-                updateResultNotices();
-                updateSweepNotice();
-                updateModesNotice();
-            });
-        }
-    });
+    // Real-time geometry updates for the parameter inputs and checkboxes
+    for (const [, id, kind] of fieldsFor('l')) {
+        const ev = kind === 'chk' ? 'change' : 'input';
+        document.getElementById(id)?.addEventListener(ev, () => geometryEdited());
+    }
 
     // Custom geometry editor: every edit rebuilds the preview, and the parameter list
     // of the sweep tab follows the parameters defined in the text.
@@ -2903,12 +2518,7 @@ function bindEvents() {
         log,
         onGeometryChange: (resetZoom = false) => {
             if (document.getElementById('tl_type').value !== 'custom') return;
-            updateGeometry();
-            draw(resetZoom === true);
-            syncCustomSweepParams();
-            updateResultNotices();
-            updateSweepNotice();
-            updateModesNotice();
+            geometryEdited(resetZoom === true, syncCustomSweepParams);
         },
         onHighlightChange: () => {
             if (document.getElementById('tl_type').value === 'custom') draw();
@@ -2922,11 +2532,7 @@ function bindEvents() {
             activateCustomGeometry();
             syncCustomSweepParams();
         }
-        updateGeometry();
-        draw(true);  // Reset zoom/pan for new geometry
-        updateResultNotices();
-        updateSweepNotice();
-        updateModesNotice();
+        geometryEdited(true);  // Reset zoom/pan for new geometry
     });
 
     // Frequency inputs - update notices when changed
@@ -2946,25 +2552,10 @@ function bindEvents() {
         modesFreqEl.addEventListener('change', updateModesNotice);
     }
 
-    // Plot options - mode selector
-    const plotModeEl = document.getElementById('plot-mode');
-    if (plotModeEl) {
-        plotModeEl.addEventListener('change', () => {
-            if (solver && solver.solution_valid) {
-                draw();
-            }
-        });
-    }
-
-    // Plot options - streamlines and contours
-    const plotStreamlinesEl = document.getElementById('plot-streamlines');
-    const plotContoursEl = document.getElementById('plot-contours');
-    if (plotStreamlinesEl) {
-        plotStreamlinesEl.addEventListener('change', () => {
-            if (solver && solver.solution_valid) {
-                draw();
-            }
-        });
+    // Plot options redraw the solved fields.
+    const redrawFields = () => { if (solver && solver.solution_valid) draw(); };
+    for (const id of ['plot-mode', 'plot-streamlines', 'plot-contours']) {
+        document.getElementById(id)?.addEventListener('change', redrawFields);
     }
     const plotFreqEl = document.getElementById('plot-freq');
     if (plotFreqEl) plotFreqEl.addEventListener('change', () => updatePlotFields());
@@ -2972,15 +2563,8 @@ function bindEvents() {
     if (plotEfieldDbEl) {
         // dB and linear keep separate scales, so the dialog reloads the new one.
         plotEfieldDbEl.addEventListener('change', () => {
-            if (solver && solver.solution_valid) draw();
+            redrawFields();
             if (scaleDialogOpen) openScaleDialog();
-        });
-    }
-    if (plotContoursEl) {
-        plotContoursEl.addEventListener('change', () => {
-            if (solver && solver.solution_valid) {
-                draw();
-            }
         });
     }
 

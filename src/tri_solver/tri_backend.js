@@ -1,29 +1,33 @@
 // Triangular full-wave FEM backend.
 //
-// Consumes the SAME backend-neutral geometry the rectilinear FDM solver uses
-// (`solver.conductors` / `solver.dielectrics` from `_build_geometry_lists()`),
-// meshes it with the generalized geo-kernel mesher, and returns the identical
-// result-object shape as field_solver.js (`{ modes:[...], Z_diff?, Z_common?,
-// RLGC_matrix? }`), so the app's UI/plotting/export paths are unchanged.
+// Takes the same geometry as the rectilinear FDM solver (solver.conductors and
+// solver.dielectrics), meshes it with gmsh/OpenCASCADE (occ_to_mesh.js), and returns
+// the same result shape as field_solver.js ({ modes, Z_diff, Z_common, RLGC_matrix,
+// physMatrix, warnings }), so the UI, plotting and export code serve both backends.
 //
-// Physics (the "better solver"):
-//   - static P2 FEM (C/L/C0/eps_eff/Z0) — variational, gold-standard magnitude
-//   - full-wave eigenmode (assembleTriFEM -> generalized eigensolve) — dispersive
-//     eps_eff(f) and the mode fields, quasi-TEM mode picked by overlap with the
-//     static drive (works for asymmetric geometry; no symmetry assumption)
-//   - dielectric loss G from the lossy-permittivity energy integral
-//   - conductor loss via the validated perturbation method (corner-corrected),
-//     with surface roughness AND plating applied as a surface-impedance scaling
-//     (gradient model, calculate_Zrough): plating = "roughness with a different
-//     conductivity" on the plated conductor surfaces.
+// Per mode (single, or odd/even; an asymmetric pair uses its modal decomposition):
+//   - static P2 FEM: C, C0, static eps_eff and Z0, the drive field and the mesh
+//     refinement indicator. buildMesh refines adaptively until the static energies
+//     converge and certifies the result on a nested refinement (_certifyStatic).
+//   - full-wave eigenmode above F_STATIC_MAX: the dispersive eps_eff(f), the quasi-TEM
+//     mode picked by overlap with the static field (_eigenPick), and anchored to the
+//     static solve at the switch frequency (_eigenBias).
+//   - dielectric loss G from the lossy-permittivity energy; a conductive dielectric
+//     takes C and G from a complex static solve.
+//   - conductor loss and internal inductance: by default the MQS eddy-current solve on
+//     a skin-depth mesh (mqs_loss.js), with roughness and plating as surface terms and
+//     thick plating meshed as metal. The perturbation surface integral
+//     (conductor_loss.js) covers what MQS cannot solve and is the waveguide loss.
 //
-// Mesh + freedom maps are built once and reused across a frequency sweep; only
-// the eigen-assembly (k²-dependent) and loss are recomputed per frequency.
+// The mesh, freedom maps and static solves are built once and reused across a sweep;
+// per frequency only the materials (causal model), the eigensolve and the loss are
+// redone, with anchor caches interpolating eps and the loss between solved points.
+// A rectangular waveguide has no static drive and takes its own path (_isWG).
+// solveModes and getModeField serve the Modes tab.
 
 import { eigenWasm } from './eigen_module.js';
-import { initGmsh } from './gmsh_mesh.js';
 import { buildOccMeshFromGeometry, estimateOccTriCount, tagMaterials, validateTriMesh, _clipDomain,
-         groundBodyCount } from './occ_to_mesh.js';
+         groundBodyCount, initGmsh } from './occ_to_mesh.js';
 import { shapeSignedDist, shapeFaceAt, shapeContains, bodyDistance,
          platedThrough, insideRingHole } from '../shapes.js';
 import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, refineTriMeshNested,
@@ -31,7 +35,8 @@ import { buildTriFreedomMap, solveTriStatic, computeTriEnergy, refineTriMesh, re
          markTrianglesForRefinement, triP2Stiffness,
          triCoefficients, lvGrad, leGrad,
          staticToEdgeDofs, analyticSeedDofs, assembleTriFEM, assembleTriFEMDecomposed,
-         femFromDecomposition, decompositionClassEps, buildTriGauge, gaugeSeed, gaugeExpand } from './tri_fem.js';
+         femFromDecomposition, decompositionClassEps, buildTriGauge, gaugeSeed, gaugeExpand,
+         evalFieldsAtPoint } from './tri_fem.js';
 import { staticConductorLoss, solveConductorLoss, computeHtZZMetric,
          projectH, computePoyntingFromProjectedH, surfaceHSegments } from './conductor_loss.js';
 import { csqrt } from './fem_core.js';
@@ -47,7 +52,6 @@ import { calculate_Zrough, calculate_Zrough_layered, slabCoth, SPREAD_U_MIN, spr
 import { resampleStatic, resampleModeField, buildGridFromMesh, surfaceCurrentPoints, sampleMqsCurrent,
     mqsSurfaceCurrent, staticFieldOnMesh, meshFieldBlock, recoverNodalModeField, modeFieldMeshBlock,
     buildTriRegions } from './resample.js';
-import { evalFieldsAtPoint } from './tri_ms_solver.js';
 import { Complex } from '../complex.js';
 import { dcLineParameters } from '../dc_inductance.js';
 import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
@@ -71,23 +75,14 @@ function phaseEpsEff(Zser, Ysh, omega) {
 }
 
 
-// ---- Mesh-size budget (memory parity with the FDM backend) ----
-// The full-wave eigensolve is far heavier per mesh entity than the quasi-static FDM
-// Poisson solve: it factorizes a COMPLEX matrix over EDGE DOFs (~1.5 per triangle)
-// instead of a real one over node DOFs. Per triangle that is roughly
-//   1.5 (edges/tri) × 2 (complex doubles) × ~1.4 (Nédélec vs 5-point sparsity) ≈ 4×
-// the bytes the FDM solver spends per node. So a triangle budget of maxNodes/4 keeps the
-// full-wave memory footprint ABOUT THE SAME as the FDM backend at the same Max Nodes
-// setting — letting both backends accept the same max_nodes value (UI: Max Nodes
-// (thousands)). Without this the eigensolve can be handed an unbounded mesh (seen: a
-// 62k-triangle modes mesh) and the eigensolver heap-abort()s with an opaque assertion.
-//
-// Above roughly 100k Max Nodes the budget would let the mesh past the eigensolve
-// memory guard (MAX_SOLVE_BYTES): every eigensolve then fails and the result falls
-// back to the static eps_eff. So the budget is also capped at the triangle count the
-// guard admits, from the measured eigensolve bytes per triangle (EIG_BYTES_PER_TRI).
-// plainPencil: the Modes tab and waveguide solves assemble the ungauged pencil, which
-// carries 1/GAUGED_NNZ_SCALE more entries per triangle.
+// ---- Mesh-size budget ----
+// The eigensolve factorizes a complex matrix over edge DOFs (~1.5 per triangle), about
+// 1.5 * 2 (complex) * 1.4 (sparsity) = 4x the bytes the FDM solver spends per node, so
+// a budget of maxNodes/4 triangles keeps the two backends at about the same memory for
+// the same Max Nodes setting. The budget is also capped at the triangle count the
+// eigensolve memory guard admits (MAX_SOLVE_BYTES / EIG_BYTES_PER_TRI), above which
+// every eigensolve would fail. plainPencil: the Modes tab and waveguide solves assemble
+// the ungauged pencil, 1/GAUGED_NNZ_SCALE more entries per triangle.
 const FW_NODES_PER_TRI = 4;
 function maxTrisForBudget(maxNodes, plainPencil = false) {
     return Math.max(800, Math.min(maxSolveTris(plainPencil), Math.floor((maxNodes || 18000) / FW_NODES_PER_TRI)));
@@ -133,7 +128,6 @@ export function initTriBackend() {
 }
 
 // Build a loss-edge mask: conductor SURFACE edges + grounded-wall edges.
-// (Generalizes conductor_loss.buildMicrostripLossEdges, which hardcodes y=0.)
 function buildLossEdges(mesh, fm, condRect) {
     const { nodes, edges, nEdges, nTris, triEdges } = mesh;
     const TOL = 1e-12;
@@ -161,13 +155,10 @@ function buildLossEdges(mesh, fm, condRect) {
     return isLoss;
 }
 
-// Complex permittivity map for the mode-viewer EIGENSOLVE. The reference viewer folds the
-// dielectric loss into ε (im = −ε_r·tanδ), and that small imaginary part DAMPS the discrete
-// vector-FEM spurious modes — pushing them off the real-γ² propagating axis — so they no
-// longer masquerade as physical propagating modes. tagMaterials stores ε real (im=0) with the
-// loss kept separately (for the energy-based G), so reconstruct the complex map here. This is
-// THE reason the OCC backend saw spurious modes the reference's (lossy) eigensolve did not —
-// it was never the mesh.
+// Complex permittivity map for the Modes-tab eigensolve: the dielectric loss folded into
+// eps (im = -eps_r*tand). The small imaginary part damps the spurious vector-FEM modes
+// off the real-gamma^2 axis, so they do not pass for propagating modes. tagMaterials keeps
+// eps real and the loss separate (for the energy-based G), so the map is rebuilt here.
 function lossyEpsMap(mesh, tandFloor = 0.002) {
     const { epsMap, lossMap } = mesh;
     const out = new Array(epsMap.length);
@@ -199,25 +190,12 @@ function effectiveSurface(solver) {
     return { sigma, rq };
 }
 
-// Per-face plating model. Each conductor face (top / bottom / sides) gets its
-// own surface impedance: plated faces use the layered (plating-over-bulk)
-// gradient impedance matching the FDM backend's per-face model and bare faces
-// and grounded walls use the base metal. Thick-corner plating (geometric wrap
-// of side plating onto the bottom face within one plating thickness of each
-// corner) is additionally modeled position-aware via zAt. See zAt for FDM
-// getZsurf differences.
-//
-// Two consumers, sharing makePlatingZs:
-//   * buildSurfaceGroups (pertrubation path) groups loss edges by surface
-//     impedance so the surface integral is summed per group (loss is linear in
-//     the per-edge surface resistance). `uniform` true, a single impedance
-//     everywhere, the plain single-pass path.
-//   * buildFaceZs (MQS path) returns Zs at a face midpoint, so the MQS volume
-//     solve can weight each face's smooth current by its own plating impedance.
-// Shared surface-impedance model: the bare-metal Zs plus a (rectIndex, face) -> Zs
-// resolver. Plated faces use the layered (plating-over-bulk) gradient impedance
-// (cached per distinct plating), bare faces use the base metal. Used by both the
-// edge-based grouping (perturbation path) and the point-based lookup (MQS path).
+// Per-face surface impedance: plated faces take the layered (plating over bulk)
+// gradient impedance of the FDM backend's per-face model, bare faces and grounded
+// walls the base metal, and thick-corner plating wraps the side plating onto the
+// bottom face (zAt). Returns the bare-metal Zbare and the resolvers zForFace(ri,
+// face) and zAt(ri, face, x, y). Used by buildSurfaceGroups (perturbation path, loss
+// edges grouped by impedance) and buildFaceZs (MQS path, Zs at a face midpoint).
 function makePlatingZs(solver, condRect, freq) {
     const roles = condRect.rectRoles || [];
     const rects = condRect.rects || [];
@@ -258,20 +236,12 @@ function makePlatingZs(solver, condRect, freq) {
         if (!z) { z = calculate_Zrough(freq, sigma, rq); singleCache.set(key, z); }
         return z;
     };
-    // Position-aware resolver: same per-face Zs as zForFace, plus the FDM backend's
-    // thick-corner wrap (field_solver.getZsurf): side
-    // plating physically wraps onto the bottom face within one plating thickness
-    // of each corner (sides plated, bottom not, thick_corners on). Single-layer
-    // plating σ with the bulk rq (the surface prep is the original bottom).
-    //
-    // Two deliberate differences from the FDM getZsurf:
-    //   * The FDM's other coverage rule: top-only plating extending down the
-    //     sides by one thickness is not implemented here.
-    //   * The wrap is a hard step at the query point (edge midpoint / face
-    //     midpoint), where the FDM blends fractional cell coverage. Under a
-    //     plating-thickness sweep the tri answer therefore steps where the FDM
-    //     ramps, the two agree once the wrap is resolved by more than one
-    //     element, which the skin-band refinement gives at the corners.
+    // zForFace plus the thick-corner wrap of the FDM backend (getZsurf in
+    // field_solver.js): with the sides plated, the bottom bare and thick_corners on,
+    // the side plating covers the bottom face within one plating thickness of each
+    // corner, as single-layer plating with the bulk roughness. Unlike getZsurf the
+    // wrap is a step at the query point rather than a fractional cell coverage, and
+    // top-only plating does not extend down the sides.
     const zAt = (ri, face, x, y) => {
         const pl = roles[ri] && roles[ri].plating;
         const r = rects[ri];
@@ -516,9 +486,9 @@ function buildSurfaceGroups(solver, mesh, fm, condRect, baseMask, freq, cache = 
     return { uniform: groups.length <= 1, groups };
 }
 
-// Per-triangle electrostatic energy (legacy refinement metric): ε·∫|∇φ|² over
-// each tri.  Kept as the fallback for perElementKelly below. It refines where
-// the field is strong, not where the discretization error is.
+// Per-triangle electrostatic energy eps*int(|grad phi|^2), the fallback refinement
+// metric when perElementKelly degenerates. It refines where the field is strong, not
+// where the discretization error is.
 function perElementEnergy(phi, mesh, epsMap) {
     const { nodes, tris, nTris, triEdges } = mesh;
     const m = new Float64Array(nTris);
@@ -908,11 +878,9 @@ function wgFundamentalEfun(condRect) {
 //
 // Returns { kc, vRe, vIm, g2Re, g2Im } or null when nothing physical converged.
 //
-// No assembly cache, unlike fullwaveMode. This medium runs exactly one eigensolve per
-// (mesh, freedom map), one per refinement pass, then one on the final mesh and every
-// call therefore arrives with a freshly built fm, so there is nothing a cache could hit.
-// The sweep itself never comes back here at all: _waveguideModeAtFreq propagates beta(f)
-// analytically from the single cached eigenvector.
+// No assembly cache: there is one eigensolve per refinement pass and one on the final
+// mesh, each on a new freedom map, and the sweep propagates beta(f) analytically from
+// the cached eigenvector (_waveguideModeAtFreq).
 function waveguideEigen(ctx, mesh, fm, abc, condRect, epsMap, f, seed, kcAnalytic) {
     const k2 = (2 * Math.PI * f / c0) ** 2;
     const erMax = maxEpsRe(epsMap);
@@ -1225,41 +1193,16 @@ export class TriBackend {
 
         const tAbs = Math.max(Math.abs(s.t ?? 35e-6), 1e-9);
         const wRef = Math.max(s.w ?? (dom.x_max - dom.x_min) / 10, 1e-9);
-        // Start coarse; adaptive refinement adds resolution where the field needs it.
-        // GRADED (fine at conductors, coarse in the bulk), not uniform: the MQS volume
-        // eddy-current loss needs the conductor region resolved, so a uniform ultra-coarse
-        // start (as the SIBC reference viewer used) starves it and gives garbage R. With
-        // the graded start, hFine can be ~3× coarser than the original here with no
-        // accuracy loss — the conductor SURFACE is re-resolved by refineSkinBand for the
-        // loss solve anyway, and eps/Z0 converge at a few hundred triangles. The
-        // rough-stripline roughness loss is the binding constraint (it sits ~7% high vs
-        // ref on any mesh); coarsening further than this eats its margin.
-        //
-        // The thickness term uses 2t, not t, when the MQS loss path applies:
-        // the base mesh then only needs ~one element across the conductor
-        // thickness, the skin-depth resolution for the loss solve comes from
-        // refineSkinBand, not from here. (Coarser than 2t the sweep gets
-        // slower, skin-band refinement from a too-coarse base grows a bigger
-        // skin mesh.) The perturbation/SIBC path integrates the eigenmode's
-        // surface |H|^2 on this mesh, and its corner-dominated R is
-        // mesh-sensitive, so replicate the useMQS gate (see _modeAtFreq)
-        // pre-mesh: wall-absorption via _clipDomain instead of cr.rectRoles,
-        // and keep the proven 1.5t sizing when MQS won't apply.
-        //
-        // On the MQS path the thickness term is also floored at a quarter of
-        // the smaller of the trace width and twice the clearance to the nearest
-        // other conductor or PEC wall (gapRef). A thin conductor otherwise gets
-        // its whole perimeter meshed at the thickness scale for nothing: the
-        // static and eigen solves need the edge singularity, which the adaptive
-        // passes refine, and the loss solve re-resolves the conductor through
-        // the skin band, which copes with the flat sliver elements gmsh puts
-        // inside a rect thinner than its surface size (a 1 um trace on the
-        // 35 um sizing: R within 0.1% of the thickness-sized mesh from 100 MHz
-        // to 100 GHz on a tenth of the base triangles). The floor tracks the
-        // thick-copper sizing, where 2t is near w/4 anyway, so the base mesh of
-        // a thin conductor costs about what the same trace in thick copper does.
-        // The perturbation path keeps the thickness sizing: its surface |H|^2
-        // integral is only as good as the base mesh's edge resolution.
+        // Base mesh: graded, fine at the conductors and coarse in the bulk, and the
+        // adaptive passes add resolution where the field needs it. hFine is 1.5 times a
+        // thickness term, capped at w/4. The term is 2t on the MQS loss path, where the
+        // skin band (refineSkinBand) re-resolves the conductors for the loss solve, and t
+        // on the perturbation path, whose surface |H|^2 integral is only as good as this
+        // mesh's edge resolution. On the MQS path it is floored at min(w, 2*gapRef)/4,
+        // gapRef the clearance to the nearest other conductor or PEC wall, so a thin film
+        // is not meshed along its whole perimeter at its thickness (a 1 um trace: R within
+        // 0.1% of the thickness-sized mesh on a tenth of the triangles). mqsPre repeats
+        // the loss-path choice of _modeAtFreq before the mesh exists.
         const lmPre = this.opts.lossMethod ?? 'auto';
         const clip = _clipDomain(dom, s.conductors, s.boundaries, s.domain_width * 1e-9);
         const survives = c => Math.min(c.x_max, clip.X1) - Math.max(c.x_min, clip.X0) > 0
@@ -1319,22 +1262,13 @@ export class TriBackend {
         this.nearField = nearField;
         if (nearField) hCoarse = nearField.bulk;
         let mesh, prevAtt = null;   // previous attempt's (h, nTris), for the scaling fit
-        // Passive-ground surface-size relaxation: when the initial mesh
-        // overruns the budget, first coarsen the size painted on passive-ground
-        // curves (gndScale, see occ_to_mesh gndSizeScale) and only fall back to
-        // global hFine/hCoarse coarsening once that stops paying. Rationale:
-        // a large interior ground can cost more triangles than the entire
-        // signal region. Coarsening hFine globally to absorb it left the trace
-        // with elements bigger than the trace. Signal resolution is what the
-        // solved quantities live on, so it is the last thing the budget may
-        // take.
-        //
-        // The two mechanisms get separate pass budgets. Sharing one counter let a
-        // geometry spend the whole budget relaxing grounds and then hard-stop with
-        // an over-budget mesh, never having coarsened globally at all and maxTris
-        // is a memory guard not a preference. Worst case is now
-        // COARSEN_MAX_PASSES + GND_MAX_PASSES + 1 gmsh runs, and a geometry with no
-        // relaxable ground curves builds exactly the same meshes as before.
+        // Over budget, the initial mesh first coarsens the surface size on passive-ground
+        // curves (gndScale, see occ_to_mesh gndSizeScale) and only then hFine/hCoarse
+        // globally: a large ground can cost more triangles than the whole signal region,
+        // and the signal resolution is what the results depend on. The two get separate
+        // pass counts, so ground relaxation cannot use up the passes the global
+        // coarsening needs to get under maxTris (a memory guard). At most
+        // COARSEN_MAX_PASSES + GND_MAX_PASSES + 1 gmsh runs.
         const COARSEN_MAX_PASSES = 4, GND_MAX_PASSES = 3;
         let gndScale = 1, gndStalled = false, gndPrevN = null;
         let coarsenPasses = 0, gndPasses = 0;
@@ -1364,9 +1298,8 @@ export class TriBackend {
         // is good to ~±30%, so it only takes over when the start is far enough over
         // budget (PRESIZE_MIN_OVERSHOOT) that the loop would need two or more extra
         // builds. A moderately over-budget start keeps the loop's trial coarsening
-        // and its exact meshes (mesh-sensitive quantities such as the perturbation
-        // loss were tuned on them), and a start that fits is untouched. The loop
-        // stays as the safety net for a misestimate either way.
+        // and its exact meshes, and a start that fits is untouched. The loop stays as
+        // the safety net for a misestimate either way.
         // opts.preMeshSizing = false disables it (diagnostics).
         const PRESIZE_MIN_OVERSHOOT = 2.5;
         if (this.opts.preMeshSizing !== false) try {
@@ -1405,7 +1338,7 @@ export class TriBackend {
                     console.error('[tri] pre-mesh sizing', { est0, est: est(hFine, hCoarse, gndScale), maxTris, hFine, hCoarse, gndScale });
             }
         } catch (e) {
-            // Estimate unavailable: the loop below sizes by trial as before.
+            // Estimate unavailable: the loop below sizes by trial.
             globalThis.__OCC_DEBUG__ && console.error('[tri] pre-mesh sizing failed', e);
         }
         for (;;) {
@@ -1414,11 +1347,8 @@ export class TriBackend {
                 console.error('[tri] initial mesh attempt', { nTris: mesh.nTris, maxTris, hFine, hCoarse, gndScale, coarsenPasses, gndPasses,
                     est: estimateOccTriCount(mesh.sizeStats, mesh.sizeStats) });
             if (mesh.nTris <= maxTris || coarsenPasses >= COARSEN_MAX_PASSES) break;
-            // Accept a near-budget mesh before any relaxation/coarsening. This is the
-            // same OVERSHOOT_OK acceptance as below, hoisted so a mesh that today gets
-            // accepted at, say, 1.2x budget is still accepted identically rather than
-            // paying a rebuild with relaxed grounds (keeps the meshes of every family
-            // that never over-runs badly bit-for-bit unchanged).
+            // Accept a mesh within OVERSHOOT_OK of the budget rather than pay a rebuild.
+            // The test is on the overshoot in triangles, the unit maxTris guards.
             if (mesh.nTris < maxTris * OVERSHOOT_OK && mesh.nTris <= solveTris) break;
             // Ground relaxation first (only when there are relaxable ground curves and
             // headroom below the hCoarse cap). Element count along a painted curve is
@@ -1436,28 +1366,17 @@ export class TriBackend {
                     continue;
                 }
             }
-            // Element count vs element size is NOT the uniform-fill nTris ∝ 1/h². The
-            // conductor-surface size field makes the mesh a graded band around the
-            // metal, so the true exponent is shallower — measured ~0.75 on coax, where
-            // assuming 2 under-coarsens so badly that the loop burns every coarsening
-            // pass, never reaches the budget, and ends up SLOWER with a SMALL "Max Nodes"
-            // than a large one (7.6 s vs 4.1 s). Learn the exponent from the last two
-            // attempts instead; the first step has no data and keeps the 1/h² guess.
+            // The triangle count does not scale as 1/h^2: the mesh is a graded band
+            // around the metal and the exponent is shallower (about 0.75 on coax, where
+            // assuming 2 under-coarsens and uses up every pass). It is fitted from the
+            // last two attempts, the first step assumes 1/h^2.
             let p = 2;
             if (prevAtt) {
                 const e = Math.log(prevAtt.n / mesh.nTris) / Math.log(hFine / prevAtt.h);
                 if (Number.isFinite(e) && e > 0.3) p = Math.min(e, 3);
             }
             const factor = Math.pow(mesh.nTris / maxTris, 1 / p) * 1.05;   // +5% to land under
-            // Backstop: give up if coarsening has stopped paying (some geometries floor
-            // out). The companion OVERSHOOT_OK acceptance, accept a
-            // mesh already near the budget rather than pay a whole gmsh run to shave
-            // it is hoisted above the ground relaxation. Its test is on the
-            // overshoot, not on `factor`: factor is the p-th root, so the same cutoff
-            // there would mean a different budget overrun for every fitted exponent (a
-            // `factor < 1.2` bail lets p=3 through at 1.5x budget while p=2 stops at
-            // 1.3x). maxTris is a memory guard, so what it may be exceeded by has to
-            // be stated in its own units.
+            // Give up once coarsening stops paying (some geometries floor out).
             if (mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
             prevAtt = { h: hFine, n: mesh.nTris };
             hFine *= factor; hCoarse *= factor;
@@ -1465,11 +1384,9 @@ export class TriBackend {
         }
         this.condRect = mesh.condRect;
 
-        // Loss routines read per-rect metadata: .symmetry scales the half-domain
-        // integral, .xmin_domain locates the symmetry plane (corner/edge exclusion —
-        // rects[0] is what the loss routines receive, and without this the plane
-        // test compared against undefined and never fired), .is_signal separates
-        // signal from ground rects in the DC-resistance area.
+        // Per-rect metadata for the loss routines: .symmetry scales the half-domain
+        // integral, .xmin_domain/.ymin_domain locate the symmetry plane and the bottom
+        // wall, .is_signal separates signal from ground rects in the DC resistance.
         this.condRect.rects.forEach((r, i) => {
             r.symmetry = this.condRect.symmetry;
             r.xmin_domain = this.condRect.xmin_domain;
@@ -1479,12 +1396,14 @@ export class TriBackend {
         });
 
         // ---- Adaptive mesh refinement ----
-        // The OCC field-graded mesh produces high-quality triangles (Q≈2), so error-driven
-        // refinement converges rather than degrading the Nedelec eigensolve. Metric:
-        // the Zienkiewicz–Zhu estimator on the projected H-field (refines the
-        // conductor surfaces / corners that dominate conductor loss), blended with the
-        // static field energy (dielectric interfaces) — as in the reference solver.
-        // Driven by the full-wave eigensolve at a representative frequency.
+        // Each pass solves the statics and the full-wave eigenmode at fRef of every mode
+        // (odd and even: the odd mode needs the gap between the traces) and refines
+        // refineFrac of the triangles, marked on the sum of two normalized indicators,
+        // the flux-jump (Kelly) error of the static field and the Zienkiewicz-Zhu
+        // estimate on the eigenmode's projected H (conductor surfaces and corners),
+        // taking the larger mark over the modes. The gate tests the reported quantities,
+        // the eigenmode eps_eff and the loss integrals (the static energies settle a
+        // pass or two earlier), and a tripped gate is certified by _certifyStatic.
         const maxIters = this.opts.maxRefineIters ??
             (typeof process !== 'undefined' && process.env && process.env.TRI_MAXREF !== undefined
                 ? +process.env.TRI_MAXREF : 6);
@@ -1506,17 +1425,7 @@ export class TriBackend {
         // Passes"): guards against a premature stop on a single lucky pass.
         const minConvergedPasses = Math.max(1, this.opts.minConvergedPasses ?? 1);
         let convergedCount = 0;
-        // Refine on ALL solved modes (differential: odd AND even) so each mode's
-        // critical regions are resolved — crucially the inter-trace gap, where the
-        // odd mode's field concentrates and the mutual resistance R[12] comes from.
         const refModes = this.modeNames;
-        // Run the full-wave eigensolve EVERY refinement pass and converge on the actually
-        // REPORTED quantities (the dispersive ε_eff from the eigenmode and the static Z0),
-        // not on a cheaper static-only proxy. The static field-energy metric stabilises a
-        // mesh or two before the full-wave eigenmode does, so a static-only convergence test
-        // signs off while the reported ε_eff is still drifting (e.g. 4.305 → 4.416 on an open
-        // asymmetric stripline). The per-pass eigensolve costs more, but an adaptive mesh
-        // whose entire purpose is an accurate ε_eff/Z0/loss should converge on those numbers.
         const fRef = Math.max(s.freq || 1e9, 1e9);               // full-wave eval frequency
         let prev = null, prevEnergy = null;
         for (let it = 0; it <= maxIters; it++) {
@@ -1581,8 +1490,8 @@ export class TriBackend {
                 conv.push(fw && fw.eps > 0 ? fw.eps : eps_static);
                 if (Wc) { conv.push(Wc.im); convScale[conv.length - 1] = 1e-3 * Math.hypot(Wc.re, Wc.im); }
                 // Static marking metric: Kelly flux-jump error indicator (refines where
-                // the discretization error is), falling back to the legacy field-energy
-                // metric if it degenerates (e.g. every edge constrained).
+                // the discretization error is), falling back to the field energy
+                // if it degenerates (e.g. every edge constrained).
                 let metricS = null;
                 try {
                     metricS = cs ? perElementKelly(cs.sol.re, mesh, null, fm, { phiIm: cs.sol.im, epsRe: cs.epsRe, epsIm: cs.epsIm })
@@ -1618,10 +1527,7 @@ export class TriBackend {
             prev = conv; prevEnergy = energy;
             if (certQ0.length) this._passEnergies = { mesh, q: certQ0 };
             this._passWork = this._isWG ? null : passWork;
-            // Report this pass (real triangle count + convergence) so the UI shows
-            // the adaptive progress just like the rectilinear backend. When a progress
-            // sink is present, yield to the event loop so the browser can paint each
-            // pass live instead of all at once when buildMesh returns.
+            // Report the pass and yield, so the UI paints each pass as it happens.
             if (onProgress) {
                 onProgress({
                     iteration: it + 1, max_iterations: maxIters + 1,
@@ -1638,24 +1544,18 @@ export class TriBackend {
             // Count consecutive converged passes; only stop once minConvergedPasses in a
             // row meet the tolerance (reset the streak on any non-converged pass).
             if (maxRel < refTol && enoughNodes) convergedCount++; else convergedCount = 0;
-            // Stop before exceeding the triangle budget. Refining marks refineFrac of the
-            // triangles and splits each ~1→4 (≈ +3·refineFrac growth), so project the next
-            // size and stop now if it would blow the budget — keeps every SOLVED mesh within
-            // the memory-parity budget rather than overshooting by a full pass.
+            // Stop before the next pass would exceed the triangle budget: it splits
+            // refineFrac of the triangles into about 4 each.
             const projTris = Math.round(mesh.nTris * (1 + 3 * refineFrac));
             if (shouldStop && shouldStop()) {
                 console.log('Adaptive refinement stopped by user');
                 break;
             }
-            // Verification certificate: the pass-to-pass gate above measures
-            // the rate of approach, not the absolute error. Each pass refines
-            // only refineFrac of the triangles, so with a per-pass error-decay
-            // ratio r near 1 the remaining error is (observed change)*r/(1−r).
-            // A tripped gate is a candidate stop. Certify the actual error
-            // first (see _certifyStatic) and keep refining if the certificate
-            // fails. Waveguides have no static solve to certify with, and
-            // a mesh past certifyMaxTris (cert === null) keeps the legacy
-            // behavior.
+            // The pass-to-pass gate measures the rate of approach, not the error: with
+            // a per-pass error decay r near 1 the remaining error is (change)*r/(1 - r).
+            // A tripped gate is certified first (_certifyStatic) and refinement goes on
+            // if the certificate fails. A waveguide (no static solve) and a mesh past
+            // certifyMaxTris (cert === null) stop on the gate alone.
             if (convergedCount >= minConvergedPasses) {
                 let cert = null;
                 if (certify && !this._isWG) {
@@ -1756,7 +1656,7 @@ export class TriBackend {
                     if (inside && Math.min(d.x_max - d.x_min, d.y_max - d.y_min) < edge) { skip[t] = 1; break; }
                 }
             }
-            const mq = checkMeshQuality(mesh, [], [], { skip });
+            const mq = checkMeshQuality(mesh, { skip });
             this.meshQuality = mq.metrics;
             if (this.solver) this.solver.meshQuality = mq.metrics;
         } catch { this.meshQuality = null; }
@@ -1771,36 +1671,7 @@ export class TriBackend {
         return mesh;
     }
 
-    // Verification certificate
-    // Refine the mesh uniformly and nested (refineTriMeshNested: red split,
-    // nodes fixed) and re-solve the statics:
-    //   d1 = max rel change of (W_eps, W_air) per mode, mesh -> level 1
-    //   certified error = d1/(1-r),  r = level-to-level error ratio
-    // On a nested P2 hierarchy r is set by the strongest field singularity: h halves per
-    // level and the energy error goes as h^(2λ), so a conductor corner (λ = 2/3 for its
-    // 270° exterior angle) gives r = ~0.40 and a knife edge (λ = 1/2) is the worst case at
-    // r = 0.5. R_BOUND = 0.5 is therefore the one-level estimate.
-    // A second level, which measures r, costs 16x the base mesh
-    // and only changes the verdict when it is borderline (d1 alone passes, 2*d1 does
-    // not), so it runs only then.
-    // Every reported static quantity (C0, eps_static, Z0) is a combination of W_eps and
-    // W_air, and the eigensolve part of the reported eps_eff is anchored to the static
-    // solve (_eigenBias), so the static error is the reported error. Gates:
-    //   * d1 < noise floor  -> pass outright: below the linear-solver reproducibility.
-    //   * d1*safety ≥ tol   -> already failed, no second level (cost control).
-    //   * 2*d1*safety < tol -> pass on level 1 (rSource 'bound').
-    //   * otherwise level 2 when it fits certifyMaxTris: r ≥ certifyRMax -> pre-asymptotic,
-    //     cannot certify, else err = d1/(1−r). Over the cap -> fail on the level-1 bound.
-    //     A base mesh whose level 1 is over the cap returns null.
-    // The pass decision applies certifySafety (x1.5) on top of the estimate. `err` stays
-    // the un-inflated best estimate (it is what warnings report).
-    //
-    // Result shape is the same as FieldSolver2D._certifyStatic so the UI and tests can
-    // read either backend's `solver.certification` the same way:
-    //   { pass, err, d1, r, rSource, levels, safety, preAsymptotic?, <size> }
-    // rSource is 'bound' (r = R_BOUND), 'measured' (level-2 ratio) or null (no r, the
-    // d1-alone failure branch). The size field is deliberately named in each backend's
-    // own unit (tris or nodes).
+    // Uniform nested refinement of a mesh for the certificate, see _certifyStatic.
     _nestedRefine(mesh) {
         const refined = refineTriMeshNested(mesh);
         refined.condRect = this.condRect;
@@ -1849,6 +1720,26 @@ export class TriBackend {
         return Math.max(Math.abs(q[i]), 1e-3 * Math.hypot(q[i - 2], q[i]));
     }
 
+    // Verification certificate. The mesh is refined uniformly and nested
+    // (refineTriMeshNested, red split) and the statics re-solved:
+    //   d1 = max relative change of (W_eps, W_air) over the modes, mesh -> level 1
+    //   error = d1 / (1 - r), r the level-to-level error ratio
+    // On a nested P2 hierarchy r is set by the strongest field singularity: the energy
+    // error goes as h^(2*lambda), r ~0.40 at a conductor corner (lambda = 2/3) and 0.5
+    // at a knife edge (lambda = 1/2), so R_BOUND = 0.5 bounds it from one level. Every
+    // reported static quantity is a combination of W_eps and W_air, and the eigensolve
+    // is anchored to the statics (_eigenBias), so this is the error of the results.
+    //   d1 < 5e-5             -> pass, below the linear-solver reproducibility
+    //   d1*safety >= tol      -> fail without a second level
+    //   2*d1*safety < tol     -> pass on the bound (rSource 'bound')
+    //   otherwise a level 2 (16x the base mesh) measures r when it fits certifyMaxTris:
+    //     r >= certifyRMax is pre-asymptotic and fails, else err = d1/(1 - r) decides.
+    //     Over the cap it fails on the bound, and a base whose level 1 is over the cap
+    //     returns null.
+    // safety (certifySafety, 1.5) applies to the decision only, err is the estimate.
+    // The result has the shape of FieldSolver2D._certifyStatic:
+    //   { pass, err, d1, r, rSource, levels, safety, preAsymptotic?, tris }
+    // rSource is 'bound', 'measured' (level-2 ratio) or null (no r used).
     _certifyStatic(mesh, tol) {
         const maxDiff = (a, b) => {
             let m = 0;
@@ -2455,19 +2346,6 @@ export class TriBackend {
         return mode === 'odd' ? [1, -1] : [1, 1];
     }
 
-    // One exact quasi-TEM eigensolve at f for a prepared mode: the closed-wall pick
-    // first, escalating to the radiating-ABC pick when that fails or is ambiguous (the
-    // two-stage pick is explained in _modeAtFreq). Returns { fw, fwErr }.
-    //
-    // The shift-invert returns the eigenpairs nearest its centre. Far above the
-    // quasi-TEM regime (substrate a good fraction of a wavelength thick) the
-    // quasi-TEM eps_eff has dispersed toward max eps_r and the eigenvalues near the
-    // static eps_eff are a dense cluster of surface-wave / box modes, so a single
-    // solve centred there never sees it. The pick therefore walks a ladder of
-    // shifts: the caller's guess (a neighbouring sweep anchor), the static eps_eff,
-    // then steps toward max eps_r, and stops at the first candidate that clearly
-    // overlaps the static drive. Each step costs one factorization and runs only
-    // when the previous step found nothing convincing.
     // Ground bodies under a solve's wall map: a wall is PEC when its abc entry is absent
     // (Dirichlet), so the odd mode's PEC symmetry plane counts as a tie. Memoized per
     // conductor map (set on every refinement pass, unlike this.mesh) and wall map.
@@ -2527,6 +2405,15 @@ export class TriBackend {
         return this._groundsFloat(abc) && this._fillInhomogeneous(epsMap);
     }
 
+    // One exact quasi-TEM eigensolve at f for a prepared mode. Returns { fw, fwErr }.
+    // The pencil has closed walls, or radiating ones when the grounds float on an
+    // inhomogeneous fill (_eigenAbc), and a failed or ambiguous closed pick is retried
+    // with radiating walls. Shift-invert finds the eigenpairs nearest its centre, and
+    // far above the quasi-TEM regime the quasi-TEM eps_eff has moved towards max eps_r
+    // behind a dense cluster of surface-wave and box modes near the static value. So
+    // the shift walks a ladder, the caller's guess (a neighbouring sweep anchor), the
+    // static eps_eff, then steps towards max eps_r, with 8 and then 16 eigenpairs,
+    // stopping at the first candidate that clearly overlaps the static field.
     // mesh: a refinement pass picks on its own mesh (this.mesh is set after the loop).
     _eigenPick(st, f, phiEps, eps_eff_static, epsGuess = null, mesh = this.mesh) {
         const cr = this.condRect, fm = st.fm;
@@ -2589,15 +2476,12 @@ export class TriBackend {
     // the dispersion ratio eps_fw(f)/eps_fw(F_STATIC_MAX) is mesh-independent
     // to 1e-4. So the reported eps_d is
     //     eps_static * eps_fw(f) / eps_fw(F_STATIC_MAX)
-    // the static energies (which the verification certificate covers) set the level and
-    // the eigensolve contributes only the dispersion. It also makes eps_eff continuous at
-    // the static/full-wave switch. One extra eigensolve per (mesh, mode), cached on the
-    // backend keyed by mesh identity (survives the per-frequency causal re-solves of
-    // this._static[*], whose material changes move the bias only in the noise). When no
-    // anchor frequency yields a usable solve, or the candidate is implausible (|bias - 1|
-    // > 5%: a different mode was picked), the raw eigenvalue stays in place and a warning
-    // is surfaced once. `fwAtAnchor` lets the caller hand over a solve it already did at
-    // exactly F_STATIC_MAX.
+    // the static energies (which the certificate covers) set the level and the
+    // eigensolve only the dispersion, and eps_eff is continuous at the switch. One extra
+    // eigensolve per (mesh, mode), cached by mesh (causal material changes move the bias
+    // only in the noise). Without a usable anchor solve, or with |bias - 1| > 5% (another
+    // mode was picked), the raw eigenvalue stays and a warning is surfaced once.
+    // fwAtAnchor hands over a solve already done at F_STATIC_MAX.
     _eigenBias(mode, st, phiEps, eps_eff_static, fwAtAnchor = null) {
         if (!this._eigenBiasCache || this._eigenBiasCache.mesh !== this.mesh)
             this._eigenBiasCache = { mesh: this.mesh, byMode: {} };
@@ -2854,45 +2738,21 @@ export class TriBackend {
         }
         let eps_d = eps_eff_static, fw = null, eigen_bias = 1;
         if (f >= F_STATIC_MAX) {
-            // Seed the eigensolve with the STATIC field (frequency-deterministic), NOT a
-            // cross-frequency eigenvector warm-start. The static seed is the quasi-TEM
-            // shape (a good initial guess) AND it makes the picked eigenvector independent
-            // of evaluation ORDER. With a cross-frequency warm-start, a near-degenerate
-            // cluster (e.g. the open homogeneous stripline odd mode + lateral resonances)
-            // converges to a different in-subspace mixture depending on which frequency
-            // ran last — so the out-of-order interpolating sweep produced order-dependent
-            // conductor loss → ripple + non-convergent interpolant (excess solves).
+            // The eigensolve is seeded with the static field, not the eigenvector of the
+            // previous frequency, so the pick does not depend on the order of the sweep
+            // points (a near-degenerate cluster would otherwise converge to different
+            // mixtures). _eigenPick uses the cheap closed (natural wall) pencil, radiating
+            // walls when the grounds float on an inhomogeneous fill, retries a failed or
+            // ambiguous closed pick with radiating walls, and walks the shift towards the
+            // largest eps_r when the quasi-TEM mode hides behind other modes. The FEM is
+            // affine in k^2 (plus k0 for the radiating term), so fullwaveMode reuses a
+            // cached decomposition per wall set (st.femCache, st.femCacheAbc).
             //
-            // TWO-STAGE quasi-TEM pick:
-            //   1. Closed-wall pick ('pmc' naturals, st.abc): all-real matrices, so the
-            //      WASM real-arithmetic Arnoldi fast path applies — the complex SparseLU
-            //      factorization dominates the sweep at these problem sizes, and the real
-            //      factorization is several times cheaper.
-            //   2. Only when the closed pick FAILS or is AMBIGUOUS (a competing mode with
-            //      comparable overlap but different ε — the closed box manufacturing
-            //      near-degenerate cavity modes next to the quasi-TEM), ESCALATE to the
-            //      radiating first-order ABC pick (=== true on open walls, complex): the
-            //      radiation term absorbs outgoing waves, so the open structure's bound
-            //      quasi-TEM is found without box-mode competition. Reference output was
-            //      validated byte-identical between the closed and the ABC pick across the
-            //      whole suite — escalation only changes WHICH solve resolves the ambiguous
-            //      minority of points. PEC ('gnd') walls stay PEC either way; a fully
-            //      enclosed structure has no open wall and never escalates. The symmetry
-            //      plane stays 'pmc' (even/single) / PEC (odd, absent).
-            // The FEM is NOT re-assembled per frequency: the system is affine in k² and
-            // the ABC Robin term is linear in k₀ = √k², so fullwaveMode combines a cached
-            // decomposition A0 + k²·A1 + j·k0·Ar per point (st.femCache / st.femCacheAbc —
-            // one slot per BC set so escalation doesn't thrash the closed-pick cache).
-            //
-            // DISPERSION CACHE (MQS loss path only): there the eigensolve contributes just
-            // the scalar eps_d(f) — a very smooth dispersion curve — while the eigenvector
-            // is unused. Exact eigensolves fill st.disp with (f, eps_d) anchors; once a
-            // leave-one-out check on the neighbouring anchors proves the local PCHIP
-            // interpolation error ≤ dispTol, intermediate sweep points interpolate eps_d
-            // instead of paying a full eigensolve. Anchor points stay exact, and the
-            // interpolating sweep's own RLGC error control still verifies every reported
-            // quantity downstream. The perturbation path needs the eigenvector (SIBC
-            // projection), so it never interpolates.
+            // Dispersion cache (MQS loss path only, where only eps_d is used): exact
+            // eigensolves are stored as (f, eps_d) anchors in st.disp, and a point between
+            // anchors takes the log-frequency PCHIP value once leave-one-out checks on
+            // the neighbouring anchors pass dispTol (dispersionInterp). The perturbation
+            // path needs the eigenvector and always solves.
             const dispTol = this.opts.dispTol ?? 1e-3;
             const dc = useMQS ? (st.disp || (st.disp = { xs: [], ys: [] })) : null;
             const epsI = dc && !(slot && !('fw' in slot)) ? dispersionInterp(dc, f, dispTol) : null;
@@ -2985,8 +2845,8 @@ export class TriBackend {
         // Per-face plating: split the loss surface into surface-impedance groups.
         // Used by the perturbation path below (when MQS doesn't apply) to evaluate
         // and sum the loss per group; >1 group (e.g. top/sides plated, bottom bare)
-        // means a face-dependent impedance. (MQS handles per-face plating itself via
-        // surfaceZs, so plating no longer forces the perturbation path.)
+        // means a face-dependent impedance. MQS handles per-face plating itself
+        // (surfaceZs).
         // The loss-edge mask and the surface-group face classification are purely
         // geometric — cache them per mode (validated against mesh/fm identity);
         // only the per-frequency Zs grouping is re-evaluated each point.
@@ -3047,22 +2907,13 @@ export class TriBackend {
                 const role = crM.rectRoles[i];
                 return solidPlated(role) ? role.plating.sigma : (role.sigma || bulkSigma);
             }) : null;
-            // Skin-band element size at the conductor surface (xδ) and band width (xδ).
-            // Resolve the skin layer to bandDelta*δ within mqsBand*δ of each surface,
-            // with the target relaxing away from the surface (mqsBandDepthSlope, see
-            // buildSkin / refineSkinBand).
-            //
-            // The surface target is deliberately ~δ rather than a fraction of it: with
-            // the depth grading in place, R converges on the grading , not on the surface
-            // element size, a P2 element about a skin depth across already carries
-            // exp(-d/δ) well. The previous uniform-target band needed 0.6δ elements
-            // everywhere inside 1.5δ and still ran into its triangle cap (leaving R
-            // +0.6% at 10 GHz and +1.3% at 40 GHz on the reference differential GCPW).
-            // The graded band converges inside the same budget at ~0.1%, with a smaller
-            // mesh and a faster MQS solve.
-            // The anisotropic band refines the air side only near corners (mqsBandAirSide),
-            // which leaves its smooth faces coarser along the surface, a 1.0*delta target
-            // makes up for it at about half the triangles of the two-sided 1.25*delta band.
+            // Skin band: elements of bandDelta*delta at the conductor surfaces within
+            // mqsBand*delta of them, the target relaxing with depth (mqsBandDepthSlope, see
+            // buildSkin / refineSkinBand). With the depth grading R converges on the
+            // grading rather than the surface size, a P2 element about a skin depth across
+            // already carries exp(-d/delta) well. The anisotropic band refines the air side
+            // only near corners (mqsBandAirSide) and takes a 1.0*delta target, the
+            // isotropic one 1.25*delta.
             const anisoBand = this.opts.mqsBandAniso ?? true;
             const bandDelta = this.opts.mqsBandDelta ?? (anisoBand ? 1.0 : 1.25);
             // Skin-band triangle budget: how many triangles the size-aware band
@@ -3163,23 +3014,12 @@ export class TriBackend {
                 m.bandTrunc = trunc.length ? trunc : null;
                 return m;
             };
-            // DEFAULT: f_max-reuse. Build the skin mesh at the HIGHEST frequency seen
-            // (finest target, narrowest band) and reuse it for all lower frequencies.
-            // The fine near-surface band plus the conductor interior (always meshed on
-            // this path, see the guard on condInteriorMeshed above) resolve the
-            // lower-frequency (more uniform) current accurately, validated
-            // against the reference suite to a 100× frequency mismatch. One mesh ⇒ smooth
-            // R(f) with no per-frequency-remesh "dip", at moderate size (the high-f band
-            // is narrow), unlike a whole-range mesh which over-resolves the low-f band.
-            // opts.mqsCacheMesh === false falls back to a per-frequency remesh (marginally
-            // faster on wide sweeps, but can show a small non-monotonic wiggle).
-            // Band-sizing skin depth: when a sweep announces its maximum frequency
-            // (solver._sweepFmax, set by solve_sweep / InterpolatingSweep), size the
-            // band for the WHOLE sweep up front — an ascending discrete sweep then
-            // builds ONE skin mesh at the first point and every later point reuses
-            // it (plus its cached MQS assembly), instead of re-refining per point.
-            // Without the hint this reduces to the current frequency (old behavior:
-            // rebuild whenever a higher frequency appears).
+            // The skin mesh is built for the highest frequency seen (finest band) and
+            // reused at every lower one, whose more uniform current the band plus the
+            // meshed conductor interior still resolve, so R(f) comes from one mesh and
+            // stays smooth. A sweep that announces its maximum (solver._sweepFmax, set by
+            // solve_sweep and InterpolatingSweep) gets that mesh at its first point.
+            // opts.mqsCacheMesh === false remeshes per frequency instead.
             const fBand = Math.max(f, this.solver._sweepFmax || 0);
             const deltaBand = fBand > f ? Math.sqrt(2 / (2 * Math.PI * fBand * MU0 * mqsSigma)) : mqsDelta;
             // The band is built at every skin depth. refineSkinBand is size-aware
@@ -3226,17 +3066,6 @@ export class TriBackend {
                     `finer mesh than the full-wave solver's budget allows. ` +
                     `Conductor loss can be several percent high.` });
             }
-            // R(f) and L_internal(f) anchor caches: the sweep consumes only these
-            // two scalars from the solve, so past the first few anchor frequencies
-            // interpolate them the same way the eigensolve's eps_d dispersion cache
-            // does (log-space PCHIP + leave-one-out gate) and skip the MQS
-            // factorization entirely. Keyed to the skin mesh so a finer rebuild
-            // (higher f seen) discards anchors from the coarser mesh.
-            //
-            // Each cache is gated on its own leave-one-out check and both must
-            // pass: a hit on R alone would otherwise force L_internal to be
-            // reconstructed from it, which is exactly the R/omega assumption this
-            // path must avoid.
             // Per-line evaluation for solveAt (_lineAsymmetry): the same eddy-current
             // solve driven with current in one trace only (line 0, 1) or the same
             // current in both (line 2). It reuses the unit solutions
@@ -3244,8 +3073,7 @@ export class TriBackend {
             // MQS solve options. Per-face plating: weight each face's smooth current by its
             // own surface impedance (surfaceZs), otherwise the uniform roughness factor (Rq).
             const mqsOptsWith = (o) => {
-                Object.assign(o, { wallPEC: crM.wallPEC || null, wallThick: crM.wallThick || null, wallSigma,
-                    topGround: !!(crM.wallPEC && crM.wallPEC.top) });   // legacy fallback
+                Object.assign(o, { wallPEC: crM.wallPEC || null, wallThick: crM.wallThick || null, wallSigma });
                 if (rectSigma) o.rectSigmaRel = rectSigma.map(v => v / mqsSigma);
                 const faceDZ = meshedPlating ? buildFaceDZ(s, crM, f) : null;
                 if (anyPlatingM || ownRqM || ownSigmaM || faceDZ) o.surfaceZs = buildFaceZs(s, crM, f);
@@ -3268,6 +3096,9 @@ export class TriBackend {
                 if (pl.L[line] === undefined) pl.L[line] = mqsPecInductance(mqsMesh, crM, this.ctx.helpers.solveSparseMulti, o);
                 return { R: m.R_total / 2, L_internal: m.L_loop - pl.L[line] + m.L_wall };
             } } : null;
+            // R(f) and L_internal(f) anchor caches, as the eps_d dispersion cache
+            // (dispersionInterp): the MQS solve is skipped when both pass their own
+            // leave-one-out check. Keyed to the skin mesh, a rebuild drops the anchors.
             const rTol = this.opts.mqsInterpTol ?? 2e-3;
             const rc = (st.mqsR && st.mqsR.mesh === mqsMesh) ? st.mqsR
                 : (st.mqsR = { mesh: mqsMesh, xs: [], ys: [], log: true });
@@ -3377,18 +3208,12 @@ export class TriBackend {
             }
             }   // end R-cache miss (exact MQS solve)
         }
-        // Perturbation conductor loss (used for the 'perturbation' option and as the
-        // 'auto' fallback when MQS doesn't apply). Two estimators are blended by the
-        // skin-depth / conductor-thickness ratio:
-        //   • static-field perturbation — smooth and robust across the skin transition
-        //     (δ ≳ thickness), where it matches MQS; used at low frequency.
-        //   • SIBC eigenmode perturbation — more accurate at deep skin (δ ≪ thickness,
-        //     e.g. rough conductors at high f), but its corner-singularity model is
-        //     non-monotonic for δ ≳ thickness (a spurious jump/flat band). Used at high
-        //     frequency only.
-        // The crossover (δ/t ≈ 0.08–0.15) is where the two agree, so the blend is
-        // continuous. 'static' forces
-        // the static estimator everywhere.
+        // Perturbation conductor loss (lossMethod 'perturbation', and 'auto' where MQS
+        // does not apply) blends two estimators on delta / conductor thickness: the
+        // static-field integral, smooth through the skin transition, and the SIBC
+        // integral on the eigenmode, more accurate in deep skin but with a corner model
+        // that misbehaves for delta near the thickness. The weight moves from the first
+        // to the second over delta/t = 0.15..0.08. 'static' uses the static one only.
         // DC resistance from the conductor list, shared with the quasi-static backend
         // (cr.rects holds coplanar grounds as rects and omits wall-absorbed grounds).
         const dc = s._dc_resistance(mode), R_dc = dc.sig + dc.gnd;
@@ -3416,11 +3241,8 @@ export class TriBackend {
             const RsRef = 1 / (sigmaRef * Math.min(deltaRef, 1e30));
 
             const useFW = !!fw && lossMethod !== 'static';
-            // Galerkin H-projection of the eigenmode, computed ONCE per frequency and
-            // shared by every plating group's SIBC evaluation (solveConductorLoss used
-            // to re-project per group). Replaces the analyzeTriMode call whose only
-            // consumed output was the Poynting power — and whose voltage-path contour
-            // walk could crash on geometries without a node at its hardcoded ground.
+            // Galerkin H-projection of the eigenmode, computed once per frequency and
+            // shared by every plating group's SIBC evaluation.
             let projH = null, Pfw = 0;
             if (useFW) {
                 let gamma = csqrt(fw.g2Re, fw.g2Im);
@@ -3994,13 +3816,11 @@ export class TriBackend {
         const st = this._static[this.modeNames[0]];   // any cached static solve seeds the shift
         const { fm, phiEps, eps_eff_static } = st;
         const k2 = (2 * Math.PI * f / c0) ** 2;
-        // Radiating first-order ABC on the OPEN walls (=== true → the Robin radiation term
-        // in assembleTriFEM), exactly like the reference viewer (microstrip_viewer_gmsh.html:
-        // abc={top,left,right:true}). This absorbs outgoing waves so the open structure's
-        // bound quasi-TEM mode is found ONCE and cleanly, instead of the spurious
-        // near-degenerate duplicates a closed PMC box produces. 'gnd' walls stay PEC. The
-        // freedom map (built with 'pmc', same truthiness → same free DOFs) is reused as-is;
-        // only the assembled matrices differ (ABC adds an imaginary boundary term).
+        // Radiating first-order ABC on the open walls (=== true, the Robin term in
+        // assembleTriFEM): it absorbs outgoing waves, so the bound quasi-TEM mode comes
+        // out once instead of as the near-degenerate duplicates of a closed box. 'gnd'
+        // walls stay PEC. The 'pmc' freedom map has the same free DOFs and is reused,
+        // only the assembled matrices differ.
         const w = cr.wallPEC || {};
         const abc = {};
         if (!w.left) abc.left = true;
@@ -4048,10 +3868,9 @@ export class TriBackend {
 
         const epsMax = Math.max(1, ...s.dielectrics.map(d => d.epsilon_r || 1));
         const nullThresh = k2 * 1e-6;
-        // Classification — the reference viewer's rule, which now works because the lossy
-        // eigensolve (lossyEpsMap) damps the discrete vector-FEM spurious modes out of the
-        // propagating range, so what remains in 0 < ε_eff < ε_r are the genuine quasi-TEM +
-        // cavity/higher-order modes (verified to match the reference at 10/50/100 GHz):
+        // Classification. The lossy eigensolve (lossyEpsMap) damps the spurious
+        // vector-FEM modes out of the propagating range, so what remains in
+        // 0 < eps_eff < eps_r are the quasi-TEM and the cavity and higher-order modes:
         //   • ε_eff > ε_r           → spurious (non-physical, faster-than-the-densest-medium)
         //   • |γ²| ≈ 0              → null space
         //   • γ² < 0                → propagating (ε_eff = −γ²/k²)
@@ -4077,7 +3896,7 @@ export class TriBackend {
             const vRe = res.evecsRe.slice(i * N, (i + 1) * N);
             const vIm = res.evecsIm.slice(i * N, (i + 1) * N);
             // overlap of the transverse part with the BEST-matching conductor drive (for
-            // display + auto-selecting the quasi-TEM mode; no longer used for classification).
+            // display and for auto-selecting the quasi-TEM mode, not for classification).
             let overlap = 0;
             for (const sd of seeds) {
                 let dot = 0, nS = 0, nV = 0;

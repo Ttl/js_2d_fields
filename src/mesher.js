@@ -168,62 +168,42 @@ class Mesher {
         return out.sort((a, b) => a - b);
     }
 
-    _collect_interfaces_x() {
-        const x_cond = new Set([this.x_min, this.x_max]);
-        const x_diel = new Set();
+    _collect_interfaces(axis) {
+        const lo = axis + '_min', hi = axis + '_max';
+        const cond_lines = new Set([this[lo], this[hi]]);
+        const diel_lines = new Set();
 
         for (const cond of this.conductors) {
-            x_cond.add(cond.x_min);
-            x_cond.add(cond.x_max);
+            cond_lines.add(cond[lo]);
+            cond_lines.add(cond[hi]);
         }
 
         for (const diel of this.dielectrics) {
-            if (diel.x_min > this.x_min) {
-                x_diel.add(diel.x_min);
-            }
-            if (diel.x_max < this.x_max) {
-                x_diel.add(diel.x_max);
-            }
+            if (diel[lo] > this[lo]) diel_lines.add(diel[lo]);
+            if (diel[hi] < this[hi]) diel_lines.add(diel[hi]);
         }
 
-        return this._merge_interfaces(x_cond, x_diel, this.x_max - this.x_min);
+        return this._merge_interfaces(cond_lines, diel_lines, this[hi] - this[lo]);
     }
 
-    _collect_interfaces_y() {
-        const y_cond = new Set([this.y_min, this.y_max]);
-        const y_diel = new Set();
-
-        for (const cond of this.conductors) {
-            y_cond.add(cond.y_min);
-            y_cond.add(cond.y_max);
-        }
-
-        for (const diel of this.dielectrics) {
-            if (diel.y_min > this.y_min) {
-                y_diel.add(diel.y_min);
-            }
-            if (diel.y_max < this.y_max) {
-                y_diel.add(diel.y_max);
-            }
-        }
-
-        return this._merge_interfaces(y_cond, y_diel, this.y_max - this.y_min);
-    }
-
-    _region_weight_x(x0, x1) {
+    // Mesh density weight of the region [a0, a1] on an axis. y weights conductor
+    // interiors higher than x and also raises regions on a dielectric interface.
+    _region_weight(axis, a0, a1) {
         const tol = 1e-15;
+        const lo = axis + '_min', hi = axis + '_max';
+        const isY = axis === 'y';
 
         // Check if region is inside a conductor
         for (const cond of this.conductors) {
-            if (x0 >= cond.x_min - tol && x1 <= cond.x_max + tol) {
-                return cond.is_signal ? 10.0 : 5.0;
+            if (a0 >= cond[lo] - tol && a1 <= cond[hi] + tol) {
+                return cond.is_signal ? (isY ? 20.0 : 10.0) : (isY ? 6.0 : 5.0);
             }
         }
 
-        // Calculate minimum conductor dimension in x-direction
+        // Minimum conductor dimension along the axis
         let min_dim = Infinity;
         for (const cond of this.conductors) {
-            min_dim = Math.min(min_dim, cond.width);
+            min_dim = Math.min(min_dim, isY ? Math.abs(cond.height) : cond.width);
         }
         if (min_dim === Infinity) {
             min_dim = 1e-3;  // fallback
@@ -231,77 +211,29 @@ class Mesher {
 
         // Check if region is near a conductor
         let min_dist = Infinity;
-
         for (const cond of this.conductors) {
             const dist = Math.min(
-                Math.abs(x0 - cond.x_min), Math.abs(x0 - cond.x_max),
-                Math.abs(x1 - cond.x_min), Math.abs(x1 - cond.x_max)
+                Math.abs(a0 - cond[lo]), Math.abs(a0 - cond[hi]),
+                Math.abs(a1 - cond[lo]), Math.abs(a1 - cond[hi])
             );
             min_dist = Math.min(min_dist, dist);
         }
 
-        // Weight based on distance relative to conductor dimensions
-        if (min_dist < 0.1 * min_dim) {
-            return 5.0;
-        } else if (min_dist < 0.25 * min_dim) {
-            return 2.5;
-        } else if (min_dist < min_dim) {
-            return 1.0;
-        } else {
-            return 0.2;
-        }
-    }
-
-    _region_weight_y(y0, y1) {
-        const tol = 1e-15;
-
-        // Check if region is inside a conductor
-        for (const cond of this.conductors) {
-            if (y0 >= cond.y_min - tol && y1 <= cond.y_max + tol) {
-                return cond.is_signal ? 20.0 : 6.0;
-            }
-        }
-
-        // Calculate minimum conductor dimension in y-direction
-        let min_dim = Infinity;
-        for (const cond of this.conductors) {
-            min_dim = Math.min(min_dim, Math.abs(cond.height));
-        }
-        if (min_dim === Infinity) {
-            min_dim = 1e-3;  // fallback
-        }
-
-        // Check if region is near a conductor
-        let min_dist = Infinity;
-
-        for (const cond of this.conductors) {
-            const dist = Math.min(
-                Math.abs(y0 - cond.y_min), Math.abs(y0 - cond.y_max),
-                Math.abs(y1 - cond.y_min), Math.abs(y1 - cond.y_max)
-            );
-            min_dist = Math.min(min_dist, dist);
-        }
-
-        // Check for dielectric interfaces
-        let at_interface = false;
-        for (const diel of this.dielectrics) {
-            if (Math.abs(y0 - diel.y_min) < tol || Math.abs(y0 - diel.y_max) < tol ||
-                Math.abs(y1 - diel.y_min) < tol || Math.abs(y1 - diel.y_max) < tol) {
-                at_interface = true;
-                break;
-            }
+        // Higher base weight at a dielectric interface (y only)
+        let mult = 1.0;
+        if (isY && this.dielectrics.some(d =>
+            Math.abs(a0 - d.y_min) < tol || Math.abs(a0 - d.y_max) < tol ||
+            Math.abs(a1 - d.y_min) < tol || Math.abs(a1 - d.y_max) < tol)) {
+            mult = 1.5;
         }
 
         // Weight based on distance relative to conductor dimensions
-        // Apply higher base weight if at dielectric interface
-        const base_weight_multiplier = at_interface ? 1.5 : 1.0;
-
         if (min_dist < 0.1 * min_dim) {
-            return 5.0 * base_weight_multiplier;
+            return 5.0 * mult;
         } else if (min_dist < 0.25 * min_dim) {
-            return 2.5 * base_weight_multiplier;
+            return 2.5 * mult;
         } else if (min_dist < min_dim) {
-            return 1.0 * base_weight_multiplier;
+            return 1.0 * mult;
         } else {
             return 0.2;
         }
@@ -373,12 +305,10 @@ class Mesher {
     }
 
     _generate_axis_mesh(axis) {
-        const interfaces = axis === 'x' ? this._collect_interfaces_x() : this._collect_interfaces_y();
+        const interfaces = this._collect_interfaces(axis);
         const base_points = axis === 'x' ? this.nx : this.ny;
         const domain_size = axis === 'x' ? this.domain_width : this.domain_height;
-        const weight_func = axis === 'x' ?
-            (a, b) => this._region_weight_x(a, b) :
-            (a, b) => this._region_weight_y(a, b);
+        const weight_func = (a, b) => this._region_weight(axis, a, b);
 
         const n_regions = interfaces.length - 1;
 

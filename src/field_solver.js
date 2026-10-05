@@ -229,6 +229,30 @@ function validate_laplace_inputs(V, x, y, epsilon_r, conductor_mask, vacuum = fa
     return errors;
 }
 
+// Checks for a solver's parameter validation, each pushing its message onto errors.
+export function paramChecks(errors) {
+    const isNum = (v) => typeof v === 'number' && !isNaN(v) && isFinite(v);
+    return {
+        isNum,
+        positive(v, name) {
+            if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
+            else if (v <= 0) errors.push(`${name} must be positive, got ${v}`);
+        },
+        nonneg(v, name) {
+            if (v == null) return;
+            if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
+            else if (v < 0) errors.push(`${name} must be non-negative, got ${v}`);
+        },
+    };
+}
+
+// Throws every collected validation error at once.
+export function throwIfErrors(errors) {
+    if (errors.length > 0) {
+        throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
+    }
+}
+
 export class FieldSolver2D {
     constructor() {
         this.x = null;
@@ -262,17 +286,6 @@ export class FieldSolver2D {
 
         // Generate mesh
         [this.x, this.y] = this.mesher.generate_mesh();
-
-        // Calculate spacing arrays
-        this.dx = new Float64Array(this.x.length - 1);
-        for (let i = 0; i < this.x.length - 1; i++) {
-            this.dx[i] = this.x[i + 1] - this.x[i];
-        }
-
-        this.dy = new Float64Array(this.y.length - 1);
-        for (let i = 0; i < this.y.length - 1; i++) {
-            this.dy[i] = this.y[i + 1] - this.y[i];
-        }
 
         // Setup geometry
         this._setup_geometry();
@@ -401,15 +414,12 @@ export class FieldSolver2D {
         this.sigma_cell = sigma;
     }
 
-    // Warnings for 'open' boundaries that sit too close to the conductors. The open
-    // boundary conditions (the FDM open stencil, the triangular backend's first-order
-    // radiating ABC) approximate an unbounded exterior, which only holds where the
-    // fringing field has mostly decayed — and its decay scale is the substrate
-    // thickness. Require OPEN_CLEARANCE (3) substrate heights between each open wall
-    // and the nearest conductor (this covers all line types: for a microstrip it is
-    // ≥3·h from the trace to a side wall, and ≥3·h of air above the substrate
-    // interface). Conductors touching a wall (coplanar ground pours, full-width
-    // ground planes) are part of the boundary structure and are ignored.
+    // Pre-solve warnings for 'open' walls too close to the conductors. An open wall
+    // approximates an unbounded exterior, which holds once the fringing field has
+    // decayed, on the scale of the substrate thickness, so each open wall needs
+    // OPEN_CLEARANCE (3) substrate heights to the nearest conductor. Conductors touching
+    // a wall, and conductors shielded from it by a wall-touching ground (GCPW pours), are
+    // left out, and a ground ring around every signal (coax) passes all walls.
     // Returns an array of human-readable warning strings (empty when fine).
     // clearance: false drops this geometric rule, for callers that go on to solve and
     // get the measured check (openBoundaryFieldWarning) instead.
@@ -653,17 +663,12 @@ export class FieldSolver2D {
         const CELLS_PER_FEATURE = 3;
         const hFine = Math.max(dMin / CELLS_PER_FEATURE, 1e-12);
 
-        // --- 2. The field-concentration ("active") region that must be wavelength-resolved ---
-        // A bound quasi-TEM mode's field lives within ~a few substrate heights of the
-        // conductors; the auto-sized domain pads far beyond that with near-field-free air
-        // that only needs a coarse mesh. So the WAVELENGTH-resolution requirement applies
-        // to the active region, NOT the full (often heavily over-padded) air domain — that
-        // is what separates a normal mm-scale line at 100 GHz (active region ≪ λ, fine) from
-        // a genuinely electrically-large 1 m cross-section at 100 GHz (active region ≫ λ).
-        // Build the structure box from the conductors and the real substrate dielectrics
-        // (ε_r > 1). The air fill is often modelled as a full-height ε_r=1 dielectric that
-        // spans the whole padded domain — including it would wrongly make the structure look
-        // domain-sized. The substrate thickness + conductor extent is the true field scale.
+        // --- 2. The field region that must be wavelength-resolved ---
+        // A bound quasi-TEM field lives within a few substrate heights of the conductors,
+        // and the padded air beyond it only needs a coarse mesh, so the wavelength rule
+        // applies to this region, not the whole domain: a mm-scale line at 100 GHz is
+        // fine, a 1 m cross-section is not. The box spans the conductors and the
+        // dielectrics with eps_r > 1 (an eps_r = 1 air fill can span the whole domain).
         const stackYs = [...this.conductors,
             ...(this.dielectrics || []).filter(d => (d.epsilon_r || 1) > 1.001)];
         let yLo = Infinity, yHi = -Infinity;
@@ -1513,29 +1518,22 @@ export class FieldSolver2D {
         const dx = diff(this.x);
         const dy = diff(this.y);
 
+        // Minus the 3-point derivative on a nonuniform grid, spacings hl below and
+        // hr above the centre value vc.
+        const negDeriv = (hl, hr, vl, vc, vr) => -(
+            (hl / (hr * (hl + hr))) * vr +
+            ((hr - hl) / (hl * hr)) * vc -
+            (hr / (hl * (hl + hr))) * vl
+        );
+
         const Ex = Array(ny).fill().map(() => new Float64Array(nx));
         const Ey = Array(ny).fill().map(() => new Float64Array(nx));
 
         for(let i=1; i<ny-1; i++) {
             for(let j=1; j<nx-1; j++) {
                 if (this.conductor_mask[i][j]) continue;
-
-                const dxl = dx[j-1];
-                const dxr = dx[j];
-                const dyd = dy[i-1];
-                const dyu = dy[i];
-
-                Ex[i][j] = -(
-                    (dxl / (dxr * (dxl + dxr))) * V[i][j+1] +
-                    ((dxr - dxl) / (dxl * dxr)) * V[i][j] -
-                    (dxr / (dxl * (dxl + dxr))) * V[i][j-1]
-                );
-
-                Ey[i][j] = -(
-                    (dyd / (dyu * (dyd + dyu))) * V[i+1][j] +
-                    ((dyu - dyd) / (dyd * dyu)) * V[i][j] -
-                    (dyu / (dyd * (dyd + dyu))) * V[i-1][j]
-                );
+                Ex[i][j] = negDeriv(dx[j-1], dx[j], V[i][j-1], V[i][j], V[i][j+1]);
+                Ey[i][j] = negDeriv(dy[i-1], dy[i], V[i-1][j], V[i][j], V[i+1][j]);
             }
         }
         // Symmetry plane at x=0: the loss/dielectric integrands read the j=0
@@ -1549,13 +1547,7 @@ export class FieldSolver2D {
                 if (planeBC === 'pec') {
                     Ex[i][0] = -V[i][1] / dx[0];
                 } else {
-                    const dyd = dy[i-1];
-                    const dyu = dy[i];
-                    Ey[i][0] = -(
-                        (dyd / (dyu * (dyd + dyu))) * V[i+1][0] +
-                        ((dyu - dyd) / (dyd * dyu)) * V[i][0] -
-                        (dyu / (dyd * (dyd + dyu))) * V[i-1][0]
-                    );
+                    Ey[i][0] = negDeriv(dy[i-1], dy[i], V[i-1][0], V[i][0], V[i+1][0]);
                 }
             }
         }
@@ -1721,7 +1713,7 @@ export class FieldSolver2D {
      * potential (the same identity as L_ext = 1/(c^2*C0)), so H_t = E_n(vac)/η0,
      * the surface current distribution, which is permittivity independent.
      *
-     * vacuum_fields = false (legacy): Ex/Ey are the dielectric solve fields,
+     * vacuum_fields = false (fallback): Ex/Ey are the dielectric solve fields,
      * H_t = E_n*√εr(local)/η0, Z0 is the line impedance. For mixed dielectric
      * this uses the charge distribution as a current proxy, it overestimates
      * corner-dominated microstrip loss and its substrate-interface corner
@@ -1729,7 +1721,7 @@ export class FieldSolver2D {
      *
      * @param {Array<Array<number>>} Ex - Electric field x-component
      * @param {Array<Array<number>>} Ey - Electric field y-component
-     * @param {number} Z0 - Line impedance (legacy) or vacuum impedance 1/(c*C0)
+     * @param {number} Z0 - Vacuum impedance 1/(c*C0), or the line impedance (fallback)
      * @param {boolean} vacuum_fields - Ex/Ey are vacuum-solve fields
      * @returns {{R_ac: number, R_dc: number, R_total: number, L_internal: number}}
      */
@@ -2280,7 +2272,7 @@ export class FieldSolver2D {
         const power_factor = (this.is_differential && line === null) ? 0.5 : 1.0;
 
         // Vacuum variant: |H|^2 per unit current is |H_vac per 1V|^2*Z0_vac^2, since the
-        // vacuum drive at 1V carries I_vac = 1/Z0_vac (legacy: same algebra with the
+        // vacuum drive at 1V carries I_vac = 1/Z0_vac (the fallback: the same with the
         // line Z0).
         const Z0_sq = Z0 * Z0;
 
@@ -2334,7 +2326,7 @@ export class FieldSolver2D {
         // every family, so the notch applies to all line types.
         let transitionCal = 1.0;
         // Cleared unconditionally: the warning describes this call's frequency, and
-        // the branch below is skipped on the legacy integrand and on solvers without
+        // the branch below is skipped on the fallback integrand and on solvers without
         // a rectangular conductor thickness. Leaving it set would carry a stale note
         // into the next sweep point.
         this._skinTransitionWarn = null;
@@ -2378,12 +2370,6 @@ export class FieldSolver2D {
         return !!cond && platedThrough(cond);
     }
 
-    // Accuracy note for plated conductors in the skin transition: the layered
-    // plating-over-bulk surface impedance assumes a bulk thick against its skin
-    // depth. Returns null when no plated rectangular conductor has less than two
-    // bulk skin depths under its plating (solid plating is exact by convention).
-    //   meshedThick - thick plating was solved as meshed metal and is left out
-    //   fullWave    - the full-wave solver, which can mesh the plating
     // Accuracy note for the grounds of unlimited width at low frequency. A thin ground
     // shields the field only over the lateral spreading length l = delta^2 / d =
     // 1 / (pi f mu0 sigma d). Once l exceeds the ground's distance to the signal, the
@@ -2450,6 +2436,12 @@ export class FieldSolver2D {
             `The full-wave solver models the current in the gap.` };
     }
 
+    // Accuracy note for plated conductors in the skin transition: the layered
+    // plating-over-bulk surface impedance assumes a bulk thick against its skin
+    // depth. Returns null when no plated rectangular conductor has less than two
+    // bulk skin depths under its plating (solid plating is exact by convention).
+    //   meshedThick - thick plating was solved as meshed metal and is left out
+    //   fullWave    - the full-wave solver, which can mesh the plating
     _plating_transition_note(f, { meshedThick = false, fullWave = false } = {}) {
         if (!(f > 0) || !this.conductors) return null;
         let worst = null;
@@ -2685,12 +2677,8 @@ export class FieldSolver2D {
         return this._finish_differs;
     }
 
-    // Conductor loss for a solved mode, choosing the integrand variant:
-    // rect-based solvers (conductor_id present) use the vacuum-field integrand
-    // when the mode's vacuum fields are available.
-    // The only production caller lacking vacuum fields on a rect solver is
-    // _solve_single_mode(vacuum_first=false), whose loss output is discarded
-    // and recomputed by the caller with the cached vacuum fields.
+    // Conductor loss for a solved mode: the vacuum-field integrand when the mode has its
+    // vacuum fields (every solve path supplies them), else the dielectric-field one.
     _mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode = null) {
         if (this.conductor_id && Ex0 && Ey0 && C0 > 0) {
             const Z0_vac = 1 / (CONSTANTS.C * C0);
@@ -2775,62 +2763,38 @@ export class FieldSolver2D {
 
         // DC: the f -> 0 limit of Zc and eps_eff (line_params.js), Zc infinite without a
         // shunt conductance.
+        let Zc, eps_eff_mode;
         if (this.freq === 0) {
             const dc = dcLineLimit(R_total, L_total, G, C_mode);
-            return {
-                Zc: new Complex(dc.Zc, 0),
-                rlgc: {
-                    R: R_total,
-                    L: L_total,
-                    G: G,
-                    C: C_mode
-                },
-                eps_eff_mode: dc.eps_eff,
-                alpha_c, alpha_d,
-                L_internal: L_internal,
-                L_external: L_ext
-            };
+            Zc = new Complex(dc.Zc, 0);
+            eps_eff_mode = dc.eps_eff;
+        } else {
+            // Zc = sqrt((R + jwL) / (G + jwC)), gamma = sqrt((R + jwL)(G + jwC)) and
+            // eps_eff = (beta / k0)^2 with beta = Im(gamma)
+            const Z_num = new Complex(R_total, omega * L_total);
+            const Z_den = new Complex(G, omega * C_mode);
+            Zc = Z_num.div(Z_den).sqrt();
+            const beta = Z_num.mul(Z_den).sqrt().im;
+            const k0 = omega / 299792458.0;
+            eps_eff_mode = Math.pow(beta / k0, 2);
         }
 
-        // Re-calculate complex Zc and Epsilon_eff with the new L and R
-        // Zc = sqrt( (R + jwL) / (G + jwC) )
-        const Z_num = new Complex(R_total, omega * L_total);
-        const Z_den = new Complex(G, omega * C_mode);
-        const Zc = Z_num.div(Z_den).sqrt();
-
-        // Effective Permittivity
-        // gamma = sqrt( (R+jwL)(G+jwC) ) = alpha + j*beta
-        // beta = Im(gamma)
-        // eps_eff = (beta / k0)^2  where k0 = omega/c0
-        const gamma = Z_num.mul(Z_den).sqrt();
-        const beta = gamma.im;
-        const k0 = omega / 299792458.0;
-        const eps_eff_new = Math.pow(beta / k0, 2);
-
         return {
-            Zc: Zc,
-            rlgc: {
-                R: R_total,
-                L: L_total,
-                G: G,
-                C: C_mode
-            },
-            eps_eff_mode: eps_eff_new,
+            Zc,
+            rlgc: { R: R_total, L: L_total, G, C: C_mode },
+            eps_eff_mode,
             alpha_c, alpha_d,
-            L_internal: L_internal,
+            L_internal,
             L_external: L_ext
         };
     }
 
     // Adaptive Meshing
-    // Discrete flux-jump refinement indicator (FDM analog of the tri backend's
-    // Kelly marker). At each interior node the jump in ε*dV/dh between the two
-    // adjacent intervals measures local discretization error. It vanishes where
-    // the discrete solution resolves the field and concentrates where curvature
-    // is under-resolved. The legacy dV*|E|*ε metric is a field intensity
-    // indicator, it keeps refining strong-field intervals. Jumps at
-    // conductor-adjacent nodes are physical surface charge and are skipped, the
-    // same rule as the tri Kelly indicator's Dirichlet-edge skip.
+    // Flux-jump refinement indicator (the FDM counterpart of the tri backend's Kelly
+    // marker): the jump of eps*dV/dh between the two intervals at each interior node
+    // measures the local discretization error, vanishing where the field is resolved.
+    // Jumps at conductor-adjacent nodes are surface charge and are skipped, as the
+    // Kelly indicator skips Dirichlet edges.
     //
     // planeBC (half-domain solves): the symmetry-plane BC of this field, see the
     // j = 0 term below.
@@ -2844,12 +2808,10 @@ export class FieldSolver2D {
         const dx = diff(this.x), dy = diff(this.y);
         const cm = this.conductor_mask;
         // Face permittivities exactly as the operator forms them (see
-        // solve_laplace_multi). The cell-weighted average over the half-faces
-        // above and below (x faces) or left and right (y faces) of the node. The
-        // nodal average this used to take differs from the operator's face value
-        // at any interface running along the jump direction, which shows up as a
-        // spurious jump where the discrete flux is in fact continuous, the
-        // indicator then spends refinement on interfaces that are already exact.
+        // solve_laplace_multi): the cell-weighted average over the half-faces above
+        // and below (x faces) or left and right (y faces) of the node. Any other
+        // average shows a spurious jump at interfaces where the discrete flux is
+        // continuous, and refinement goes to interfaces that are already exact.
         const faceX = ec => (i, cj) => {    // face at column cj, node row i
             if (!ec) return 1.0;
             const hd = i > 0 ? dy[i - 1] : dy[0], hu = i < ny - 1 ? dy[i] : dy[ny - 2];
@@ -2919,13 +2881,11 @@ export class FieldSolver2D {
 
     _compute_refine_metrics(V, Ex, Ey, vacuum = false, planeBC = null, cplx = null) {
         /**
-         * For each grid interval, compute a metric indicating how much
-         * refinement would help. Default ('blend'): the flux-jump error
-         * indicator plus the legacy dV*|E|*ε field-intensity metric. The jump
-         * metric targets the static discretization error (C, C0).  But the
-         * intensity metric's conductor-surface emphasis is important for the
-         * conductor-loss integral. The blend keeps both. Opt-outs:
-         * solver.refine_metric = 'intensity' (legacy) or 'jump' (static-only).
+         * For each grid interval, a metric of how much refinement would help.
+         * Default ('blend'): the flux-jump indicator, which targets the static error
+         * (C, C0), plus refine_surface_weight (0.35) times the field-intensity metric
+         * on conductor-adjacent cells, which resolves the conductor-loss integral.
+         * solver.refine_metric = 'intensity' or 'jump' uses one of them alone.
          *
          * vacuum: the fields are from the vacuum (C0) solve.
          * planeBC: the field's symmetry-plane BC on a half-domain solve.
@@ -2952,10 +2912,10 @@ export class FieldSolver2D {
         return this._compute_refine_metrics_intensity(V, Ex, Ey, vacuum);
     }
 
-    // Legacy field-intensity metric: dV * |E| * ε with a x2 conductor-boundary
-    // boost. Not an error indicator (it keeps refining strong-field intervals
-    // after they converge) but its surface emphasis resolves the conductor-loss
-    // integrand.
+    // Field-intensity metric: dV * |E| * eps with a x2 conductor-boundary boost
+    // (boundaryOnly: conductor-adjacent cells only). Not an error indicator, it keeps
+    // refining strong-field intervals, but its surface emphasis resolves the
+    // conductor-loss integrand.
     _compute_refine_metrics_intensity(V, Ex, Ey, vacuum = false, boundaryOnly = false) {
         const ny = V.length;
         const nx = V[0].length;
@@ -3391,29 +3351,26 @@ export class FieldSolver2D {
     async _mode_loss_results(r) {
         // Conductive dielectrics: C and G from the complex solve.
         await this._apply_conductive(r);
-        const { mode, Z0, C, C0, V, Ex, Ey, V0, Ex0, Ey0, G_diel } = r;
-        // Calculate conductor losses with surface roughness and DC resistance
-        await this._ensure_dc_signal_inductance(this._plane_bc(mode));
+        await this._ensure_dc_signal_inductance(this._plane_bc(r.mode));
+        const { V, Ex, Ey, V0, Ex0, Ey0, G_diel } = r;
+        return { ...this._mode_parameters(r), V, Ex, Ey, V0, Ex0, Ey0, G_diel };
+    }
+
+    // Conductor loss (surface roughness and DC resistance included), dielectric loss
+    // and RLGC of a mode with its C, C0, Z0 and fields.
+    _mode_parameters(r) {
+        const { mode, Z0, C, C0, Ex, Ey, Ex0, Ey0 } = r;
         const { R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
-
-        // Calculate dielectric loss (returns alpha in dB/m)
-        const alpha_d_pert = this._mode_alpha_d(r);
-
-        // Calculate RLGC using new surface roughness aware approach
-        const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, C, Z0);
-
-        const alpha_total = alpha_c + alpha_d;
-
+        const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } =
+            this.rlgc(R_total, L_internal, this._mode_alpha_d(r), C, Z0);
         return {
             mode,
             Z0,
             eps_eff: eps_eff_mode,
             C, C0,
             RLGC: rlgc, Zc,
-            alpha_c, alpha_d, alpha_total,
+            alpha_c, alpha_d, alpha_total: alpha_c + alpha_d,
             L_internal, L_external,
-            V, Ex, Ey,
-            V0, Ex0, Ey0, G_diel
         };
     }
 
@@ -3444,17 +3401,6 @@ export class FieldSolver2D {
         return this._triBackend;
     }
 
-    // ---- Mode viewer ----------------------------------------------------------
-    // Solve the full-wave eigenproblem for the lowest `nev` modes at `freq` and return
-    // a classified list (see TriBackend.solveModes). Always uses the triangular full-wave
-    // backend on the FULL domain (symmetry off) so symmetric AND antisymmetric higher-order
-    // modes both appear. A dedicated backend instance is cached on `_modesBackend` so it
-    // does not disturb the main (possibly half-domain) solve in `_triBackend`.
-    // refineOpts wires the sidebar adaptive-mesh controls (maxRefineIters ← Max
-    // Iterations, refineTol ← Tolerance, maxNodes ← Max Nodes) into buildMesh's
-    // refinement loop, exactly like solve_adaptive does for the main solve, plus
-    // wavelengthDensity ← the Modes tab's Mesh density (cells/λ for the bulk
-    // wavelength cap — see TriBackend._wavelengthCap).
     // Field region of an auto-sized open domain for the Modes solve: the signal
     // cluster padded by four substrate-stack heights on the open sides, the ground
     // side kept. Returns null when the box would not be smaller than the domain, or
@@ -3484,6 +3430,14 @@ export class FieldSolver2D {
         return shrunk ? box : null;
     }
 
+    // ---- Mode viewer ----------------------------------------------------------
+    // Solve the full-wave eigenproblem for the lowest `nev` modes at `freq` and return
+    // a classified list (see TriBackend.solveModes). Always the triangular backend on
+    // the full domain (symmetry off), so symmetric and antisymmetric modes both appear,
+    // on its own backend instance (_modesBackend) beside the main solve's _triBackend.
+    // refineOpts carries the sidebar adaptive-mesh controls (maxRefineIters, refineTol,
+    // maxNodes) into buildMesh, plus the Modes tab's wavelengthDensity (cells per
+    // wavelength of the bulk cap, TriBackend._wavelengthCap) and shrinkDomain.
     async solveModes(freq, nev = 4, onProgress = null, refineOpts = {}) {
         // Optional shrink of an auto-sized open domain to the field region: the modes
         // solve wavelength-resolves the whole meshed box, and the padded far field of an
@@ -3518,60 +3472,10 @@ export class FieldSolver2D {
         return this._modesBackend ? this._modesBackend.getModeField(sortedIdx) : null;
     }
 
-    // Verification certificate (rectilinear backend)
-    // Mirror of TriBackend._certifyStatic, so the UI Tolerance means the same thing
-    // on both backends: the verified remaining error of the reported static
-    // quantities, not the pass-to-pass change the refinement gate measures.
-    //
-    // Insert a grid line at the midpoint of every x and y interval (uniform bisection
-    // of the tensor grid, exact projected size (2nx-1)(2ny-1) ~= 4x nodes per level)
-    // and re-solve the statics:
-    //   d1 = max rel change of (C, C0) per mode, grid -> bisect
-    //   d2 = same, bisect -> bisect^2,   r = d2/d1
-    //   certified error = d1/(1−r)
-    // Every reported static quantity (C, C0, eps_eff, Z0) is a combination of C and
-    // C0, so the static capacitances certify the reported numbers. Losses are not
-    // covered (the triangular certificate does not cover them either). Gates match
-    // the triangular backend:
-    //   * r > rMax  -> pre-asymptotic, cannot certify.
-    //   * d1 > tol  -> already failed. Level 2 skipped (cost control).
-    //   * d1 < noise floor -> pass outright.
-    //   * level-2 grid over its (smaller) node cap -> fall back to r = 0.5. Measured
-    //     r on microstrip geometries (single-ended and differential) is 0.28-0.41,
-    //     so the fallback overestimates the remaining error (conservative) and the
-    //     x1.5 safety additionally covers a true r up to 2/3. Level 2 gets its own
-    //     cap well below the level-1 cap because its value (a genuine measured r and
-    //     the pre-asymptotic gate) matters most on coarse grids, while on mid-size
-    //     grids a 16x-node LU dominates the whole solve time for little sharpening.
-    //     A base grid whose bisection is already over the level-1 cap returns null
-    //     (the caller keeps the legacy gate). The caps also guard the WASM LU's
-    //     ~1 GB allocation limit.
-    // The pass decision applies `safety` (x1.5) on top of the estimate; `err` stays
-    // the un-inflated best estimate (it is what warnings report).
-    //
-    // Coarsening (solving on decimated grids, ~0.3x base cost instead of ~6x) was
-    // measured as an alternative and rejected: the coarse-level convergence ratio
-    // does not transfer to the base level, and the resulting estimate came out 1.2x
-    // to 3.5x optimistic vs the bisection reference.
-    //
-    // Cost reductions that keep the certificate's meaning intact:
-    //   * The base level reuses the (C, C0) the refinement pass just computed
-    //     (q0 option) instead of re-solving the base grid.
-    //   * Odd/even modes share each operator, so every grid level factors the
-    //     signal and vacuum matrices once and back-substitutes per mode
-    //     (solve_laplace_multi).
-    //   * r is measured once per solve and reused by later certificates (knownR
-    //     option), deleting the 16x level-2 solve from every call but the first.
-    //   * After a failed certificate the loop predicts how many refinement passes
-    //     the measured error trend needs before a pass is plausible and skips
-    //     certifying until then (certSkipPasses in solve_adaptive).
-
     // Run fn on a temporarily swapped grid. Every grid-derived array (masks,
     // epsilon_r, conductor ids) is rebuilt from this.x/this.y by _setup_geometry, so
     // swapping the line arrays and rebuilding is a complete state switch, and the
-    // finally-rebuild restores the caller's exact state. (this.dx/dy are left
-    // untouched, matching _refine_selected_lines, nothing reads them after the
-    // initial mesh generation.)
+    // finally-rebuild restores the caller's exact state.
     async _withGrid(x, y, fn) {
         const saved_x = this.x, saved_y = this.y;
         this.x = x;
@@ -3649,30 +3553,33 @@ export class FieldSolver2D {
     }
 
     // Richardson certificate for the static quantities (C, C0 per mode, and C'' with a
-    // conductive dielectric, see _staticCapacitances).
+    // conductive dielectric, see _staticCapacitances), the counterpart of
+    // TriBackend._certifyStatic: the UI tolerance is the estimated remaining error of
+    // the reported static quantities on both backends, not the pass-to-pass change.
+    // Every reported static quantity is a combination of C and C0. Losses are not
+    // covered.
+    //   d1 = relative change from the grid to its one-axis bisections (x and y added)
+    //   err = d1 / (1 - r), r the level-to-level ratio, measured from a second
+    //   bisection per axis, reused from an earlier certificate (knownR), or 0.5
+    //   d1 < 5e-5 passes, r >= rMax is pre-asymptotic and fails, and the decision
+    //   applies safety (x1.5) on top of err, which stays the estimate.
+    // Solving on coarsened grids instead was tried and rejected: the coarse-level
+    // ratio does not carry over to the base grid (estimates 1.2-3.5x optimistic).
     //
-    // The comparison level halves one axis at a time rather than both at once.
-    // For a tensor-product discretisation the error separates as
+    // One axis is halved at a time: on a tensor grid the error separates as
     // A_x*h_x^p + A_y*h_y^p, so the two single-axis differences add up to the
-    // both-axes difference. Verified in tests to within 0.7% on a microstrip, a
-    // stripline and a differential GCPW + solder mask, while the peak grid is
-    // 2N instead of 4N. That is ~0.7x the solve time at level 1 and a
-    // quarter of it at level 2 (two 4N solves instead of one 16N), and it halves
-    // the peak factorization, which is what the node caps below really guard.
+    // both-axes one (within 0.7% in the tests) at a peak grid of 2N instead of 4N.
     //
-    // Options beyond the caps/gates:
-    //   * q0: base-grid (C, C0) per mode in _staticCapacitances order, when the
-    //     caller already has them (the refinement pass that tripped the gate just
-    //     computed exactly these). Skips re-solving the base level.
-    //   * knownR: convergence ratio measured by an earlier certificate in the same
-    //     solve. Skips the level-2 solves entirely: r decreases (or holds) under
-    //     refinement, so an earlier genuine measurement used on a finer grid errs
-    //     conservative, and the x1.5 safety still covers a moderately larger true r.
-    //     Only genuinely measured, non-pre-asymptotic r values are reused.
-    //   * l2MaxNodes: peak-grid cap for the level-2 (convergence-ratio) solves.
-    //
-    // All caps are on the peak grid a level actually solves, so they bound peak
-    // memory directly.
+    // Options:
+    //   * q0: the base-grid quantities in _staticCapacitances order, when the caller
+    //     has them (the refinement pass that tripped the gate). Skips the base solve.
+    //   * knownR: r measured by an earlier certificate of the same solve, skipping the
+    //     level-2 solves. r falls or holds under refinement, so reusing it on a finer
+    //     grid is conservative. Only measured, non-pre-asymptotic values are reused.
+    //   * maxNodes, l2MaxNodes: caps on the peak grid of level 1 (over it: null) and
+    //     of the level-2 solves, which bound the peak memory.
+    // solve_adaptive skips certifying after a failure until the error trend makes a
+    // pass plausible (certSkipPasses).
     async _certifyStatic(tol, { maxNodes = 600000, l2MaxNodes = CERT_L2_MAX_NODES,
                                 rMax = 0.7, safety = 1.5,
                                 q0 = null, knownR = null } = {}) {
@@ -3992,11 +3899,10 @@ export class FieldSolver2D {
                 if (max_energy_err < energy_tol && max_param_err < param_tol) {
                     converged_count++;
                     if (converged_count >= min_converged_passes && it >= certHoldUntil) {
-                        // The pass-to-pass gate above measures the RATE of approach,
-                        // not the absolute error. Certify the actual remaining error
-                        // (see _certifyStatic) and keep refining if the certificate
-                        // fails. A null certificate (grid over the certification cap)
-                        // keeps the legacy behavior.
+                        // The pass-to-pass gate measures the rate of approach, not
+                        // the error: certify it (_certifyStatic) and keep refining if
+                        // the certificate fails. A null certificate (grid over the
+                        // cap) stops on the gate alone.
                         let cert = null;
                         if (certify) {
                             try {
@@ -4571,82 +4477,24 @@ export class FieldSolver2D {
                 // _modalPhys from the initial solve: a symmetric pair (null) skips the
                 // four extra Laplace solves — its odd/even drives are exact.
                 const modal = this._modalPhys ? await this._solve_modal_differential() : null;
-                if (modal) {
-                    modeResults.push(...modal);
-                } else {
-                // Solve both odd and even modes
-                const oddMode = await this._solve_single_mode('odd', false);
-                const evenMode = await this._solve_single_mode('even', false);
-
-                // Use cached C0 values from initial solve (vacuum doesn't
-                // change).  Same for the vacuum fields: permittivity- and
-                // frequency-independent, so the causal re-solve (which only
-                // shifts the dielectric fields) reuses them for the
-                // conductor-loss integrand.
-                const cachedOdd = cachedResults.modes.find(m => m.mode === 'odd');
-                const cachedEven = cachedResults.modes.find(m => m.mode === 'even');
-                oddMode.C0 = cachedOdd.C0;
-                evenMode.C0 = cachedEven.C0;
-                oddMode.Ex0 = cachedOdd.Ex0; oddMode.Ey0 = cachedOdd.Ey0;
-                evenMode.Ex0 = cachedEven.Ex0; evenMode.Ey0 = cachedEven.Ey0;
-
-                // Recalculate eps_eff and Z0 with new C and cached C0
-                oddMode.eps_eff = oddMode.C / oddMode.C0;
-                oddMode.Z0 = 1 / (CONSTANTS.C * Math.sqrt(oddMode.C * oddMode.C0));
-                evenMode.eps_eff = evenMode.C / evenMode.C0;
-                evenMode.Z0 = 1 / (CONSTANTS.C * Math.sqrt(evenMode.C * evenMode.C0));
-
-                // Recalculate RLGC parameters with corrected Z0
-                const recalc = (mode) => {
-                    const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
-                        mode.Ex, mode.Ey, mode.Z0, mode.C0, mode.Ex0, mode.Ey0, mode.mode);
-                    const alpha_d_pert = this._mode_alpha_d(mode);
-                    const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, mode.C, mode.Z0);
-                    mode.RLGC = rlgc;
-                    mode.Zc = Zc;
-                    mode.eps_eff = eps_eff_mode;
-                    mode.alpha_c = alpha_c;
-                    mode.alpha_d = alpha_d;
-                    mode.alpha_total = mode.alpha_c + alpha_d;
-                    mode.L_internal = L_internal;
-                    mode.L_external = L_external;
-                };
-
-                recalc(oddMode);
-                recalc(evenMode);
-
-                modeResults.push(oddMode, evenMode);
+                if (modal) modeResults.push(...modal);
+            }
+            if (!modeResults.length) {
+                // The vacuum capacitance and fields are permittivity- and frequency-
+                // independent: the cached solve's are reused, C0 for Z0 and the vacuum
+                // fields for the conductor-loss integrand.
+                const solved = [];
+                for (const mode of this.is_differential ? ['odd', 'even'] : ['single']) {
+                    const r = await this._solve_single_mode(mode, false, false);
+                    const cached = this.is_differential
+                        ? cachedResults.modes.find(m => m.mode === mode) : cachedResults.modes[0];
+                    r.C0 = cached.C0;
+                    r.Ex0 = cached.Ex0;
+                    r.Ey0 = cached.Ey0;
+                    r.Z0 = 1 / (CONSTANTS.C * Math.sqrt(r.C * r.C0));
+                    solved.push(r);
                 }
-            } else {
-                // Solve single mode
-                const result = await this._solve_single_mode('single', false);
-
-                // Use cached C0 from initial solve and the cached vacuum fields
-                // (ε- and frequency-independent) for the conductor-loss integrand.
-                result.C0 = cachedResults.modes[0].C0;
-                result.Ex0 = cachedResults.modes[0].Ex0;
-                result.Ey0 = cachedResults.modes[0].Ey0;
-
-                // Recalculate eps_eff and Z0 with new C and cached C0
-                result.eps_eff = result.C / result.C0;
-                result.Z0 = 1 / (CONSTANTS.C * Math.sqrt(result.C * result.C0));
-
-                // Recalculate RLGC parameters with corrected Z0
-                const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(
-                    result.Ex, result.Ey, result.Z0, result.C0, result.Ex0, result.Ey0, result.mode);
-                const alpha_d_pert = this._mode_alpha_d(result);
-                const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, result.C, result.Z0);
-
-                result.RLGC = rlgc;
-                result.Zc = Zc;
-                result.eps_eff = eps_eff_mode;
-                result.alpha_c = alpha_c;
-                result.alpha_d = alpha_d;
-                result.alpha_total = result.alpha_c + alpha_d;
-                result.L_internal = L_internal;
-                result.L_external = L_external;
-
-                modeResults.push(result);
+                for (const r of solved) modeResults.push(await this._mode_loss_results(r));
             }
 
             const out = this._build_results(modeResults);
@@ -4654,35 +4502,9 @@ export class FieldSolver2D {
             return out;
         }
 
-        // Fast path: Non-causal materials - use cached fields
-        const modeResults = [];
-
-        for (const cached of cachedResults.modes) {
-            const { mode, V, Ex, Ey, Ex0, Ey0, C, C0, Z0 } = cached;
-
-            // Recalculate conductor losses with new frequency (affects skin depth)
-            const { R_ac, R_dc, R_total, L_internal } = this._mode_conductor_loss(Ex, Ey, Z0, C0, Ex0, Ey0, mode);
-
-            // Recalculate dielectric loss (affects omega)
-            const alpha_d_pert = this.calculate_dielectric_loss(V, Z0);
-
-            // Recalculate RLGC with new frequency
-            const { Zc, rlgc, eps_eff_mode, L_external, alpha_c, alpha_d } = this.rlgc(R_total, L_internal, alpha_d_pert, C, Z0);
-
-            const alpha_total = alpha_c + alpha_d;
-
-            modeResults.push({
-                mode,
-                Z0,
-                eps_eff: eps_eff_mode,
-                C, C0,
-                RLGC: rlgc, Zc,
-                alpha_c, alpha_d, alpha_total,
-                L_internal, L_external,
-                V, Ex, Ey,
-                Ex0, Ey0
-            });
-        }
+        // Fast path: the cached fields, only the frequency-dependent losses change.
+        const modeResults = cachedResults.modes.map(m =>
+            ({ ...this._mode_parameters(m), V: m.V, Ex: m.Ex, Ey: m.Ey, Ex0: m.Ex0, Ey0: m.Ey0 }));
 
         const out = this._build_results(modeResults);
         if (freq === this.plot_freq_target) await this._keep_plot_result(freq, cachedResults, out);

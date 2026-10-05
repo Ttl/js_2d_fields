@@ -1,5 +1,5 @@
 import { makeStreamlineTraceFromConductors } from './streamlines.js';
-import { computeSParamsSingleEnded, computeSParamsDiffAuto, sParamTodB,
+import { computeSParamsDiffAuto, sParamTodB,
          isSelfReferenced, sparamsForPoint, usableSweepPoints } from './sparameters.js';
 import { svgShapePath, shapePoly, isPolyShape, shapeContains, visibleLoops } from './shapes.js';
 import { CONDUCTOR_COLOR, dielectricRGB, overAir, hexToRGB } from './body_colors.js';
@@ -391,7 +391,7 @@ function getScaleRange() {
 
 // The E-field and surface current views in dB are separate scales: their range is in dB.
 function isDbView() {
-    return (currentView.startsWith("efield") || currentView === "current" || currentView === "density")
+    return (currentView === "efield" || currentView === "current" || currentView === "density")
         && getPlotOptions().efieldDb;
 }
 function scaleView() {
@@ -409,7 +409,7 @@ function setScaleRange(min, max) {
     // The surface current colors are binned by value, and the triangle-mesh contours
     // are traced per level, so a new range redraws them.
     if (currentView === "current" || currentView === "density"
-        || ((currentView.startsWith("efield") || currentView === "geometry") && getFieldMesh())) {
+        || ((currentView === "efield" || currentView === "geometry") && getFieldMesh())) {
         draw(); return;
     }
 
@@ -444,7 +444,7 @@ function setScaleRange(min, max) {
             Plotly.restyle(container, restyle, [hIdx]);
         }
     }
-    if (currentView.startsWith("efield")) {
+    if (currentView === "efield") {
         Plotly.relayout(container, { 'coloraxis.cmin': min, 'coloraxis.cmax': max });
         updateDensityImage(container);
     }
@@ -461,7 +461,7 @@ function solverGridMM(solver) {
 // Help topic (field_solver.html helpContent) of the view on screen.
 function plotHelpTopic() {
     return currentView.startsWith("potential") ? "plot_potential"
-        : currentView.startsWith("efield") ? "plot_efield"
+        : currentView === "efield" ? "plot_efield"
         : currentView === "current" ? "plot_current"
         : currentView === "density" ? "plot_density" : "plot_geometry";
 }
@@ -481,7 +481,7 @@ function fieldFreqLabel(solver) {
         : f >= 1e3 ? `${+(f / 1e3).toPrecision(4)} kHz` : `${+f.toPrecision(4)} Hz`;
     // Below a waveguide cutoff the mode keeps its transverse pattern but decays along z.
     const evanescent = solver.fc > 0 && f <= solver.fc ? ", below cutoff (evanescent)" : "";
-    return ` at ${fs}` + (solver.fieldKind === 'fullwave' && currentView.startsWith("efield") ? ", full-wave mode" : "") + evanescent;
+    return ` at ${fs}` + (solver.fieldKind === 'fullwave' && currentView === "efield" ? ", full-wave mode" : "") + evanescent;
 }
 
 // Index of the displayed mode in the per-mode plot data.
@@ -845,7 +845,7 @@ let gridImageBlocks = [];
 // the mesh or the grid.
 function imageBlocks() {
     if (currentView === "density") return [...(getCurrentJ() || []).filter(b => b.tris), ...gridImageBlocks];
-    if (!currentView.startsWith("efield")) return [];
+    if (!currentView === "efield") return [];
     const M = getFieldMesh();
     return M ? [{ tris: M.tris, Jv: M.E }] : gridImageBlocks;
 }
@@ -880,7 +880,7 @@ function gridHoverTrace(blocks, value, hovertemplate) {
 // Redraws the image of the triangle blocks for the current axis ranges and plot size.
 const updateDensityImage = container =>
     updateTriImage(container, () => ({ blocks: imageBlocks(), zmin: zMin, zmax: zMax, db: getPlotOptions().efieldDb,
-        bleed: currentView.startsWith("efield") ? 2 : 0 }));
+        bleed: currentView === "efield" ? 2 : 0 }));
 
 // Redraws the image of triangle blocks in `container` on the next frame, for its axis
 // ranges and plot size. get() returns { blocks, zmin, zmax, db, bleed } at draw time.
@@ -1232,7 +1232,7 @@ function draw(resetZoom = false) {
         }
     }
 
-    else if ((currentView === "potential" || currentView === "potential_odd" || currentView === "potential_even") && solver.solution_valid) {
+    else if (currentView === "potential" && solver.solution_valid) {
         // Ensure mesh exists for field visualization
         if (!solver.mesh_generated) {
             solver.ensure_mesh();
@@ -1240,16 +1240,10 @@ function draw(resetZoom = false) {
 
         ({ xMM, yMM, nx, nyDisplay } = solverGridMM(solver));
 
-        let modeLabel = "";
-        if (currentView === "potential_odd") {
-            modeLabel = " (Odd Mode)";
-        } else if (currentView === "potential_even") {
-            modeLabel = " (Even Mode)";
-        }
         // The potential is the real part, the instant the drive peaks. A conducting
         // dielectric shifts the phase of the field in it, which this does not show.
         const peak = instantField(getFields()).imagShare > 1e-3 ? ', at the peak of the drive' : '';
-        title = `Electric Potential${modeLabel} (V)${fieldFreqLabel(solver)}${peak}`;
+        title = `Electric Potential (V)${fieldFreqLabel(solver)}${peak}`;
         zTitle = "Volts";
 
         const V = getPotential();
@@ -1266,7 +1260,7 @@ function draw(resetZoom = false) {
         actualDataMax = zMax;
     }
 
-    else if ((currentView === "efield" || currentView === "efield_odd" || currentView === "efield_even") && solver.solution_valid) {
+    else if (currentView === "efield" && solver.solution_valid) {
         // Ensure mesh exists for field visualization
         if (!solver.mesh_generated) {
             solver.ensure_mesh();
@@ -1274,14 +1268,8 @@ function draw(resetZoom = false) {
 
         ({ xMM, yMM, nx, nyDisplay } = solverGridMM(solver));
 
-        let modeLabel = "";
-        if (currentView === "efield_odd") {
-            modeLabel = " (Odd Mode)";
-        } else if (currentView === "efield_even") {
-            modeLabel = " (Even Mode)";
-        }
         const db = plotOptions.efieldDb;
-        title = `|E| Field Magnitude${modeLabel} (${db ? "dB V/m" : "V/m"})${fieldFreqLabel(solver)}`;
+        title = `|E| Field Magnitude (${db ? "dB V/m" : "V/m"})${fieldFreqLabel(solver)}`;
         zTitle = db ? "dB(V/m)" : "V/m";
 
         zData = efieldMagnitude(nyDisplay, nx);
@@ -1437,7 +1425,7 @@ function draw(resetZoom = false) {
         const n = plotOptions.contours;
         const hoverTpl = "x: %{x:.2f} mm<br>y: %{y:.2f} mm<br>value: %{z:.3e}<extra></extra>";
 
-        const fieldMesh = currentView.startsWith("efield") ? getFieldMesh() : null;
+        const fieldMesh = currentView === "efield" ? getFieldMesh() : null;
         if (fieldMesh) {
             // |E| on the triangles: the color is an image (updateDensityImage), the hover
             // and colorbar ride on invisible markers, the contours are traced per triangle.
@@ -1449,7 +1437,7 @@ function draw(resetZoom = false) {
                     : contourScaledB(autoscaled ? contourFloor : Math.max(zMin, 0), zMax, n);
                 traces.push(fieldMeshContourTrace(fieldMesh, limits));
             }
-        } else if (currentView.startsWith("efield")) {
+        } else if (currentView === "efield") {
             const db = plotOptions.efieldDb;
             // |E| (linear or dB) on the grid: the color is an image (updateDensityImage),
             // the hover and colorbar ride on invisible markers at the grid nodes...
@@ -1525,36 +1513,20 @@ function draw(resetZoom = false) {
     }
 
     // An |E| image below the traces sits under the grid lines, which the heatmap covered.
-    const gridOff = currentView.startsWith("efield");
+    const gridOff = currentView === "efield";
 
     // UI menues
     const layout = {
         title: { text: title, font: { color: '#fff' } },
-        xaxis: {
-            title: { text: "Width (mm)", font: { color: '#aaa' } },
-            scaleanchor: "y",
-            scaleratio: 1,
-            range: currentXRange,  // Preserve zoom/pan
-            color: '#aaa',
-            gridcolor: '#444',
-            zerolinecolor: '#555',
-            showgrid: !gridOff, zeroline: !gridOff
-        },
-        yaxis: {
-            title: { text: "Height (mm)", font: { color: '#aaa' } },
-            range: currentYRange,  // Preserve zoom/pan
-            color: '#aaa',
-            gridcolor: '#444',
-            zerolinecolor: '#555',
-            showgrid: !gridOff, zeroline: !gridOff
-        },
+        // range preserves zoom/pan
+        xaxis: { ...darkAxis("Width (mm)", { scaleanchor: "y", scaleratio: 1, range: currentXRange }),
+                 showgrid: !gridOff, zeroline: !gridOff },
+        yaxis: { ...darkAxis("Height (mm)", { range: currentYRange }), showgrid: !gridOff, zeroline: !gridOff },
         margin: { l: 70, r: 90, t: 50, b: 60 },
         showlegend: false,
         hovermode: "closest",
         dragmode: "pan",
-        paper_bgcolor: '#2a2a2a',
-        plot_bgcolor: '#1a1a1a',
-        font: { color: '#fff' },
+        ...darkBackground(),
         shapes: shapes,  // Add vector shapes for geometry
         ...(colorAxis ? { coloraxis: colorAxis } : {}),
 
@@ -1580,10 +1552,8 @@ function draw(resetZoom = false) {
             }
             // Both the highlighted button and the click handler key off the LABEL, never a
             // fixed index, with Potential absent, "|E| Field" is at index 1, not 2.
-            // Prefix match so the differential "_odd"/"_even" view variants land on their
-            // own button rather than falling through to the first one.
-            const activeLabel = currentView.startsWith("geometry") ? "Geometry"
-                : currentView.startsWith("potential") ? "Potential"
+            const activeLabel = currentView === "geometry" ? "Geometry"
+                : currentView === "potential" ? "Potential"
                 : currentView === "current" ? "|K| Current"
                 : currentView === "density" ? "|J| Density" : "|E| Field";
             menus.push({
@@ -1628,7 +1598,7 @@ function draw(resetZoom = false) {
     };
 
     Plotly.react(container, traces, layout, geometryPlotConfig(Plotly));
-    if (currentView === "density" || currentView.startsWith("efield")) updateDensityImage(container);
+    if (currentView === "density" || currentView === "efield") updateDensityImage(container);
 
     if (!container._viewListenerBound) {
         container.on('plotly_buttonclicked', (event) => {
@@ -1678,7 +1648,7 @@ function draw(resetZoom = false) {
         // Handle autoscale button click
         container.on('plotly_relayout', (eventData) => {
             // A zoom or pan redraws the |J| image of the shaped conductors for the new view.
-            if ((currentView === "density" || currentView.startsWith("efield")) && !container._triImageUpdate)
+            if ((currentView === "density" || currentView === "efield") && !container._triImageUpdate)
                 updateDensityImage(container);
             // Check if this is an autoscale event (both axes autoscaling)
             if (eventData && eventData['xaxis.autorange'] === true && eventData['yaxis.autorange'] === true) {
@@ -1693,6 +1663,51 @@ function draw(resetZoom = false) {
         container._autoscaleListenerBound = true;
     }
 
+}
+
+// Axis of the dark plot theme. extra goes between the title and the colours.
+function darkAxis(title, extra = {}) {
+    return { title: { text: title, font: { color: '#aaa' } }, ...extra,
+             color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' };
+}
+
+// Backgrounds and text colour of the dark plot theme.
+function darkBackground() {
+    return { paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' } };
+}
+
+// Layout of the Results and S-parameter plots, legendY places the legend.
+function frequencyPlotLayout(yTitle, useLogX, legendY) {
+    return {
+        xaxis: darkAxis('Frequency (GHz)', { type: useLogX ? 'log' : 'linear' }),
+        yaxis: darkAxis(yTitle),
+        margin: { l: 80, r: 40, t: 40, b: 60 },
+        showlegend: true,
+        legend: { x: 0.02, y: legendY, font: { color: '#fff' } },
+        ...darkBackground(),
+    };
+}
+
+// The active traces get explicit colours and legend groups, so the frozen traces (drawn
+// faint underneath, in the colour of the same index) do not shift the colour cycle.
+function withFrozenTraces(activeTraces, frozen) {
+    for (let i = 0; i < activeTraces.length; i++) {
+        const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
+        activeTraces[i].line = { ...activeTraces[i].line, color };
+        activeTraces[i].marker = { color };
+        activeTraces[i].legendgroup = `group${i}`;
+    }
+    if (!frozen) return activeTraces.slice();
+    for (let i = 0; i < frozen.length; i++) {
+        const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
+        frozen[i].line = { color };
+        frozen[i].opacity = 0.35;
+        frozen[i].showlegend = false;
+        frozen[i].hoverinfo = 'skip';
+        frozen[i].mode = 'lines';
+        frozen[i].legendgroup = `group${i}`;
+    }
+    return [...frozen, ...activeTraces];
 }
 
 function getYAxisLabel(selector) {
@@ -1734,62 +1749,22 @@ function buildResultsTraces(sweepResults, selector, useDiffMode) {
     const mode1 = useDiffMode ? 'Common' : 'Even';
 
     if (selector === 'loss') {
-        if (resultsAreDifferential) {
-            const suffix0 = useDiffMode ? 'diff' : 'odd';
-            const suffix1 = useDiffMode ? 'common' : 'even';
-            // Mode 0 losses (solid lines)
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].alpha_c),
-                name: `Conductor (${suffix0})`, type: 'scatter', mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].alpha_d),
-                name: `Dielectric (${suffix0})`, type: 'scatter', mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].alpha_total),
-                name: `Total (${suffix0})`, type: 'scatter', mode: plotMode,
-                line: { width: 2 }
-            });
-            // Mode 1 losses (dashed lines)
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[1].alpha_c),
-                name: `Conductor (${suffix1})`, type: 'scatter', mode: plotMode,
-                line: { dash: 'dash' }
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[1].alpha_d),
-                name: `Dielectric (${suffix1})`, type: 'scatter', mode: plotMode,
-                line: { dash: 'dash' }
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[1].alpha_total),
-                name: `Total (${suffix1})`, type: 'scatter', mode: plotMode,
-                line: { width: 2, dash: 'dash' }
-            });
-        } else {
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].alpha_c),
-                name: 'Conductor', type: 'scatter', mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].alpha_d),
-                name: 'Dielectric', type: 'scatter', mode: plotMode
-            });
-            traces.push({
-                x: freqs,
-                y: sweepResults.map(r => r.result.modes[0].alpha_total),
-                name: 'Total', type: 'scatter', mode: plotMode,
-                line: { width: 2 }
-            });
+        // Per mode: conductor, dielectric and total loss. The second mode of a pair is dashed.
+        const modes = !resultsAreDifferential ? [[0, '', {}]]
+            : [[0, ` (${useDiffMode ? 'diff' : 'odd'})`, {}],
+               [1, ` (${useDiffMode ? 'common' : 'even'})`, { dash: 'dash' }]];
+        for (const [m, suffix, dash] of modes) {
+            for (const [key, label, width] of [['alpha_c', 'Conductor'], ['alpha_d', 'Dielectric'],
+                                               ['alpha_total', 'Total', { width: 2 }]]) {
+                const trace = {
+                    x: freqs,
+                    y: sweepResults.map(r => r.result.modes[m][key]),
+                    name: label + suffix, type: 'scatter', mode: plotMode
+                };
+                const line = { ...width, ...dash };
+                if (Object.keys(line).length) trace.line = line;
+                traces.push(trace);
+            }
         }
     } else {
         // Z0, eps_eff, RLGC parameters
@@ -1828,57 +1803,16 @@ function drawResultsPlot() {
     const useDiffMode = document.getElementById('results-diff').checked && resultsAreDifferential;
 
     const activeTraces = buildResultsTraces(frequencySweepResults, selector, useDiffMode);
-
-    // Assign explicit colors and legend groups so frozen traces don't shift the color cycle
-    for (let i = 0; i < activeTraces.length; i++) {
-        const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
-        activeTraces[i].line = { ...activeTraces[i].line, color };
-        activeTraces[i].marker = { color };
-        activeTraces[i].legendgroup = `group${i}`;
-    }
-
-    const allTraces = [];
-
+    let frozen = null;
     if (frozenResultsData) {
         const frozenDiff = frozenResultsData[0].result.modes.length === 2;
         const frozenUseDiff = document.getElementById('results-diff').checked && frozenDiff;
-        const frozen = buildResultsTraces(frozenResultsData, selector, frozenUseDiff);
-        for (let i = 0; i < frozen.length; i++) {
-            const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
-            frozen[i].line = { color };
-            frozen[i].opacity = 0.35;
-            frozen[i].showlegend = false;
-            frozen[i].hoverinfo = 'skip';
-            frozen[i].mode = 'lines';
-            frozen[i].legendgroup = `group${i}`;
-        }
-        allTraces.push(...frozen);
+        frozen = buildResultsTraces(frozenResultsData, selector, frozenUseDiff);
     }
-
-    allTraces.push(...activeTraces);
+    const allTraces = withFrozenTraces(activeTraces, frozen);
 
     const useLogX = document.getElementById('results-log-x').checked;
-    const layout = {
-        xaxis: {
-            title: { text: 'Frequency (GHz)', font: { color: '#aaa' } },
-            type: useLogX ? 'log' : 'linear',
-            color: '#aaa',
-            gridcolor: '#444',
-            zerolinecolor: '#555'
-        },
-        yaxis: {
-            title: { text: getYAxisLabel(selector), font: { color: '#aaa' } },
-            color: '#aaa',
-            gridcolor: '#444',
-            zerolinecolor: '#555'
-        },
-        margin: { l: 80, r: 40, t: 40, b: 60 },
-        showlegend: true,
-        legend: { x: 0.02, y: 0.98, font: { color: '#fff' } },
-        paper_bgcolor: '#2a2a2a',
-        plot_bgcolor: '#1a1a1a',
-        font: { color: '#fff' }
-    };
+    const layout = frequencyPlotLayout(getYAxisLabel(selector), useLogX, 0.98);
 
     Plotly.newPlot('results-plot', allTraces, layout, { responsive: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
@@ -2015,59 +1949,15 @@ function drawSParamPlot() {
     const plotMode = document.getElementById('sparam-plot-mode').value;
 
     const activeTraces = buildSParamTraces(frequencySweepResults, length, Z_ref, plotMode, useMixedMode);
-
-    // Assign explicit colors and legend groups so frozen traces don't shift the color cycle
-    for (let i = 0; i < activeTraces.length; i++) {
-        const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
-        activeTraces[i].line = { ...activeTraces[i].line, color };
-        activeTraces[i].marker = { color };
-        activeTraces[i].legendgroup = `group${i}`;
-    }
-
-    const allTraces = [];
-
-    if (frozenSParamData) {
-        const frozen = buildSParamTraces(
-            frozenSParamData.results, frozenSParamData.length,
-            frozenSParamData.zRef, plotMode, useMixedMode
-        );
-        for (let i = 0; i < frozen.length; i++) {
-            const color = PLOTLY_COLORS[i % PLOTLY_COLORS.length];
-            frozen[i].line = { color };
-            frozen[i].opacity = 0.35;
-            frozen[i].showlegend = false;
-            frozen[i].hoverinfo = 'skip';
-            frozen[i].mode = 'lines';
-            frozen[i].legendgroup = `group${i}`;
-        }
-        allTraces.push(...frozen);
-    }
-
-    allTraces.push(...activeTraces);
+    const frozen = frozenSParamData && buildSParamTraces(
+        frozenSParamData.results, frozenSParamData.length,
+        frozenSParamData.zRef, plotMode, useMixedMode
+    );
+    const allTraces = withFrozenTraces(activeTraces, frozen);
 
     const useLogX = document.getElementById('sparam-log-x').checked;
     const yTitle = plotMode === 'magnitude' ? 'Magnitude (dB)' : 'Phase (degrees)';
-    const layout = {
-        xaxis: {
-            title: { text: 'Frequency (GHz)', font: { color: '#aaa' } },
-            type: useLogX ? 'log' : 'linear',
-            color: '#aaa',
-            gridcolor: '#444',
-            zerolinecolor: '#555'
-        },
-        yaxis: {
-            title: { text: yTitle, font: { color: '#aaa' } },
-            color: '#aaa',
-            gridcolor: '#444',
-            zerolinecolor: '#555'
-        },
-        margin: { l: 80, r: 40, t: 40, b: 60 },
-        showlegend: true,
-        legend: { x: 0.02, y: 0.02, font: { color: '#fff' } },
-        paper_bgcolor: '#2a2a2a',
-        plot_bgcolor: '#1a1a1a',
-        font: { color: '#fff' }
-    };
+    const layout = frequencyPlotLayout(yTitle, useLogX, 0.02);
 
     Plotly.newPlot('sparam-plot', allTraces, layout, { responsive: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
@@ -2140,13 +2030,13 @@ function drawParameterSweepPlot(sweepData, xLabel, ySelector, useDiffMode) {
     }
 
     const layout = {
-        xaxis: { title: { text: xLabel, font: { color: '#aaa' } }, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
-        yaxis: { title: { text: getYAxisLabel(ySelector), font: { color: '#aaa' } }, color: '#aaa', gridcolor: '#444', zerolinecolor: '#555' },
+        xaxis: darkAxis(xLabel),
+        yaxis: darkAxis(getYAxisLabel(ySelector)),
         margin: { l: 80, r: 40, t: 40, b: 60 },
         hovermode: 'closest',
         showlegend: isDiff,
         legend: { x: 0.02, y: 0.98, font: { color: '#fff' } },
-        paper_bgcolor: '#2a2a2a', plot_bgcolor: '#1a1a1a', font: { color: '#fff' }
+        ...darkBackground(),
     };
     Plotly.newPlot('sweep-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
@@ -2265,6 +2155,6 @@ function unfreeze() {
 }
 function isFrozen() { return frozenResultsData !== null; }
 
-export { draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
+export { darkAxis, darkBackground, draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
     freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
     centroidHoverTrace, triMeanE, updateTriImage };

@@ -659,42 +659,8 @@ function _condArea(cr) {
         : Math.abs((cr.xmax - cr.xmin) * (cr.ymax - cr.ymin));
 }
 
-// --- Build isLossEdge array for microstrip geometry ---
-// Marks conductor boundary edges + ground (y=0) edges.
-// condRect: if provided and condRect.symmetry > 1, excludes edges on the
-// symmetry plane (x = xmin_domain) — these are not physical conductor surfaces.
-export function buildMicrostripLossEdges(mesh, fm, condRect) {
-    const { nodes, edges, nEdges, nTris, triEdges } = mesh;
-    const symX = (condRect && condRect.symmetry > 1) ? condRect.xmin_domain : null;
-    const isLossEdge = new Uint8Array(nEdges);
-    // On meshes with conductor interiors (meshConductorInterior), isCondEdge also
-    // marks edges strictly inside the metal. A loss edge is a conductor SURFACE
-    // edge: it must touch at least one exterior (non-conductor) triangle.
-    const touchesExterior = new Uint8Array(nEdges);
-    for (let t = 0; t < nTris; t++) {
-        if (fm.faceF && fm.faceF[2*t] < 0) continue;
-        for (let k = 0; k < 3; k++) touchesExterior[triEdges[3*t+k]] = 1;
-    }
-    for (let e = 0; e < nEdges; e++) {
-        const n0=edges[2*e], n1=edges[2*e+1];
-        // Conductor boundary edges (from freedom map)
-        if (fm.isCondEdge && fm.isCondEdge[e] && touchesExterior[e]) {
-            // Exclude symmetry plane edges — not physical conductor surfaces
-            if (symX !== null && Math.abs(nodes[2*n0] - symX) < 1e-12 &&
-                Math.abs(nodes[2*n1] - symX) < 1e-12) continue;
-            isLossEdge[e] = 1; continue;
-        }
-        // Ground plane (y=0)
-        if (Math.abs(nodes[2*n0+1]) < 1e-12 && Math.abs(nodes[2*n1+1]) < 1e-12) {
-            if (!(fm.isCondEdge && fm.isCondEdge[e])) isLossEdge[e] = 1;
-        }
-    }
-    return isLossEdge;
-}
-
 // --- Main entry ---
-// isLossEdge: optional Uint8Array marking which edges contribute to conductor loss.
-//   If not provided, uses buildMicrostripLossEdges (backward compatible).
+// isLossEdge: Uint8Array marking which edges contribute to conductor loss.
 // condArea: conductor cross-section area for DC resistance (default: computed from condRects).
 export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, vecIm,
                                     gamma2Re, gamma2Im, P_poynting, Z0, epsMap, isLossEdge, projectedH, wasmSolver) {
@@ -706,9 +672,6 @@ export function solveConductorLoss(condRects, freq, sigma, extMesh, fm, vecRe, v
     let gamma = csqrt(gamma2Re, gamma2Im);
     if(gamma.im<0) gamma={re:-gamma.re,im:-gamma.im};
     const omu = 2 * Math.PI * freq * MU0;
-
-    // Build loss edge mask if not provided
-    if (!isLossEdge) isLossEdge = buildMicrostripLossEdges(extMesh, fm, condRects && condRects[0]);
 
     // Galerkin-projected H with γ-scaled convention: both h2dl and P_proj carry the same
     // γ² factor from the e_t term, which cancels exactly in the ratio αc = h2dl/(4P).
@@ -857,7 +820,7 @@ export function computeHtZZMetric(mesh, fm, vecRe, vecIm, gamma2Re, gamma2Im, fr
 // For TEM: Ht = ẑ×∇φ/Z₀, so ∮|Ht|²dl = ∮|∇φ|²dl/Z₀².
 // α_c = Rs · ∮|∇φ|²dl / (2·Z₀)  (with φ normalized so V=1).
 // For quasi-TEM at frequency f: scale by √(ε_eff(f)/ε_eff(static)) via Z₀(f).
-export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, epsEff, epsEffMode, isLossEdgeArg = null) {
+export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, epsEff, epsEffMode, isLossEdge) {
     const omega = 2*Math.PI*freq;
     const delta = Math.sqrt(2/(omega*MU0*sigma));
     const Rs = 1/(sigma*delta);
@@ -865,9 +828,6 @@ export function staticConductorLoss(condRects, freq, sigma, mesh, fm, phi, Z0, e
     const { nodes, tris, edges, triEdges, nEdges, nTris, nNodes } = mesh;
     const { faceF, nodeF, edgeNodeF, nFreeVertexDof } = fm;
     const edgeVerts = [[0,1],[1,2],[2,0]];
-
-    // Build loss edge mask (caller may supply a generalized one)
-    const isLossEdge = isLossEdgeArg || buildMicrostripLossEdges(mesh, fm, condRects && condRects[0]);
 
     const edgeToTri = buildEdgeToTri(nEdges, nTris, triEdges);
 

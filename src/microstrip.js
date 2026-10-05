@@ -1,4 +1,4 @@
-import { FieldSolver2D } from './field_solver.js';
+import { FieldSolver2D, throwIfErrors } from './field_solver.js';
 import { Dielectric, Conductor, Mesher, DEFAULT_GRID_N } from './mesher.js';
 import { halfDomainSymmetry } from './geometry_symmetry.js';
 
@@ -152,10 +152,6 @@ class MicrostripSolver extends FieldSolver2D {
         );
 
         // Mesh will be generated when needed
-        this.x = null;
-        this.y = null;
-        this.dx = null;
-        this.dy = null;
         this.mesh_generated = false;
     }
 
@@ -310,9 +306,7 @@ class MicrostripSolver extends FieldSolver2D {
         }
 
         // If there are any errors, throw them
-        if (errors.length > 0) {
-            throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
-        }
+        throwIfErrors(errors);
     }
 
     // Auto domain width of a coplanar line whose traces span trace_span. Full-width
@@ -647,130 +641,25 @@ class MicrostripSolver extends FieldSolver2D {
     }
 
     _add_standard_solder_mask(dielectrics, xl, xr, x_min, x_max) {
-        // Standard microstrip solder mask: substrate and trace solder mask
-        // Avoid overlaps between substrate and side solder masks
-
-        if (this.is_differential) {
-            // Differential: solder mask for both traces
-            const half_spacing = this.trace_spacing / 2;
-            const xl_left = -this.w - half_spacing;
-            const xr_left = -half_spacing;
-            const xl_right = half_spacing;
-            const xr_right = this.w + half_spacing;
-
-            // Substrate solder mask in three regions (avoiding trace side solder masks)
-            // Left region: from x_min to left trace left side
-            const x_sub_left_end = xl_left - this.sm_t_side;
-            if (x_sub_left_end > x_min) {
-                dielectrics.push(new Dielectric(
-                    x_min, this.y_sub_end,
-                    x_sub_left_end - x_min, this.sm_t_sub,
-                    this.sm_er, this.sm_tand
-                ));
-            }
-
-            // Center region: between the two traces (avoiding side solder masks)
-            const x_sub_center_start = xr_left + this.sm_t_side;
-            const x_sub_center_end = xl_right - this.sm_t_side;
-            if (x_sub_center_end > x_sub_center_start) {
-                dielectrics.push(new Dielectric(
-                    x_sub_center_start, this.y_sub_end,
-                    x_sub_center_end - x_sub_center_start, this.sm_t_sub,
-                    this.sm_er, this.sm_tand
-                ));
-            }
-
-            // Right region: from right trace right side to x_max
-            const x_sub_right_start = xr_right + this.sm_t_side;
-            if (x_sub_right_start < x_max) {
-                dielectrics.push(new Dielectric(
-                    x_sub_right_start, this.y_sub_end,
-                    x_max - x_sub_right_start, this.sm_t_sub,
-                    this.sm_er, this.sm_tand
-                ));
-            }
-
-            // Left trace side solder masks
-            dielectrics.push(new Dielectric(
-                xl_left - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
-                this.sm_er, this.sm_tand
-            ));
-            dielectrics.push(new Dielectric(
-                xr_left, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
-                this.sm_er, this.sm_tand
-            ));
-
-            // Left trace top solder mask
-            dielectrics.push(new Dielectric(
-                xl_left, this.y_trace_top,
-                this.w, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
-
-            // Right trace side solder masks
-            dielectrics.push(new Dielectric(
-                xl_right - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
-                this.sm_er, this.sm_tand
-            ));
-            dielectrics.push(new Dielectric(
-                xr_right, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
-                this.sm_er, this.sm_tand
-            ));
-
-            // Right trace top solder mask
-            dielectrics.push(new Dielectric(
-                xl_right, this.y_trace_top,
-                this.w, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
-        } else {
-            // Single-ended: solder mask for one trace
-            // Substrate solder mask in two regions (avoiding trace side solder masks)
-
-            // Left region: from x_min to trace left side
-            const x_sub_left_end = xl - this.sm_t_side;
-            if (x_sub_left_end > x_min) {
-                dielectrics.push(new Dielectric(
-                    x_min, this.y_sub_end,
-                    x_sub_left_end - x_min, this.sm_t_sub,
-                    this.sm_er, this.sm_tand
-                ));
-            }
-
-            // Right region: from trace right side to x_max
-            const x_sub_right_start = xr + this.sm_t_side;
-            if (x_sub_right_start < x_max) {
-                dielectrics.push(new Dielectric(
-                    x_sub_right_start, this.y_sub_end,
-                    x_max - x_sub_right_start, this.sm_t_sub,
-                    this.sm_er, this.sm_tand
-                ));
-            }
-
-            // Trace left side solder mask
-            dielectrics.push(new Dielectric(
-                xl - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
-                this.sm_er, this.sm_tand
-            ));
-
-            // Trace right side solder mask
-            dielectrics.push(new Dielectric(
-                xr, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
-                this.sm_er, this.sm_tand
-            ));
-
-            // Trace top solder mask
-            dielectrics.push(new Dielectric(
-                xl, this.y_trace_top,
-                this.w, this.sm_t_trace,
-                this.sm_er, this.sm_tand
-            ));
+        // Standard microstrip solder mask: the substrate between and beside the traces
+        // (stopping at the side masks, so the two do not overlap), then each trace's
+        // side and top masks.
+        const sm = (x, y, w, h) => dielectrics.push(new Dielectric(x, y, w, h, this.sm_er, this.sm_tand));
+        const half_spacing = this.trace_spacing / 2;
+        const traces = this.is_differential
+            ? [[-this.w - half_spacing, -half_spacing], [half_spacing, this.w + half_spacing]]
+            : [[xl, xr]];
+        let start = x_min;
+        for (const [l, r] of traces) {
+            const end = l - this.sm_t_side;
+            if (end > start) sm(start, this.y_sub_end, end - start, this.sm_t_sub);
+            start = r + this.sm_t_side;
+        }
+        if (start < x_max) sm(start, this.y_sub_end, x_max - start, this.sm_t_sub);
+        for (const [l, r] of traces) {
+            sm(l - this.sm_t_side, this.y_trace_start, this.sm_t_side, this.sm_side_h);
+            sm(r, this.y_trace_start, this.sm_t_side, this.sm_side_h);
+            sm(l, this.y_trace_top, this.w, this.sm_t_trace);
         }
     }
 

@@ -226,44 +226,44 @@ export function createWasmHelpers(M) {
     function freeAll(ptrs) {
         for (const p of ptrs) { try { M._free(p); } catch { /* module aborted */ } }
     }
+    // Runs fn(ai, af, out) with allocators for Int32 / Float64 inputs and Float64
+    // outputs of n values, all freed afterwards.
+    function withAllocs(fn) {
+        const ptrs = [];
+        const ai = (a) => { const p = allocInt32(a); ptrs.push(p); return p; };
+        const af = (a) => { const p = allocFloat64(a); ptrs.push(p); return p; };
+        const out = (n) => { const p = M._malloc(8 * n); ptrs.push(p); return p; };
+        try {
+            return fn(ai, af, out);
+        } finally {
+            freeAll(ptrs);
+        }
+    }
     // ncvMax > ncv lets the WASM solver GROW the Krylov subspace (doubling, reusing
     // the factorization) until nev pairs pass its residual gate or ncvMax columns
     // are reached — needed when wanted modes sit far from the shift (mode viewer).
     // The default (0 → clamped to ncv in C++) keeps the single fixed-size pass.
     function solveGeneralized(N, csrA, csrB, sigma, nev, ncv, initVec, ncvMax = 0) {
-        const ptrs = [];
-        function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
-        function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
         const dumpPath = _dumpCall('solveGeneralized',
             { N, sigma, nev, ncv, ncvMax, hasInit: !!initVec },
             [['aRowPtr', csrA.rowPtr], ['aColIdx', csrA.colIdx], ['aValRe', csrA.valRe], ['aValIm', csrA.valIm],
              ['bRowPtr', csrB.rowPtr], ['bColIdx', csrB.colIdx], ['bValRe', csrB.valRe], ['bValIm', csrB.valIm],
              ...(initVec ? [['init', initVec]] : [])]);
-        try {
+        return withAllocs((ai, af, out) => {
             const pAr = ai(csrA.rowPtr), pAc = ai(csrA.colIdx), pAre = af(csrA.valRe), pAim = af(csrA.valIm);
             const pBr = ai(csrB.rowPtr), pBc = ai(csrB.colIdx), pBre = af(csrB.valRe), pBim = af(csrB.valIm);
-            const pEvRe = M._malloc(8 * nev); ptrs.push(pEvRe);
-            const pEvIm = M._malloc(8 * nev); ptrs.push(pEvIm);
-            const pVRe = M._malloc(8 * nev * N); ptrs.push(pVRe);
-            const pVIm = M._malloc(8 * nev * N); ptrs.push(pVIm);
+            const pEvRe = out(nev), pEvIm = out(nev);
+            const pVRe = out(nev * N), pVIm = out(nev * N);
             const _t0 = _stats ? performance.now() : 0;
-            let nc;
-            if (initVec) {
-                const pInitRe = af(initVec);
-                const pInitIm = af(new Float64Array(N));
-                nc = M._solve_generalized_eigen_with_init(
-                    N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
-                    csrB.colIdx.length, pBr, pBc, pBre, pBim,
-                    sigma[0], sigma[1], nev, ncv, ncvMax, pEvRe, pEvIm, pVRe, pVIm,
-                    pInitRe, pInitIm
-                );
-            } else {
-                nc = M._solve_generalized_eigen(
-                    N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
-                    csrB.colIdx.length, pBr, pBc, pBre, pBim,
-                    sigma[0], sigma[1], nev, ncv, ncvMax, pEvRe, pEvIm, pVRe, pVIm
-                );
-            }
+            // No start vector: null pointers, the solver seeds its own.
+            const pInitRe = initVec ? af(initVec) : 0;
+            const pInitIm = initVec ? af(new Float64Array(N)) : 0;
+            const nc = M._solve_generalized_eigen_with_init(
+                N, csrA.colIdx.length, pAr, pAc, pAre, pAim,
+                csrB.colIdx.length, pBr, pBc, pBre, pBim,
+                sigma[0], sigma[1], nev, ncv, ncvMax, pEvRe, pEvIm, pVRe, pVIm,
+                pInitRe, pInitIm
+            );
             const _st = _stats ? { N, nnz: csrA.colIdx.length, nev, ncv, sigma: sigma[0], ms: performance.now() - _t0 } : null;
             if (_st) _stats.eig.push(_st);
             // Negative nc = solver-reported failure (factorization failed,
@@ -279,42 +279,42 @@ export function createWasmHelpers(M) {
                 evecsRe: readFloat64(pVRe, nc > 0 ? nc * N : 0),
                 evecsIm: readFloat64(pVIm, nc > 0 ? nc * N : 0),
             };
-        } finally {
-            freeAll(ptrs);
-        }
+        });
+    }
+    // One factorization, every RHS solved. Each RHS and solution holds N values, or
+    // N real parts then N imaginary parts when complex.
+    function solveMultiRhs(dumpName, N, csr, rhsArrays, complex) {
+        const w = complex ? 2 : 1, nRhs = rhsArrays.length, nnz = csr.colIdx.length;
+        const dumpPath = _dumpCall(dumpName, { N, nRhs },
+            [['rowPtr', csr.rowPtr], ['colIdx', csr.colIdx], ['valRe', csr.valRe],
+             ...(complex ? [['valIm', csr.valIm]] : []),
+             ...rhsArrays.map((r, i) => [`rhs${i}`, r])]);
+        return withAllocs((ai, af, out) => {
+            const pR = ai(csr.rowPtr), pC = ai(csr.colIdx), pVr = af(csr.valRe);
+            const pVi = complex ? af(csr.valIm) : 0;
+            const rhsPacked = new Float64Array(nRhs * w * N);
+            for (let r = 0; r < nRhs; r++) rhsPacked.set(rhsArrays[r], r * w * N);
+            const pRhs = af(rhsPacked);
+            const pX = out(nRhs * w * N);
+            const _t0 = _stats ? performance.now() : 0;
+            const rc = complex
+                ? M._solve_complex_symmetric(N, nnz, pR, pC, pVr, pVi, nRhs, pRhs, pX)
+                : M._solve_sparse_multi(N, nnz, pR, pC, pVr, nRhs, pRhs, pX);
+            if (_stats) _stats.lin.push({ N, nnz, nRhs, ms: performance.now() - _t0,
+                                          ...(complex ? { complex: true } : {}), luFallback: rc === 1 });
+            if (rc < 0) throw new Error(`${complex ? 'solve_complex_symmetric' : 'solve_sparse_multi'} failed: ${rc}`);
+            _dumpDone(dumpPath);
+            const results = [];
+            for (let r = 0; r < nRhs; r++)
+                results.push(readFloat64(pX + r * w * N * 8, w * N));
+            return results;
+        });
     }
     // Direct sparse solver: factorize once, solve for multiple RHS.
     // csr: {rowPtr, colIdx, valRe}, rhsArrays: array of Float64Array(N)
     // Returns array of Float64Array(N) solutions.
     function solveSparseMulti(N, csr, rhsArrays) {
-        const ptrs = [];
-        function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
-        function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
-        const dumpPath = _dumpCall('solveSparseMulti',
-            { N, nRhs: rhsArrays.length },
-            [['rowPtr', csr.rowPtr], ['colIdx', csr.colIdx], ['valRe', csr.valRe],
-             ...rhsArrays.map((r, i) => [`rhs${i}`, r])]);
-        try {
-            const pR = ai(csr.rowPtr), pC = ai(csr.colIdx), pV = af(csr.valRe);
-            const nRhs = rhsArrays.length;
-            // Pack RHS into contiguous array
-            const rhsPacked = new Float64Array(nRhs * N);
-            for (let r = 0; r < nRhs; r++) rhsPacked.set(rhsArrays[r], r * N);
-            const pRhs = af(rhsPacked);
-            const pX = M._malloc(8 * nRhs * N); ptrs.push(pX);
-            const _t0 = _stats ? performance.now() : 0;
-            const rc = M._solve_sparse_multi(N, csr.colIdx.length, pR, pC, pV, nRhs, pRhs, pX);
-            if (_stats) _stats.lin.push({ N, nnz: csr.colIdx.length, nRhs, ms: performance.now() - _t0,
-                                          luFallback: rc === 1 });
-            if (rc < 0) throw new Error(`solve_sparse_multi failed: ${rc}`);
-            _dumpDone(dumpPath);
-            const results = [];
-            for (let r = 0; r < nRhs; r++)
-                results.push(readFloat64(pX + r * N * 8, N));
-            return results;
-        } finally {
-            freeAll(ptrs);
-        }
+        return solveMultiRhs('solveSparseMulti', N, csr, rhsArrays, false);
     }
     // Complex-symmetric direct solver (K^T = K, not Hermitian, the MQS eddy-current
     // system S + jβM). csr: {rowPtr, colIdx, valRe, valIm} every RHS is a
@@ -323,35 +323,9 @@ export function createWasmHelpers(M) {
     // serves all RHS (solve_complex_symmetric in eigen_solver.cpp, which verifies
     // the residual and falls back to the pivoted complex LU on its own).
     function solveComplexSymmetric(N, csr, rhsArrays) {
-        const ptrs = [];
-        function ai(a) { const p = allocInt32(a); ptrs.push(p); return p; }
-        function af(a) { const p = allocFloat64(a); ptrs.push(p); return p; }
-        const nRhs = rhsArrays.length;
         for (const r of rhsArrays)
             if (r.length !== 2 * N) throw new Error(`solveComplexSymmetric: RHS length ${r.length} != 2N (${2 * N})`);
-        const dumpPath = _dumpCall('solveComplexSymmetric',
-            { N, nRhs },
-            [['rowPtr', csr.rowPtr], ['colIdx', csr.colIdx], ['valRe', csr.valRe], ['valIm', csr.valIm],
-             ...rhsArrays.map((r, i) => [`rhs${i}`, r])]);
-        try {
-            const pR = ai(csr.rowPtr), pC = ai(csr.colIdx), pVr = af(csr.valRe), pVi = af(csr.valIm);
-            const rhsPacked = new Float64Array(nRhs * 2 * N);
-            for (let r = 0; r < nRhs; r++) rhsPacked.set(rhsArrays[r], r * 2 * N);
-            const pRhs = af(rhsPacked);
-            const pX = M._malloc(8 * nRhs * 2 * N); ptrs.push(pX);
-            const _t0 = _stats ? performance.now() : 0;
-            const rc = M._solve_complex_symmetric(N, csr.colIdx.length, pR, pC, pVr, pVi, nRhs, pRhs, pX);
-            if (_stats) _stats.lin.push({ N, nnz: csr.colIdx.length, nRhs, ms: performance.now() - _t0,
-                                          complex: true, luFallback: rc === 1 });
-            if (rc < 0) throw new Error(`solve_complex_symmetric failed: ${rc}`);
-            _dumpDone(dumpPath);
-            const results = [];
-            for (let r = 0; r < nRhs; r++)
-                results.push(readFloat64(pX + r * 2 * N * 8, 2 * N));
-            return results;
-        } finally {
-            freeAll(ptrs);
-        }
+        return solveMultiRhs('solveComplexSymmetric', N, csr, rhsArrays, true);
     }
     return { allocInt32, allocFloat64, readFloat64, solveGeneralized, solveSparseMulti, solveComplexSymmetric };
 }

@@ -1,43 +1,42 @@
-// Magneto-quasi-static (MQS) volume eddy-current conductor loss.
+// Magneto-quasi-static (MQS) eddy-current conductor loss.
 //
-// Solves the 2D skin-effect problem with the conductor interior meshed at finite σ
-// — the same physics as Ansys 2D Extractor's RL solve. No Leontovich/SIBC
-// assumption, no PEC-field singular boundary integral: corners are handled by the
-// actual current distribution. Requires a mesh generated with
-// generateGmshMesh({..., meshConductorInterior: true}).
+// Solves the 2D skin-effect problem for A_z with the conductor interiors meshed at
+// finite sigma, so the current distribution (corners included) comes out of the
+// solve rather than from a surface-impedance model. The mesh must include the
+// conductor interiors (buildOccMeshFromGeometry, meshConductorInterior on).
 //
-// Formulation (A_z, e^{jωt}, quasi-TEM so the H pattern is ε-independent):
-//   signal:     ∇²A − jωμ₀σ·A + μ₀σ·C = 0     J = σ(C − jωA), C = −dV/dz (V/m)
-//   ground rect: ∇²A − jωμ₀σ·A = 0            J = −jωσA (passive return/eddy)
-//   dielectric: ∇²A = 0
-//   ground y=0 and outer walls: A = 0 (perfect ground; its loss is added
-//   perturbatively with the flat-surface skin formula — exact for a plane).
-//   Symmetry plane (condRect.symmetry > 1): natural BC at x = xmin_domain.
+// Formulation (e^{jwt}, quasi-TEM so the H pattern does not depend on eps):
+//   signal rect:  lap(A) - jw*mu0*sigma*A + mu0*sigma*C = 0   J = sigma*(C - jw*A)
+//   ground rect:  lap(A) - jw*mu0*sigma*A = 0                 J = -jw*sigma*A
+//   dielectric:   lap(A) = 0
+// C = -dV/dz is the drive. Ground rects (coplanar grounds, via slabs) are tied to
+// the reference at both line ends, so their C is 0 and the return current they
+// carry is induced. The roles come from condRect.rectRoles, without them every
+// rect is driven.
 //
-// Explicit ground rects (coplanar GCPW grounds, via-fence slabs, ground-cutout
-// remnants) are return conductors tied to the reference at both line ends, so
-// their per-unit-length voltage gradient is C = 0: they get finite σ (the jωμ₀σ
-// mass term) but no source term, and the induced return current splits between
-// them and the PEC boundary walls by the field solution itself. The roles come
-// from condRect.rectRoles (is_signal), without rectRoles every rect is driven.
+// Boundaries: A = 0 on the metal walls (opts.wallPEC) and on the symmetry plane of
+// an odd mode. Open walls and the even-mode symmetry plane keep the natural BC.
+// Without a wall map, or with neither metal walls nor ground rects, every outer
+// wall is A = 0. Ideal grounds (opts.idealRects) are held at A = 0 too. The loss of
+// the walls and ideal grounds is a surface term from the tangential H, with the
+// slab impedance of the wall thickness (opts.wallThick).
 //
-// The problem is linear in the single drive C: solve K*A1 = μ₀σ*Fc once with
-// C = 1 (K = S + jωμ₀σ*M, complex symmetric, K^T = K not Hermitian, Fc spans
-// the signal rects only), then scale C so the total signal current equals I.
-// K is factorized as is by the WASM complex-symmetric LDL^T (solveComplexSymmetric,
-// see solve_complex_symmetric in eigen_solver.cpp): S is SPD and βM positive
-// semidefinite, so no pivoting is needed. Solutions travel as [Ar; Ai], the N
-// real parts followed by the N imaginary parts.
+// The system is linear in C: one solve of K*A1 = mu0*sigma*Fc with C = 1, then C is
+// scaled so the signal current equals I. K = S + jw*mu0*sigma*M is complex symmetric
+// (K^T = K, not Hermitian) and is factorized by the WASM LDL^T
+// (solveComplexSymmetric), which falls back to a pivoted LU when its residual check
+// fails. Vectors are stored as [Ar; Ai], the N real parts then the N imaginary parts.
 //
-// Per-conductor drives (opts.modeCurrents): a differential pair with no
-// symmetry walls, or asymmetric pair, cannot use the single shared drive: both
-// traces would act as a parallel conductor. Instead the signal rects are
-// grouped by polarity (one group per net), each group gets its own drive C_k,
-// and linearity gives A = Σ C_k*A_k from one unit solve per group (same
-// factorization, solveComplexSymmetric takes all RHS at once). The small NxN current
-// matrix D_jk = σ(δ_jk*area_j - jω*Fc_j*A_k) maps drives to net currents,
-// solving D*C = I_target realizes the requested mode currents (+1/-1 odd, +1/+1
-// even, or the modal current vector for an asymmetric pair).
+// A differential pair without a symmetry plane (and any asymmetric pair) needs one
+// drive per net, opts.modeCurrents: the signal rects are grouped by polarity, each
+// group gets a unit solve on the same factorization, and the small current matrix
+// D_jk = sigma*(delta_jk*area_j - jw*Fc_j*A_k) gives the drives C_k for the target
+// net currents (+1/-1 odd, +1/+1 even, or the modal currents).
+//
+// Roughness and plating scale the smooth loss per face by the |K|^2-weighted
+// Re(Zs)/Rs (opts.Rq, opts.surfaceZs, opts.surfaceDZ). mqsPecInductance gives the
+// sigma -> infinity inductance on the same mesh, the reference the caller subtracts
+// to get the internal inductance.
 
 import { tripletsToCSRMulti, GL3p, GL3w } from './fem_core.js';
 import { triCoefficients, lvGrad, leGrad, QW, QL1, QL2, QL3, NQ,
@@ -355,70 +354,54 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     }
 }
 
-// Compute conductor loss by volume eddy-current solve.
-//   mesh        — mesh WITH conductor interior triangles
-//   condRect    — conductor geometry object ({rects: [...]} for multi-rect signal)
-//   freq, sigma — frequency (Hz), conductivity (S/m)
-//   solveComplexSymmetric — WASM helper from createWasmHelpers (complex-symmetric
-//   direct solve, [re; im] vector layout)
-//   Z0          — (optional) line impedance for α_c conversion
-//   opts.wallPEC — {left,right,top,bottom} flags saying which domain walls are metal
-//   (from the mesher. `left` is already cleared on a half domain so the symmetry
-//   plane is never counted). Only these walls contribute to the wall loss. Every
-//   wall is Dirichlet in the solve, unless none of them is metal (see mqsPrecompute). Omit it and the legacy behaviour
-//   applies: bottom always, top per opts.topGround, sides never.
-//   opts.topGround — legacy fallback for opts.wallPEC.top (stripline)
-//   opts.oddSymmetry — odd-mode symmetry: A = 0 (Dirichlet) on the symmetry plane
-//   x = xmin_domain instead of the natural (even-mode) BC. For a centered
-//   differential pair meshed as a half domain with one full trace, this solves
-//   the odd mode; the default natural BC solves the even mode.
-//   opts.modeCurrents — per-conductor-drive path (full domain only): array of
-//   target net currents, one per signal polarity group (positive-polarity group
-//   first, pre.groups order). Use [1, -1] for the odd mode, [1, 1] for even, or
-//   the modal current vector (normalized to Σ|I|^2 = 2) for an asymmetric pair.
-//   Replaces the symmetry-plane mode selection: broadside/asymmetric pairs and
-//   symmetry-disabled solves get a per-mode MQS answer instead of the
-//   perturbation fallback. R_total/X_total keep the differential convention
-//   (both traces, per-line mode R = R_total/2), L_loop is per-line.
-//   opts.Rq — RMS surface roughness (m), gradient model (single layer, same Rq on
-//   all surfaces). The dissipation is scaled by Ψ_R(f) = Re(Z_rough)/Rs and the
-//   loop inductance gets the matching surface-reactance increment
-//   ΔL = (Im(Z_rough) − Rs)/ω · ∮|K|², with ∮|K|² from the volume R, keeping
-//   R(f)/L(f) causal. With a single Rq the per-surface factor is uniform, so
-//   scaling the smooth-σ dissipation is exact in the skin regime (t ≫ δ) and
-//   degrades gracefully to the correct DC limit (Ψ → 1 as δ grows).
-//   opts.surfaceZs(x, y, orient) — OPTIONAL per-face surface impedance {re,im} at a
-//   face midpoint (orient 'h' = top/bottom, 'v' = side), for per-side plating. The
-//   smooth trace (and ground) loss is scaled by the |K|²-weighted average of
-//   Re(Zs_face)/Rs over the faces — generalizing the uniform Ψ_R. The weights come
-//   from the MQS smooth current distribution (corner-regularized, unlike a
-//   perturbation surface integral). Reduces exactly to the uniform factor when
-//   every face shares one Zs. Takes precedence over Rq when provided.
-//   opts.surfaceDZ(x, y, orient) — OPTIONAL surface impedance {re,im} or null at a face
-//   midpoint, added on top of surfaceZs as R += Re(dZ) * |K|^2 and X += Im(dZ) * |K|^2
-//   over the face (meshed plating: the roughness of the plating/bulk interface, which
-//   the mesh holds smooth). Needs surfaceZs.
-//   opts.rectSigmaRel — OPTIONAL sigma_rect / sigma per rect (condRect.rects order) for
-//   conductors of different metals. `sigma` stays the reference: the mass matrix, the
-//   drive, the net current and the dissipation carry the ratio per triangle, and the
-//   surface scaling above is then taken per rect against that rect's own Rs.
-// Returns { R_trace, R_gnd, R_total, X_total, L_loop, alpha_c, alpha_c_dBm, delta, nDofs }
-// L_loop is the series inductance from Im(Z_pul) = ωL — includes trace internal
-// inductance and ground-current spreading (ground itself is PEC here).
-// X_total is the surface REACTANCE per unit length, the twin of R_total: the same
-// |K|²-weighted surface integral taken against Im(Zs) where R_total takes Re(Zs). It is
-// what the caller builds the internal inductance from (X_total/ω), because L_loop −
-// L_external cancels two large near-equal numbers and loses it. Smooth metal has
-// Zs = Rs(1 + j), so X_total === R_total there and only rough/plated surfaces separate
-// them (Im(Zs)/Re(Zs) reaches ~5 at 1 µm rms). Same differential convention as R_total.
-// Frequency-INVARIANT part of the MQS solve on a given mesh: conductor
-// classification, DOF map, the S (everywhere) / M, Fc (conductor) assembly, and
-// the symbolic CSR with separate S / M value templates. The system is
-// K = S + jβM with β = ωμ₀σ the ONLY frequency-dependent piece, so per frequency
-// the values are just valRe = valS, valIm = β·valM on a fixed pattern. Cached by
-// the caller (opts.cache) per (mesh, oddSymmetry) — the skin mesh is reused
-// across sweep points (f_max-reuse), and re-assembling it every point used to
-// dominate the MQS path's JS time.
+// Conductor loss by volume eddy-current solve.
+//   mesh        - mesh with the conductor interiors meshed
+//   condRect    - conductor geometry ({rects: [...]}, rectRoles, domain bounds)
+//   freq, sigma - frequency (Hz) and reference conductivity (S/m)
+//   solveComplexSymmetric - WASM helper from createWasmHelpers ([re; im] layout)
+//   Z0          - optional line impedance for the alpha_c conversion
+//   opts.wallPEC - {left, right, top, bottom}: which domain walls are metal (from the
+//     mesher, `left` already cleared on a half domain). These walls are A = 0 and
+//     carry the wall loss. Without it every outer wall is A = 0 and only the bottom
+//     one dissipates.
+//   opts.wallThick, opts.wallSigma - thickness of each wall's metal (slab impedance,
+//     default infinite) and its conductivity (default sigma).
+//   opts.oddSymmetry - A = 0 on the symmetry plane x = xmin_domain (odd mode) instead
+//     of the natural BC (even mode), for a half-domain pair.
+//   opts.modeCurrents - one drive per signal polarity group (positive group first,
+//     pre.groups order), full domain only: the target net currents, [1, -1] odd,
+//     [1, 1] even, or the modal currents (normalized to sum |I|^2 = 2) of an
+//     asymmetric pair. R_total/X_total keep the differential convention (both
+//     traces, per-line mode R = R_total/2), L_loop is per line.
+//   opts.diffPair - the mesh holds one full trace of a differential pair: on a half
+//     domain it carries the full trace current, and R_trace/R_gnd cover both traces.
+//   opts.idealRects - per rect, true for a perfect ground held at A = 0, its loss a
+//     surface term like the walls.
+//   opts.Rq - rms surface roughness (m), gradient model, the same on every surface.
+//     The dissipation is scaled by Re(Z_rough)/Rs and the inductance gets the
+//     matching reactance increment, which tends to the DC limit as delta grows.
+//   opts.surfaceZs(x, y, orient) - per-face surface impedance {re, im} at a face
+//     midpoint (orient 'h' top/bottom, 'v' side), for per-side plating. The smooth
+//     loss is scaled by the |K|^2-weighted Re(Zs)/Rs over the faces. Overrides Rq.
+//   opts.surfaceDZ(x, y, orient) - impedance {re, im} or null added on top of
+//     surfaceZs over a face, R += Re(dZ)*|K|^2 and X += Im(dZ)*|K|^2 (meshed plating:
+//     the roughness of the plating/bulk interface the mesh holds smooth).
+//   opts.rectSigmaRel - sigma_rect / sigma per rect for conductors of different
+//     metals. The mass matrix, drive, net current and dissipation carry the ratio per
+//     triangle, and the surface scaling is taken per rect against its own Rs.
+//   opts.cache - per-caller cache of the frequency-independent assembly (mqsPrecompute).
+//   opts.fieldOut - object that receives the solved field, for current density plots.
+// Returns { R_trace, R_gnd, R_total, X_total, L_loop, alpha_c, alpha_c_dBm, delta, nDofs }.
+// L_loop is the series inductance from Im(Z) = w*L of the solve. X_total is the surface
+// reactance per unit length: the |K|^2-weighted integral that gives R_total, taken
+// against Im(Zs) instead of Re(Zs). Smooth metal has Zs = Rs*(1 + j), so X_total equals
+// R_total there and only rough or plated surfaces separate them.
+// Frequency-independent part of the MQS solve on a given mesh: conductor
+// classification, DOF map, the S (everywhere), M and Fc (conductor) assembly, and
+// the CSR pattern with separate S and M value templates. In K = S + j*beta*M only
+// beta = w*mu0*sigma depends on frequency, so each frequency just sets valRe = valS,
+// valIm = beta*valM. Cached by the caller (opts.cache), the skin mesh is reused
+// across sweep points.
 export function mqsPrecompute(mesh, condRect, opts = {}) {
     const { nodes, edges, tris, triEdges, nNodes, nEdges, nTris } = mesh;
     const rects = condRect.rects || [condRect];
@@ -902,9 +885,8 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // conductor surfaces, used below to scale the smooth loss per face.
     // gndDXS: the reactance increment Im(Zs) - Rs of each segment against its own metal.
     let gndS = 0, gndZreS = 0, gndDXS = 0;
-    // Fallback for a caller with no wall map: bottom is ground on every
-    // geometry the mesher builds, top came from opts.topGround, sides skipped.
-    const wp = opts.wallPEC || { bottom: true, top: !!opts.topGround };
+    // Without a wall map only the bottom, ground on every geometry the mesher builds.
+    const wp = opts.wallPEC || { bottom: true };
     const onLine = (a, b, v) => Math.abs(a - v) < 1e-9 && Math.abs(b - v) < 1e-9;
     // The metal wall this edge lies on, else null.
     function wallOf(x0, y0, x1, y1) {

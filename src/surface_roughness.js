@@ -2,7 +2,6 @@ import { Complex } from "./complex.js";
 
 const EP0 = 8.854187818814e-12;
 const MU0 = 4 * Math.PI * 1e-7;
-const C0 = 299792458.0;
 
 /**
  * Computes complex surface impedance using the Gradient Model (Rational Approximation)

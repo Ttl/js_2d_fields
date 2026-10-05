@@ -221,18 +221,4 @@ int solve_sparse_multi(
     }
 }
 
-EMSCRIPTEN_KEEPALIVE
-int solve_sparse(
-    int N,
-    int nnz,
-    int* rowPtr,
-    int* colIdx,
-    double* values,
-    double* b,
-    double* x_out,
-    int force_lu
-) {
-    return solve_sparse_multi(N, nnz, rowPtr, colIdx, values, 1, b, x_out, force_lu);
-}
-
 }

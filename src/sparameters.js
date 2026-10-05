@@ -16,42 +16,22 @@ function computeSParamsSingleEnded(freq, rlgc, length, Z_ref) {
     const omega = 2 * Math.PI * freq;
     const { R, L, G, C } = rlgc;
 
-    // The reference impedance may be complex. It usually is not, a 50 Ohm port is real,
-    // but a line referenced to its own Zc needs the true complex value. Zc of any lossy
-    // line has a small imaginary part, and the B/Zr and C*Zr terms below only cancel (so a
-    // matched line gives S11 = 0) when Zr is that exact value. Referencing to Re(Zc)
-    // instead leaves |S11| ~ |Im(Zc)|/(2*Re(Zc)), which looks like a real reflection.
+    // The reference impedance may be complex: a line referenced to its own Zc needs the
+    // exact complex value, or the B/Zr and C*Zr terms below do not cancel and a matched
+    // line shows |S11| ~ |Im(Zc)|/(2*Re(Zc)).
     //
-    // WAVE DEFINITION. This is the pseudo-wave / traveling-wave conversion, and
-    // those two match here for a line, so Gamma is (Z - Zr)/(Z + Zr) either
-    // way. Both are the same diagonal similarity transform of
-    // M = (Z - ZR)(Z + ZR)^-1, differing only in which diagonal matrix
-    // conjugates it:
-    //     pseudo    (Marks & Williams 1992)   S = U    M U^-1,    U    = diag(sqrt(Re z0)/|z0|)
-    //     traveling                           S = Y^.5 M Y^-.5,   Y^.5 = diag(1/sqrt(z0))
-    // When every port shares one reference, both conjugating matrices are a scalar times
-    // the identity, the similarity collapses, and S = M exactly, for any complex Zr and
-    // any network, not just a uniform line. With per-port references they separate, but
-    // only in the transmission terms: S[m][n] picks up U_m/U_n vs sqrt(z0_n/z0_m), and
-    // those ratios are both 1 on the diagonal, so reflection terms agree regardless.
+    // Wave definition: pseudo-waves (Marks & Williams) and traveling waves both give
+    // Gamma = (Z - Zr)/(Z + Zr). They are diagonal similarity transforms of
+    // M = (Z - ZR)(Z + ZR)^-1, which collapse to S = M when every port shares one
+    // reference, and with per-port references differ only in the transmission terms.
+    // Power waves (Kurokawa) conjugate the reference, Gamma = (Z - Zr*)/(Z + Zr), which
+    // suits conjugate matching but would show a uniform line referenced to its own Z0 as
+    // mismatched. Checked against scikit-rf z2s: 'pseudo' and 'traveling' agree to float
+    // precision, 'power' differs by |Im Z0/Re Z0|, and all three agree for a real Zr.
     //
-    // Power waves (Kurokawa 1965) are the genuinely different convention: b conjugates the
-    // reference, Gamma = (Z - Zr*)/(Z + Zr). That is what you want for conjugate-matching
-    // problems, and it is wrong here. Referenced to its own Z0 a perfectly uniform line
-    // would report |Gamma| = |Im Z0|/|Z0| rather than zero.
-    //
-    // Cross-checked against scikit-rf z2s(..., s_def=...) on a lossy waveguide
-    // 2-port with Zr = Z0 complex: 'pseudo' and 'traveling' each agree with
-    // this function to float precision, while 'power' differs by |Im Z0/Re Z0|.
-    // With a real Zr all three agree exactly — skrf's own s2s() short-circuits
-    // on real z0 for precisely that reason.
-    //
-    // Duck-typed, not `instanceof Complex`: build.sh ships the lazily-imported tri_solver
-    // tree with its own copy of complex.js alongside the one esbuild inlines into the app
-    // bundle, so a Zc built inside the backend is not an instance of the class this module
-    // sees. `instanceof` would silently take the number branch there and produce NaN
-    // S-parameters in the built app while dev (single module instance) looked perfect.
-    // Rebuilding as a local Complex also guarantees the arithmetic below is this copy's.
+    // Z_ref is duck-typed rather than tested with instanceof Complex: the built app ships
+    // the lazily imported tri_solver tree with its own copy of complex.js, so a Zc from
+    // the full-wave backend is not an instance of this module's class.
     const Zr = (typeof Z_ref === 'number')
         ? new Complex(Z_ref, 0)
         : new Complex(Z_ref.re, Z_ref.im);
@@ -179,8 +159,8 @@ function computeSParamsDifferential(freq, rlgc_odd, rlgc_even, length, Z_ref) {
     const S_odd = computeSParamsSingleEnded(freq, rlgc_odd, length, Z_ref);
     const S_even = computeSParamsSingleEnded(freq, rlgc_even, length, Z_ref);
 
-    // For ideal symmetric differential pairs with no coupling between modes,
-    // the 4-port S-matrix can be constructed from odd and even mode responses.
+    // A symmetric pair has uncoupled odd and even modes, so the 4-port S-matrix is
+    // built from the two modal 2-ports (asymmetric pairs: computeSParamsDifferentialMTL).
     //
     // Port assignment:
     //   Port 1 = near end, trace + (in+)

@@ -58,7 +58,6 @@ h2 { font-size: 1.2em; margin-bottom: 15px; }
 .control-group { margin-bottom: 12px; }
 .control-group label { display: block; font-size: 0.8em; font-weight: 500; margin-bottom: 4px; color: var(--text-muted); }
 
-.input-row { display: flex; gap: 10px; align-items: center; }
 input[type="number"], input[type="text"], select {
     width: 100%;
     padding: 8px;
@@ -83,9 +82,6 @@ input[type="number"]:focus, input[type="text"]:focus, select:focus {
 }
 input.unit-input {
     font-family: 'Consolas', 'Monaco', monospace;
-}
-input.unit-parsed {
-    background-color: #3a4a3a;
 }
 input.unit-input.invalid {
     border-color: #f44336;
@@ -583,6 +579,32 @@ button.stop-mode:hover {
     transform: translateX(-50px);
 }
 
+/* Plotly modebar button alignment fix for version 3.x */
+/* !important needed because Plotly CSS loads dynamically after this file */
+.js-plotly-plot .plotly .modebar {
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
+}
+
+.js-plotly-plot .plotly .modebar-group {
+    display: flex !important;
+    align-items: center !important;
+    float: left !important;
+}
+
+.js-plotly-plot .plotly .modebar-btn {
+    position: relative !important;
+    font-size: 16px !important;
+    padding: 2px 4px !important;
+    cursor: pointer !important;
+}
+
+.js-plotly-plot .plotly .modebar-btn svg {
+    position: relative !important;
+    pointer-events: none !important;
+}
+
 /* Mobile Responsive Layout */
 @media (max-width: 768px) {
     body {
@@ -779,6 +801,12 @@ button.stop-mode:hover {
         width: 90%;
         max-width: 90%;
     }
+
+    /* Make modebar buttons even smaller on mobile to prevent overlap */
+    .js-plotly-plot .plotly .modebar-btn {
+        font-size: 14px !important;
+        padding: 1px 3px !important;
+    }
 }
 
 /* Extra small screens */
@@ -812,40 +840,6 @@ input[type=number]::-webkit-outer-spin-button {
 /* Firefox */
 input[type=number] {
   -moz-appearance: textfield;
-}
-
-/* Plotly modebar button alignment fix for version 3.x */
-/* !important needed because Plotly CSS loads dynamically after this file */
-.js-plotly-plot .plotly .modebar {
-    position: absolute !important;
-    top: 0 !important;
-    right: 0 !important;
-}
-
-.js-plotly-plot .plotly .modebar-group {
-    display: flex !important;
-    align-items: center !important;
-    float: left !important;
-}
-
-.js-plotly-plot .plotly .modebar-btn {
-    position: relative !important;
-    font-size: 16px !important;
-    padding: 2px 4px !important;
-    cursor: pointer !important;
-}
-
-.js-plotly-plot .plotly .modebar-btn svg {
-    position: relative !important;
-    pointer-events: none !important;
-}
-
-/* Make modebar buttons even smaller on mobile to prevent overlap */
-@media (max-width: 768px) {
-    .js-plotly-plot .plotly .modebar-btn {
-        font-size: 14px !important;
-        padding: 1px 3px !important;
-    }
 }
 
 /* Custom geometry */

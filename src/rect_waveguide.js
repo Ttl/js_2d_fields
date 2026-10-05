@@ -1,4 +1,4 @@
-import { FieldSolver2D, CONSTANTS } from './field_solver.js';
+import { FieldSolver2D, CONSTANTS, paramChecks, throwIfErrors } from './field_solver.js';
 import { Dielectric } from './mesher.js';
 
 const C0 = CONSTANTS.C;
@@ -166,10 +166,6 @@ class RectWaveguideSolver extends FieldSolver2D {
         this.w = this.a;
         this.t = this.b;
 
-        this.x = null;
-        this.y = null;
-        this.dx = null;
-        this.dy = null;
         this.mesh_generated = false;
     }
 
@@ -193,16 +189,7 @@ class RectWaveguideSolver extends FieldSolver2D {
 
     _validate_parameters(options) {
         const errors = [];
-        const isNum = (v) => typeof v === 'number' && !isNaN(v) && isFinite(v);
-        const positive = (v, name) => {
-            if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
-            else if (v <= 0) errors.push(`${name} must be positive, got ${v}`);
-        };
-        const nonneg = (v, name) => {
-            if (v == null) return;
-            if (!isNum(v)) errors.push(`${name} must be a valid number (got ${v})`);
-            else if (v < 0) errors.push(`${name} must be non-negative, got ${v}`);
-        };
+        const { isNum, positive, nonneg } = paramChecks(errors);
 
         positive(options.width, 'width');
         positive(options.height, 'height');
@@ -225,9 +212,7 @@ class RectWaveguideSolver extends FieldSolver2D {
         nonneg(options.rq, 'rq');
         if (options.sigma_cond != null) positive(options.sigma_cond, 'sigma_cond');
 
-        if (errors.length > 0) {
-            throw new Error('Parameter validation failed:\n' + errors.map(e => '  - ' + e).join('\n'));
-        }
+        throwIfErrors(errors);
     }
 
     // The triangular backend builds and owns its own mesh in TriBackend, and it is the
