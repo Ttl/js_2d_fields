@@ -154,15 +154,20 @@ function _cdfMean(a, b, mean, sigma) {
  * @param {number} sigma_plating - Plating layer conductivity (S/m)
  * @param {number} thickness_plating - Plating layer thickness (m)
  * @param {number} rq_interface - RMS roughness of the plating/bulk interface (m), default rq
+ * @param {number} slab - Depth of the metal below the mean surface (m), default semi-infinite.
+ *   A finite slab ends in a plane of zero tangential H: the mid-plane of a conductor
+ *   carrying current on both faces, or the back of a one-sided slab.
  * @param {number} N - Number of points for recursion (default 2048)
  * @returns {Complex} Complex surface impedance
  */
 function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_plating,
-                                  rq_interface = rq, N = 2048) {
+                                  rq_interface = rq, slab = Infinity, N = 2048) {
+    const finite = slab > 0 && isFinite(slab);
     // Fallback to single-layer if not layered
-    if (thickness_plating <= 0 || sigma_plating <= 0) {
+    if (!finite && (thickness_plating <= 0 || sigma_plating <= 0)) {
         return calculate_Zrough(f, sigma_bulk, rq);
     }
+    if (thickness_plating <= 0 || sigma_plating <= 0) { thickness_plating = 0; sigma_plating = 0; }
 
     const omega = 2 * Math.PI * f;
 
@@ -175,7 +180,7 @@ function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_pl
     // this span, so that top must sit at the surface for a sharp interface.
     const recursion_min = -5 * rq;
     // A plating/bulk interface rougher than the surface extends the span by its own tail.
-    const recursion_max = Math.max(thickness_plating + 10 * skin_depth
+    const recursion_max = finite ? slab : Math.max(thickness_plating + 10 * skin_depth
         + 5 * Math.max(0, rq_interface - rq), 5e-6);
 
     // Uniform grid spacing
@@ -235,9 +240,16 @@ function calculate_Zrough_layered(f, sigma_bulk, rq, sigma_plating, thickness_pl
 
     // Transmission line recursion (from last to first)
     // Zsi_new = z * (Zsi + z*tanh(g*dx)) / (z + Zsi*tanh(g*dx))
+    // A semi-infinite metal ends in its own wave impedance. A slab ends in H = 0, an
+    // open circuit, which turns the last segment into z * coth(g*dx).
     let Zsi = Z[N - 1];
+    let kStart = N - 1;
+    if (finite) {
+        Zsi = Z[N - 1].div(gamma[N - 1].mul(dx).tanh());
+        kStart = N - 2;
+    }
 
-    for (let k = N - 1; k >= 0; k--) {
+    for (let k = kStart; k >= 0; k--) {
         const g = gamma[k];
         const z = Z[k];
         const tanh_gdx = g.mul(dx).tanh();

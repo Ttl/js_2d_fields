@@ -1191,9 +1191,20 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 const Zs = calculate_Zrough(freq, sigma * sRel[i], Rq);
                 psiR = Zs.re / RsI; psiX = Zs.im / RsI;
             }
-            const d = condThinDim(r);
-            const k = 1 / slabCoth((isSig ? d / 2 : d) / deltaI).re;
-            const Xi = Ri * (1 + k * (psiX - 1));
+            // A meshed plating layer is a one-sided slab of the plating thickness, and its
+            // volume loss holds only the plating's share of the surface current, which
+            // falls as delta passes the layer and the core takes the rest. The
+            // surface integral of |K|^2 over its faces is the whole current there, but
+            // reads a few percent low on a skin layer, so the layer takes the larger.
+            const layerT = rolesX ? rolesX[i].platingLayer : 0;
+            const d = layerT || condThinDim(r);
+            const k = 1 / slabCoth((isSig && !layerT ? d / 2 : d) / deltaI).re;
+            let dXi = Ri * k * (psiX - 1);
+            if (layerT && opts.surfaceZs && rS[i] > 0) {
+                const dXs = sym * Cmag2 / (MU0 * MU0) * (rZimS[i] - RsI * rS[i]);
+                if (Math.abs(dXs) > Math.abs(dXi)) dXi = dXs;
+            }
+            const Xi = Ri + dXi;
             if (isSig) { R_trace += Ri * psiR; X_trace += Xi; sigS += Ri; sigPsi += Ri * psiR; }
             else { R_gr += Ri * psiR; X_gr += Xi; }
         });

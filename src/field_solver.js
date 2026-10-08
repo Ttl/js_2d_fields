@@ -1841,22 +1841,39 @@ export class FieldSolver2D {
             return Z_cache.get(key);
         };
 
-        // Plating over the bulk metal. With `dc` set it also stands in for the faces
-        // modelled as plating metal alone (top plating down the sides, thick corners):
-        // their semi-infinite plating reactance never returns to the bulk value, so
-        // its excess over the bulk would grow as 1/sqrt(f) in the low-frequency blend.
-        const layeredZ = (ci, platingRq) => {
+        // Plating over the bulk metal. `dc` is the slab depth of the low-frequency blend
+        // (or false): the plating over a bulk slab of that depth, shifted by the bulk's
+        // semi-infinite minus slab impedance, so that its difference from the
+        // semi-infinite bulk reference (refIm) is the excess the plating makes on the
+        // slab. A semi-infinite bulk would give a thin trace the excess of a skin layer
+        // it does not have: a good plating over a poor bulk takes the current to the
+        // surface, and on the half-space that removes far more reactance than the whole
+        // trace holds at DC. With dc set it also stands in for the faces modelled as
+        // plating metal alone (top plating down the sides, thick corners): their
+        // plating reactance never returns to the bulk value, so its excess over the bulk
+        // would grow as 1/sqrt(f) in the low-frequency blend.
+        const layeredZ = (ci, platingRq, dc = false) => {
             const cond = this.conductors[ci];
-            const key = `${ci}_layered_${platingRq}`;
-            if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough_layered(
-                this.freq, sigmaOf(ci), platingRq, cond.plating.sigma, cond.plating.thickness,
-                cond.plating.rq_interface ?? platingRq));
+            const key = dc ? `${ci}_layered_${platingRq}_slab_${dc}` : `${ci}_layered_${platingRq}`;
+            if (!Z_cache.has(key)) {
+                const pl = cond.plating, sb = sigmaOf(ci), ri = pl.rq_interface ?? platingRq;
+                let z;
+                if (dc) {
+                    const lay = calculate_Zrough_layered(this.freq, sb, platingRq, pl.sigma, pl.thickness, ri, dc);
+                    const dlt = Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * sb)), Rs = 1 / (sb * dlt);
+                    const slab = slabCoth(dc / dlt);
+                    z = new Complex(lay.re + Rs * (1 - slab.re), lay.im + Rs * (1 - slab.im));
+                } else {
+                    z = calculate_Zrough_layered(this.freq, sb, platingRq, pl.sigma, pl.thickness, ri);
+                }
+                Z_cache.set(key, z);
+            }
             return Z_cache.get(key);
         };
         // Plating metal alone on a face (no bulk under it) with roughness r. With dc the
         // layered plating over the bulk stands in, see layeredZ.
         const platingOnlyZ = (ci, key, r, dc) => {
-            if (dc) return layeredZ(ci, r);
+            if (dc) return layeredZ(ci, r, dc);
             if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, this.conductors[ci].plating.sigma, r));
             return Z_cache.get(key);
         };
@@ -1904,7 +1921,7 @@ export class FieldSolver2D {
                     // face, which is the plating metal's own for a layer thick against
                     // its skin depth. A thinner layer's edge leaves the current in the
                     // bulk behind it, which the plating metal alone would overstate.
-                    const Z_plating = layeredZ(ci, cond.plating.rq);
+                    const Z_plating = layeredZ(ci, cond.plating.rq, dc);
                     if (fraction >= 1.0) return Z_plating;
                     // Weighted average with bulk side impedance for uncovered part
                     return blend(fraction, Z_plating, Z_bare);
@@ -1956,7 +1973,7 @@ export class FieldSolver2D {
                 const corner_fraction = corner_size / dl;
 
                 // Get bottom surface impedance
-                const Z_bottom = cond.plating.bottom ? layeredZ(ci, cond.plating.rq) : Z_bare;
+                const Z_bottom = cond.plating.bottom ? layeredZ(ci, cond.plating.rq, dc) : Z_bare;
 
                 // Weighted average: corner region uses corner plating impedance, bulk uses bottom impedance
                 return blend(corner_fraction, Z_corner, Z_bottom);
@@ -1964,7 +1981,7 @@ export class FieldSolver2D {
 
             // Standard surface impedance (no corner effects)
             if (!cond.plating[surface]) return Z_bare;
-            return layeredZ(ci, cond.plating.rq);
+            return layeredZ(ci, cond.plating.rq, dc);
         };
 
         const ny = this.y.length;
@@ -2015,6 +2032,7 @@ export class FieldSolver2D {
         const nCond = (this.conductors || []).length;
         const sumL = new Float64Array(nCond), faceBot = new Float64Array(nCond), faceTop = new Float64Array(nCond);
         const sumLref = new Float64Array(nCond), sumLdc = new Float64Array(nCond), netI = [0, 0];
+        const dcFaces = [];
         // Per signal conductor: Re(Zs)|H|^2 dl and its current, for the body blend.
         const sigR = new Float64Array(nCond), sigI = new Float64Array(nCond);
         let sigOutside = false;
@@ -2042,7 +2060,9 @@ export class FieldSolver2D {
             const c = this.conductors[ci];
             if (c.is_signal) netI[this.is_differential && c.polarity < 0 ? 1 : 0] += H_out * dl;
             sumLref[ci] += refIm(ci, direction) * H2dl;
-            sumLdc[ci] += getZsurf(ci, direction, i, j, span, xStart, true).im * H2dl;
+            // A plated face needs the slab depth, known once the face split is.
+            if (c.plating) dcFaces.push([ci, direction, i, j, span, xStart, H2dl]);
+            else sumLdc[ci] += getZsurf(ci, direction, i, j, span, xStart).im * H2dl;
             if (direction === 'u') faceBot[ci] += H2dl;
             else if (direction === 'd') faceTop[ci] += H2dl;
         };
@@ -2217,6 +2237,23 @@ export class FieldSolver2D {
             spreadU[c] = dlt * dlt / d / Wk;
             const g = wallSpreadFactor(2 * Math.PI * spreadU[c]);
             spreadG[c] = idealGnd.has(c) ? g : Math.max(g, Math.min(1, Wk / wMax));
+        }
+        // Plated faces in the low-frequency blend, on the slab the conductor's
+        // reactance takes below. A top or bottom face: the face split of a signal trace,
+        // the full thickness of a one-sided ground. A side face reaches across the
+        // width: half of it on a trace, all of it on a ground.
+        const dcSlab = new Map();
+        for (const [ci, direction, i, j, span, xStart, H2dl] of dcFaces) {
+            const side = direction === 'l' || direction === 'r';
+            const key = side ? -1 - ci : ci;
+            let d = dcSlab.get(key);
+            if (d === undefined) {
+                const c = this.conductors[ci];
+                if (side) d = Math.abs(c.width) / (c.is_signal ? 2 : 1);
+                else d = c.is_signal ? signalSlab(c, ci) : Math.min(Math.abs(c.width), stackH(c, ci));
+                dcSlab.set(key, d);
+            }
+            sumLdc[ci] += getZsurf(ci, direction, i, j, span, xStart, d > 0 ? d : Infinity).im * H2dl;
         }
         let sumSig = 0, sumExcess = 0, sumLgnd = 0, sumLsheet = 0;
         (this.conductors || []).forEach((c, ci) => {
