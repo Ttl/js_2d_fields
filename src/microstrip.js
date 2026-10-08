@@ -640,6 +640,11 @@ class MicrostripSolver extends FieldSolver2D {
         return [dielectrics, conductors];
     }
 
+    // Side-coat width on a face looking across a gap at another conductor face
+    _sm_side_in(gap) {
+        return Math.min(this.sm_t_side, gap / 2);
+    }
+
     _add_standard_solder_mask(dielectrics, xl, xr, x_min, x_max) {
         // Standard microstrip solder mask: the substrate between and beside the traces
         // (stopping at the side masks, so the two do not overlap), then each trace's
@@ -656,11 +661,15 @@ class MicrostripSolver extends FieldSolver2D {
             start = r + this.sm_t_side;
         }
         if (start < x_max) sm(start, this.y_sub_end, x_max - start, this.sm_t_sub);
-        for (const [l, r] of traces) {
-            sm(l - this.sm_t_side, this.y_trace_start, this.sm_t_side, this.sm_side_h);
-            sm(r, this.y_trace_start, this.sm_t_side, this.sm_side_h);
+        // Side coats facing each other across a gap narrower than two coats meet at
+        // the gap centre instead of overlapping into slivers.
+        const inner = this._sm_side_in(this.trace_spacing);
+        traces.forEach(([l, r], k) => {
+            const sl = k > 0 ? inner : this.sm_t_side, sr = k < traces.length - 1 ? inner : this.sm_t_side;
+            sm(l - sl, this.y_trace_start, sl, this.sm_side_h);
+            sm(r, this.y_trace_start, sr, this.sm_side_h);
             sm(l, this.y_trace_top, this.w, this.sm_t_trace);
-        }
+        });
     }
 
     _add_coplanar_solder_mask(dielectrics) {
@@ -707,39 +716,44 @@ class MicrostripSolver extends FieldSolver2D {
                 ));
             }
 
+            // Side coats, clipped to half of each gap so facing coats meet
+            // instead of overlapping
+            const s_out_l = this._sm_side_in(xl - xl_gap), s_out_r = this._sm_side_in(xr_gap - xr);
+            const s_in = this._sm_side_in(xl_right - xr_left);
+
             // Solder mask on sides of left trace
             dielectrics.push(new Dielectric(
-                xl - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
+                xl - s_out_l, this.y_trace_start,
+                s_out_l, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr_left, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
+                s_in, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Solder mask on sides of right trace
             dielectrics.push(new Dielectric(
-                xl_right - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
+                xl_right - s_in, this.y_trace_start,
+                s_in, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
                 xr, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
+                s_out_r, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
             // Solder mask on outer gap sides (ground side)
             dielectrics.push(new Dielectric(
                 xl_gap, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
+                s_out_l, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
             dielectrics.push(new Dielectric(
-                xr_gap - this.sm_t_side, this.y_trace_start,
-                this.sm_t_side, this.sm_side_h,
+                xr_gap - s_out_r, this.y_trace_start,
+                s_out_r, this.sm_side_h,
                 this.sm_er, this.sm_tand
             ));
 
@@ -763,13 +777,17 @@ class MicrostripSolver extends FieldSolver2D {
             const xl_gap = this.x_gap_l;
             const xr_gap = this.x_gap_r;
 
+            // Side coats, clipped to half of each gap so the trace and ground
+            // coats meet instead of overlapping
+            const s_l = this._sm_side_in(xl - xl_gap), s_r = this._sm_side_in(xr_gap - xr);
+
             // Trace side positions
-            const xsl = xl - this.sm_t_side;
-            const xsr = xr + this.sm_t_side;
+            const xsl = xl - s_l;
+            const xsr = xr + s_r;
 
             // Ground side mask positions
-            const xl_gnd_side_end = Math.min(xl_gap + this.sm_t_side, xl);
-            const xr_gnd_side_start = Math.max(xr_gap - this.sm_t_side, xr);
+            const xl_gnd_side_end = xl_gap + s_l;
+            const xr_gnd_side_start = xr_gap - s_r;
 
             // Solder mask on substrate in gaps (between grounds and signal)
             // Left gap
@@ -798,7 +816,7 @@ class MicrostripSolver extends FieldSolver2D {
             if (xsl > -this.domain_width/2) {
                 dielectrics.push(new Dielectric(
                     xsl, this.y_trace_start,
-                    this.sm_t_side, this.sm_side_h,
+                    s_l, this.sm_side_h,
                     this.sm_er, this.sm_tand
                 ));
             }
@@ -807,7 +825,7 @@ class MicrostripSolver extends FieldSolver2D {
             if (xsr <= this.domain_width/2) {
                 dielectrics.push(new Dielectric(
                     xr, this.y_trace_start,
-                    this.sm_t_side, this.sm_side_h,
+                    s_r, this.sm_side_h,
                     this.sm_er, this.sm_tand
                 ));
             }
