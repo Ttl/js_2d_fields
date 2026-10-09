@@ -73,6 +73,7 @@ class CustomGeometrySolver extends FieldSolver2D {
         this.thick_plating = !!options.thick_plating;
 
         const rects = this._resolve_rects(geo);
+        this._snap_dielectric_edges(rects);
         this._validate_rects(rects, platingMaterial);
         this._build_lists(rects, platingMaterial);
         // Source lines of the non-rectangular shapes, which only the full-wave solver takes.
@@ -313,6 +314,56 @@ class CustomGeometrySolver extends FieldSolver2D {
             if (joined) {
                 throw new Error(`line ${r.line}: plating is not supported on a conductor that touches another ${r.kind} rectangle.`);
             }
+        }
+    }
+
+    // Dielectric edges a hair away from another edge are moved onto it: numbers typed
+    // rounded (a layer y + h that misses the trace y by nanometres) otherwise leave a
+    // film between two lines, which the full-wave mesh holds as slivers whose field
+    // spoils C and the surface loss. Per axis, coordinates closer than eps form a
+    // cluster, and the dielectric edges in it move to the conductor face there, else to
+    // the most common value. Conductors never move, and a dielectric no thicker than a
+    // few eps keeps its edges. eps is 1e-5 of the domain, at most 5% of the thinnest
+    // conductor. Gaps within the geometry tolerance (1e-9 of the domain, rounding of
+    // exact input) are left alone.
+    _snap_dielectric_edges(rects) {
+        const conds = rects.filter(r => r.kind !== 'diel' && !r.shape && !r.wall);
+        const thin = Math.min(...conds.map(r => Math.min(r.x1 - r.x0, r.y1 - r.y0)));
+        const span = Math.max(this.domain_width, this.domain_height - this.domain_y_min);
+        const eps = Math.min(1e-5 * span, Number.isFinite(thin) ? 0.05 * thin : Infinity), tol = 1e-9 * span;
+        for (const [lo, hi, pos, size] of [['x0', 'x1', 'x', 'w'], ['y0', 'y1', 'y', 'h']]) {
+            const moved = new Set();
+            const items = [];
+            for (const r of rects) {
+                if (r.shape) continue;
+                const diel = r.kind === 'diel';
+                if (diel && r[hi] - r[lo] <= 4 * eps) continue;
+                items.push({ r, k: lo, v: r[lo], diel }, { r, k: hi, v: r[hi], diel });
+            }
+            items.sort((a, b) => a.v - b.v);
+            for (let i = 0; i < items.length;) {
+                let j = i + 1;
+                while (j < items.length && items[j].v - items[i].v < eps) j++;
+                const group = items.slice(i, j);
+                i = j;
+                if (group[group.length - 1].v - group[0].v <= tol || !group.some(g => g.diel)) continue;
+                const metal = group.filter(g => !g.diel);
+                let target;
+                if (metal.length) target = metal[0].v;
+                else {
+                    const count = new Map();
+                    for (const g of group) count.set(g.v, (count.get(g.v) || 0) + 1);
+                    target = [...count.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+                }
+                for (const g of group) {
+                    if (!g.diel || Math.abs(g.v - target) <= tol) continue;
+                    // The nearest conductor face when the cluster holds several.
+                    const t = metal.length ? metal.reduce((b, m) => (Math.abs(m.v - g.v) < Math.abs(b - g.v) ? m.v : b), target) : target;
+                    g.r[g.k] = t;
+                    moved.add(g.r);
+                }
+            }
+            for (const r of moved) { r[pos] = r[lo]; r[size] = r[hi] - r[lo]; }
         }
     }
 

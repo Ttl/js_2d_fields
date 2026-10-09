@@ -2562,7 +2562,9 @@ export class FieldSolver2D {
         else if (line === 2) pf = [1, 1];
         else if (this.is_differential && (mode === 'odd' || mode === 'even')) {
             if (!(G[0] > 0 && G[1] > 0)) return null;
-            pf = [0.5, 0.5];
+            // The mode's trace currents: +-1, or the modal currents of an asymmetric pair.
+            const I = this._modal_currents(mode);
+            pf = I ? [0.5 * I[0] * I[0], 0.5 * I[1] * I[1]] : [0.5, 0.5];
         } else pf = null;   // one net of every signal conductor
         const netOf = c => (pf ? net(c) : 0);
         if (!pf) { G[0] += G[1]; G[1] = 0; pf = [1, 0]; }

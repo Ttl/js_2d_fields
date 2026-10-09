@@ -199,15 +199,31 @@ const mat2T = (M) => [[M[0][0], M[1][0]], [M[0][1], M[1][1]]];
 // (so symmetric results are reproduced) AND is continuous through symmetry (normalising to the
 // max component would jump when the dominant component switches, making the modal Z0
 // discontinuous in the asymmetry). Returns { vals:[λ1,λ2], vecs:[v1,v2] }.
+// Each eigenvector is [b, λ-a], or the parallel [λ-d, c] where that one is far better
+// conditioned (a nearly diagonal M, decoupled lines, where [b, λ-a] is rounding noise for
+// the eigenvalue near a), turned to the sign [b, λ-a] would have. An exactly diagonal M
+// gives the unit vectors.
 function eig2x2(M) {
     const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1];
     const tr = a + d, disc = Math.sqrt(Math.max(0, tr * tr - 4 * (a * d - b * c)));
-    const vecFor = (l) => {
-        const v = Math.abs(b) > 1e-300 ? [b, l - a] : (Math.abs(c) > 1e-300 ? [l - d, c] : [1, 0]);
-        const n = Math.hypot(v[0], v[1]);
-        return n > 0 ? [v[0] * Math.SQRT2 / n, v[1] * Math.SQRT2 / n] : v;
+    const scale = Math.abs(a) + Math.abs(b) + Math.abs(c) + Math.abs(d);
+    const vals = [(tr + disc) / 2, (tr - disc) / 2];
+    const vecFor = (l, k) => {
+        const v1 = [b, l - a], v2 = [l - d, c];
+        const n1 = Math.hypot(v1[0], v1[1]), n2 = Math.hypot(v2[0], v2[1]);
+        let v = v1, n = n1;
+        if (n2 > 1e6 * n1) {
+            const sg = b * (l - d) < 0 ? -1 : 1;
+            v = [sg * v2[0], sg * v2[1]]; n = n2;
+        }
+        if (!(n > 1e-12 * scale)) {
+            // Diagonal: the larger eigenvalue takes the axis of the larger diagonal entry.
+            const first = (k === 0) === (a >= d);
+            return first ? [Math.SQRT2, 0] : [0, Math.SQRT2];
+        }
+        return [v[0] * Math.SQRT2 / n, v[1] * Math.SQRT2 / n];
     };
-    return { vals: [(tr + disc) / 2, (tr - disc) / 2], vecs: [vecFor((tr + disc) / 2), vecFor((tr - disc) / 2)] };
+    return { vals, vecs: [vecFor(vals[0], 0), vecFor(vals[1], 1)] };
 }
 
 export { Matrix2x2, mat2Mul, mat2Inv, mat2T, eig2x2 };

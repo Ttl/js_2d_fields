@@ -1,3 +1,5 @@
+import { symTol } from './geometry_symmetry.js';
+
 class Dielectric {
     /**
      * Represents a rectangular dielectric region.
@@ -614,7 +616,7 @@ class Mesher {
         if (axis !== 'x') return false;
 
         const center = (this.x_min + this.x_max) / 2;
-        const tol = 1e-12;
+        const tol = symTol(this.x_max - this.x_min);
 
         for (const cond of this.conductors) {
             const x_min_mirror = center - (cond.x_max - center);

@@ -7,10 +7,25 @@
 //      order are not symmetric, for the swap symmetry of a pair (which used to keep the
 //      odd/even decomposition with C11 = C22 forced) as well as for the half domain,
 //      on both mirror axes. Overlapping metals of a conductor follow the same rule.
+//   3. a trace off centre by rounding of its typed numbers (x=-199.29 w=398.57 ends at
+//      199.28) is not symmetric: QS solves it on the full domain and agrees with the
+//      exactly centred trace. Its grid was once declared symmetric by the geometry test
+//      and rejected by the mesher's stricter one, so the solve threw.
+//   4. a layer whose rounded y + h misses the trace face by 3 nm is snapped onto it: the
+//      film between the two lines was meshed by full-wave as slivers, which put C0 and
+//      C 3.5x off (eps far above every eps_r) and the ground surface loss 2x off.
+//   5. an asymmetric pair of unequal metal: the QS mode R is 1/2 i^T R i of its own
+//      per-line matrix with the modal currents i. The skin-transition blend weighted the
+//      DC floor of each trace by the +-1 currents of a symmetric pair (odd R 3x high).
+//   6. decoupled lines (a ground plane between two stacked traces): [C0]^-1 [C] is
+//      diagonal or nearly so, and its eigenvectors are the two traces. They were built
+//      from the off-diagonal entry, which gave QS the first trace for both modes (exactly
+//      0) and full-wave rounding noise (1e-21).
 //
 // Run: node tests/test_custom_geometry_asymmetry.js
 import { CustomGeometrySolver } from '../src/custom_geometry.js';
 import { conductorSwapSymmetric } from '../src/geometry_symmetry.js';
+import { eig2x2 } from '../src/matrix.js';
 import { check, quiet, rel, APP, done } from './helpers.js';
 
 const TRI = { mesh_backend: 'triangular' };
@@ -84,6 +99,66 @@ async function solve(text, extra = {}, opts = APP) {
     const q = (await solve(bad)).r.modes, f = (await solve(bad, TRI)).r.modes;
     const d = Math.max(...q.map((m, i) => rel(m.eps_eff, f[i].eps_eff)));
     check('pair painted asymmetrically: the modes of the two backends agree', d < 0.02, `eps_eff ${pct(d)}`);
+}
+
+// --- 3. Nearly symmetric trace ---
+{
+    const g = x => 'units um\nbounds open open open open\ndiel x=-inf w=inf y=0 h=550 er=6.3\n' +
+        `sig+ x=${x} w=398.57 y=550 h=50\ngnd x=-970 w=1940 y=-36 h=36\n`;
+    let err = null, near = null;
+    try { near = await solve(g(-199.29)); } catch (e) { err = e.message; }
+    check('QS: a trace off centre by 0.01 um solves', !err, err || '');
+    if (near) {
+        const exact = await solve(g(-398.57 / 2));
+        check('QS: it solves on the full domain', near.s.sym_half === false && exact.s.sym_half === true);
+        const d = rel(near.r.modes[0].Z0, exact.r.modes[0].Z0);
+        check('QS: and agrees with the exactly centred trace', d < 0.002, `Z0 ${pct(d)}`);
+    }
+}
+
+// --- 4. Dielectric edge a hair off a conductor face ---
+{
+    const g = h => 'units um\nbounds open open open open\n' +
+        `diel x=-inf w=inf y=0 h=228.07 er=8.7\ndiel x=-inf w=inf y=228.07 h=${h} er=6.8\n` +
+        'sig+ x=-292.31 w=267.63 y=276.94 h=35.541\nsig- x=24.674 w=267.63 y=276.94 h=35.541\n' +
+        'gnd x=-inf w=inf y=-34.497 h=34.497\n';
+    const s = new CustomGeometrySolver({ text: g(48.866), nx: 30, ny: 30, freq: 1e8 });
+    const top = Math.max(...s.dielectrics.filter(d => d.y_max < 300e-6).map(d => d.y_max));
+    check('a layer top 3 nm below the trace face is snapped onto it', top === s.conductors.find(c => c.is_signal).y_min,
+        `${(top * 1e6).toFixed(4)} um`);
+    const near = (await solve(g(48.866), { ...TRI, freq: 1e8 })).r.modes;
+    const exact = (await solve(g(276.94 - 228.07), { ...TRI, freq: 1e8 })).r.modes;
+    const d = Math.max(...near.map((m, i) => rel(m.RLGC.C, exact[i].RLGC.C)));
+    check('full-wave: the rounded layer gives the C of the exact one', d < 0.01, `C ${pct(d)}`);
+}
+
+// --- 5. Modal R of an asymmetric pair of unequal metal ---
+{
+    const text = 'units um\nbounds open open open open\n' +
+        'diel x=-inf w=inf y=0 h=339.38 er=9.0\ndiel x=-inf w=inf y=339.38 h=226.48 er=6.6\n' +
+        'diel x=-inf w=inf y=565.86 h=190.74 er=8.7\n' +
+        'sig+ x=-131.66 w=51.854 y=565.86 h=13.779\nsig- x=79.803 w=51.854 y=565.86 h=13.779 sigma=1.1244e6\n' +
+        'gnd x=-261.71 w=-inf y=565.86 h=13.779\ngnd x=-197.72 w=395.44 y=756.6 h=24.491\n';
+    const { s, r } = await solve(text, { freq: 1.38e9, sigma_cond: 3.06e7 });
+    for (const m of r.modes) {
+        const I = s._modal_currents(m.mode), Rm = m.RLGC.Rm;
+        const q = I && Rm ? 0.5 * (I[0] * I[0] * Rm[0] + 2 * I[0] * I[1] * Rm[1] + I[1] * I[1] * Rm[2]) : NaN;
+        check(`QS: ${m.mode} R of an unequal-metal pair is 1/2 i^T R i of its per-line matrix`, rel(m.RLGC.R, q) < 0.1,
+            `${m.RLGC.R.toFixed(1)} vs ${q.toFixed(1)}`);
+    }
+}
+
+// --- 6. Eigenvectors of decoupled lines ---
+{
+    const axes = M => eig2x2(M).vecs.map(v => (Math.abs(v[0]) > Math.abs(v[1]) ? 0 : 1) + (Math.min(Math.abs(v[0]), Math.abs(v[1])) < 1e-6 ? '' : '?'));
+    for (const [what, M, want] of [['diagonal', [[3, 0], [0, 2]], '0,1'], ['diagonal, larger second', [[2, 0], [0, 3]], '1,0'],
+        ['off-diagonal at rounding level', [[3, 1e-21], [2e-21, 2]], '0,1'], ['equal diagonal', [[3, 0], [0, 3]], '0,1']]) {
+        const got = axes(M).join(',');
+        check(`eig2x2, ${what}: one eigenvector per trace`, got === want, got);
+    }
+    const v = eig2x2([[2.5, 0.3], [0.3, 2.5]]).vecs;
+    check('eig2x2 keeps the +-1 vectors of a symmetric pair', Math.abs(v[0][0] - 1) < 1e-12 && Math.abs(v[0][1] - 1) < 1e-12
+        && Math.abs(v[1][0] - 1) < 1e-12 && Math.abs(v[1][1] + 1) < 1e-12, JSON.stringify(v));
 }
 
 done();

@@ -133,8 +133,10 @@ export function conductorSwapSymmetric(conductors, dielectrics) {
         && paintOrderMirrors(dielectrics, sameDielectric, axis, coord, tol);
 }
 
-// Coordinate tolerance for the x=0 mirror tests below (relative to the domain width).
-const symTol = (domainW) => domainW * 1e-6;
+// Coordinate tolerance for the x=0 mirror tests below (relative to the domain width),
+// the rounding of exactly mirrored input. The FDM mesher uses it too, so a geometry
+// solved as symmetric always gets a symmetric grid.
+export const symTol = (domainW) => domainW * 1e-9;
 
 // Metal and surface finish of a conductor as a comparable string: plating material,
 // interface roughness (left out it is the plating roughness) and faces, own roughness,
