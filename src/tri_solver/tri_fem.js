@@ -1997,6 +1997,19 @@ export function refineTriMesh(mesh, marked, opts = {}) {
                     newNodes[2*n] = ox; newNodes[2*n+1] = oy;
                     if (area <= 0) valid = false;
                 }
+                // Quality-targeted smoothing keeps only moves that do not worsen the
+                // worst adjacent triangle. Without this the clamp could park a
+                // constrained vertex 1e-12 from its neighbour on the line, a zero-area
+                // pair that later bisection turns into degenerate triangles.
+                if (valid && clampLo) {
+                    let qOld = 0, qNew = 0;
+                    const ox = newNodes[2*n], oy = newNodes[2*n+1];
+                    for (let i = vtStart[n]; i < vtStart[n+1]; i++) qOld = Math.max(qOld, triQuality(vtList[i]));
+                    newNodes[2*n] = nx; newNodes[2*n+1] = ny;
+                    for (let i = vtStart[n]; i < vtStart[n+1]; i++) qNew = Math.max(qNew, triQuality(vtList[i]));
+                    newNodes[2*n] = ox; newNodes[2*n+1] = oy;
+                    if (qNew > qOld) valid = false;
+                }
                 if (valid) {
                     newNodes[2*n] = nx; newNodes[2*n+1] = ny; nMoved++;
                     for (let i = vtStart[n]; i < vtStart[n+1]; i++) qStale[vtList[i]] = 1;

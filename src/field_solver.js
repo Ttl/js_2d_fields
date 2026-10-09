@@ -6,7 +6,7 @@ import { applyDjordjevicSarkar } from './djordjevic_sarkar.js';
 import { hasConductiveDielectric, conductiveOmega, complexEps, conductiveDielectricWarning, dcConductance,
     dcConductanceMatrix } from './conductive_dielectric.js';
 import { dcLineLimit, lineAttenuation } from './line_params.js';
-import { classifyModalDecomposition, conductorFinishKey } from './geometry_symmetry.js';
+import { classifyModalDecomposition, conductorFinishKey, modalCurrents } from './geometry_symmetry.js';
 import { buildPhysicalRLGC } from './sparameters.js';
 import { visibleAreas, platedThrough, platingArea, insideRingHole, bodyDistance, shapeArea } from './shapes.js';
 import { unlimitedGrounds } from './wall_grounds.js';
@@ -1726,7 +1726,8 @@ export class FieldSolver2D {
         // Signal metal: the plating metal when every signal conductor is solid plating.
         const sigma_sig = this._signal_sigma(line === 2 ? null : line);
         const ownSigma = this._own_sigma();
-        const { sig: R_dc_sig, gnd: R_dc_gnd } = this._dc_resistance(mode, line);
+        const { sig: R_dc_sig, gnd: R_dc_gnd } = this._dc_resistance(mode, line,
+            line === null ? this._modal_currents(mode) : null);
         const R_dc = R_dc_sig + R_dc_gnd;
 
         if (this.freq === 0) {
@@ -2617,13 +2618,18 @@ export class FieldSolver2D {
     // one, the return current has no DC resistance and the other grounds carry none.
     // line (0 = positive trace, 1 = negative trace, 2 = both) gives I^T R I for unit
     // current in that trace or in both (see _line_asymmetry).
-    _dc_resistance(mode = null, line = null) {
+    // I: the trace currents of a mode of an asymmetric pair (_modal_currents), whose
+    // traces carry unequal currents; the mode R is then 1/2 I^T R I, with the ground
+    // returning their sum.
+    _dc_resistance(mode = null, line = null, I = null) {
         const g = this._dc_conductances();
         const R_gnd = this._unlimited_grounds().size || !(g.gnd > 0) ? 0 : 1 / g.gnd;
         if (line !== null) {
             if (line === 2) return { sig: 1 / g.pos + 1 / g.neg, gnd: 4 * R_gnd };
             return { sig: 1 / (line === 0 ? g.pos : g.neg), gnd: R_gnd };
         }
+        if (I && this.is_differential && g.pos > 0 && g.neg > 0)
+            return { sig: 0.5 * (I[0] * I[0] / g.pos + I[1] * I[1] / g.neg), gnd: 0.5 * (I[0] + I[1]) ** 2 * R_gnd };
         const G = g.pos + g.neg;
         if (!(G > 0)) return { sig: 0, gnd: R_gnd };
         if (this.is_differential && (mode === 'odd' || mode === 'even')) {
@@ -2688,6 +2694,11 @@ export class FieldSolver2D {
         } finally {
             [this._skinTransitionWarn, this._platingTransitionWarn] = warn;
         }
+    }
+
+    // Trace currents of a mode of an asymmetric pair (modalCurrents), null otherwise.
+    _modal_currents(mode) {
+        return this._modalPhys && this._modalI && (mode === 'odd' || mode === 'even') ? this._modalI[mode] : null;
     }
 
     _pair_finish_differs() {
@@ -3209,6 +3220,7 @@ export class FieldSolver2D {
     async _solve_modal_differential() {
         // Half-domain pair: symmetric by construction and only one trace is meshed, so
         // the odd/even drives are the modes and the per-trace solves are impossible.
+        this._modalI = null;
         if (this.sym_half) { this._modalPhys = null; this._traceVac = null; return null; }
         // Per-trace static fields (dielectric + vacuum). The Laplace solve is linear in the
         // drive, so the field for any drive [vp,vn] is vp·(A field) + vn·(B field).
@@ -3268,6 +3280,7 @@ export class FieldSolver2D {
         const { physMatrix, modalVecs } = classifyModalDecomposition(Cm, Cm0, this.conductors, this.dielectrics);
         this._modalPhys = physMatrix;
         if (!modalVecs) return null;
+        this._modalI = { odd: modalCurrents(Cm, modalVecs[0]), even: modalCurrents(Cm, modalVecs[1]) };
         const comb = (a, P, b, Q) => P.map((row, i) => row.map((val, j) => a * val + b * Q[i][j]));
         await this._ensure_dc_signal_inductance(null);
         const results = [];
@@ -4089,11 +4102,6 @@ export class FieldSolver2D {
         if (this._certWarn) warns.push(this._certWarn);
         if (this._skinTransitionWarn) warns.push(this._skinTransitionWarn);
         if (this._platingTransitionWarn) warns.push(this._platingTransitionWarn);
-        // Geometry-level accuracy note a subclass may set at construction (e.g. the
-        // broadside strong-coupling warning). Like the two above, this only reaches
-        // rectilinear results: the triangular backend returns from solveAt before
-        // _build_results and models these regimes accurately (MQS).
-        if (this._proximityWarn) warns.push(this._proximityWarn);
         const gapWarn = this._narrow_gap_note(this.freq);
         if (gapWarn) warns.push(gapWarn);
         if (this._causalWarn) warns.push(this._causalWarn);

@@ -3,27 +3,21 @@
 //
 //   node tests/run.mjs [fast|slow|e2e|fuzz|all] [-j N]
 //
-// Tests run in PARALLEL (default jobs: min(8, cpus - 2); e2e defaults to 1 because its
-// tests share the dev server on localhost:8731). Each test's output is buffered and
-// only printed on failure, so parallel output stays readable; status lines appear in
-// completion order. `-j 1` restores strictly sequential runs.
+// Tests run in parallel (default jobs: min(8, cpus - 2), except e2e defaults to
+// 1 because its tests share the dev server on localhost:8731). Each test's
+// output is buffered and only printed on failure, so parallel output stays
+// readable, status lines appear in completion order. `-j 1` restores strictly
+// sequential runs.
 //
-// Scheduling is longest-first using the per-entry `cost` hints (seconds, measured
-// 2026-08-15 on a 16-core box) — with a worker pool the wall time is then bounded by
-// max(longest single test, total/jobs). The hints only order the queue; a stale hint
-// costs a little wall time, never correctness.
+// Scheduling is longest-first using the per-entry `cost` hints (seconds on my
+// PC), with a worker pool the wall time is then bounded by max(longest single
+// test, total/jobs). The hints only order the queue.
 //
 // Tiers:
-//   fast — run before every commit (~30 s at -j8): geometry construction, eigensolver
-//          pencil, enclosed-box analytic modes, closed-form parallel-plate, coax and
-//          rectangular waveguide.
-//   slow — full solver validation (~4 min at -j8, ~28 min sequential): tri-backend
-//          correctness suite, mode viewer, per-side plating, plating behavior
-//          invariants, the reference-free identity suite (test_invariants.js), a
-//          pinned-seed QS-vs-fullwave fuzzer smoke, and the reference suite on BOTH
-//          backends.
-//   e2e  — browser tests; need the dev server on localhost:8731 and chromium.
-//   fuzz — the full 40-case QS-vs-fullwave fuzzer run (~10 min, deterministic seed).
+//   fast - Quick correctness check.
+//   slow - Full check including some heavy tests.
+//   e2e  - Browser tests. Need the dev server on localhost:8731 and chromium.
+//   fuzz - QS-vs-fullwave fuzzer run.
 import { spawn } from 'child_process';
 import os from 'os';
 
@@ -47,7 +41,6 @@ const TIERS = {
         { file: 'tests/test_interpolating_sweep.js', cost: 2 },
         { file: 'tests/test_mtl_sparams.js', cost: 1 },
         { file: 'tests/test_open_boundary_warning.js', cost: 25 },
-        { file: 'tests/test_broadside_proximity_warning.js', cost: 15 },
         { file: 'tests/test_gcpw_qs_continuity.js', cost: 9 },
         { file: 'tests/test_gcpw_gnd_width.js', cost: 25 },
         { file: 'tests/test_qs_edge_cases.js', cost: 30 },

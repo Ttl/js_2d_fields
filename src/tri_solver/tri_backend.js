@@ -54,7 +54,7 @@ import { resampleStatic, resampleModeField, buildGridFromMesh, surfaceCurrentPoi
     buildTriRegions } from './resample.js';
 import { Complex } from '../complex.js';
 import { dcLineParameters } from '../dc_inductance.js';
-import { classifyModalDecomposition, halfDomainSymmetry } from '../geometry_symmetry.js';
+import { classifyModalDecomposition, halfDomainSymmetry, modalCurrents } from '../geometry_symmetry.js';
 import { buildPhysicalRLGC } from '../sparameters.js';
 import { djordjevic_sarkar, causalModelWarning } from '../djordjevic_sarkar.js';
 import { hasConductiveDielectric, conductiveOmega, conductiveDielectricWarning, dcConductance,
@@ -2324,6 +2324,14 @@ export class TriBackend {
         return { Rm: [v[0], v[4] - (v[0] + v[2]) / 2, v[2]], Lim: [v[1], v[5] - (v[1] + v[3]) / 2, v[3]] };
     }
 
+    // Trace currents of a mode of an asymmetric pair at f (modalCurrents), null for an
+    // odd/even drive.
+    _modalCurrentsAt(mode, st, f) {
+        const cm = this._conductiveModal(f);
+        const v = this._modalVecAt(mode, st, f), Cm = cm ? cm.phys.C : this._modalPhys && this._modalPhys.C;
+        return v && Cm ? modalCurrents(Cm, v) : null;
+    }
+
     _pairFinishDiffers() {
         return !!this.solver.is_differential && this.solver._pair_finish_differs();
     }
@@ -2333,18 +2341,10 @@ export class TriBackend {
     // mqsPrecompute's group order. Symmetric pair: the odd/even unit vectors.
     // Asymmetric pair with a modal decomposition (_prepareStaticModal): the
     // genuine modal current vector i \propto C*v (v = the modal voltage eigenvector,
-    // C = the SI capacitance matrix, γI = YV makes i an eigenvector of YZ),
-    // normalized to Σ|I|^2 = 2 so the per-line power convention matches +-1.
+    // C = the SI capacitance matrix, γI = YV makes i an eigenvector of YZ), in the
+    // power convention of the mode's Z0 (modalCurrents).
     _mqsModeCurrents(mode, st, f) {
-        const cm = this._conductiveModal(f);
-        const v = this._modalVecAt(mode, st, f), Cm = cm ? cm.phys.C : this._modalPhys && this._modalPhys.C;
-        if (v && Cm) {
-            const i0 = Cm[0][0] * v[0] + Cm[0][1] * v[1];
-            const i1 = Cm[1][0] * v[0] + Cm[1][1] * v[1];
-            const n = Math.sqrt(2 / (i0 * i0 + i1 * i1));
-            if (isFinite(n) && n > 0) return [i0 * n, i1 * n];
-        }
-        return mode === 'odd' ? [1, -1] : [1, 1];
+        return this._modalCurrentsAt(mode, st, f) || (mode === 'odd' ? [1, -1] : [1, 1]);
     }
 
     // Ground bodies under a solve's wall map: a wall is PEC when its abc entry is absent
@@ -3217,7 +3217,7 @@ export class TriBackend {
         // to the second over delta/t = 0.15..0.08. 'static' uses the static one only.
         // DC resistance from the conductor list, shared with the quasi-static backend
         // (cr.rects holds coplanar grounds as rects and omits wall-absorbed grounds).
-        const dc = s._dc_resistance(mode), R_dc = dc.sig + dc.gnd;
+        const dc = s._dc_resistance(mode, null, this._modalCurrentsAt(mode, st, f)), R_dc = dc.sig + dc.gnd;
         if (f === 0) {
             // DC point: R is the geometric DC resistance, L_internal the low-frequency
             // plateau of the loss solve (current uniform across every conductor).

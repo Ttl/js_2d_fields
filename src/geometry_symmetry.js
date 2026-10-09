@@ -270,3 +270,13 @@ export function classifyModalDecomposition(C, C0, conductors, dielectrics) {
     physMatrix.Tv = modalVecs;
     return { physMatrix, modalVecs };
 }
+
+// Trace currents of a mode with voltages v on a pair of capacitance matrix C:
+// i = C v / (v^T C v / 2). The mode's Z0 takes C_k = v^T C v / 2, so 1/2 i^T R i is
+// the R of alpha = R / (2 Z0), the modal power loss over twice the transmitted
+// power. i = [1, -+1] on a symmetric pair. Null if v^T C v is not positive.
+export function modalCurrents(C, v) {
+    const i0 = C[0][0] * v[0] + C[0][1] * v[1], i1 = C[1][0] * v[0] + C[1][1] * v[1];
+    const n = 2 / (v[0] * i0 + v[1] * i1);
+    return isFinite(n) && n > 0 ? [i0 * n, i1 * n] : null;
+}

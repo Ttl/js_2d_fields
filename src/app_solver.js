@@ -2184,7 +2184,7 @@ async function runParameterSweep() {
                 }
                 // Every accuracy note, not just the first: one solve can carry a failed
                 // certificate and a loss-accuracy note (skin-transition,
-                // broadside-proximity) at once.
+                // narrow-gap) at once.
                 for (const aw of m.warnings || []) {
                     if (aw.type !== 'accuracy' && aw.type !== 'open-boundary') continue;
                     log(`\u26a0 First point: ${aw.message} Later sweep points are not re-verified.`);

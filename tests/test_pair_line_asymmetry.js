@@ -186,16 +186,18 @@ for (const [label, backend] of BACKENDS) {
         `R ${M.R.flat().map(v => v.toFixed(2)).join(' ')}`);
     check(`${label}: L is the external matrix plus a positive internal part`,
         M.L[0][0] > r.physMatrix.L[0][0] * 1.002 && M.L[1][1] > r.physMatrix.L[1][1] * 1.002 && M.L[0][0] < r.physMatrix.L[0][0] * 1.03);
+    // Mode currents i = C v / (v^T C v / 2): the current of the modal voltages v in the
+    // convention of the mode's Z0 (C_k = v^T C v / 2), so that alpha = R / (2 Z0) is the
+    // modal power loss over twice the transmitted power.
+    for (const m of [odd, even]) {
+        const v = backend === 'triangular' ? s._triBackend._static[m.mode].modalVec : m.modalVec, C = r.physMatrix.C;
+        let i = [C[0][0] * v[0] + C[0][1] * v[1], C[1][0] * v[0] + C[1][1] * v[1]];
+        const n = 2 / (v[0] * i[0] + v[1] * i[1]); i = i.map(x => x * n);
+        const q = (i[0] * i[0] * M.R[0][0] + 2 * i[0] * i[1] * M.R[0][1] + i[1] * i[1] * M.R[1][1]) / 2;
+        check(`${label}: ${m.mode}-mode R is the quadratic form of the matrix in the modal currents`, rel(q, m.RLGC.R) < 2e-3,
+            `${m.RLGC.R.toFixed(3)} vs ${q.toFixed(3)} ohm/m`);
+    }
     if (backend === 'triangular') {
-        // Mode currents i = C v, normalised to |i|^2 = 2, as the mode loss solve uses them.
-        for (const m of [odd, even]) {
-            const v = s._triBackend._static[m.mode].modalVec, C = r.physMatrix.C;
-            let i = [C[0][0] * v[0] + C[0][1] * v[1], C[1][0] * v[0] + C[1][1] * v[1]];
-            const n = Math.sqrt(2 / (i[0] ** 2 + i[1] ** 2)); i = i.map(x => x * n);
-            const q = (i[0] * i[0] * M.R[0][0] + 2 * i[0] * i[1] * M.R[0][1] + i[1] * i[1] * M.R[1][1]) / 2;
-            check(`${label}: ${m.mode}-mode R is the quadratic form of the matrix in the modal currents`, rel(q, m.RLGC.R) < 2e-3,
-                `${m.RLGC.R.toFixed(3)} vs ${q.toFixed(3)} ohm/m`);
-        }
         // The eigenvector transform it replaces is visibly off.
         const bare = { ...odd.RLGC }; delete bare.Rm; delete bare.Lim;
         const old = buildPhysicalRLGC(bare, even.RLGC, r.physMatrix);

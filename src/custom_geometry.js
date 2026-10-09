@@ -104,7 +104,6 @@ class CustomGeometrySolver extends FieldSolver2D {
         const symAllowed = options.symmetry !== false && mirror;
         if (!symAllowed) this.tri_symmetry = false;
         this.sym_half = this.mesh_backend !== 'triangular' && symAllowed && symInfo.ok;
-        this._proximityWarn = this._broadside_proximity_note(signals);
         // Per-conductor finishes need the centred loss quadrature (see
         // calculate_conductor_loss): the default rule only balances over mirrored pairs
         // of equal finish. Geometries without a finish of their own keep the default
@@ -452,21 +451,6 @@ class CustomGeometrySolver extends FieldSolver2D {
             ...this.metal_overlaps.map(([a, b]) => `Conductors of different metal overlap (lines ${a} and ${b}): ` +
                 `the later line's metal fills the overlap on the full-wave solver. The quasi-static solver does not support ` +
                 'overlapping metals and refuses this geometry; touching blocks work on both solvers.')];
-    }
-
-    // Accuracy note for a strongly coupled broadside pair, see BroadsideStriplineSolver.
-    _broadside_proximity_note(signals) {
-        if (signals.length !== 2 || !this.is_differential) return null;
-        const [a, c] = signals;
-        const overlap = Math.min(a.x_max, c.x_max) - Math.max(a.x_min, c.x_min);
-        const facing_gap = Math.max(a.y_min - c.y_max, c.y_min - a.y_max);
-        const w = Math.min(a.width, c.width);
-        if (!(facing_gap > 0) || !(overlap > -w) || w / facing_gap < 1.5) return null;
-        return { type: 'accuracy', reason: 'broadside-proximity', mode: 'all', message:
-            `Strongly coupled broadside pair (trace width ${(w * 1e6).toFixed(0)} µm vs ` +
-            `${(facing_gap * 1e6).toFixed(0)} µm facing gap): conductor loss accuracy is reduced. ` +
-            `R typically reads up to 50% high in this regime. The full-wave solver models the ` +
-            `broadside proximity effect accurately.` };
     }
 }
 
