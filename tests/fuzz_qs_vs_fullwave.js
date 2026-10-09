@@ -30,11 +30,10 @@
 //   modes      — single-ended lines compare the one quasi-TEM mode; differential pairs
 //                compare BOTH the odd and the even mode (the worst of the two is flagged)
 //
-// Conductor loss (R per mode) IS compared (since 2026-08-16, after the multi-drive-MQS
-// broadside reference and the skin-transition/plating/GCPW loss fixes): gate R_THRESH
+// Conductor loss (R per mode) is compared: gate R_THRESH
 // (default 25%), RELAXED to R_RELAX (default 60%) when a solve carries a loss-accuracy
-// note — QS reason 'skin-transition' (δ deep into the conductor thickness) or
-// 'broadside-proximity' (strongly coupled pair, QS reads up to ~50% high), or any tri
+// note. QS reason 'skin-transition' (δ deep into the conductor thickness) or
+// 'narrow-gap', or any tri
 // mqs-* warning: either a fallback (reference degraded to perturbation) or
 // 'mqs-band-capped' (MQS ran, but on a skin band that stopped short of its size
 // target). Certificate warnings do NOT relax the gate (they describe C, not R).
@@ -43,8 +42,6 @@
 // Usage:   node tests/fuzz_qs_vs_fullwave.js [N] [seed] [threshold%] [R-threshold%]
 //   e.g.   node tests/fuzz_qs_vs_fullwave.js 40 1 15 25
 // Reproduce a flagged case: rerun with the same N and seed (generation is deterministic;
-// NOTE the 2026-08-16 generator extension shifted every seed's stream — older seed/case
-// references, incl. the ones in docs/backend_agreement_handover.md, no longer reproduce).
 
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
@@ -66,13 +63,10 @@ const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number))
 const BAD_Q  = 2000;
 // Conductor-loss (R) gates: base, and relaxed for solves carrying a
 // loss-accuracy note (see header). Calibrated 2026-08-16 on seeds 1-13
-// (360 specs, app settings): unwarned median ~6% / max 17.2% (a low-coupling
-// broadside; the sweep found the broadside bias crossing 26% at w/gap 1.70,
-// which is why the proximity-warning threshold sits at 1.5); warned max 47.8%
-// (deep-skin-transition plated stripline — QS ~2× high — and strongly-coupled
-// broadside). New unwarned rows above 25% are worth investigating, not just
-// gate-bumping: they'd extend the known bias envelope (issue-9 pour faces,
-// broadside proximity below the warning threshold).
+// (360 specs, app settings): unwarned median ~6% / max 17.2%; warned max 47.8%
+// (deep-skin-transition plated stripline, QS ~2x high). New unwarned rows above
+// 25% are worth investigating, not just gate-bumping: they'd extend the known
+// bias envelope (issue-9 pour faces, strongly coupled broadside pairs).
 const R_THRESH = (parseFloat(process.argv[5]) || 25) / 100;
 const R_RELAX  = 0.60;
 // Shunt-conductance and inductance gates (see the G/L block in main).
@@ -84,8 +78,15 @@ const L_RELAX  = 0.35;
 
 // --- Seeded PRNG (deterministic, reproducible) ---
 export function createRng(seed) {
-    let s = (seed | 0) || 1;
-    const next = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    // mulberry32. The old LCG multiplied in doubles, which dropped the low bits of
+    // s * 1103515245 and collapsed every seed onto one 10466-draw cycle (~363 specs).
+    let s = seed >>> 0;
+    const next = () => {
+        s = (s + 0x6D2B79F5) >>> 0;
+        let z = Math.imul(s ^ (s >>> 15), s | 1);
+        z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+        return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+    };
     return {
         f: (lo, hi) => lo + next() * (hi - lo),
         logf: (lo, hi) => lo * Math.pow(hi / lo, next()),
@@ -360,7 +361,7 @@ async function solveOn(spec, backend) {
         return {
             modes: r.modes.map(m => ({ Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C, R: m.RLGC.R, G: m.RLGC.G, L: m.RLGC.L, mode: m.mode })),
             // Warning tags for the R-gate relaxation: QS loss-accuracy reasons
-            // ('skin-transition' / 'broadside-proximity') and tri fallback types.
+            // ('skin-transition' / 'narrow-gap') and tri fallback types.
             warns: (r.warnings || []).map(w => ({ type: w.type, reason: w.reason || null })),
             maxQ: s.meshQuality ? s.meshQuality.maxQ : null,
             degenerate: s.meshQuality ? s.meshQuality.degenerateCount : 0,
@@ -469,11 +470,11 @@ async function main() {
         }
         // Conductor-loss gate (R per mode). Relaxed when either backend flagged
         // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
-        // 'broadside-proximity' / 'narrow-gap', or any tri mqs-* warning — the backend downgrading
+        // 'narrow-gap', or any tri mqs-* warning — the backend downgrading
         // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
         // band). Certificate warnings describe C, not R, and do NOT relax the gate.
         const lossRelaxed =
-            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'broadside-proximity' || w.reason === 'narrow-gap'
+            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'narrow-gap'
                 || w.reason === 'plating-transition')
             || fw.warns.some(w => /^mqs-/.test(w.type) || w.reason === 'plating-transition');
         // Shunt conductance and total inductance, each at its own gate. G follows the
