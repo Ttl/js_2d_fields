@@ -1629,15 +1629,34 @@ export class TriBackend {
         // about this mesh's accuracy. A rect thinner than its surface element size
         // (a 1 um trace on the thick-copper sizing) holds flat slivers of Q in the
         // hundreds that would otherwise trip the UI warning.
-        // Nor the triangles inside a dielectric layer thinner than their longest edge: a
-        // layer thinner than the element size (a solder mask) is meshed as slivers
-        // spanning it, its faces held by the refiner, and their shape is the layer's
-        // aspect, which the field along the layer does not need resolved.
+        // Nor the triangles squeezed between two geometry lines closer than their longest
+        // edge: a layer thinner than the element size (a solder mask, or the thin cap of
+        // a dielectric left over a trace) is meshed as slivers spanning it, its faces
+        // held by the refiner, and their shape is the layer's aspect, which the field
+        // along the layer does not need resolved. The lines are the edges of the
+        // dielectric and conductor rects, each over its own span.
         try {
             const skip = new Uint8Array(mesh.nTris);
             const rects = this.condRect.rects || [];
-            const layers = (this.solver.dielectrics || []).filter(d => !d.shape);
             const tolL = 1e-9 * (this.domain.x_max - this.domain.x_min);
+            const boxes = (this.solver.dielectrics || []).filter(d => !d.shape)
+                .map(d => [d.x_min, d.x_max, d.y_min, d.y_max])
+                .concat(rects.filter(r => !r.shape).map(r => [r.xmin, r.xmax, r.ymin, r.ymax]));
+            // Lines along axis a (0: horizontal, y = const; 1: vertical, x = const) as
+            // [position, span lo, span hi].
+            const lines = [0, 1].map(a => boxes.flatMap(b => a === 0
+                ? [[b[2], b[0], b[1]], [b[3], b[0], b[1]]]
+                : [[b[0], b[2], b[3]], [b[1], b[2], b[3]]]));
+            // Gap between the nearest lines below and above [lo, hi] that span c.
+            const gapAround = (a, lo, hi, c) => {
+                let below = -Infinity, above = Infinity;
+                for (const [p, s0, s1] of lines[a]) {
+                    if (c < s0 - tolL || c > s1 + tolL) continue;
+                    if (p <= lo + tolL && p > below) below = p;
+                    if (p >= hi - tolL && p < above) above = p;
+                }
+                return above - below;
+            };
             for (let t = 0; t < mesh.nTris; t++) {
                 const v0 = mesh.tris[3 * t], v1 = mesh.tris[3 * t + 1], v2 = mesh.tris[3 * t + 2];
                 const xs = [mesh.nodes[2 * v0], mesh.nodes[2 * v1], mesh.nodes[2 * v2]];
@@ -1650,12 +1669,8 @@ export class TriBackend {
                 if (skip[t]) continue;
                 const edge = Math.max(Math.hypot(xs[1] - xs[0], ys[1] - ys[0]), Math.hypot(xs[2] - xs[1], ys[2] - ys[1]),
                     Math.hypot(xs[0] - xs[2], ys[0] - ys[2]));
-                for (const d of layers) {
-                    if (!(xc > d.x_min && xc < d.x_max && yc > d.y_min && yc < d.y_max)) continue;
-                    const inside = xs.every(x => x > d.x_min - tolL && x < d.x_max + tolL)
-                        && ys.every(y => y > d.y_min - tolL && y < d.y_max + tolL);
-                    if (inside && Math.min(d.x_max - d.x_min, d.y_max - d.y_min) < edge) { skip[t] = 1; break; }
-                }
+                if (gapAround(0, Math.min(...ys), Math.max(...ys), xc) < edge
+                    || gapAround(1, Math.min(...xs), Math.max(...xs), yc) < edge) skip[t] = 1;
             }
             const mq = checkMeshQuality(mesh, { skip });
             this.meshQuality = mq.metrics;
@@ -2802,9 +2817,9 @@ export class TriBackend {
                     + `modes (inhomogeneous fill), reported ε_eff/Z0 may be unreliable.`;
                 // Surfaced to the UI via result.warnings / solver.modeWarnings; the console
                 // line is dev-only (avoid duplicate user-facing noise).
-                if (this._warnOnce({ mode, freq: f, bestEps: fw.bestEps, altEps: fw.altEps,
+                if (this._warnOnce({ type: 'eigen-ambiguous', mode, freq: f, bestEps: fw.bestEps, altEps: fw.altEps,
                     bestOvl: fw.bestOvl, altOvl: fw.altOvl, staticEps: eps_eff_static, message: msg },
-                    w => w.mode === mode))
+                    w => w.type === 'eigen-ambiguous' && w.mode === mode))
                     globalThis.__TRI_DEBUG__ && console.warn('[tri full-wave] ' + msg);
             }
             }   // end exact-eigensolve branch (dispersion-cache miss)
@@ -2812,6 +2827,23 @@ export class TriBackend {
                 eigen_bias = this._eigenBias(mode, st, phiEps, eps_eff_static,
                     (f === F_STATIC_MAX && fw && fw.eps > 0) ? fw : null);
                 eps_d /= eigen_bias;
+                // Grounds that float on an inhomogeneous fill (a stripline whose cover
+                // differs from the substrate, open sides) let the mode drive the
+                // parallel-plate wave between them. Its lateral tail sets eps_eff at
+                // frequency, so the result depends on the board width and leaves the
+                // stitched-ground (quasi-static) value, and below the parallel-plate eps
+                // the mode leaks and has no well-defined eps_eff at all.
+                if (this._modeWarnings && Math.abs(eps_d / eps_eff_static - 1) > 0.02
+                    && this._eigenRadiates(st.abc, this.mesh.epsMap)) {
+                    this._warnOnce({ type: 'floating-grounds', mode, freq: f, message:
+                        `${mode} mode: the grounds are not connected in this cross-section and the dielectric ` +
+                        `differs between them, so at ${(f / 1e9).toFixed(2)} GHz the mode couples to the ` +
+                        `parallel-plate wave between the grounds (full-wave ε_eff ${eps_d.toFixed(3)} vs ` +
+                        `${eps_eff_static.toFixed(3)} static). This depends on the board width and is not the ` +
+                        `stitched-ground line the quasi-static solver models. Enclosure side walls at the ` +
+                        `via-fence spacing connect the grounds.` },
+                        w => w.type === 'floating-grounds' && w.mode === mode);
+                }
             }
         }
         // Dielectric dispersion is a capacitance effect: C = eps_d·C0 (geometric

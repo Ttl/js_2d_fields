@@ -362,7 +362,7 @@ async function solveOn(spec, backend) {
             modes: r.modes.map(m => ({ Z0: m.Z0, eps_eff: m.eps_eff, C: m.RLGC.C, R: m.RLGC.R, G: m.RLGC.G, L: m.RLGC.L, mode: m.mode })),
             // Warning tags for the R-gate relaxation: QS loss-accuracy reasons
             // ('skin-transition' / 'narrow-gap') and tri fallback types.
-            warns: (r.warnings || []).map(w => ({ type: w.type, reason: w.reason || null })),
+            warns: (r.warnings || []).map(w => ({ type: w.type, reason: w.reason || null, mode: w.mode ?? null })),
             maxQ: s.meshQuality ? s.meshQuality.maxQ : null,
             degenerate: s.meshQuality ? s.meshQuality.degenerateCount : 0,
             nan: s.meshQuality ? s.meshQuality.nanNodes : 0,
@@ -409,7 +409,7 @@ async function main() {
         `R>${(R_THRESH * 100).toFixed(0)}% (warned ${(R_RELAX * 100).toFixed(0)}%) Qmax>${BAD_Q} ###`);
     console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
     const rng = createRng(SEED);
-    const flagged = { discrepancy: [], loss: [], rlgc: [], badMesh: [], crash: [] };
+    const flagged = { discrepancy: [], loss: [], rlgc: [], badMesh: [], crash: [], floating: [] };
     let ok = 0, skipped = 0, rejected = 0;
     const byType = {};
     for (let i = 0; i < N; i++) {
@@ -460,14 +460,25 @@ async function main() {
         // Compare each matched mode pair and flag the worst. Single-ended lines have one
         // quasi-TEM mode; differential pairs have two (odd then even), so the even mode — which
         // the old fuzzer never checked — is now validated cross-backend alongside the odd.
+        // A mode the full-wave flags 'floating-grounds' (grounds not connected, fill
+        // differing between them) couples to the parallel-plate wave: a different
+        // structure from the stitched-ground quasi-static line, with an eps_eff that
+        // depends on the domain width (or none at all where the mode leaks). Its Z0/C
+        // are not compared, only counted.
         const nModes = Math.min(qs.modes.length, fw.modes.length);
-        let worst = null;
+        const floatingMode = m => fw.warns.some(w => w.type === 'floating-grounds' && (w.mode === m || w.mode === 'all'));
+        let worst = null, floating = null;
         for (let mi = 0; mi < nModes; mi++) {
             const q = qs.modes[mi], w = fw.modes[mi];
             const dZ = relDiff(q.Z0, w.Z0), dE = relDiff(q.eps_eff, w.eps_eff), dC = relDiff(q.C, w.C);
             const dMax = Math.max(dZ, dC);
+            if (floatingMode(q.mode)) {
+                if (!floating || dMax > floating.dMax) floating = { mode: q.mode, dMax };
+                continue;
+            }
             if (!worst || dMax > worst.dMax) worst = { mode: q.mode, dZ, dE, dC, dMax, q, w };
         }
+        if (floating) flagged.floating.push({ i, spec, ...floating });
         // Conductor-loss gate (R per mode). Relaxed when either backend flagged
         // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
         // 'narrow-gap', or any tri mqs-* warning — the backend downgrading
@@ -543,7 +554,9 @@ async function main() {
     console.log(`SUMMARY: ${ok}/${N} clean | ${flagged.discrepancy.length} discrepancy | ` +
         `${flagged.loss.length} loss-discrepancy (${lossUnwarned} unwarned, ${lossWarned} warned) | ` +
         `${flagged.rlgc.length} G/L-discrepancy | ${flagged.badMesh.length} bad-mesh | ` +
-        `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid)`);
+        `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid) | ` +
+        `${flagged.floating.length} floating-grounds (Z0/C not compared, max ` +
+        `${(100 * Math.max(0, ...flagged.floating.map(f => f.dMax))).toFixed(0)}%)`);
     if (lossUnwarned) {
         console.log(`unwarned loss rows (investigate, do not just raise the gate):`);
         for (const f of flagged.loss.filter(x => !x.relaxed))
