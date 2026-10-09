@@ -84,6 +84,10 @@ function phaseEpsEff(Zser, Ysh, omega) {
 // every eigensolve would fail. plainPencil: the Modes tab and waveguide solves assemble
 // the ungauged pencil, 1/GAUGED_NNZ_SCALE more entries per triangle.
 const FW_NODES_PER_TRI = 4;
+// Share of the triangle budget the initial mesh is sized to (TriBackend.buildMesh),
+// and the smallest refinement fraction a final budget-filling pass is run with.
+const INITIAL_MESH_SHARE = 0.5;
+const MIN_LAST_PASS_FRAC = 0.04;
 function maxTrisForBudget(maxNodes, plainPencil = false) {
     return Math.max(800, Math.min(maxSolveTris(plainPencil), Math.floor((maxNodes || 18000) / FW_NODES_PER_TRI)));
 }
@@ -1252,8 +1256,8 @@ export class TriBackend {
         let hCoarse = this._wavelengthCap(this.opts.hCoarse ?? hints.hCoarse ?? (dom.y_max - dom.y_min) / 5);
         // Triangle budget derived from the Max Nodes setting (memory parity with the FDM
         // backend — see maxTrisForBudget). Cap the INITIAL mesh here: element count ∝ 1/h²,
-        // so if the feature-/wavelength-sized start overshoots (thin trace → tiny hFine, or a
-        // high modesFreq → fine bulk), coarsen hFine/hCoarse by √(nTris/budget) and rebuild.
+        // so if the feature-/wavelength-sized start overshoots its target (initTris: thin
+        // trace → tiny hFine, or a high modesFreq → fine bulk), coarsen hFine/hCoarse and rebuild.
         // The refinement loop below also stops at this budget; capping the initial mesh too is
         // what prevents the very first eigensolve from running on an unbounded mesh.
         const plainPencil = !!this.opts.modesFreq || this._isWG;
@@ -1262,13 +1266,20 @@ export class TriBackend {
         const nearField = this._nearFieldCap(hCoarse, maxTris);
         this.nearField = nearField;
         if (nearField) hCoarse = nearField.bulk;
+        // The initial mesh is sized to a share of the budget: the refiner only splits,
+        // so triangles the initial mesh spends where the field turns out not to need
+        // them are never recovered, and the adaptive passes need the rest of the
+        // budget to put elements where the error indicators say. A wavelength-capped
+        // mesh keeps the whole budget, the passes do not refine for the wavelength.
+        const initTris = nearField ? maxTris
+            : Math.round(maxTris * (this.opts.initialMeshShare ?? INITIAL_MESH_SHARE));
         let mesh, prevAtt = null;   // previous attempt's (h, nTris), for the scaling fit
         // Over budget, the initial mesh first coarsens the surface size on passive-ground
         // curves (gndScale, see occ_to_mesh gndSizeScale) and only then hFine/hCoarse
         // globally: a large ground can cost more triangles than the whole signal region,
         // and the signal resolution is what the results depend on. The two get separate
         // pass counts, so ground relaxation cannot use up the passes the global
-        // coarsening needs to get under maxTris (a memory guard). At most
+        // coarsening needs to get under initTris. At most
         // COARSEN_MAX_PASSES + GND_MAX_PASSES + 1 gmsh runs.
         const COARSEN_MAX_PASSES = 4, GND_MAX_PASSES = 3;
         let gndScale = 1, gndStalled = false, gndPrevN = null;
@@ -1308,16 +1319,16 @@ export class TriBackend {
             const est = (hF, hC, gS) => estimateOccTriCount(pre.sizeStats, {
                 sizeMin: hF * surfScaleB, sizeMinGnd: Math.min(hF * surfScaleB * Math.max(1, gS), hC),
                 hCoarse: hC, gradeRate: this.opts.gradeRate ?? 0.35 });
-            // Aim at the budget itself: the loop accepts up to OVERSHOOT_OK×, and an
-            // over-estimate (the common error direction) then lands under it.
-            const target = maxTris;
+            // Aim at the initial target itself: the loop accepts up to OVERSHOOT_OK×,
+            // and an over-estimate (the common error direction) then lands under it.
+            const target = initTris;
             const bisect = (f) => {   // largest x in [0, 1] with f(x) > target, log-scale
                 let lo = 0, hi = 1;
                 for (let k = 0; k < 40; k++) { const mid = (lo + hi) / 2; if (f(mid) > target) lo = mid; else hi = mid; }
                 return hi;
             };
             const est0 = est(hFine, hCoarse, 1);
-            if (est0 > PRESIZE_MIN_OVERSHOOT * maxTris) {
+            if (est0 > PRESIZE_MIN_OVERSHOOT * initTris) {
                 // Ground relaxation up to the loop's cap (the ground field is inert at
                 // hCoarse): the smallest scale that fits, or the cap.
                 const gndCap = hCoarse / (hFine * surfScaleB);
@@ -1336,7 +1347,7 @@ export class TriBackend {
                     hFine *= f; hCoarse *= f;
                 }
                 if (globalThis.__OCC_DEBUG__)
-                    console.error('[tri] pre-mesh sizing', { est0, est: est(hFine, hCoarse, gndScale), maxTris, hFine, hCoarse, gndScale });
+                    console.error('[tri] pre-mesh sizing', { est0, est: est(hFine, hCoarse, gndScale), initTris, hFine, hCoarse, gndScale });
             }
         } catch (e) {
             // Estimate unavailable: the loop below sizes by trial.
@@ -1345,12 +1356,12 @@ export class TriBackend {
         for (;;) {
             mesh = buildOccMeshFromGeometry(this.ctx.G, { ...occBase, hFine, hCoarse, gndSizeScale: gndScale });
             if (globalThis.__OCC_DEBUG__)
-                console.error('[tri] initial mesh attempt', { nTris: mesh.nTris, maxTris, hFine, hCoarse, gndScale, coarsenPasses, gndPasses,
+                console.error('[tri] initial mesh attempt', { nTris: mesh.nTris, initTris, hFine, hCoarse, gndScale, coarsenPasses, gndPasses,
                     est: estimateOccTriCount(mesh.sizeStats, mesh.sizeStats) });
-            if (mesh.nTris <= maxTris || coarsenPasses >= COARSEN_MAX_PASSES) break;
-            // Accept a mesh within OVERSHOOT_OK of the budget rather than pay a rebuild.
+            if (mesh.nTris <= initTris || coarsenPasses >= COARSEN_MAX_PASSES) break;
+            // Accept a mesh within OVERSHOOT_OK of the target rather than pay a rebuild.
             // The test is on the overshoot in triangles, the unit maxTris guards.
-            if (mesh.nTris < maxTris * OVERSHOOT_OK && mesh.nTris <= solveTris) break;
+            if (mesh.nTris < initTris * OVERSHOOT_OK && mesh.nTris <= solveTris) break;
             // Ground relaxation first (only when there are relaxable ground curves and
             // headroom below the hCoarse cap). Element count along a painted curve is
             // ~1/size, so scale by the overshoot, +5% to land under. If a relaxation
@@ -1362,7 +1373,7 @@ export class TriBackend {
                     gndStalled = true;
                 } else {
                     gndPrevN = mesh.nTris;
-                    gndScale = Math.min(gndScale * (mesh.nTris / maxTris) * 1.05, gndCap);
+                    gndScale = Math.min(gndScale * (mesh.nTris / initTris) * 1.05, gndCap);
                     gndPasses++;
                     continue;
                 }
@@ -1376,13 +1387,15 @@ export class TriBackend {
                 const e = Math.log(prevAtt.n / mesh.nTris) / Math.log(hFine / prevAtt.h);
                 if (Number.isFinite(e) && e > 0.3) p = Math.min(e, 3);
             }
-            const factor = Math.pow(mesh.nTris / maxTris, 1 / p) * 1.05;   // +5% to land under
+            const factor = Math.pow(mesh.nTris / initTris, 1 / p) * 1.05;   // +5% to land under
             // Give up once coarsening stops paying (some geometries floor out).
             if (mesh.nTris > (prevAtt ? prevAtt.n : Infinity) * 0.9) break;
             prevAtt = { h: hFine, n: mesh.nTris };
             hFine *= factor; hCoarse *= factor;
             coarsenPasses++;
         }
+        // The initial mesh and the budget, for diagnostics and tests.
+        Object.assign(this, { initialTris: mesh.nTris, maxTris, initialSizeStats: mesh.sizeStats });
         this.condRect = mesh.condRect;
 
         // Per-rect metadata for the loss routines: .symmetry scales the half-domain
@@ -1566,13 +1579,21 @@ export class TriBackend {
                 if (!certify || this._isWG || !cert || cert.pass) break;
                 convergedCount = 0;   // gate was optimistic — keep refining
             }
-            if (it === maxIters || projTris > maxTris) break;
+            if (it === maxIters) break;
+            // A full pass that would overrun the budget is cut down to the fraction that
+            // fills it, unless that is too small a pass to be worth a solve.
+            let passFrac = refineFrac, passTris = projTris;
+            if (projTris > maxTris) {
+                passFrac = (maxTris / mesh.nTris - 1) / 3;
+                if (passFrac < MIN_LAST_PASS_FRAC) break;
+                passTris = maxTris;
+            }
             // The same projection against the eigensolve memory guard, from this pass's
             // own estimate: the per-triangle cost varies with the geometry.
             let passBytes = 0;
             for (const w of Object.values(passWork.byMode)) passBytes = Math.max(passBytes, (w.femCache && w.femCache.solveBytes) || 0);
-            if (projTris * passBytes / mesh.nTris > MAX_SOLVE_BYTES) break;
-            const marked = markTrianglesForRefinement(metric, refineFrac);
+            if (passTris * passBytes / mesh.nTris > MAX_SOLVE_BYTES) break;
+            const marked = markTrianglesForRefinement(metric, passFrac);
             const refined = refineTriMesh(mesh, marked);
             refined.condRect = this.condRect;
             const mats = tagMaterials(refined, s.dielectrics);

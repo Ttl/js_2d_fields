@@ -267,6 +267,11 @@ export function groundBodyCount(rects, roles, wallPEC, bounds, tol) {
 // estimate is biased high for closely stacked conductors (a cutout's ground slabs
 // under a pair: +30%). `st` is the sizeStats object from a buildOccMeshFromGeometry
 // call (statsOnly or not), `sz` the sizing {sizeMin, sizeMinGnd, hCoarse, gradeRate}.
+//
+// Ground curves are painted at a surface size that grows with the distance d from
+// the signals, clamp(gndGradeRate * d, sizeMinGnd, hCoarse) (see the field setup).
+// st.gndSamples holds [length, d, exterior] pieces of every ground curve, and the
+// ground band is summed piece by piece at the local surface size.
 export function estimateOccTriCount(st, sz) {
     const K = 0.33;
     const g = sz.gradeRate ?? 0.35;
@@ -285,9 +290,25 @@ export function estimateOccTriCount(st, sz) {
         }
         return n;
     };
+    const graded = (sG) => {
+        if (!(st.gndLen > 0) || !(sG > 0)) return 0;
+        const gG = st.gndGradeRate, hC = sz.hCoarse;
+        const D = Number.isFinite(st.gndThin) ? st.gndThin / 2 : Infinity;
+        let ext = 0, int = 0;
+        for (const [len, d, isExt] of st.gndSamples) {
+            const sl = Math.min(Math.max(gG * d, sG), Math.max(hC, sG));
+            // Off the surface the size stays at sl until the ground's own grading,
+            // sG + g * distance, catches up with it, then grows at g.
+            if (isExt) ext += len * (side(sl, Infinity) + (sl - sG) / (g * sl * sl * K));
+            int += len * side(sl, D);
+        }
+        if (st.interior && st.gndArea > 0) ext += Math.min(int, st.gndArea / (K * sG * sG));
+        return ext;
+    };
     const bulk = sz.hCoarse > 0 ? st.area / (K * sz.hCoarse * sz.hCoarse) : 0;
-    return cls(st.sigLen, st.sigLenExt ?? st.sigLen, st.sigArea, st.sigThin, sz.sizeMin)
-         + cls(st.gndLen, st.gndLenExt ?? st.gndLen, st.gndArea, st.gndThin, sz.sizeMinGnd) + bulk;
+    const gnd = st.gndSamples && st.gndGradeRate > 0 ? graded(sz.sizeMinGnd)
+        : cls(st.gndLen, st.gndLenExt ?? st.gndLen, st.gndArea, st.gndThin, sz.sizeMinGnd);
+    return cls(st.sigLen, st.sigLenExt ?? st.sigLen, st.sigArea, st.sigThin, sz.sizeMin) + gnd + bulk;
 }
 
 export function buildOccMeshFromGeometry(G, opts) {
@@ -301,6 +322,9 @@ export function buildOccMeshFromGeometry(G, opts) {
     const hFine = opts.hFine;
     const hCoarse = opts.hCoarse;
     const gradeRate = opts.gradeRate ?? 0.35;
+    // Growth rate of the ground surface size with the distance from the signals (see
+    // the size fields), 0 paints every ground curve at its full surface size.
+    const gndGradeRate = opts.gndGradeRate ?? gradeRate / 4;
 
     const symmetry = !!opts.symmetry;
     // Half-domain meshing uses the x >= 0 half of every polygon. Containment, however,
@@ -555,6 +579,30 @@ export function buildOccMeshFromGeometry(G, opts) {
         };
         for (const c of sigCurves) { const { len, onOutline } = curveLen(c); sizeStats.sigLen += len; if (!onOutline) sizeStats.sigLenExt += len; }
         for (const c of gndCurves) { const { len, onOutline } = curveLen(c); sizeStats.gndLen += len; if (!onOutline) sizeStats.gndLenExt += len; }
+        // Ground curves cut into pieces with their distance from the signal curves,
+        // for the graded ground term of the estimate. Distances are taken to the
+        // signal curves' bounding boxes (exact for axis-aligned sides, short for a
+        // slanted one, which over-predicts the count).
+        if (gndGradeRate > 0 && sigCurves.size > 0) {
+            const sigBoxes = [...sigCurves].map(c => readBB(1, c, 'GetBoundingBox(1) sig'));
+            const distSig = (x, y) => {
+                let d = Infinity;
+                for (const b of sigBoxes)
+                    d = Math.min(d, Math.hypot(Math.max(0, b.x0 - x, x - b.x1), Math.max(0, b.y0 - y, y - b.y1)));
+                return d;
+            };
+            sizeStats.gndGradeRate = gndGradeRate;
+            sizeStats.gndSamples = [];
+            const PIECES = 32;
+            for (const c of gndCurves) {
+                const { len, onOutline } = curveLen(c);
+                const b = readBB(1, c, 'GetBoundingBox(1) gnd');
+                for (let k = 0; k < PIECES; k++) {
+                    const u = (k + 0.5) / PIECES;
+                    sizeStats.gndSamples.push([len / PIECES, distSig(b.x0 + u * (b.x1 - b.x0), b.y0 + u * (b.y1 - b.y0)), !onOutline]);
+                }
+            }
+        }
         condRects.forEach((c, i) => {
             const thin = c.shape ? Infinity : Math.min(c.xmax - c.xmin, c.ymax - c.ymin);
             if (condRoles[i] && condRoles[i].is_signal) {
@@ -653,25 +701,49 @@ export function buildOccMeshFromGeometry(G, opts) {
         // passes sharpen it further.
         // dMin: distance from the curves over which the size stays at sMin before
         // grading up to hCoarse (the conductor fields use sMin itself).
-        const addCurveField = (curveSet, sMin, dMin = sMin) => {
+        const distFields = new Map();
+        const distanceField = (curveSet) => {
+            if (distFields.has(curveSet)) return distFields.get(curveSet);
             const fd = G._gmshModelMeshFieldAdd(_cstr(G, 'Distance'), -1, ierr); check('FieldAdd Distance');
             const cl = [...curveSet];
             const clBuf = G.stackAlloc(cl.length * 8);
             cl.forEach((v, i) => G.setValue(clBuf + i * 8, v, 'double'));
             G._gmshModelMeshFieldSetNumbers(fd, _cstr(G, 'CurvesList'), clBuf, cl.length, ierr); check('CurvesList');
             G._gmshModelMeshFieldSetNumber(fd, _cstr(G, 'Sampling'), 200, ierr);
+            distFields.set(curveSet, fd);
+            return fd;
+        };
+        const threshold = (fd, sMin, dMin, dMax) => {
             const ft = G._gmshModelMeshFieldAdd(_cstr(G, 'Threshold'), -1, ierr); check('FieldAdd Threshold');
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'InField'), fd, ierr);
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMin'), sMin * OCC_SCALE, ierr);
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'SizeMax'), hCoarse * OCC_SCALE, ierr);
             G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMin'), dMin * OCC_SCALE, ierr);
-            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), (dMin + (hCoarse - sMin) / gradeRate) * OCC_SCALE, ierr);
+            G._gmshModelMeshFieldSetNumber(ft, _cstr(G, 'DistMax'), dMax * OCC_SCALE, ierr);
             return ft;
         };
+        const addCurveField = (curveSet, sMin, dMin = sMin) =>
+            threshold(distanceField(curveSet), sMin, dMin, dMin + (hCoarse - sMin) / gradeRate);
         const fields = [];
         if (sigCurves.size > 0) fields.push(addCurveField(sigCurves, sizeMin));
         // A fully relaxed ground field would be constant hCoarse — skip it.
-        if (gndCurves.size > 0 && sizeMinGnd < hCoarse) fields.push(addCurveField(gndCurves, sizeMinGnd));
+        if (gndCurves.size > 0 && sizeMinGnd < hCoarse) {
+            let fg = addCurveField(gndCurves, sizeMinGnd);
+            // Ground surfaces far from the signals carry little charge and current and
+            // see a field that varies on the scale of that distance d, so their surface
+            // size grows as gndGradeRate * d (never below sizeMinGnd): the ground field
+            // is floored by a slow threshold on the distance from the signals. Ground
+            // corners and faces near the signals keep the full surface size.
+            if (gndGradeRate > 0 && sigCurves.size > 0) {
+                const fs = threshold(distanceField(sigCurves), sizeMinGnd, sizeMinGnd / gndGradeRate, hCoarse / gndGradeRate);
+                const fx = G._gmshModelMeshFieldAdd(_cstr(G, 'Max'), -1, ierr); check('FieldAdd Max');
+                const xb = G.stackAlloc(16);
+                G.setValue(xb, fg, 'double'); G.setValue(xb + 8, fs, 'double');
+                G._gmshModelMeshFieldSetNumbers(fx, _cstr(G, 'FieldsList'), xb, 2, ierr); check('FieldsList Max');
+                fg = fx;
+            }
+            fields.push(fg);
+        }
         // Near-field wavelength cap (main solve): the quasi-TEM eigenmode lives within a
         // few substrate heights of the signal conductors, so only that patch needs
         // wavelength resolution; the far field keeps the geometric hCoarse.
