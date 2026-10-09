@@ -1647,11 +1647,12 @@ export class TriBackend {
             const lines = [0, 1].map(a => boxes.flatMap(b => a === 0
                 ? [[b[2], b[0], b[1]], [b[3], b[0], b[1]]]
                 : [[b[0], b[2], b[3]], [b[1], b[2], b[3]]]));
-            // Gap between the nearest lines below and above [lo, hi] that span c.
-            const gapAround = (a, lo, hi, c) => {
+            // Gap between the nearest lines below and above [lo, hi] whose span overlaps
+            // [c0, c1], the triangle's extent along the line.
+            const gapAround = (a, lo, hi, c0, c1) => {
                 let below = -Infinity, above = Infinity;
                 for (const [p, s0, s1] of lines[a]) {
-                    if (c < s0 - tolL || c > s1 + tolL) continue;
+                    if (c1 < s0 - tolL || c0 > s1 + tolL) continue;
                     if (p <= lo + tolL && p > below) below = p;
                     if (p >= hi - tolL && p < above) above = p;
                 }
@@ -1669,8 +1670,8 @@ export class TriBackend {
                 if (skip[t]) continue;
                 const edge = Math.max(Math.hypot(xs[1] - xs[0], ys[1] - ys[0]), Math.hypot(xs[2] - xs[1], ys[2] - ys[1]),
                     Math.hypot(xs[0] - xs[2], ys[0] - ys[2]));
-                if (gapAround(0, Math.min(...ys), Math.max(...ys), xc) < edge
-                    || gapAround(1, Math.min(...xs), Math.max(...xs), yc) < edge) skip[t] = 1;
+                const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+                if (gapAround(0, y0, y1, x0, x1) < edge || gapAround(1, x0, x1, y0, y1) < edge) skip[t] = 1;
             }
             const mq = checkMeshQuality(mesh, { skip });
             this.meshQuality = mq.metrics;
@@ -3458,6 +3459,13 @@ export class TriBackend {
             const st = this._static[mode];
             const pot = drivePotentials(this.condRect, mode, this.symmetry);
             const phiEps = solveTriStatic(this.mesh, st.fm, epsMap, pot, this.ctx.wasmSolver);
+            // A pair whose modal split closed under eps(f) falls back from the modal
+            // drive to odd/even: its vacuum field belongs to the old drive.
+            if (st.modalVec) {
+                st.phiAir = solveTriStatic(this.mesh, st.fm, null, pot, this.ctx.wasmSolver);
+                st.C0 = st.kC * eps0 * computeTriEnergy(st.phiAir, this.mesh, null);
+                delete st.modalVec;
+            }
             const W_air = st.C0 / (st.kC * eps0);   // geometric, eps-independent
             st.phiEps = phiEps;
             st.eps_eff_static = computeTriEnergy(phiEps, this.mesh, epsMap) / W_air;

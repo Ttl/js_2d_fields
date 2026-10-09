@@ -463,10 +463,11 @@ async function main() {
         // A mode the full-wave flags 'floating-grounds' (grounds not connected, fill
         // differing between them) couples to the parallel-plate wave: a different
         // structure from the stitched-ground quasi-static line, with an eps_eff that
-        // depends on the domain width (or none at all where the mode leaks). Its Z0/C
-        // are not compared, only counted.
+        // depends on the domain width (or none at all where the mode leaks). So does an
+        // 'eigen-ambiguous' pick (the mode split across near-degenerate eigenpairs, e.g.
+        // a box mode near its cutoff). Their Z0/C are not compared, only counted.
         const nModes = Math.min(qs.modes.length, fw.modes.length);
-        const floatingMode = m => fw.warns.some(w => w.type === 'floating-grounds' && (w.mode === m || w.mode === 'all'));
+        const floatingMode = m => fw.warns.some(w => (w.type === 'floating-grounds' || w.type === 'eigen-ambiguous') && (w.mode === m || w.mode === 'all'));
         let worst = null, floating = null;
         for (let mi = 0; mi < nModes; mi++) {
             const q = qs.modes[mi], w = fw.modes[mi];
@@ -555,7 +556,7 @@ async function main() {
         `${flagged.loss.length} loss-discrepancy (${lossUnwarned} unwarned, ${lossWarned} warned) | ` +
         `${flagged.rlgc.length} G/L-discrepancy | ${flagged.badMesh.length} bad-mesh | ` +
         `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid) | ` +
-        `${flagged.floating.length} floating-grounds (Z0/C not compared, max ` +
+        `${flagged.floating.length} floating-grounds/ambiguous (Z0/C not compared, max ` +
         `${(100 * Math.max(0, ...flagged.floating.map(f => f.dMax))).toFixed(0)}%)`);
     if (lossUnwarned) {
         console.log(`unwarned loss rows (investigate, do not just raise the gate):`);

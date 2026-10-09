@@ -2011,7 +2011,7 @@ export class FieldSolver2D {
         const deltaOf = (sigma) => Math.sqrt(2 / (2 * Math.PI * this.freq * 4e-7 * Math.PI * sigma));
         // delta is the skin depth of the signal metal (transition calibration and
         // warning below), deltaCond the one of each conductor.
-        const delta = deltaOf((ownSigma || line !== null) ? sigma_sig : this.sigma_cond);
+        const delta = deltaOf(sigma_sig);
         const deltaCond = c => deltaOf(this._solid_plating(c) ? c.plating.sigma : (c.sigma > 0 ? c.sigma : this.sigma_cond));
         const slabReactanceFactor = (d, dlt = delta) => slabCoth(d / dlt).im;
         // A block stacked on another metal of the same conductor is as thick as the stack.
