@@ -41,16 +41,25 @@
 //
 // Usage:   node tests/fuzz_qs_vs_fullwave.js [N] [seed] [threshold%] [R-threshold%]
 //   e.g.   node tests/fuzz_qs_vs_fullwave.js 40 1 15 25
+// Parallel: node tests/fuzz_parallel.mjs [-j jobs] [N] [seed] [threshold%] [R-threshold%]
+//   (same cases and output, the cases spread over worker threads)
 // Reproduce a flagged case: rerun with the same N and seed (generation is deterministic;
 
 import { MicrostripSolver } from '../src/microstrip.js';
 import { BroadsideStriplineSolver } from '../src/broadside_stripline.js';
+import { CustomGeometrySolver } from '../src/custom_geometry.js';
 
-const N      = parseInt(process.argv[2]) || 40;
-const SEED   = process.argv[3] !== undefined ? parseInt(process.argv[3]) : 1;
-const THRESH = (parseFloat(process.argv[4]) || 15) / 100;
-// ONLY=4,11 solves just those case indices (the others are drawn and skipped).
-const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number)) : null;
+// Run settings from the command line [N] [seed] [threshold%] [R-threshold%], and
+// ONLY=4,11, which solves just those case indices (the others are drawn and skipped).
+export function parseArgs(args) {
+    return {
+        N: parseInt(args[0]) || 40,
+        seed: args[1] !== undefined ? parseInt(args[1]) : 1,
+        thresh: (parseFloat(args[2]) || 15) / 100,
+        rThresh: (parseFloat(args[3]) || 25) / 100,
+        only: process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number)) : null,
+    };
+}
 // Bad-mesh gate: structural errors (degenerate/NaN), systemic quality collapse (>5% of
 // triangles with Q>5 — checkMeshQuality's own warning threshold), or a single
 // extreme sliver. The singleton cap was 100 and is now 2000: coarse-budget
@@ -66,8 +75,8 @@ const BAD_Q  = 2000;
 // (360 specs, app settings): unwarned median ~6% / max 17.2%; warned max 47.8%
 // (deep-skin-transition plated stripline, QS ~2x high). New unwarned rows above
 // 25% are worth investigating, not just gate-bumping: they'd extend the known
-// bias envelope (issue-9 pour faces, strongly coupled broadside pairs).
-const R_THRESH = (parseFloat(process.argv[5]) || 25) / 100;
+// bias envelope (issue-9 pour faces, strongly coupled broadside pairs). The base
+// gate is a command-line setting (rThresh).
 const R_RELAX  = 0.60;
 // Shunt-conductance and inductance gates (see the G/L block in main).
 const G_THRESH = 0.15;
@@ -273,6 +282,220 @@ export function randomSpec(rng) {
     return spec;
 }
 
+// --- Random custom geometry (geometry text, rectangles only: both backends solve it) ---
+//
+// A stack of full-width dielectric layers with the signal (or a pair) on one of its
+// interfaces, embedded or on the surface, then:
+//   grounds    - bottom: a gnd wall, a full-width plane over an open bottom, a finite
+//                plane or none; coplanar grounds beside the signals (to the domain edge
+//                or finite, one or both sides); a ground buried at another interface;
+//                a top ground over the stack (wall, plane or finite). Finite grounds are
+//                meshed metal in the full-wave loss solve, the ones reaching the domain
+//                edges on three sides are wall grounds. Separate ground bodies float
+//                against each other in the full-wave eigenproblem.
+//   pairs      - equal or unequal widths and thicknesses, the two traces on the same
+//                interface or on different ones (laterally offset)
+//   dielectric - random rectangles painted over the stack (later ones win), some of
+//                them over the trace; in ~12% of cases one dielectric conducts
+//   metal      - stacked touching blocks for a signal (T shapes), per-conductor
+//                conductivity, roughness and plating material on any conductor
+//   bounds     - open sides, or ground side walls with an explicit domain width
+// Sizes are drawn in um, the text is written in um.
+export function randomCustomSpec(rng) {
+    const freq = rng.bool(0.3) ? rng.logf(1e6, 0.5e9) : rng.logf(0.5e9, 6e9);
+    const spec = { tl: 'custom', freq, sigma: rng.logf(5e5, 6.3e7), rq: rng.bool(0.3) ? rng.logf(0.1e-6, 3e-6) : 0,
+        thick_plating: rng.bool(0.7), use_causal: rng.bool(0.2), tags: [] };
+    const tags = spec.tags;
+    const n = v => +v.toPrecision(5);
+    const drawEr = () => (rng.bool(0.1) ? rng.f(1, 2.2) : rng.f(2.2, 10));
+    const drawTand = () => (rng.bool(0.1) ? rng.logf(0.02, 0.2) : rng.f(0.001, 0.02));
+    const drawT = () => (rng.bool(0.15) ? rng.logf(0.5, 10) : rng.logf(10, 70));
+
+    // Dielectric layers from y = 0 up, interfaces Y[0..nL].
+    const nL = 1 + Math.floor(rng.f(0, 4));
+    const H = Array.from({ length: nL }, () => rng.logf(40, 600));
+    const Y = [0];
+    for (const h of H) Y.push(Y[Y.length - 1] + h);
+    const diels = H.map((h, k) => ({ x: '-inf', w: 'inf', y: Y[k], h }));
+    // Signal interface: on top of layer ks (ks = nL is the surface).
+    const ks = 1 + Math.floor(rng.f(0, nL));
+    // A trace inside the stack must fit in the layer it grows into.
+    const fit = (k, t) => (k < nL ? Math.min(t, 0.8 * H[k]) : t);
+    // A cover layer over a surface trace.
+    if (ks === nL && rng.bool(0.3)) {
+        const h = rng.logf(30, 500);
+        diels.push({ x: '-inf', w: 'inf', y: Y[nL], h });
+        H.push(h); Y.push(Y[nL] + h);
+        tags.push('cover');
+    }
+    const nTop = Y.length - 1;
+
+    // Signals: [{ kind, x0, w, y, t }].
+    const sigs = [];
+    const w1 = rng.logf(50, 2000), t1 = fit(ks, drawT());
+    const pair = rng.bool(0.5);
+    if (!pair) sigs.push({ kind: 'sig+', x0: -w1 / 2, w: w1, y: Y[ks], t: t1, k: ks });
+    else {
+        const s = rng.logf(20, 600);
+        const w2 = rng.bool(0.6) ? w1 : w1 * rng.f(0.5, 2);
+        let k2 = ks;
+        if (nTop >= 2 && rng.bool(0.2)) {
+            // The other trace on another interface, laterally offset.
+            const ks2 = 1 + Math.floor(rng.f(0, nTop));
+            if (ks2 !== ks) k2 = ks2;
+        }
+        const t2 = fit(k2, rng.bool(0.8) ? t1 : drawT());
+        const [plus, minus] = rng.bool(0.5) ? ['sig+', 'sig-'] : ['sig-', 'sig+'];
+        if (k2 === ks) {
+            sigs.push({ kind: minus, x0: -s / 2 - w1, w: w1, y: Y[ks], t: t1, k: ks });
+            sigs.push({ kind: plus, x0: s / 2, w: w2, y: Y[ks], t: t2, k: ks });
+        } else {
+            const lo = Math.min(ks, k2), hi = Math.max(ks, k2);
+            // The lower trace must clear the upper interface.
+            const tLo = lo === ks ? t1 : t2;
+            if (Y[lo] + tLo >= Y[hi] - 5) return randomCustomSpec(rng);
+            const off = rng.f(-1, 1) * w1;
+            sigs.push({ kind: minus, x0: -w1 / 2, w: w1, y: Y[ks], t: t1, k: ks });
+            sigs.push({ kind: plus, x0: -w2 / 2 + off, w: w2, y: Y[k2], t: t2, k: k2 });
+            tags.push('stacked-pair');
+        }
+        if (w2 !== w1 || t2 !== t1 || k2 !== ks) tags.push('asym-pair');
+        else tags.push('pair');
+    }
+    const sx0 = Math.min(...sigs.map(g => g.x0)), sx1 = Math.max(...sigs.map(g => g.x0 + g.w));
+    const span = sx1 - sx0;
+    const sigK = new Set(sigs.map(g => g.k));
+
+    const conds = [];   // { kind, x, w, y, h, noPlating }
+    // Signal metal, a T-shaped stack of two touching blocks in some cases.
+    for (const g of sigs) {
+        if (g.k === ks && !tags.includes('stacked-pair') && rng.bool(0.15)) {
+            const t0 = g.t * rng.f(0.3, 0.7), wTop = g.w * rng.f(0.3, 0.9);
+            // The upper block starts at the same expression as the lower one ends, so the
+            // two touch exactly after the text rounds each number.
+            conds.push({ kind: g.kind, x: g.x0, w: g.w, y: g.y, h: t0, noPlating: true });
+            conds.push({ kind: g.kind, x: g.x0 + (g.w - wTop) / 2, w: wTop, y: `${+g.y.toPrecision(5)}+${+t0.toPrecision(5)}`,
+                h: g.t - t0, noPlating: true });
+            if (!tags.includes('blocks')) tags.push('blocks');
+        } else conds.push({ kind: g.kind, x: g.x0, w: g.w, y: g.y, h: g.t });
+    }
+
+    // Grounds.
+    const bounds = ['open', 'open', 'open', 'open'];
+    let domain = null;
+    const tg = () => rng.logf(5, 50);
+    const gnd = (x, w, y, h, tag) => { conds.push({ kind: 'gnd', x, w, y, h }); tags.push(tag); };
+    const bottom = rng.pick(['wall', 'wall', 'wall', 'plane', 'plane', 'finite', 'finite', 'none', 'none']);
+    if (bottom === 'wall') { bounds[3] = 'gnd'; tags.push('gnd:wall'); }
+    else if (bottom === 'plane') { const t = tg(); gnd('-inf', 'inf', -t, t, 'gnd:plane'); }
+    else if (bottom === 'finite') { const t = tg(), W = span * rng.f(1.2, 8); gnd(-W / 2 + (sx0 + sx1) / 2, W, -t, t, 'gnd:finite'); }
+    // Coplanar grounds at the signal interface.
+    if (rng.bool(0.3)) {
+        const t = sigs[0].t, y = Y[ks];
+        const gL = rng.logf(20, 500), gR = rng.bool(0.8) ? gL : rng.logf(20, 500);
+        const sides = rng.pick(['both', 'both', 'both', 'left', 'right']);
+        const toEdge = rng.bool(0.5);
+        const wL = rng.logf(50, 2000), wR = rng.logf(50, 2000);
+        const lo = Math.min(...sigs.filter(g => g.k === ks).map(g => g.x0));
+        const hi = Math.max(...sigs.filter(g => g.k === ks).map(g => g.x0 + g.w));
+        if (sides !== 'right') gnd(lo - gL, toEdge ? '-inf' : -wL, y, t, 'gnd:coplanar');
+        if (sides !== 'left') gnd(hi + gR, toEdge ? 'inf' : wR, y, t, 'gnd:coplanar');
+    }
+    // A ground buried at an interface without a signal (a ground plane inside the stack).
+    const free = [];
+    for (let k = 1; k < nTop; k++) if (!sigK.has(k)) free.push(k);
+    if (free.length && rng.bool(0.15)) {
+        const kb = rng.pick(free), t = tg();
+        const below = [...sigK].some(k => k > kb);
+        // Below a signal it hangs under the interface, above one it sits on it.
+        const y = below ? Y[kb] - Math.min(t, 0.5 * H[kb - 1]) : Y[kb];
+        const h = below ? Y[kb] - y : Math.min(t, 0.5 * H[kb]);
+        const clear = sigs.every(g => g.y + g.t < y - 1 || g.y > y + h + 1);
+        if (clear) {
+            if (rng.bool(0.6)) { const W = span * rng.f(1, 6); gnd(-W / 2 + (sx0 + sx1) / 2, W, y, h, 'gnd:buried'); }
+            else gnd('-inf', 'inf', y, h, 'gnd:buried');
+        }
+    }
+    // A ground over the stack when something covers the signals.
+    const topSig = Math.max(...sigs.map(g => g.y + g.t));
+    if (Y[nTop] > topSig + 1 && rng.bool(0.4)) {
+        const top = rng.pick(['wall', 'plane', 'finite']);
+        if (top === 'wall') { bounds[2] = 'gnd'; tags.push('gnd:top-wall'); }
+        else if (top === 'plane') { const t = tg(); gnd('-inf', 'inf', Y[nTop], t, 'gnd:top-plane'); }
+        else { const t = tg(), W = span * rng.f(1.2, 8); gnd(-W / 2 + (sx0 + sx1) / 2, W, Y[nTop], t, 'gnd:top-finite'); }
+    }
+    if (!conds.some(c => c.kind === 'gnd') && !bounds.includes('gnd')) { bounds[3] = 'gnd'; tags.push('gnd:wall'); }
+    // Ground side walls at an explicit domain width.
+    if (rng.bool(0.15)) {
+        bounds[0] = bounds[1] = 'gnd';
+        // The walls clear every finite conductor.
+        const cx = (sx0 + sx1) / 2;
+        let reach = span / 2;
+        for (const c of conds) {
+            if (typeof c.x !== 'string') reach = Math.max(reach, Math.abs(c.x - cx));
+            if (typeof c.x !== 'string' && typeof c.w !== 'string') reach = Math.max(reach, Math.abs(c.x + c.w - cx));
+        }
+        const half = reach + span * rng.f(0.5, 3) + 100;
+        domain = [n(cx - half), n(cx + half)];
+        tags.push('side-walls');
+    }
+
+    // Random dielectric rectangles over the stack, some of them over the trace.
+    const nR = rng.bool(0.4) ? 0 : 1 + Math.floor(rng.f(0, 3));
+    for (let r = 0; r < nR; r++) {
+        if (rng.bool(0.35)) {
+            const c = rng.logf(5, 0.5 * span + 10);
+            diels.push({ x: sx0 - c, w: span + 2 * c, y: Y[ks], h: topSig - Y[ks] + rng.logf(5, 200), extra: true });
+            tags.push('diel:over');
+        } else {
+            const w = span * rng.logf(0.2, 3), x = (sx0 + sx1) / 2 + rng.f(-1, 1) * span - w / 2;
+            const y = Y[ks] + rng.f(-1, 1) * Math.max(50, 0.5 * Y[nTop]);
+            diels.push({ x, w, y, h: rng.logf(10, 400), extra: true });
+            tags.push('diel:rect');
+        }
+    }
+    diels.forEach(d => { d.er = drawEr(); d.tand = drawTand(); });
+    // One conducting dielectric in some cases (a doped silicon substrate or layer).
+    if (rng.bool(0.12)) {
+        rng.pick(diels).sigma = rng.logf(0.01, 300);
+        tags.push('cond-diel');
+    }
+
+    // Per-conductor metal and finish. Plating only on conductors that touch no other of
+    // their kind: single-block signals, and finite grounds clear of the side walls.
+    let own = false;
+    const sideWalls = bounds[0] === 'gnd';
+    for (const c of conds) {
+        if (c.kind === 'gnd' && (sideWalls || typeof c.w === 'string')) c.noPlating = true;
+        const keys = [];
+        if (rng.bool(0.25)) keys.push(`sigma=${n(rng.logf(5e5, 6.3e7))}`);
+        if (rng.bool(0.25)) keys.push(`rq=${n(rng.logf(0.1, 3))}`);
+        if (!c.noPlating && rng.bool(0.25)) {
+            const faces = ['top', 'sides', 'bottom'].filter(() => rng.bool(0.6));
+            keys.push(`plating=${faces.length ? faces.join(',') : 'top'}`,
+                `plating_sigma=${n(rng.logf(1e6, 6e7))}`, `plating_t=${n(rng.logf(1, 8))}`);
+            if (rng.bool(0.3)) keys.push(`plating_rq=${n(rng.logf(0.1, 2))}`);
+            if (rng.bool(0.15)) keys.push(`plating_rq_iface=${n(rng.logf(0.1, 2))}`);
+            if (!tags.includes('plating')) tags.push('plating');
+        }
+        if (keys.length) own = true;
+        c.keys = keys;
+    }
+    if (own) tags.push('own-metal');
+
+    const v = x => (typeof x === 'string' ? x : String(n(x)));
+    const lines = ['units um', `bounds ${bounds.join(' ')}`];
+    if (domain) lines.push(`domain ${domain[0]} ${domain[1]} auto auto`);
+    for (const d of diels) {
+        lines.push(`diel x=${v(d.x)} w=${v(d.w)} y=${v(d.y)} h=${v(d.h)} er=${n(d.er)} tand=${n(d.tand)}` +
+            (d.sigma ? ` sigma=${n(d.sigma)}` : ''));
+    }
+    for (const c of conds) lines.push(`${c.kind} x=${v(c.x)} w=${v(c.w)} y=${v(c.y)} h=${v(c.h)}${c.keys.length ? ' ' + c.keys.join(' ') : ''}`);
+    spec.text = lines.join('\n');
+    spec.tags = [...new Set(tags)];
+    return spec;
+}
+
 // --- Build solver options for a spec on a backend (mirrors app_solver.updateGeometry) ---
 function addCommon(o, spec) {
     if (spec.use_sm) {
@@ -296,6 +519,13 @@ function addCommon(o, spec) {
 }
 
 export function buildSolver(spec, backend) {
+    if (spec.tl === 'custom') {
+        // The app's custom-geometry options (solver_factory.buildSolverFromParams).
+        const s = new CustomGeometrySolver({ text: spec.text, sigma_cond: spec.sigma, freq: spec.freq, rq: spec.rq,
+            thick_plating: spec.thick_plating, mesh_backend: backend, nx: 30, ny: 30 });
+        s.use_causal_materials = !!spec.use_causal;
+        return s;
+    }
     if (spec.tl === 'broadside_stripline') {
         const o = {
             trace_width: spec.bs_w, trace_thickness: spec.bs_t, x_offset: spec.bs_x_offset, sigma_cond: spec.bs_sigma,
@@ -379,6 +609,14 @@ async function solveOn(spec, backend) {
 
 function fmtSpec(spec) {
     const u = (x, s = 1e3, d = 3) => (x * s).toFixed(d);
+    if (spec.tl === 'custom') {
+        // The geometry text on one line (';' separates statements), pasteable into the app.
+        const f = spec.freq < 0.1e9 ? (spec.freq / 1e6).toFixed(2) + 'MHz' : (spec.freq / 1e9).toFixed(2) + 'GHz';
+        const opts = [spec.rq ? `rq=${u(spec.rq, 1e6, 2)}µm` : '', spec.thick_plating ? '' : 'thin-plating',
+            spec.use_causal ? 'causal' : ''].filter(Boolean);
+        return `custom sig=${(spec.sigma / 1e6).toFixed(1)}e6 f=${f}${opts.length ? ' ' + opts.join(' ') : ''} ` +
+            `[${spec.tags.join(',')}]\n      ${spec.text.split('\n').join('; ')}`;
+    }
     let s = spec.tl;
     if (spec.tl === 'broadside_stripline') s += ` w=${u(spec.bs_w)}mm t=${u(spec.bs_t, 1e6, 1)}µm off=${u(spec.bs_x_offset)}mm hM=${u(spec.bs_h_middle)}mm`;
     else s += ` w=${u(spec.w)}mm h=${u(spec.h)}mm t=${u(spec.t, 1e6, 1)}µm er=${spec.er.toFixed(2)}`;
@@ -404,167 +642,211 @@ function fmtSpec(spec) {
 
 const relDiff = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1e-30);
 
-async function main() {
-    console.log(`\n### Fuzz QS vs full-wave — N=${N} seed=${SEED} flag>${(THRESH * 100).toFixed(0)}% ` +
-        `R>${(R_THRESH * 100).toFixed(0)}% (warned ${(R_RELAX * 100).toFixed(0)}%) Qmax>${BAD_Q} ###`);
-    console.log(`covers: ${TL_TYPES.join(', ')} + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
-    const rng = createRng(SEED);
-    const flagged = { discrepancy: [], loss: [], rlgc: [], badMesh: [], crash: [], floating: [] };
-    let ok = 0, skipped = 0, rejected = 0;
-    const byType = {};
-    for (let i = 0; i < N; i++) {
-        const spec = randomSpec(rng);
-        if (ONLY && !ONLY.has(i)) continue;
-        byType[spec.tl] = (byType[spec.tl] || 0) + 1;
-        const qs = await solveOn(spec, 'rectilinear');
-        const fw = await solveOn(spec, 'triangular');
+export function printHeader(cfg) {
+    console.log(`\n### Fuzz QS vs full-wave — N=${cfg.N} seed=${cfg.seed} flag>${(cfg.thresh * 100).toFixed(0)}% ` +
+        `R>${(cfg.rThresh * 100).toFixed(0)}% (warned ${(R_RELAX * 100).toFixed(0)}%) Qmax>${BAD_Q} ###`);
+    console.log(`covers: ${TL_TYPES.join(', ')}, custom + solder-mask/top-diel/gnd-cut/enclosure/plating/roughness/causal; diff pairs check odd+even\n`);
+}
 
-        // Both reject → invalid random geometry (validation is backend-independent); skip.
-        if (qs.error && fw.error) { skipped++; continue; }
-        // Only one backend fails → a real backend bug — UNLESS it's the pre-mesh
-        // meshability guard cleanly refusing a geometry one backend's cost model
-        // can't afford (working as intended; the guard has its own dedicated test).
-        if (qs.error || fw.error) {
-            const err = String(qs.error || fw.error);
-            const who = qs.error ? `quasi-static threw (full-wave OK): ${qs.error}` : `full-wave threw (quasi-static OK): ${fw.error}`;
-            if (/cannot be meshed/i.test(err)) {
-                rejected++;
-                console.log(`[${i}] ○ MESHABILITY REJECTED (${qs.error ? 'quasi-static' : 'full-wave'} guard)\n      ${fmtSpec(spec)}`);
-            } else {
-                flagged.crash.push({ spec, who });
-                console.log(`[${i}] ✗ ONE-SIDED FAILURE — ${who}\n      ${fmtSpec(spec)}`);
-            }
-            continue;
-        }
+// The specs of a run, in case order: every case is drawn (so the stream does not
+// depend on ONLY), and the ones to solve are returned with their index. A second
+// stream replaces about one case in five by a custom geometry, so the native cases
+// keep the specs of the native stream at their index. FAMILY=custom or native draws
+// one family only.
+const CUSTOM_SHARE = 0.2;
+export function drawCases(cfg) {
+    const rng = createRng(cfg.seed);
+    const crng = createRng((cfg.seed ^ 0x5bd1e995) >>> 0);
+    const family = process.env.FAMILY || 'all';
+    const cases = [];
+    for (let i = 0; i < cfg.N; i++) {
+        let spec = randomSpec(rng);
+        const custom = crng.bool(CUSTOM_SHARE);
+        const cspec = randomCustomSpec(crng);
+        if (family === 'custom' || (family === 'all' && custom)) spec = cspec;
+        if (!cfg.only || cfg.only.has(i)) cases.push({ i, spec });
+    }
+    return cases;
+}
 
-        // areaRatio is deliberately NOT gated: adaptive skin-band refinement
-        // routinely produces max/min element-area ratios of 1e6-1e7 (µm-scale
-        // skin elements vs mm-scale far field) on perfectly healthy meshes —
-        // measured on cases with Qmax 3-6 and badFraction ~0 — and the direct
-        // factorization handles it; the ratio separates nothing here.
-        const badMesh = (fw.maxQ != null && fw.maxQ > BAD_Q) || fw.degenerate > 0 || fw.nan > 0
-            || fw.badFraction > 0.05;
-        if (badMesh) {
-            flagged.badMesh.push({ spec, maxQ: fw.maxQ });
-            console.log(`[${i}] ✗ BAD MESH (Qmax=${fw.maxQ?.toFixed(0)} degen=${fw.degenerate} nan=${fw.nan} ` +
-                `areaRatio=${fw.areaRatio?.toExponential(1)} ` +
-                `badFrac=${(fw.badFraction * 100).toFixed(1)}%)\n      ${fmtSpec(spec)}`);
-        }
+// Solve one case on both backends and compare. Returns a plain (cloneable) record:
+// the report lines and what was flagged, for printSummary.
+export async function evaluateCase(i, spec, cfg) {
+    const res = { i, tl: spec.tl, desc: fmtSpec(spec), lines: [], status: 'compared', ok: false,
+        badMesh: false, discrepancy: null, loss: null, rlgc: null, floating: null, crash: null };
+    const log = line => res.lines.push(line);
+    const THRESH = cfg.thresh, R_THRESH = cfg.rThresh;
+    const qs = await solveOn(spec, 'rectilinear');
+    const fw = await solveOn(spec, 'triangular');
 
-        // Flag on the field-driven quantities Z0 and C only. eps_eff is reported with
-        // DIFFERENT conventions by the two backends — the full-wave includes the
-        // conductor internal inductance (eps_eff = c²·L·C), the quasi-static reports the
-        // pure C/C0 — so it differs by the (loss-dependent) L_internal even when the
-        // electrostatic field agrees. That's the loss-modeling difference the fuzzer is
-        // meant to exclude; eps is still printed for context.
-        // Compare each matched mode pair and flag the worst. Single-ended lines have one
-        // quasi-TEM mode; differential pairs have two (odd then even), so the even mode — which
-        // the old fuzzer never checked — is now validated cross-backend alongside the odd.
-        // A mode the full-wave flags 'floating-grounds' (grounds not connected, fill
-        // differing between them) couples to the parallel-plate wave: a different
-        // structure from the stitched-ground quasi-static line, with an eps_eff that
-        // depends on the domain width (or none at all where the mode leaks). So does an
-        // 'eigen-ambiguous' pick (the mode split across near-degenerate eigenpairs, e.g.
-        // a box mode near its cutoff). Their Z0/C are not compared, only counted.
-        const nModes = Math.min(qs.modes.length, fw.modes.length);
-        const floatingMode = m => fw.warns.some(w => (w.type === 'floating-grounds' || w.type === 'eigen-ambiguous') && (w.mode === m || w.mode === 'all'));
-        let worst = null, floating = null;
-        for (let mi = 0; mi < nModes; mi++) {
-            const q = qs.modes[mi], w = fw.modes[mi];
-            const dZ = relDiff(q.Z0, w.Z0), dE = relDiff(q.eps_eff, w.eps_eff), dC = relDiff(q.C, w.C);
-            const dMax = Math.max(dZ, dC);
-            if (floatingMode(q.mode)) {
-                if (!floating || dMax > floating.dMax) floating = { mode: q.mode, dMax };
-                continue;
-            }
-            if (!worst || dMax > worst.dMax) worst = { mode: q.mode, dZ, dE, dC, dMax, q, w };
+    // Both reject → invalid random geometry (validation is backend-independent); skip.
+    if (qs.error && fw.error) { res.status = 'skipped'; return res; }
+    // Only one backend fails → a real backend bug — UNLESS it's the pre-mesh
+    // meshability guard cleanly refusing a geometry one backend's cost model
+    // can't afford (working as intended; the guard has its own dedicated test).
+    if (qs.error || fw.error) {
+        const err = String(qs.error || fw.error);
+        const who = qs.error ? `quasi-static threw (full-wave OK): ${qs.error}` : `full-wave threw (quasi-static OK): ${fw.error}`;
+        if (/cannot be meshed/i.test(err)) {
+            res.status = 'rejected';
+            log(`[${i}] ○ MESHABILITY REJECTED (${qs.error ? 'quasi-static' : 'full-wave'} guard)\n      ${fmtSpec(spec)}`);
+        } else {
+            res.status = 'crash'; res.crash = who;
+            log(`[${i}] ✗ ONE-SIDED FAILURE — ${who}\n      ${fmtSpec(spec)}`);
         }
-        if (floating) flagged.floating.push({ i, spec, ...floating });
-        // Conductor-loss gate (R per mode). Relaxed when either backend flagged
-        // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
-        // 'narrow-gap', or any tri mqs-* warning — the backend downgrading
-        // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
-        // band). Certificate warnings describe C, not R, and do NOT relax the gate.
-        const lossRelaxed =
-            qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'narrow-gap'
-                || w.reason === 'plating-transition')
-            || fw.warns.some(w => /^mqs-/.test(w.type) || w.reason === 'plating-transition');
-        // Shunt conductance and total inductance, each at its own gate. G follows the
-        // same static loss weighting on both backends, so it tracks C up to the mesh
-        // (and the lossless-air-void class Q1 that C cannot see). L carries the
-        // backends' different internal-inductance models on top of the shared vacuum
-        // C0, a few percent of L at these frequencies. Under a loss-accuracy note the
-        // L gate relaxes like the R gate: with the skin depth at or beyond the conductor
-        // thickness the quasi-static surface-field L_internal has no lateral current
-        // spreading and reads 10-30% of L away from the MQS volume solve, so only gross
-        // errors are detectable there.
-        const lGate = lossRelaxed ? L_RELAX : L_THRESH;
-        let worstGL = null;
-        for (let mi = 0; mi < nModes; mi++) {
-            const q = qs.modes[mi], w = fw.modes[mi];
-            const dG = (q.G > 0 && w.G > 0) ? relDiff(q.G, w.G) : 0;
-            const dL = relDiff(q.L, w.L);
-            const over = Math.max(dG / G_THRESH, dL / lGate);
-            if (!worstGL || over > worstGL.over) worstGL = { mode: q.mode, dG, dL, over, q, w };
-        }
-        if (worstGL && worstGL.over > 1) {
-            flagged.rlgc.push({ i, spec, mode: worstGL.mode, dG: worstGL.dG, dL: worstGL.dL });
-            const tag = nModes > 1 ? ` [${worstGL.mode}]` : '';
-            console.log(`[${i}] ✗ G/L DISCREPANCY${tag} (G ${(worstGL.dG * 100).toFixed(0)}% L ${(worstGL.dL * 100).toFixed(0)}%)` +
-                `${lossRelaxed ? ' (relaxed L gate)' : ''}\n` +
-                `      ${fmtSpec(spec)}\n` +
-                `      qs: G=${worstGL.q.G.toExponential(3)} L=${(worstGL.q.L * 1e9).toFixed(2)}nH | ` +
-                `fw: G=${worstGL.w.G.toExponential(3)} L=${(worstGL.w.L * 1e9).toFixed(2)}nH`);
-        }
-        if (worst && worst.dMax > THRESH) {
-            flagged.discrepancy.push({ i, spec, mode: worst.mode, dZ: worst.dZ, dE: worst.dE, dC: worst.dC });
-            const tag = nModes > 1 ? ` [${worst.mode}]` : '';
-            console.log(`[${i}] ✗ DISCREPANCY ${(worst.dMax * 100).toFixed(0)}%${tag} (Z0 ${(worst.dZ * 100).toFixed(0)}% eps ${(worst.dE * 100).toFixed(0)}% C ${(worst.dC * 100).toFixed(0)}%)\n` +
-                `      ${fmtSpec(spec)}\n` +
-                `      qs: Z0=${worst.q.Z0.toFixed(2)} eps=${worst.q.eps_eff.toFixed(3)} C=${(worst.q.C * 1e12).toFixed(1)}pF | ` +
-                `fw: Z0=${worst.w.Z0.toFixed(2)} eps=${worst.w.eps_eff.toFixed(3)} C=${(worst.w.C * 1e12).toFixed(1)}pF`);
-        }
-
-        const rGate = lossRelaxed ? R_RELAX : R_THRESH;
-        let worstR = null;
-        for (let mi = 0; mi < nModes; mi++) {
-            const q = qs.modes[mi], w = fw.modes[mi];
-            if (!(q.R > 0) || !(w.R > 0)) continue;
-            const dR = relDiff(q.R, w.R);
-            if (!worstR || dR > worstR.dR) worstR = { mode: q.mode, dR, q, w };
-        }
-        if (worstR && worstR.dR > rGate) {
-            flagged.loss.push({ i, spec, mode: worstR.mode, dR: worstR.dR, relaxed: lossRelaxed });
-            const tag = nModes > 1 ? ` [${worstR.mode}]` : '';
-            console.log(`[${i}] ✗ LOSS DISCREPANCY ${(worstR.dR * 100).toFixed(0)}%${tag}` +
-                `${lossRelaxed ? ' (relaxed gate)' : ''}\n` +
-                `      ${fmtSpec(spec)}\n` +
-                `      R qs=${worstR.q.R.toFixed(2)} vs fw=${worstR.w.R.toFixed(2)} Ω/m`);
-        }
-        if (!badMesh && (!worst || worst.dMax <= THRESH) && (!worstR || worstR.dR <= rGate)
-            && (!worstGL || worstGL.over <= 1)) ok++;
+        return res;
     }
 
+    // areaRatio is deliberately NOT gated: adaptive skin-band refinement
+    // routinely produces max/min element-area ratios of 1e6-1e7 (µm-scale
+    // skin elements vs mm-scale far field) on perfectly healthy meshes —
+    // measured on cases with Qmax 3-6 and badFraction ~0 — and the direct
+    // factorization handles it; the ratio separates nothing here.
+    const badMesh = (fw.maxQ != null && fw.maxQ > BAD_Q) || fw.degenerate > 0 || fw.nan > 0
+        || fw.badFraction > 0.05;
+    if (badMesh) {
+        res.badMesh = true;
+        log(`[${i}] ✗ BAD MESH (Qmax=${fw.maxQ?.toFixed(0)} degen=${fw.degenerate} nan=${fw.nan} ` +
+            `areaRatio=${fw.areaRatio?.toExponential(1)} ` +
+            `badFrac=${(fw.badFraction * 100).toFixed(1)}%)\n      ${fmtSpec(spec)}`);
+    }
+
+    // Flag on the field-driven quantities Z0 and C only. eps_eff is reported with
+    // DIFFERENT conventions by the two backends — the full-wave includes the
+    // conductor internal inductance (eps_eff = c²·L·C), the quasi-static reports the
+    // pure C/C0 — so it differs by the (loss-dependent) L_internal even when the
+    // electrostatic field agrees. That's the loss-modeling difference the fuzzer is
+    // meant to exclude; eps is still printed for context.
+    // Compare each matched mode pair and flag the worst. Single-ended lines have one
+    // quasi-TEM mode; differential pairs have two (odd then even), so the even mode — which
+    // the old fuzzer never checked — is now validated cross-backend alongside the odd.
+    // A mode the full-wave flags 'floating-grounds' (grounds not connected, fill
+    // differing between them) couples to the parallel-plate wave: a different
+    // structure from the stitched-ground quasi-static line, with an eps_eff that
+    // depends on the domain width (or none at all where the mode leaks). So does an
+    // 'eigen-ambiguous' pick (the mode split across near-degenerate eigenpairs, e.g.
+    // a box mode near its cutoff). Their Z0/C are not compared, only counted.
+    const nModes = Math.min(qs.modes.length, fw.modes.length);
+    const floatingMode = m => fw.warns.some(w => (w.type === 'floating-grounds' || w.type === 'eigen-ambiguous') && (w.mode === m || w.mode === 'all'));
+    let worst = null, floating = null;
+    for (let mi = 0; mi < nModes; mi++) {
+        const q = qs.modes[mi], w = fw.modes[mi];
+        const dZ = relDiff(q.Z0, w.Z0), dE = relDiff(q.eps_eff, w.eps_eff), dC = relDiff(q.C, w.C);
+        const dMax = Math.max(dZ, dC);
+        if (floatingMode(q.mode)) {
+            if (!floating || dMax > floating.dMax) floating = { mode: q.mode, dMax };
+            continue;
+        }
+        if (!worst || dMax > worst.dMax) worst = { mode: q.mode, dZ, dE, dC, dMax, q, w };
+    }
+    res.floating = floating;
+    // Conductor-loss gate (R per mode). Relaxed when either backend flagged
+    // reduced loss accuracy for this solve: QS reasons 'skin-transition' /
+    // 'narrow-gap', or any tri mqs-* warning — the backend downgrading
+    // MQS to perturbation, or 'mqs-band-capped' (MQS on an under-resolved skin
+    // band). Certificate warnings describe C, not R, and do NOT relax the gate.
+    const lossRelaxed =
+        qs.warns.some(w => w.reason === 'skin-transition' || w.reason === 'narrow-gap'
+            || w.reason === 'plating-transition')
+        || fw.warns.some(w => /^mqs-/.test(w.type) || w.reason === 'plating-transition');
+    // Shunt conductance and total inductance, each at its own gate. G follows the
+    // same static loss weighting on both backends, so it tracks C up to the mesh
+    // (and the lossless-air-void class Q1 that C cannot see). L carries the
+    // backends' different internal-inductance models on top of the shared vacuum
+    // C0, a few percent of L at these frequencies. Under a loss-accuracy note the
+    // L gate relaxes like the R gate: with the skin depth at or beyond the conductor
+    // thickness the quasi-static surface-field L_internal has no lateral current
+    // spreading and reads 10-30% of L away from the MQS volume solve, so only gross
+    // errors are detectable there.
+    const lGate = lossRelaxed ? L_RELAX : L_THRESH;
+    let worstGL = null;
+    for (let mi = 0; mi < nModes; mi++) {
+        const q = qs.modes[mi], w = fw.modes[mi];
+        const dG = (q.G > 0 && w.G > 0) ? relDiff(q.G, w.G) : 0;
+        const dL = relDiff(q.L, w.L);
+        const over = Math.max(dG / G_THRESH, dL / lGate);
+        if (!worstGL || over > worstGL.over) worstGL = { mode: q.mode, dG, dL, over, q, w };
+    }
+    if (worstGL && worstGL.over > 1) {
+        res.rlgc = { mode: worstGL.mode, dG: worstGL.dG, dL: worstGL.dL };
+        const tag = nModes > 1 ? ` [${worstGL.mode}]` : '';
+        log(`[${i}] ✗ G/L DISCREPANCY${tag} (G ${(worstGL.dG * 100).toFixed(0)}% L ${(worstGL.dL * 100).toFixed(0)}%)` +
+            `${lossRelaxed ? ' (relaxed L gate)' : ''}\n` +
+            `      ${fmtSpec(spec)}\n` +
+            `      qs: G=${worstGL.q.G.toExponential(3)} L=${(worstGL.q.L * 1e9).toFixed(2)}nH | ` +
+            `fw: G=${worstGL.w.G.toExponential(3)} L=${(worstGL.w.L * 1e9).toFixed(2)}nH`);
+    }
+    if (worst && worst.dMax > THRESH) {
+        res.discrepancy = { mode: worst.mode, dZ: worst.dZ, dE: worst.dE, dC: worst.dC };
+        const tag = nModes > 1 ? ` [${worst.mode}]` : '';
+        log(`[${i}] ✗ DISCREPANCY ${(worst.dMax * 100).toFixed(0)}%${tag} (Z0 ${(worst.dZ * 100).toFixed(0)}% eps ${(worst.dE * 100).toFixed(0)}% C ${(worst.dC * 100).toFixed(0)}%)\n` +
+            `      ${fmtSpec(spec)}\n` +
+            `      qs: Z0=${worst.q.Z0.toFixed(2)} eps=${worst.q.eps_eff.toFixed(3)} C=${(worst.q.C * 1e12).toFixed(1)}pF | ` +
+            `fw: Z0=${worst.w.Z0.toFixed(2)} eps=${worst.w.eps_eff.toFixed(3)} C=${(worst.w.C * 1e12).toFixed(1)}pF`);
+    }
+
+    const rGate = lossRelaxed ? R_RELAX : R_THRESH;
+    let worstR = null;
+    for (let mi = 0; mi < nModes; mi++) {
+        const q = qs.modes[mi], w = fw.modes[mi];
+        if (!(q.R > 0) || !(w.R > 0)) continue;
+        const dR = relDiff(q.R, w.R);
+        if (!worstR || dR > worstR.dR) worstR = { mode: q.mode, dR, q, w };
+    }
+    if (worstR && worstR.dR > rGate) {
+        res.loss = { mode: worstR.mode, dR: worstR.dR, relaxed: lossRelaxed };
+        const tag = nModes > 1 ? ` [${worstR.mode}]` : '';
+        log(`[${i}] ✗ LOSS DISCREPANCY ${(worstR.dR * 100).toFixed(0)}%${tag}` +
+            `${lossRelaxed ? ' (relaxed gate)' : ''}\n` +
+            `      ${fmtSpec(spec)}\n` +
+            `      R qs=${worstR.q.R.toFixed(2)} vs fw=${worstR.w.R.toFixed(2)} Ω/m`);
+    }
+    res.ok = !badMesh && (!worst || worst.dMax <= THRESH) && (!worstR || worstR.dR <= rGate)
+        && (!worstGL || worstGL.over <= 1);
+    return res;
+}
+
+// Summary of a run from the evaluateCase records (any order). Sets the exit code
+// when anything was flagged.
+export function printSummary(results, cfg) {
+    const sorted = [...results].sort((a, b) => a.i - b.i);
+    const byType = {};
+    for (const r of sorted) byType[r.tl] = (byType[r.tl] || 0) + 1;
+    const pick = k => sorted.filter(r => r[k]);
+    const count = st => sorted.filter(r => r.status === st).length;
+    const ok = sorted.filter(r => r.ok).length;
+    const loss = pick('loss'), floating = pick('floating');
     console.log(`\n${'='.repeat(72)}`);
     console.log(`coverage: ${Object.entries(byType).map(([k, v]) => `${k}:${v}`).join('  ')}`);
     // Split the loss failures by gate: an UNWARNED one is the interesting kind — it
     // extends the known bias envelope rather than re-confirming a regime both backends
-    // already flag as approximate (see the R_THRESH note above).
-    const lossUnwarned = flagged.loss.filter(f => !f.relaxed).length;
-    const lossWarned = flagged.loss.length - lossUnwarned;
-    console.log(`SUMMARY: ${ok}/${N} clean | ${flagged.discrepancy.length} discrepancy | ` +
-        `${flagged.loss.length} loss-discrepancy (${lossUnwarned} unwarned, ${lossWarned} warned) | ` +
-        `${flagged.rlgc.length} G/L-discrepancy | ${flagged.badMesh.length} bad-mesh | ` +
-        `${flagged.crash.length} one-sided-fail | ${rejected} meshability-rejected | ${skipped} skipped(invalid) | ` +
-        `${flagged.floating.length} floating-grounds/ambiguous (Z0/C not compared, max ` +
-        `${(100 * Math.max(0, ...flagged.floating.map(f => f.dMax))).toFixed(0)}%)`);
-    if (lossUnwarned) {
+    // already flag as approximate (see the R gate note above).
+    const unwarned = loss.filter(r => !r.loss.relaxed);
+    console.log(`SUMMARY: ${ok}/${cfg.N} clean | ${pick('discrepancy').length} discrepancy | ` +
+        `${loss.length} loss-discrepancy (${unwarned.length} unwarned, ${loss.length - unwarned.length} warned) | ` +
+        `${pick('rlgc').length} G/L-discrepancy | ${pick('badMesh').length} bad-mesh | ` +
+        `${count('crash')} one-sided-fail | ${count('rejected')} meshability-rejected | ${count('skipped')} skipped(invalid) | ` +
+        `${floating.length} floating-grounds/ambiguous (Z0/C not compared, max ` +
+        `${(100 * Math.max(0, ...floating.map(r => r.floating.dMax))).toFixed(0)}%)`);
+    if (unwarned.length) {
         console.log(`unwarned loss rows (investigate, do not just raise the gate):`);
-        for (const f of flagged.loss.filter(x => !x.relaxed))
-            console.log(`  [${f.i}] ${(100 * f.dR).toFixed(0)}%${f.mode ? ` [${f.mode}]` : ''}  ${fmtSpec(f.spec)}`);
+        for (const r of unwarned)
+            console.log(`  [${r.i}] ${(100 * r.loss.dR).toFixed(0)}%${r.loss.mode ? ` [${r.loss.mode}]` : ''}  ${r.desc}`);
     }
     console.log(`${'='.repeat(72)}`);
-    if (flagged.discrepancy.length || flagged.loss.length || flagged.rlgc.length || flagged.badMesh.length || flagged.crash.length) process.exitCode = 1;
+    if (sorted.some(r => r.discrepancy || r.loss || r.rlgc || r.badMesh || r.crash)) process.exitCode = 1;
+}
+
+async function main() {
+    const cfg = parseArgs(process.argv.slice(2));
+    printHeader(cfg);
+    const results = [];
+    for (const { i, spec } of drawCases(cfg)) {
+        const r = await evaluateCase(i, spec, cfg);
+        for (const line of r.lines) console.log(line);
+        results.push(r);
+    }
+    printSummary(results, cfg);
 }
 
 import { pathToFileURL } from 'url';
