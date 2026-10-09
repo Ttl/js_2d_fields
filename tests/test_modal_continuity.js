@@ -13,6 +13,11 @@
 //      the eigenvectors are arbitrary, so the modal path must fall back to the
 //      odd/even decomposition. A missing guard once produced >100% Z0 errors.
 //
+//   3. NO SPURIOUS CUT — a nearly homogeneous stackup (core 3.8, prepreg 3.9-4.3) keeps the
+//      genuine eigenmodes: they are mesh-independent down to tiny separations, and a
+//      degeneracy cut above the numerical floor (once 2%) switched the reported modes
+//      between two bases as the prepreg permittivity crossed it, a ~1.5% Z0 step.
+//
 // Also checks that the two backends agree on a strongly-asymmetric case.
 //
 // Backend: `MESH_BACKEND=triangular node tests/test_modal_continuity.js`; default rectilinear.
@@ -147,6 +152,23 @@ async function test_degenerate_falls_back() {
     }
 }
 
+// NO SPURIOUS CUT: prepreg 4.1 / 4.2 / 4.3 between 3.8 cores (eigenvalue separation
+// ~1.7 / 2.2 / 2.7%) with unequal core heights. Each mode's Z0 is smooth in the prepreg
+// permittivity, so the middle point lies within 0.2% of the mean of its neighbours.
+async function test_near_degenerate_smooth() {
+    const geom = er => ({ er_bottom: 3.8, er_middle: er, er_top: 3.8,
+        h_bottom: 0.15e-3, h_middle: 0.2e-3, h_top: 0.25e-3, x_offset: 0 });
+    const r = [];
+    for (const er of [4.1, 4.2, 4.3]) r.push(await solveModes(makeSolver(3.8, MESH_BACKEND, geom(er)), undefined));
+    for (let k = 0; k < 2; k++) {
+        const mid = 0.5 * (r[0].Z0[k] + r[2].Z0[k]);
+        assert(relDiff(r[1].Z0[k], mid) < 0.002,
+            `near-degenerate mode ${k}: Z0 ${r.map(x => x.Z0[k].toFixed(3)).join(' / ')} is not smooth ` +
+            `across prepreg 4.1 / 4.2 / 4.3 (middle off the neighbour mean by ` +
+            `${(100 * relDiff(r[1].Z0[k], mid)).toFixed(2)}%)`);
+    }
+}
+
 // BACKEND CONSISTENCY: a strongly-asymmetric inhomogeneous pair must give the same modes on both
 // backends (independent implementations of the same modal decomposition).
 async function test_backend_consistency() {
@@ -166,6 +188,7 @@ async function runTests() {
         test_continuity_small_asymmetry,
         test_smooth_divergence,
         test_degenerate_falls_back,
+        test_near_degenerate_smooth,
         test_backend_consistency,
     ];
     console.log(`\n### Modal continuity tests (mesh_backend = "${MESH_BACKEND}") ###`);

@@ -234,11 +234,16 @@ function signalsMirrorOpposite(conductors, tol) {
 //      fine … ≈1.3e-3 coarse; a 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2;
 //      5e-3 separates the two). The odd/even decomposition is exact: no physMatrix.
 //   2. DEGENERATE — asymmetric but velocity-degenerate modes (homogeneous dielectric,
-//      relative eigenvalue separation < 2%): the eigenvectors of [C0]⁻¹[C] are
-//      arbitrary, so no per-mode rebuild is possible (modalVecs null, physMatrix
-//      without Tv). The asymmetric [C]/[L] still drive the MTL 4-port S-matrix; the
-//      caller keeps its odd/even per-mode results (loss [R]/[G] use the symmetric
-//      reconstruction).
+//      relative eigenvalue separation below DEGENERATE_SEP): the eigenvectors of
+//      [C0]⁻¹[C] are arbitrary, so no per-mode rebuild is possible (modalVecs null,
+//      physMatrix without Tv). The asymmetric [C]/[L] still drive the MTL 4-port
+//      S-matrix; the caller keeps its odd/even per-mode results (loss [R]/[G] use the
+//      symmetric reconstruction). A homogeneous fill gives a separation of exactly 0
+//      (C and C0 come from the same mesh), while any inhomogeneity gives eigenvectors
+//      that are mesh-independent down to separations of 1e-5 and tend to a fixed basis
+//      as the separation shrinks. So only the numerical floor counts as degenerate: a
+//      larger cut would switch the reported modes between two different bases as the
+//      separation crosses it (a causal sweep, a small permittivity change).
 //   3. MODAL — non-degenerate asymmetric pair: physMatrix {C, L, Tv} plus
 //      modalVecs = [v_odd, v_even], ordered by differential character
 //      ((v0·v1)/|v|² — opposite-sign components → odd), for the caller to rebuild
@@ -250,6 +255,8 @@ function signalsMirrorOpposite(conductors, tol) {
 // Returns { physMatrix, modalVecs }:
 //   physMatrix — null (symmetric) or {C, L: (1/c²)[C0]⁻¹, Tv?: [v_odd, v_even]}
 //   modalVecs  — null (symmetric or degenerate) or [v_odd, v_even]
+const DEGENERATE_SEP = 1e-6;
+
 export function classifyModalDecomposition(C, C0, conductors, dielectrics) {
     const { vals, vecs } = eig2x2(mat2Mul(mat2Inv(C0), C));
     const sep = Math.abs(vals[0] - vals[1]) / (Math.abs(vals[0]) + Math.abs(vals[1]) + 1e-30);
@@ -263,7 +270,7 @@ export function classifyModalDecomposition(C, C0, conductors, dielectrics) {
     const kL = 1 / (C_LIGHT * C_LIGHT);
     const C0inv = mat2Inv(C0);
     const physMatrix = { C, L: [[C0inv[0][0] * kL, C0inv[0][1] * kL], [C0inv[1][0] * kL, C0inv[1][1] * kL]] };
-    if (force !== 'on' && sep < 0.02) return { physMatrix, modalVecs: null };
+    if (force !== 'on' && sep < DEGENERATE_SEP) return { physMatrix, modalVecs: null };
     const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
     const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
     const modalVecs = [vecs[order[0]], vecs[order[1]]];
