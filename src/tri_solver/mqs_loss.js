@@ -74,9 +74,10 @@ const P2_AT_Q = (() => {
 //
 // `grading` (optional) relaxes the target size with distance from the signal
 // conductors: target(x,y) = max(targetH, slope*(d_sig - Dfine)) where d_sig is
-// the distance to the nearest rect in grading.sigRects. Used for the ground-rect
-// band (GCPW coplanar grounds, via slabs): their surface current decays away
-// from the slot, so full δ-resolution is only needed within ~Dfine of the signal
+// the distance to the nearest rect in grading.sigRects and Dfine = grading.Dfine(rect) of
+// the band rect nearest to (x, y). Used for the ground-rect band (GCPW coplanar grounds,
+// via slabs, planes): their surface current decays away from the signal, so full
+// δ-resolution is only needed within ~Dfine of the signal
 // and the band cost stays independent of how far the ground pour extends.
 // Refinement stops naturally once the graded target exceeds the base mesh size.
 //
@@ -102,6 +103,8 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
     const rects = (condRect.rects || [condRect]).map(r =>
         symX !== null && !r.shape && Math.abs(r.xmin - symX) < 1e-12 ? { ...r, xmin: 2 * symX - r.xmax } : r);
     const bw = band * delta;
+    // Fine-zone radius of each rect (grading.Dfine(rect), on the unmirrored rect).
+    const rectDfine = grading ? (condRect.rects || [condRect]).map(r => grading.Dfine(r)) : null;
     // A ground ring around every signal conductor is a shield: its current runs on the
     // hole side, and its outer surface needs no band.
     const shields = new Set(grading ? rects.filter(r => r.shape && r.shape.type === 'ring'
@@ -116,7 +119,8 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
         if (outside > 0) return outside;
         return -Math.min(x - r.xmin, r.xmax - x, y - r.ymin, r.ymax - y);
     }
-    // Graded target size at a point: outside distance to the nearest signal rect.
+    // Graded target size at a point: outside distance to the nearest signal rect,
+    // past the fine zone of the nearest band rect.
     function targetAt(x, y) {
         if (!grading) return targetH;
         let d = Infinity;
@@ -126,7 +130,12 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
             const dy = Math.max(r.ymin - y, 0, y - r.ymax);
             d = Math.min(d, Math.hypot(dx, dy));
         }
-        return Math.max(targetH, grading.slope * (d - grading.Dfine));
+        let dFine = 0, dNear = Infinity;
+        rects.forEach((r, i) => {
+            const dr = Math.abs(distToRectBoundary(r, x, y));
+            if (dr < dNear) { dNear = dr; dFine = rectDfine[i]; }
+        });
+        return Math.max(targetH, grading.slope * (d - dFine));
     }
     // Depth grading (across the band, not along the surface). The eddy current
     // decays as exp(-d/δ), so the outer part of the

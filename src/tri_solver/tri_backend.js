@@ -3077,19 +3077,25 @@ export class TriBackend {
             crM.rects.forEach((r, i) => (crM.rectRoles[i].is_signal ? sigRects : gndRects).push(r));
             let gndGrading = null;
             if (gndRects.length) {
-                // Dfine keys off the signal-ground clearance (the GCPW slot width):
-                // points on the ground's inner edge sit exactly gapMin from the
-                // signal, so Dfine = 1.5*gapMin keeps ~half a slot-width of the
-                // ground at full resolution beyond its inner edge.
-                let gapMin = Infinity;
-                for (const gr of gndRects) for (const sr of sigRects) {
-                    const dx = Math.max(0, Math.max(gr.xmin, sr.xmin) - Math.min(gr.xmax, sr.xmax));
-                    const dy = Math.max(0, Math.max(gr.ymin, sr.ymin) - Math.min(gr.ymax, sr.ymax));
-                    gapMin = Math.min(gapMin, (gr.shape || sr.shape) ? bodyDistance(gr, sr) : Math.hypot(dx, dy));
+                // Dfine keys off each ground's own clearance to the signal (the GCPW
+                // slot width, the substrate height of a plane): points on the ground's
+                // nearest face sit exactly that gap from the signal, so Dfine = 1.5*gap
+                // keeps ~half a gap of the ground at full resolution beyond it. One
+                // clearance for all grounds would grade a plane under a coplanar line
+                // from the slot width, coarse where its return current peaks.
+                const gapOf = new Map();
+                for (const gr of gndRects) {
+                    let gap = Infinity;
+                    for (const sr of sigRects) {
+                        const dx = Math.max(0, Math.max(gr.xmin, sr.xmin) - Math.min(gr.xmax, sr.xmax));
+                        const dy = Math.max(0, Math.max(gr.ymin, sr.ymin) - Math.min(gr.ymax, sr.ymax));
+                        gap = Math.min(gap, (gr.shape || sr.shape) ? bodyDistance(gr, sr) : Math.hypot(dx, dy));
+                    }
+                    gapOf.set(gr, isFinite(gap) ? gap : 0);
                 }
-                if (!isFinite(gapMin)) gapMin = 0;
+                const fine = this.opts.mqsGndFine ?? 1.5;
                 gndGrading = { sigRects,
-                    Dfine: (this.opts.mqsGndFine ?? 1.5) * gapMin,
+                    Dfine: r => fine * (gapOf.get(r) ?? 0),
                     slope: this.opts.mqsGndSlope ?? 0.5 };
             }
             // A shield ring (around every signal) carries the whole return current and
@@ -3265,7 +3271,7 @@ export class TriBackend {
                     // fine zone the drawn skin layer follows the coarse elements and
                     // changes shape from one frequency to the next, so the plot widens it.
                     const plotGrading = gndGrading && { ...gndGrading,
-                        Dfine: gndGrading.Dfine * (this.opts.mqsPlotGndFine ?? 4) };
+                        Dfine: r => gndGrading.Dfine(r) * (this.opts.mqsPlotGndFine ?? 4) };
                     const gndCap = pm.nTris + gndBudget;
                     for (const { k, rects } of gndBands) {
                         pm = refineSkinBand(pm, { rects, symX }, k * mqsDelta, bandPasses, plotBand,

@@ -7,6 +7,9 @@
 //   - the coax as n-gons at 40 GHz: the isotropic band runs into its triangle budget
 //     there (0.33 um skin depth on 12 mm of perimeter), the anisotropic one resolves it
 //     and R matches the closed form
+//   - a ground plane under a line with a closer coplanar ground gets its band graded
+//     from its own clearance (one clearance for all grounds, the slot's, left the plane
+//     under the trace coarse and R 15-35 % low, fuzzer seed 6646 case 812)
 //   - a corner rounded far below the skin depth is still a corner (the 10 nm radius
 //     against the sharp trace is pinned in test_custom_geometry_shapes.js)
 //
@@ -78,6 +81,20 @@ gnd   ngon  x=0  y=0  r=r3  r_in=r2  n=128`;
     const Rx = Rs / (2 * Math.PI) * (1 / a + 1 / b);
     check('coax 40 GHz: R = closed form', rel(an.R, Rx) < 3e-3, `${an.R.toFixed(3)} vs ${Rx.toFixed(3)} ohm/m`);
     check('coax 40 GHz: no degenerate triangles', minShape(an.mesh) > 1e-6, minShape(an.mesh).toExponential(2));
+}
+
+// --- ground plane under a line with a closer coplanar ground ---
+{
+    const text = `units um
+bounds open open open open
+diel x=-inf w=inf y=0 h=189.52 er=2.8724 tand=0.02
+sig+ x=-480 w=960 y=189.52 h=34.836
+gnd x=-inf w=inf y=-28.832 h=28.832
+gnd x=565 w=inf y=189.52 h=34.836`;
+    const ref = await solveAt(text, 3.55e9, { mqsGndFine: 10 });
+    const an = await solveAt(text, 3.55e9);
+    check('plane + one-sided coplanar ground 3.55 GHz: R = fully resolved ground band',
+        rel(an.R, ref.R) < 1e-2, `${an.R.toFixed(3)} vs ${ref.R.toFixed(3)} ohm/m`);
 }
 
 done();
