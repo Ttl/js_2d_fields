@@ -30,6 +30,24 @@ function platedEdgeLines(shape, plating, line) {
     return out;
 }
 
+// Offset (mm) from the solver's x to the drawn x. A custom geometry is solved with its
+// domain centred on x=0 and drawn at the coordinates it was written in.
+const plotShiftMM = solver => ((solver && solver.x_shift) || 0) * 1000;
+
+// Moves traces, shapes (rect, line and M/L paths) and a view { xRange } built in the
+// solver's x by dx mm, in place.
+function shiftPlotX(dx, traces = [], shapes = [], view = null) {
+    if (!dx) return;
+    const add = v => (v == null ? v : v + dx);
+    for (const t of traces) if (t.x) t.x = Array.from(t.x, add);
+    for (const s of shapes) {
+        if (s.xref === 'paper') continue;
+        if (s.type === 'path') s.path = s.path.replace(/([ML])\s*([-+\d.eE]+)/g, (_, c, x) => `${c}${(+x + dx).toFixed(9)}`);
+        else { s.x0 += dx; s.x1 += dx; }
+    }
+    if (view && view.xRange) view.xRange = view.xRange.map(add);
+}
+
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
 
@@ -913,12 +931,18 @@ function updateTriImage(container, get) {
         const fl = container._fullLayout;
         if (!blocks || !blocks.length || !fl || !fl.xaxis || !fl._size) return;
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
-        const xr = fl.xaxis.range.slice().sort((a, b) => a - b), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
-        const im = rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
-            zmin, zmax, db, bleed, true);
-        const key = { values: blocks.map(b => b.Jv || b.Z), zmin, zmax, db, bleed };
+        // The blocks are in the solver's x, the axes in the drawn x (shiftPlotX).
+        const dx = container._plotShift || 0;
+        const toPlot = im => {
+            if (im && dx) { im.x += dx; if (im.hover) im.hover.x = im.hover.x.map(v => v + dx); }
+            return im;
+        };
+        const xr = fl.xaxis.range.slice().sort((a, b) => a - b).map(v => v - dx), yr = fl.yaxis.range.slice().sort((a, b) => a - b);
+        const im = toPlot(rasterizeDensity(blocks, xr, yr, Math.round(fl._size.w * ratio), Math.round(fl._size.h * ratio),
+            zmin, zmax, db, bleed, true));
+        const key = { values: blocks.map(b => b.Jv || b.Z), zmin, zmax, db, bleed, dx };
         const bd = container._triBackdrop;
-        const fresh = bd && bd.key.zmin === zmin && bd.key.zmax === zmax && bd.key.db === db && bd.key.bleed === bleed
+        const fresh = bd && bd.key.dx === dx && bd.key.zmin === zmin && bd.key.zmax === zmax && bd.key.db === db && bd.key.bleed === bleed
             && bd.key.values.length === key.values.length && bd.key.values.every((v, i) => v === key.values[i]);
         setTriImages(container, fresh ? bd.im : null, im);
         if (fresh) return;
@@ -930,7 +954,7 @@ function updateTriImage(container, get) {
             const s = Math.sqrt(BACKDROP_PIXELS / ((bx[1] - bx[0]) * (by[1] - by[0]) || 1));
             const w = Math.max(1, Math.min(4096, Math.round((bx[1] - bx[0]) * s)));
             const h = Math.max(1, Math.min(4096, Math.round((by[1] - by[0]) * s)));
-            container._triBackdrop = { key, im: rasterizeDensity(blocks, bx, by, w, h, zmin, zmax, db, bleed, false, !bleed) };
+            container._triBackdrop = { key, im: toPlot(rasterizeDensity(blocks, bx, by, w, h, zmin, zmax, db, bleed, false, !bleed)) };
             setTriImages(container, container._triBackdrop.im, container._triView);
         }, 100);
     });
@@ -1170,6 +1194,7 @@ function draw(resetZoom = false) {
     // The initial view of the geometry, unless the plot keeps the user's.
     const fitView = (maxY) => {
         const view = computeGeometryView(solver, maxY);
+        shiftPlotX(plotShiftMM(solver), [], [], view);
         if (view) { currentXRange = view.xRange; currentYRange = view.yRange; }
     };
 
@@ -1597,6 +1622,8 @@ function draw(resetZoom = false) {
         })()
     };
 
+    container._plotShift = plotShiftMM(solver);
+    shiftPlotX(container._plotShift, traces, shapes);
     Plotly.react(container, traces, layout, geometryPlotConfig(Plotly));
     if (currentView === "density" || currentView === "efield") updateDensityImage(container);
 
@@ -2156,5 +2183,5 @@ function unfreeze() {
 function isFrozen() { return frozenResultsData !== null; }
 
 export { darkAxis, darkBackground, draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, setCurrentView, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop, plotShiftMM, shiftPlotX,
     centroidHoverTrace, triMeanE, updateTriImage };

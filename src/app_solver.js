@@ -2,7 +2,7 @@ import { Complex } from './complex.js';
 import { usableSweepPoints } from './sparameters.js';
 import { exportSnP, downloadFile } from './snp_export.js';
 import { darkAxis, darkBackground, draw, fieldsHaveWantedView, drawResultsPlot, drawSParamPlot, drawParameterSweepPlot, setGlobals, getScaleRange, setScaleRange, getActualDataRange,
-    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop,
+    freeze, unfreeze, isFrozen, conductorFillShapes, dielectricFillShapes, computeGeometryView, displayTop, plotShiftMM, shiftPlotX,
     centroidHoverTrace, triMeanE, updateTriImage } from './plot.js';
 import { initCustomGeometryEditor, activateCustomGeometry, validateCustomGeometry, getCustomGeometryText, setCustomGeometryText,
          getCustomOverrides, customSweepParams, flushCustomGeometryEdits } from './custom_geometry_editor.js';
@@ -1454,6 +1454,8 @@ function plotModesField(grid, mode, idx, resetView = false) {
     container._modesMesh = { blocks: [{ tris: M.tris, Jv: M.E }], zmax: zmax || 1 };
     const traces = [centroidHoverTrace([M], (b, t) => triMeanE(b, t) * inv,
         'x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>|E_t|/max: %{marker.color:.3f}<extra></extra>')];
+    container._plotShift = plotShiftMM(modesSolver);
+    shiftPlotX(container._plotShift, traces);
 
     // Switching modes (a plot of the same kind exists, no view reset): update only the
     // field data and title in place — leaving the axes untouched preserves the current
@@ -1470,6 +1472,7 @@ function plotModesField(grid, mode, idx, resetView = false) {
     // Fresh plot (first render or after a new solve): full render at the focused view.
     const shapes = buildGeometryShapes(maxY);
     const view = computeModesView(maxY);
+    shiftPlotX(container._plotShift, [], shapes, view);
     const layout = modesPlotLayout(title, view, shapes);
     layout.coloraxis = { cmin: 0, cmax: 1, colorscale: 'Viridis', colorbar };
     // The image sits below the traces, under the grid lines.
@@ -1504,10 +1507,13 @@ function plotModesGeometry() {
     container._modesMesh = null;
     const maxY = displayTop(modesSolver);
     const view = computeModesView(maxY);
+    const shapes = buildGeometryShapes(maxY);
+    container._plotShift = plotShiftMM(modesSolver);
+    shiftPlotX(container._plotShift, [], shapes, view);
     // Invisible scatter spanning the view so the axes (and shapes) scale correctly.
     const traces = [{ type: 'scatter', x: [view.xRange[0], view.xRange[1]], y: [view.yRange[0], view.yRange[1]],
         mode: 'markers', marker: { size: 0, opacity: 0 }, hoverinfo: 'skip', showlegend: false }];
-    const layout = modesPlotLayout('Geometry (click Solve Modes to compute fields)', view, buildGeometryShapes(maxY));
+    const layout = modesPlotLayout('Geometry (click Solve Modes to compute fields)', view, shapes);
     Plotly.react(container, traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
 }
 

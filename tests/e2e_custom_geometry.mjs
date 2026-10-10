@@ -609,6 +609,31 @@ check('the sweep leaves the text and the input as they were', /wgnd = 0\.5\b/.te
 }
 if (shot) await page.screenshot({ path: `${shot}/custom_sweep.png` });
 
+// The preview draws the geometry at its own x, not at the solver's domain centred on x=0:
+// a one-sided domain moves the centre off the conductors.
+{
+    const plain = (await geomText());
+    const setText = t => page.evaluate(v => {
+        const el = document.getElementById('custom_geom_text');
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, t);
+    const sigX = () => page.evaluate(() => (document.getElementById('sim_canvas').layout?.shapes || [])
+        .filter(s => s.type === 'rect' && s.fillcolor === '#d97706' && s.y0 > 0.2).map(s => +s.x0.toFixed(4)).sort((a, b) => a - b));
+    const base = 'units mm\nt = 0.2mm\nbounds open open open gnd\n'
+        + 'diel x=-inf w=inf y=0 h=0.21 er=4.4 tand=0.02\ngnd x=-inf w=inf y=0 h=-t\n';
+    await setText(base + 'domain -1mm auto auto auto\nsig+ x=1mm w=0.35 y=0.21 h=0.035\n');
+    await page.waitForTimeout(600);
+    const one = await sigX();
+    await setText(base + 'domain -4mm auto auto auto\nsig+ x=1mm w=0.35 y=0.21 h=0.035 mirror=1\n');
+    await page.waitForTimeout(600);
+    const two = await sigX();
+    check('the preview draws a one-sided domain at the written coordinates',
+        one.join() === '1' && two.join() === '-1.35,1', `${one} / ${two}`);
+    await setText(plain);
+    await page.waitForTimeout(600);
+}
+
 // ---- Modes tab: the field plot covers the air above and below the conductors ----
 await page.click('[data-tab="geometry"]');
 await page.selectOption('#custom-template', 'Differential CPW over air');
