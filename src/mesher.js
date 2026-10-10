@@ -375,16 +375,13 @@ class Mesher {
         for (let k = 0; k < n_regions; k++) {
             if (region_points[k] > 0) continue;
 
-            let pts;
-            if (k === n_regions - 1 && allocated < n_points) {
-                pts = n_points - allocated;
-            } else {
-                if (non_conductor_weight > 0) {
-                    pts = Math.max(5, Math.floor(remaining_points * region_weights[k] / non_conductor_weight));
-                } else {
-                    pts = 5;
-                }
-            }
+            let pts = non_conductor_weight > 0
+                ? Math.max(5, Math.floor(remaining_points * region_weights[k] / non_conductor_weight))
+                : 5;
+            // The last region takes the rounding remainder, but never less than its
+            // own share: the floors of the earlier regions can use up the target,
+            // and a far-field region at the end of the axis then got two lines.
+            if (k === n_regions - 1) pts = Math.max(pts, n_points - allocated);
             region_points[k] = pts;
             allocated += pts;
         }

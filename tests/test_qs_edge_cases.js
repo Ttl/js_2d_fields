@@ -23,6 +23,10 @@
 //   Q8 conductors facing each other across a gap of about ten skin depths get the
 //      narrow-gap note (the surface-impedance loss overstates the facing faces), a
 //      wide gap does not, and the estimate grows with the skin depth.
+//   Q9 the far-field region at the high end of an axis gets its share of grid lines:
+//      a mirror-image pair under dielectric blocks on one side only (the floors of the
+//      many block regions used to leave the last x region two lines) has the same
+//      vacuum L and the same R on both traces, which do not depend on the dielectrics.
 //
 // Run: node tests/test_qs_edge_cases.js
 import { MicrostripSolver } from '../src/microstrip.js';
@@ -117,7 +121,9 @@ async function solve(opts, backend) {
     // sliver-cell jumps (2-7% before the fix) without tripping on that noise.
     check('R continuous across the threshold (< 1%)', rel(a.m.RLGC.R, b.m.RLGC.R) < 0.01,
         `${a.m.RLGC.R.toFixed(3)} vs ${b.m.RLGC.R.toFixed(3)} ohm/m`);
-    check('C continuous across the threshold (< 0.05%)', rel(a.m.RLGC.C, b.m.RLGC.C) < 5e-4,
+    // Both C sit 0.25-0.3% above the converged 76.02 pF/m (equal to 2e-5 there), so
+    // the two adaptive grids differ by a few 1e-4 without any jump.
+    check('C continuous across the threshold (< 0.1%)', rel(a.m.RLGC.C, b.m.RLGC.C) < 1e-3,
         `${(a.m.RLGC.C * 1e12).toFixed(3)} vs ${(b.m.RLGC.C * 1e12).toFixed(3)} pF/m`);
     const thin = make({ ...sm, trace_thickness: 10e-6 });
     thin.ensure_mesh();
@@ -192,6 +198,27 @@ async function solve(opts, backend) {
     check('Q8 a 10 um gap at 5 GHz (11 skin depths) gets the narrow-gap note', close.length === 1,
         close.map(w => w.message).join(' | '));
     check('Q8 a 100 um gap at 5 GHz does not', (await reasons(100, 5e9)).length === 0);
+}
+
+// Q9: mirror-image traces under a one-sided dielectric layout.
+{
+    console.log('Q9 last-region grid share');
+    const text = 'units um\nbounds open open open open\n' +
+        'diel x=-inf w=inf y=0 h=56.633 er=7.4038 tand=0.078017\n' +
+        'diel x=-inf w=inf y=56.633 h=216.8 er=4.2658 tand=0.0076857\n' +
+        'diel x=-inf w=inf y=273.43 h=288.56 er=1.2717 tand=0.012249\n' +
+        'diel x=-659.04 w=854.29 y=309.52 h=128.15 er=8.5437 tand=0.016105\n' +
+        'diel x=-2221.6 w=1124.4 y=540.29 h=16.875 er=1.4402 tand=0.0057266\n' +
+        'diel x=-1807.6 w=2931.3 y=469.67 h=98.926 er=7.6227 tand=0.015059\n' +
+        'sig- x=-1140.2 w=1109.9 y=562 h=19.85\nsig+ x=30.295 w=1109.9 y=562 h=19.85\n' +
+        'gnd x=-inf w=inf y=263.9 h=9.5361\n';
+    const s = new CustomGeometrySolver({ text, nx: 30, ny: 30, freq: 5.18e9, sigma_cond: 16.2e6 });
+    const r = await quiet(() => s.solve_adaptive(APP));
+    const { R, L } = r.RLGC_matrix;
+    check('Q9 mirror traces have the same L (vacuum) under one-sided dielectrics', rel(L[0][0], L[1][1]) < 5e-3,
+        `L11 ${(L[0][0] * 1e9).toFixed(2)} vs L22 ${(L[1][1] * 1e9).toFixed(2)} nH/m (was 3.7% apart)`);
+    check('Q9 and the same R', rel(R[0][0], R[1][1]) < 2e-2,
+        `R11 ${R[0][0].toFixed(2)} vs R22 ${R[1][1].toFixed(2)} ohm/m (was 26% apart)`);
 }
 
 done();

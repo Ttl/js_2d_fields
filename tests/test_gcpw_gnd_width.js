@@ -179,9 +179,11 @@ for (const [label, o] of [['omitted', {}], ["'full'", { coplanar_gnd_width: 'ful
     const rMs = await quiet(() => ms.solve_adaptive({ ...APP }));
     check('QS: narrow ground strips stay below the microstrip Z0', zStrip < rMs.modes[0].Z0,
         `${zStrip.toFixed(2)} vs microstrip ${rMs.modes[0].Z0.toFixed(2)} ohm`);
-    // Half-domain identity
+    // Half-domain identity. The node budget counts the nodes of the solved domain, so
+    // the identity needs a budget neither run reaches (the full grid hits 20000 first).
     const halfS = build({ coplanar_gnd_width: 0.6e-3 }), fullS = build({ coplanar_gnd_width: 0.6e-3, symmetry: false });
-    const rh = await quiet(() => halfS.solve_adaptive({ ...APP })), rf = await quiet(() => fullS.solve_adaptive({ ...APP }));
+    const idOpts = { ...APP, max_nodes: 60000 };
+    const rh = await quiet(() => halfS.solve_adaptive(idOpts)), rf = await quiet(() => fullS.solve_adaptive(idOpts));
     check('QS: half-domain solve == full-domain solve', halfS.sym_half && !fullS.sym_half
         && rel(rh.modes[0].RLGC.C, rf.modes[0].RLGC.C) < 1e-6 && rel(rh.modes[0].RLGC.R, rf.modes[0].RLGC.R) < 1e-6,
         `C ${rh.modes[0].RLGC.C.toExponential(6)} vs ${rf.modes[0].RLGC.C.toExponential(6)}`);

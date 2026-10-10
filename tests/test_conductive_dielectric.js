@@ -52,6 +52,20 @@ async function solve(text, f, extra = {}, opts = APP) {
     return { s, r };
 }
 
+// QS solve of text on the grid of the solved QS solver ref, no refinement.
+async function solveOnGrid(ref, text, f) {
+    const s = new CustomGeometrySolver({ text, nx: 30, ny: 30, freq: f });
+    s.use_causal_materials = false;
+    s.ensure_mesh();
+    s.x = Float64Array.from(ref.x);
+    s.y = Float64Array.from(ref.y);
+    s.dx = Float64Array.from(s.x.subarray(1), (v, j) => v - s.x[j]);
+    s.dy = Float64Array.from(s.y.subarray(1), (v, i) => v - s.y[i]);
+    s._setup_geometry();
+    s.mesh_generated = true;
+    return quiet(() => s.solve_adaptive({ ...APP, skip_mesh: true }));
+}
+
 // Complex arithmetic for the closed forms.
 const cdiv = (a, b) => {
     const d = b.re * b.re + b.im * b.im;
@@ -166,8 +180,11 @@ for (const [name, extra] of BACKENDS) {
 for (const [name, extra] of BACKENDS) {
     for (const [lname, geo] of lines) {
         const f = 30 * FR;
-        const { r: ra } = await solve(geo(`sigma=${SIG}`), f, extra);
-        const { r: rb } = await solve(geo(`tand=${tandOf(f)}`), f, extra);
+        const { s: sa, r: ra } = await solve(geo(`sigma=${SIG}`), f, extra);
+        // QS: the loss tangent line on the grid of the conductive one. The two
+        // adaptive gates follow different solves and need not stop on one grid.
+        const rb = name === 'QS' ? await solveOnGrid(sa, geo(`tand=${tandOf(f)}`), f)
+            : (await solve(geo(`tand=${tandOf(f)}`), f, extra)).r;
         const a = modesOf(ra), b = modesOf(rb);
         // The two G estimators of the QS backend (charge flux of the complex solve,
         // cell-wise field integral of the perturbative one) differ by its

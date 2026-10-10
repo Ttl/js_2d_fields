@@ -62,6 +62,18 @@ function build(diels, extra = {}) {
     s.use_causal_materials = true;
     return s;
 }
+// FDM solve of the dielectrics diels on the grid of the solved FDM solver ref.
+function solveOnGrid(ref, diels) {
+    const s = build(diels);
+    s.ensure_mesh();
+    s.x = Float64Array.from(ref.x);
+    s.y = Float64Array.from(ref.y);
+    s.dx = Float64Array.from(s.x.subarray(1), (v, j) => v - s.x[j]);
+    s.dy = Float64Array.from(s.y.subarray(1), (v, i) => v - s.y[i]);
+    s._setup_geometry();
+    s.mesh_generated = true;
+    return s.solve_adaptive({ ...FDM, skip_mesh: true });
+}
 const numbers = r => r.modes.map(m => [m.Z0?.re ?? m.Z0, m.eps_eff, m.RLGC.R, m.RLGC.L, m.RLGC.G, m.RLGC.C]).flat();
 const relMax = (a, b) => Math.max(...a.map((v, i) => Math.abs(v - b[i]) / (Math.abs(v) + 1e-300)));
 
@@ -111,8 +123,11 @@ for (const [name, g] of [['inset', INSET], ['crossing block', CROSS]]) {
     check(`${name}: FDM reversed order paints the base last`,
         fdmCellMismatch(sr, g.expectReversed) === 0);
     if (g.hidden) {
-        check(`${name}: FDM hidden inset reads as the plain substrate`, relMax([rr[0], rr[1], rr[4]], [plain[0], plain[1], plain[4]]) < 5e-3,
-            `max rel ${relMax([rr[0], rr[1], rr[4]], [plain[0], plain[1], plain[4]]).toExponential(2)}`);
+        // On the grid of the reversed solve: the inset adds grid lines, and two
+        // adaptive grids differ by the mesh error (~1% at these settings).
+        const rp = numbers(await quiet(() => solveOnGrid(sr, BASE)));
+        check(`${name}: FDM hidden inset reads as the plain substrate`, relMax(rr, rp) < 1e-9,
+            `max rel ${relMax(rr, rp).toExponential(2)}`);
     }
 
     // --- Triangular ---
