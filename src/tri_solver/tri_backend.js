@@ -86,7 +86,7 @@ function phaseEpsEff(Zser, Ysh, omega) {
 const FW_NODES_PER_TRI = 4;
 // Share of the triangle budget the initial mesh is sized to (TriBackend.buildMesh),
 // and the smallest refinement fraction a final budget-filling pass is run with.
-const INITIAL_MESH_SHARE = 0.5;
+const INITIAL_MESH_SHARE = 0.3;
 const MIN_LAST_PASS_FRAC = 0.04;
 function maxTrisForBudget(maxNodes, plainPencil = false) {
     return Math.max(800, Math.min(maxSolveTris(plainPencil), Math.floor((maxNodes || 18000) / FW_NODES_PER_TRI)));
@@ -1162,7 +1162,9 @@ export class TriBackend {
         // Then the patch at or below a third of the budget; coarsen its density if needed.
         while (nLambda > 3 && trisFor(size, patchArea) > maxTris / 3) { nLambda -= 1; size = lamMin / nLambda; }
         if (trisFor(size, patchArea) > maxTris / 3) return null;
-        return { size, dist, nLambda, bulk: Math.min(bulk, hCoarse) };
+        // tris: what the wavelength sizing alone costs (patch and bulk floor).
+        const tris = trisFor(size, patchArea) + (bulk < hCoarse ? trisFor(bulk, domainArea) : 0);
+        return { size, dist, nLambda, bulk: Math.min(bulk, hCoarse), tris };
     }
 
     // Build mesh (with symmetry + adaptive refinement), then solve & cache the
@@ -1269,10 +1271,10 @@ export class TriBackend {
         // The initial mesh is sized to a share of the budget: the refiner only splits,
         // so triangles the initial mesh spends where the field turns out not to need
         // them are never recovered, and the adaptive passes need the rest of the
-        // budget to put elements where the error indicators say. A wavelength-capped
-        // mesh keeps the whole budget, the passes do not refine for the wavelength.
-        const initTris = nearField ? maxTris
-            : Math.round(maxTris * (this.opts.initialMeshShare ?? INITIAL_MESH_SHARE));
+        // budget to put elements where the error indicators say. A wavelength cap adds
+        // its own cost on top, the passes do not refine for the wavelength.
+        const initTris = Math.min(maxTris, Math.round(maxTris * (this.opts.initialMeshShare ?? INITIAL_MESH_SHARE)
+            + (nearField ? nearField.tris : 0)));
         let mesh, prevAtt = null;   // previous attempt's (h, nTris), for the scaling fit
         // Over budget, the initial mesh first coarsens the surface size on passive-ground
         // curves (gndScale, see occ_to_mesh gndSizeScale) and only then hFine/hCoarse
@@ -1298,7 +1300,7 @@ export class TriBackend {
             // The MQS loss solves plating as a layer of metal, which needs the inside of
             // each plating layer as a mesh interface.
             meshPlating: mqsPre,
-            occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate,
+            occSurfScale: this.opts.occSurfScale, gradeRate: this.opts.gradeRate, gndGradeRate: this.opts.gndGradeRate,
             gmshOptions: this.opts.gmshOptions,
         };
         // Pre-mesh budget sizing
@@ -1442,7 +1444,12 @@ export class TriBackend {
         const refModes = this.modeNames;
         const fRef = Math.max(s.freq || 1e9, 1e9);               // full-wave eval frequency
         let prev = null, prevEnergy = null;
+        // How the loop ended, for diagnostics: passes run, the stop reason and the
+        // number of certificates a tripped gate asked for.
+        const refineStats = { passes: 0, stop: null, gateCerts: 0 };
+        this.refineStats = refineStats;
         for (let it = 0; it <= maxIters; it++) {
+            refineStats.passes = it;
             let metric = null;
             const conv = [];   // convergence quantities (eps + loss surface integral per mode)
             const convScale = [];   // lower bound of a quantity's reference size, where set
@@ -1454,6 +1461,9 @@ export class TriBackend {
             // _prepareStatic and the first solveAt would redo all of it on the same
             // objects, so it is handed over instead (see this._passWork).
             const passWork = { mesh, byMode: {} };
+            // An asymmetric pair reports its line modes (the modal vectors of this mesh),
+            // so the gate, the marking and the certificate follow those drives.
+            const modal = this._isWG ? null : this._passModal(mesh);
             // Source-free waveguide: there is no static solve, so the whole per-mode body
             // in the else branch is replaced, see _wgRefinePass.
             if (this._isWG) {
@@ -1461,10 +1471,19 @@ export class TriBackend {
                 metric = p.metric; conv.push(...p.conv); energy.push(...p.energy);
             } else for (const rm of refModes) {
                 const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
-                const pot = drivePotentials(this.condRect, rm, this.symmetry);
-                const fm = buildTriFreedomMap(mesh, this.condRect, abc);
-                const phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
-                const phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
+                let pot, fm, phiEps, phiAir;
+                if (modal) {
+                    const [a, b] = modal.vecs[rm === 'odd' ? 0 : 1];
+                    pot = this._modePotentials(rm, null, [a, b]);
+                    fm = modal.fm;
+                    phiEps = combineStatic(a, modal.phiA, b, modal.phiB);
+                    phiAir = combineStatic(a, modal.phiAa, b, modal.phiBa);
+                } else {
+                    pot = drivePotentials(this.condRect, rm, this.symmetry);
+                    fm = buildTriFreedomMap(mesh, this.condRect, abc);
+                    phiEps = solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver);
+                    phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
+                }
                 const W_eps = computeTriEnergy(phiEps, mesh, mesh.epsMap);
                 const W_air = computeTriEnergy(phiAir, mesh, null);
                 const eps_static = W_eps / W_air;
@@ -1563,6 +1582,7 @@ export class TriBackend {
             const projTris = Math.round(mesh.nTris * (1 + 3 * refineFrac));
             if (shouldStop && shouldStop()) {
                 console.log('Adaptive refinement stopped by user');
+                refineStats.stop = 'user';
                 break;
             }
             // The pass-to-pass gate measures the rate of approach, not the error: with
@@ -1575,24 +1595,25 @@ export class TriBackend {
                 if (certify && !this._isWG) {
                     try { cert = this._certifyStatic(mesh, refTol); } catch { cert = null; }
                     if (cert) this.certification = cert;
+                    refineStats.gateCerts++;
                 }
-                if (!certify || this._isWG || !cert || cert.pass) break;
+                if (!certify || this._isWG || !cert || cert.pass) { refineStats.stop = 'converged'; break; }
                 convergedCount = 0;   // gate was optimistic — keep refining
             }
-            if (it === maxIters) break;
+            if (it === maxIters) { refineStats.stop = 'iterations'; break; }
             // A full pass that would overrun the budget is cut down to the fraction that
             // fills it, unless that is too small a pass to be worth a solve.
             let passFrac = refineFrac, passTris = projTris;
             if (projTris > maxTris) {
                 passFrac = (maxTris / mesh.nTris - 1) / 3;
-                if (passFrac < MIN_LAST_PASS_FRAC) break;
+                if (passFrac < MIN_LAST_PASS_FRAC) { refineStats.stop = 'budget'; break; }
                 passTris = maxTris;
             }
             // The same projection against the eigensolve memory guard, from this pass's
             // own estimate: the per-triangle cost varies with the geometry.
             let passBytes = 0;
             for (const w of Object.values(passWork.byMode)) passBytes = Math.max(passBytes, (w.femCache && w.femCache.solveBytes) || 0);
-            if (passTris * passBytes / mesh.nTris > MAX_SOLVE_BYTES) break;
+            if (passTris * passBytes / mesh.nTris > MAX_SOLVE_BYTES) { refineStats.stop = 'memory'; break; }
             const marked = markTrianglesForRefinement(metric, passFrac);
             const refined = refineTriMesh(mesh, marked);
             refined.condRect = this.condRect;
@@ -1723,12 +1744,32 @@ export class TriBackend {
         return refined;
     }
 
-    _staticEnergies(mesh) {
+    // Static energies per mode on mesh. vecs: the modal vectors of an asymmetric pair
+    // on the certified mesh. The modes of this mesh are then decomposed again and their
+    // energies taken with its own vectors, as the reported modal C and C0 are: the
+    // vectors move with the mesh too. A conductive fill takes the fixed vecs as drives.
+    _staticEnergies(mesh, vecs = null) {
         const s = this.solver;
         const out = [];
+        if (vecs && !this._conductiveFill()) {
+            const m = this._modalStatics(mesh);
+            const v2 = m ? m.vecs : vecs;
+            const quad = (E, v) => v[0] * v[0] * E[0][0] + 2 * v[0] * v[1] * E[0][1] + v[1] * v[1] * E[1][1];
+            for (const rm of this.modeNames) {
+                const v = v2[rm === 'odd' ? 0 : 1];
+                if (m) { out.push(quad(m.Ee, v), quad(m.Ea, v)); continue; }
+                // Degenerate on this level: the fixed drive.
+                const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
+                const fm = buildTriFreedomMap(mesh, this.condRect, abc), pot = this._modePotentials(rm, null, v);
+                out.push(computeTriEnergy(solveTriStatic(mesh, fm, mesh.epsMap, pot, this.ctx.wasmSolver), mesh, mesh.epsMap),
+                    computeTriEnergy(solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver), mesh, null));
+            }
+            return out;
+        }
         for (const rm of this.modeNames) {
             const { abc } = modeConfig(rm, s.is_differential, this.symmetry, this.condRect.wallPEC);
-            const pot = drivePotentials(this.condRect, rm, this.symmetry);
+            const pot = vecs ? this._modePotentials(rm, null, vecs[rm === 'odd' ? 0 : 1])
+                : drivePotentials(this.condRect, rm, this.symmetry);
             const fm = buildTriFreedomMap(mesh, this.condRect, abc);
             const phiAir = solveTriStatic(mesh, fm, null, pot, this.ctx.wasmSolver);
             // A conductive dielectric reports C' and G = omega C'' of the complex solve,
@@ -1793,10 +1834,12 @@ export class TriBackend {
         const R_BOUND = 0.5;                              // knife-edge rate, worst singularity
         // Level 0 is exactly what the refinement pass on this mesh already solved
         // (same freedom map, same drives), reuse it rather than re-solving.
+        // An asymmetric pair is certified on its modal quantities, see _staticEnergies.
+        const vecs = (this._certModal && this._certModal.mesh === mesh) ? this._certModal.vecs : null;
         const pe = this._passEnergies;
-        const q0 = (pe && pe.mesh === mesh) ? pe.q : this._staticEnergies(mesh);
+        const q0 = (pe && pe.mesh === mesh) ? pe.q : this._staticEnergies(mesh, vecs);
         const m1 = this._nestedRefine(mesh);
-        const q1 = this._staticEnergies(m1);
+        const q1 = this._staticEnergies(m1, vecs);
         const d1 = maxDiff(q0, q1);
         const base = { tris: mesh.nTris, d1, safety };
         if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, rSource: null, levels: 1 };
@@ -1809,7 +1852,7 @@ export class TriBackend {
         if (m1.nTris * GROW > cap)
             return { ...base, pass: false, err: errBound, r: R_BOUND, rSource: 'bound', levels: 1 };
         const m2 = this._nestedRefine(m1);
-        const q2 = this._staticEnergies(m2);
+        const q2 = this._staticEnergies(m2, vecs);
         const r = maxDiff(q1, q2) / d1;
         if (r >= rMax)
             return { ...base, pass: false, err: d1, r, rSource: 'measured', levels: 2, preAsymptotic: true };
@@ -2238,6 +2281,44 @@ export class TriBackend {
             };
         });
         return true;
+    }
+
+    // Line modes of an asymmetric pair on a refinement-pass mesh (see _modalStatics).
+    // The vectors are kept for the certificate.
+    _passModal(mesh) {
+        const m = this._modalStatics(mesh);
+        this._certModal = m ? { mesh, vecs: m.vecs } : null;
+        return m;
+    }
+
+    // Per-trace statics of a full-domain pair on the shared freedom map and the modal
+    // vectors of [C0]^-1 [C], the decomposition _prepareStaticModal makes on the final
+    // mesh, with the energy matrices Ee / Ea (energy of drive v = v^T E v). Null when
+    // the pair is symmetric or degenerate (the odd/even drives are then the reported
+    // modes) and for anything but a full-domain pair.
+    _modalStatics(mesh) {
+        const s = this.solver;
+        if (!s.is_differential || this.symmetry) return null;
+        const roles = this.condRect.rectRoles;
+        const potA = roles.map(r => (r.is_signal && (r.polarity || 1) > 0) ? 1 : 0);
+        const potB = roles.map(r => (r.is_signal && (r.polarity || 1) < 0) ? 1 : 0);
+        if (!potA.some(v => v) || !potB.some(v => v)) return null;
+        const { abc, kC } = modeConfig('odd', true, false, this.condRect.wallPEC);
+        const fm = buildTriFreedomMap(mesh, this.condRect, abc);
+        const w = this.ctx.wasmSolver;
+        const phiA = solveTriStatic(mesh, fm, mesh.epsMap, potA, w), phiB = solveTriStatic(mesh, fm, mesh.epsMap, potB, w);
+        const phiAa = solveTriStatic(mesh, fm, null, potA, w), phiBa = solveTriStatic(mesh, fm, null, potB, w);
+        const energies = (X, Y, eps) => {
+            const aa = computeTriEnergy(X, mesh, eps), bb = computeTriEnergy(Y, mesh, eps);
+            const ab = (computeTriEnergy(combineStatic(1, X, 1, Y), mesh, eps) - aa - bb) / 2;
+            return [[aa, ab], [ab, bb]];
+        };
+        const Ee = energies(phiA, phiB, mesh.epsMap), Ea = energies(phiAa, phiBa, null);
+        const k = 2 * kC * eps0;
+        const sc = E => E.map(row => row.map(v => k * v));
+        const { modalVecs } = classifyModalDecomposition(sc(Ee), sc(Ea), s.conductors, s.dielectrics);
+        if (!modalVecs) return null;
+        return { fm, vecs: modalVecs, phiA, phiB, phiAa, phiBa, Ee, Ea };
     }
 
     // Conductor potentials of a mode's drive: the modal voltages v of an asymmetric pair.
