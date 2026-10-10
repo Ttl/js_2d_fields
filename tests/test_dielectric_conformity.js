@@ -93,6 +93,43 @@ for (const [name, lower, upper] of [['conductivity', 'sigma=10', ''], ['loss tan
         lo >= 0 && hi >= 0 && lo !== hi, `regions ${lo} / ${hi}`);
 }
 
+// Polygon dielectric sides stay mesh edges where several bodies meet at one vertex:
+// the twinax insulation touches the shield's flat wall at a vertex that lies on four
+// polygon sides. A swapped side there let triangles span the air cusp and the
+// insulation, +0.013 % dielectric area that the nested certificate inherits.
+{
+    const TWINAX = 'units mm\nd = 0.4; di = 1.2; t_sh = 0.03\ns = di\nhw = s/2+di/2; hh = di/2\n' +
+        'bounds open open open open\ndomain -1.2*(hw+t_sh) 1.2*(hw+t_sh) -1.5*(hh+t_sh) 1.5*(hh+t_sh)\n' +
+        'diel ngon x=s/2 y=0 r=di/2 n=64 er=2.1 tand=0.0003 mirror=1\n' +
+        'sig+ ngon x=s/2 y=0 r=d/2 n=64 mirror=1\n' +
+        'gnd x=-hw-t_sh w=2*(hw+t_sh) y=-hh-t_sh h=2*(hh+t_sh) radius=hh+t_sh wall=t_sh\n';
+    const s = new CustomGeometrySolver({ text: TWINAX, sigma_cond: 5.8e7, freq: 10e9, nx: 30, ny: 30, mesh_backend: 'triangular' });
+    await quiet(() => s.solve_adaptive({ ...APP, certify: true }));
+    const { nodes, tris, nTris } = s._triBackend.mesh;
+    // Signed distance to a convex CCW polygon, positive inside.
+    const sd = (P, x, y) => {
+        let m = Infinity;
+        for (let v = 0, n = P.length / 2; v < n; v++) {
+            const ax = P[2 * v], ay = P[2 * v + 1], bx = P[2 * ((v + 1) % n)], by = P[2 * ((v + 1) % n) + 1];
+            m = Math.min(m, ((bx - ax) * (y - ay) - (by - ay) * (x - ax)) / Math.hypot(bx - ax, by - ay));
+        }
+        return m;
+    };
+    let n = 0;
+    for (const d of s.dielectrics) {
+        if (!d.shape) continue;
+        for (let t = 0; t < nTris; t++) {
+            const ds = [0, 1, 2].map(k => sd(d.shape.poly, nodes[2 * tris[3 * t + k]], nodes[2 * tris[3 * t + k] + 1]));
+            if (Math.max(...ds) > 1e-9 && Math.min(...ds) < -1e-9) n++;
+        }
+    }
+    check('twinax: no triangle crosses an insulation side', n === 0, `${n} of ${nTris} triangles cross one`);
+    // A certificate below the reproducibility floor still reports d1 / (1 - r).
+    const c = s._triBackend.certification;
+    check('twinax: certificate reports the extrapolated error', c && c.err >= 2 * c.d1 * (1 - 1e-12),
+        c ? `err ${c.err.toExponential(3)}, d1 ${c.d1.toExponential(3)}` : 'no certificate');
+}
+
 done();
 
 console.log('\nALL CHECKS PASSED');

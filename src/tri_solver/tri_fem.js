@@ -1864,13 +1864,13 @@ export function refineTriMesh(mesh, marked, opts = {}) {
         hullX0 = Math.min(hullX0, d.xMin); hullX1 = Math.max(hullX1, d.xMax);
         hullY0 = Math.min(hullY0, d.yMin); hullY1 = Math.max(hullY1, d.yMax);
     }
-    // Index of a constraint segment (px, py) lies on, or -1. `skip` excludes one already
-    // found, so a vertex shared by two polygon sides reports both. The union-bbox test
-    // first: most queries come from nodes nowhere near a shaped boundary and reject in O(1).
-    const segmentAt = (px, py, skip = -1) => {
+    // Index of a constraint segment (px, py) lies on at or after `from`, or -1, so
+    // repeated calls list every segment through a point (a polygon vertex lies on two
+    // sides, a vertex where bodies touch on more). The union-bbox test first: most
+    // queries come from nodes nowhere near a shaped boundary and reject in O(1).
+    const segmentAt = (px, py, from = 0) => {
         if (px < hullX0 || px > hullX1 || py < hullY0 || py > hullY1) return -1;
-        for (let si = 0; si < segData.length; si++) {
-            if (si === skip) continue;
+        for (let si = from; si < segData.length; si++) {
             const d = segData[si];
             if (px < d.xMin || px > d.xMax || py < d.yMin || py > d.yMax) continue;
             // Perpendicular distance to the (infinite) line; the bbox test above already
@@ -1880,21 +1880,19 @@ export function refineTriMesh(mesh, marked, opts = {}) {
         }
         return -1;
     };
-    // Which segment(s) each EXISTING node sits on. Computed once and reused by the
-    // smoother's eligibility test and the edge-swap guard; only the smoother's candidate
-    // positions (which are not nodes yet) have to go back through segmentAt.
-    const nodeSegA = new Int32Array(newNodeCount).fill(-1);
-    const nodeSegB = new Int32Array(newNodeCount).fill(-1);
+    // The segments each existing node sits on (null for none). Computed once and reused
+    // by the smoother's eligibility test and the edge-swap guard. Only the smoother's
+    // candidate positions (which are not nodes yet) have to go back through segmentAt.
+    const nodeSegs = new Array(newNodeCount).fill(null);
     if (segData.length) {
         for (let n = 0; n < newNodeCount; n++) {
             const px = newNodes[2*n], py = newNodes[2*n+1];
-            const a = segmentAt(px, py);
-            if (a < 0) continue;
-            nodeSegA[n] = a;
-            nodeSegB[n] = segmentAt(px, py, a);
+            for (let si = segmentAt(px, py); si >= 0; si = segmentAt(px, py, si + 1)) {
+                (nodeSegs[n] ??= []).push(si);
+            }
         }
     }
-    const onSegment = (n) => nodeSegA[n] >= 0;
+    const onSegment = (n) => nodeSegs[n] !== null;
     const pointOnAnySegment = (px, py) => segmentAt(px, py) >= 0;
 
     // Classify ALL vertices: 0=pinned, 1=free, 2=along-Y, 3=along-X
@@ -2031,12 +2029,12 @@ export function refineTriMesh(mesh, marked, opts = {}) {
         const ax = newNodes[2*na], ay = newNodes[2*na+1];
         const bx = newNodes[2*nb], by = newNodes[2*nb+1];
         // Both endpoints on the SAME polygon side ⇒ this edge lies on a shaped
-        // conductor's boundary. Swapping it would tear the surface apart. The domain
+        // conductor's or dielectric's boundary. Swapping it would tear the surface
+        // apart or move the material interface off the polygon. The domain
         // outline is already safe (one adjacent triangle, so tris2.length !== 2), but
         // an inner conductor's boundary has two — its interior is meshed.
-        const a0 = nodeSegA[na], a1 = nodeSegB[na];
-        if (a0 >= 0 && (a0 === nodeSegA[nb] || a0 === nodeSegB[nb])) return true;
-        if (a1 >= 0 && (a1 === nodeSegA[nb] || a1 === nodeSegB[nb])) return true;
+        const sa = nodeSegs[na], sb = nodeSegs[nb];
+        if (sa && sb && sa.some(si => sb.includes(si))) return true;
         if (onYLine(ax, ay) && onYLine(bx, by) && Math.abs(ay - by) < 1e-10) return true;
         if (onXLine(ax, ay) && onXLine(bx, by) && Math.abs(ax - bx) < 1e-10) return true;
         if (Math.abs(ax - bx) < 1e-10 && (Math.abs(ax - xMin) < 1e-10 || Math.abs(ax - xMax) < 1e-10)) return true;
