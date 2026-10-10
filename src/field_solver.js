@@ -3594,7 +3594,7 @@ export class FieldSolver2D {
     //   d1 = relative change from the grid to its one-axis bisections (x and y added)
     //   err = d1 / (1 - r), r the level-to-level ratio, measured from a second
     //   bisection per axis, reused from an earlier certificate (knownR), or 0.5
-    //   d1 < 5e-5 passes, r >= rMax is pre-asymptotic and fails, and the decision
+    //   d1 < 5e-5 passes (err still d1 / (1 - r)), r >= rMax is pre-asymptotic and fails, and the decision
     //   applies safety (x1.5) on top of err, which stays the estimate.
     // Solving on coarsened grids instead was tried and rejected: the coarse-level
     // ratio does not carry over to the base grid (estimates 1.2-3.5x optimistic).
@@ -3648,7 +3648,11 @@ export class FieldSolver2D {
         const qy = await this._withGrid(this.x, y1, () => this._staticCapacitances());
         const d1 = splitDiff(q0, qx, qy);
         const base = { nodes: this.x.length * this.y.length, d1, safety };
-        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, rSource: null, levels: 1 };
+        if (d1 < 5e-5) {
+            const r = knownR != null ? knownR : 0.5;
+            return { ...base, pass: true, err: d1 / (1 - Math.min(r, rMax)), r, levels: 1,
+                     rSource: knownR != null ? 'reused' : 'fallback' };
+        }
 
         // Level 2 refines each axis once more, again one at a time: qxx is the
         // x-halved grid with x halved again, qyy likewise in y, so each component

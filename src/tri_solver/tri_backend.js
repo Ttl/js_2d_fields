@@ -1808,7 +1808,7 @@ export class TriBackend {
     // at a knife edge (lambda = 1/2), so R_BOUND = 0.5 bounds it from one level. Every
     // reported static quantity is a combination of W_eps and W_air, and the eigensolve
     // is anchored to the statics (_eigenBias), so this is the error of the results.
-    //   d1 < 5e-5             -> pass, below the linear-solver reproducibility
+    //   d1 < 5e-5             -> pass on the bound, below the linear-solver reproducibility
     //   d1*safety >= tol      -> fail without a second level
     //   2*d1*safety < tol     -> pass on the bound (rSource 'bound')
     //   otherwise a level 2 (16x the base mesh) measures r when it fits certifyMaxTris:
@@ -1842,10 +1842,10 @@ export class TriBackend {
         const q1 = this._staticEnergies(m1, vecs);
         const d1 = maxDiff(q0, q1);
         const base = { tris: mesh.nTris, d1, safety };
-        if (d1 < 5e-5) return { ...base, pass: true, err: d1, r: 0, rSource: null, levels: 1 };
+        const errBound = d1 / (1 - R_BOUND);
+        if (d1 < 5e-5) return { ...base, pass: true, err: errBound, r: R_BOUND, rSource: 'bound', levels: 1 };
         if (d1 * safety >= tol)
             return { ...base, pass: false, err: d1, r: null, rSource: null, levels: 1 };
-        const errBound = d1 / (1 - R_BOUND);
         if (errBound * safety < tol)
             return { ...base, pass: true, err: errBound, r: R_BOUND, rSource: 'bound', levels: 1 };
         // Borderline: only a measured ratio below the bound can still certify this mesh.
