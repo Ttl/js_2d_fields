@@ -375,26 +375,35 @@ function eyeAnalysis(v, dt, ui, spb, nb) {
     return { metrics, hist: histogram(v, dt, ui, start), info };
 }
 
-// 2 UI density histogram of a periodic trace folded every UI, from `start`.
+// 2 UI density histogram of a periodic trace folded every UI, from `start`. Every bit
+// gives every time column the same weight, spread over the voltage bins the trace
+// crosses within the column (its values at the column edges), so the column totals are
+// uniform whatever the samples per bit, and steep edges stay continuous.
 function histogram(v, dt, ui, start) {
-    const M = v.length;
+    const M = v.length, nb = Math.max(1, Math.round(M * dt / ui));
     let lo = Infinity, hi = -Infinity;
     for (const x of v) { lo = Math.min(lo, x); hi = Math.max(hi, x); }
     const pad = 0.06 * (hi - lo || 1);
     const y0 = lo - pad, y1 = hi + pad;
     const counts = new Float32Array(EYE_T_BINS * EYE_V_BINS);
-    // Points between samples so a few samples per bit still give continuous traces.
-    const sub = Math.max(1, Math.ceil(2 * EYE_T_BINS / (2 * Math.max(1, Math.round(ui / dt)))));
     const half = EYE_T_BINS / 2;
-    for (let n = 0; n < M; n++) {
-        const a = v[n], b = v[(n + 1) % M];
-        for (let q = 0; q < sub; q++) {
-            const f = q / sub, t = (n + f) * dt, y = a + (b - a) * f;
-            const x = ((((t - start) % ui) + ui) % ui) / ui;
-            const iy = Math.min(EYE_V_BINS - 1, Math.max(0, Math.floor((y - y0) / (y1 - y0) * EYE_V_BINS)));
-            const ix = Math.min(half - 1, Math.floor(x * half));
-            counts[iy * EYE_T_BINS + ix]++;
-            counts[iy * EYE_T_BINS + ix + half]++;
+    const at = (t) => {
+        const x = ((t / dt) % M + M) % M, n = Math.floor(x), f = x - n;
+        return v[n] + (v[(n + 1) % M] - v[n]) * f;
+    };
+    const bin = (y) => Math.min(EYE_V_BINS - 1, Math.max(0, Math.floor((y - y0) / (y1 - y0) * EYE_V_BINS)));
+    const edge = new Float64Array(half + 1);
+    for (let k = 0; k < nb; k++) {
+        const t0 = start + k * ui;
+        for (let j = 0; j <= half; j++) edge[j] = at(t0 + j * ui / half);
+        for (let ix = 0; ix < half; ix++) {
+            let a = bin(edge[ix]), b = bin(edge[ix + 1]);
+            if (a > b) { const tmp = a; a = b; b = tmp; }
+            const w = 1 / (b - a + 1);
+            for (let iy = a; iy <= b; iy++) {
+                counts[iy * EYE_T_BINS + ix] += w;
+                counts[iy * EYE_T_BINS + ix + half] += w;
+            }
         }
     }
     return { counts, tBins: EYE_T_BINS, vBins: EYE_V_BINS, y0, y1 };

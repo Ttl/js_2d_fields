@@ -19,7 +19,7 @@
 //      links (negligible) from slow, low-impedance ones.
 //  14. Bit patterns: PRBS generators maximal length; the periodic pattern engine equals
 //      the clock steady state for clock-like patterns (DC and AC coupled, a pair with
-//      skew); eye metrics on a lossless line; AC-coupled baseline wander.
+//      skew); eye metrics and histogram on a lossless line; AC-coupled baseline wander.
 import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
@@ -468,6 +468,12 @@ const valueAt = (r, name, t) => {
             && m['Crossing jitter pk-pk / rms'] === '0 ps / 0 ps' && m['Delay (50 %)'] === '500 ps',
             JSON.stringify([m['Eye height (centre)'], m['Eye width (at threshold)'], m['Crossing jitter pk-pk / rms'], m['Delay (50 %)']]));
         check('eye histogram filled', r.eyeHist && r.eyeHist.counts.some(c => c > 0));
+        // Every time column carries one unit per bit: no brighter columns from the
+        // sampling beating against the bins.
+        const h = r.eyeHist, col = new Float64Array(h.tBins);
+        for (let iy = 0; iy < h.vBins; iy++) for (let ix = 0; ix < h.tBins; ix++) col[ix] += h.counts[iy * h.tBins + ix];
+        const cmin = Math.min(...col), cmax = Math.max(...col);
+        check('eye histogram: equal column totals (= bits)', Math.abs(cmin - 127) < 1e-3 && Math.abs(cmax - 127) < 1e-3, `${cmin.toFixed(4)} .. ${cmax.toFixed(4)}`);
     }
     // AC coupling: an unbalanced pattern settles around its mean (baseline wander), the
     // mean of the receiver is zero; DC coupled the mean is the divided mean level.
