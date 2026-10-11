@@ -2367,7 +2367,9 @@ export class FieldSolver2D {
             // reason distinguishes loss-accuracy notes from certificate notes for
             // machine consumers (the fuzzer relaxes its R gate on loss reasons).
             this._skinTransitionWarn = (deltaWarn > 0.5 * tMin)
-                ? { type: 'accuracy', reason: 'skin-transition', mode: 'all', message:
+                // fBand: where the skin depth is half the thickness (delta ~ f^-1/2).
+                ? { type: 'accuracy', reason: 'skin-transition', mode: 'all',
+                    fBand: this.freq * (deltaWarn / (0.5 * tMin)) ** 2, message:
                     `Conductor loss and internal-inductance accuracy is reduced in the DC-skin ` +
                     `transition (skin depth ${(deltaWarn * 1e6).toFixed(1)} µm vs conductor thickness ` +
                     `${(tMin * 1e6).toFixed(1)} µm). The full-wave solver resolves the ` +

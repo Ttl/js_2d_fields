@@ -3,10 +3,10 @@
 import { darkAxis, darkBackground } from '../plot.js';
 import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
 import { requiredBandwidth } from './stimulus.js';
-import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX } from './sensitivity.js';
+import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX, SKIN_ERR } from './sensitivity.js';
 
 // Accuracy notes the tab quantifies on the waveform instead of logging them.
-const QUANTIFIED = new Set(['narrow-gap', 'ground-spreading']);
+const QUANTIFIED = new Set(['narrow-gap', 'skin-transition', 'ground-spreading']);
 // Waveform change (fraction of the swing) above which such a note is a warning.
 const LOW_FREQ_WARN = 0.01;
 // Accuracy notes of sweep rows (discrete sweeps carry them per row).
@@ -355,7 +355,7 @@ async function getChannel(fNeed) {
 
 // ---------------------------------------------------------------- low-frequency notes
 
-const NOTE_NAME = { 'narrow-gap': 'narrow-gap loss', 'ground-spreading': 'ground spreading' };
+const NOTE_NAME = { 'narrow-gap': 'narrow-gap loss', 'skin-transition': 'DC-skin transition', 'ground-spreading': 'ground spreading' };
 
 // Warning text of a low-frequency note that changes the waveform noticeably.
 function lowFreqText(lf) {
@@ -364,6 +364,11 @@ function lowFreqText(lf) {
         return `Below ${fmtHz(lf.band)} the quasi-static model overstates the skin-effect loss of closely facing conductors ` +
             `(up to ${100 * GAP_ERR_MAX} %): its estimated error changes this receiver waveform by ${pct} of the swing. ` +
             `The full-wave solver models the current in the gap.`;
+    }
+    if (lf.reason === 'skin-transition') {
+        return `Below ${fmtHz(lf.band)} the quasi-static conductor loss and internal inductance are approximate (DC-skin ` +
+            `transition): a ${100 * SKIN_ERR} % error there changes this receiver waveform by ${pct} of the swing. ` +
+            `The full-wave solver resolves the transition-region current.`;
     }
     return `Below ${fmtHz(lf.band)} the ground return spreads sideways, modelled as an ideal return: the resulting ` +
         `inductance increase (up to a ${BOARD_WIDTH * 1e3} mm wide board) changes this receiver waveform by ${pct} of the swing. ` +

@@ -14,7 +14,7 @@
 //  11. Non-causal dielectric model: precursor warning.
 //  12. Open end, strongly mismatched source, skin-effect line: the low-frequency
 //      ringing settles inside the window (no wrap-around before the arrival).
-//  13. Low-frequency model notes (narrow gap, ground spreading): the bound on the
+//  13. Low-frequency model notes (narrow gap, skin transition, ground spreading): the bound on the
 //      receiver change holds against perturbed steady-state runs and separates GHz
 //      links (negligible) from slow, low-impedance ones.
 import { check, done } from './helpers.js';
@@ -363,8 +363,10 @@ const valueAt = (r, name, t) => {
     skin.lext = { L: 300e-9 };
     const notes = lowFrequencyNotes([
         { reason: 'narrow-gap', gap: 300e-6, sigma: sig }, { reason: 'narrow-gap', gap: 200e-6, sigma: sig },
+        { reason: 'skin-transition', fBand: 14e6 }, { reason: 'skin-transition', fBand: 12e6 },
         { reason: 'ground-spreading', fOn: 594e3, gap: 210e-6 }, { reason: 'open-boundary' }]);
-    check('notes merged: narrowest gap, one spreading note', notes.length === 2 && notes[0].gap === 200e-6);
+    check('notes merged: narrowest gap, highest skin band, one spreading note',
+        notes.length === 3 && notes[0].gap === 200e-6 && notes[1].fBand === 14e6);
     const mk = (len, r, stimulus) => ({ length: len, samplesPerEdge: 16,
         network: { rs: r, tx: { ac: false }, rx: { ac: false }, term: { type: 'r', rt: r } },
         stimulus: { vLow: 0, vHigh: 1, edgeDef: '10-90', shape: 'rcos', delay: 0, ...stimulus } });
@@ -389,7 +391,7 @@ const valueAt = (r, name, t) => {
                 bound >= actual * (1 - 1e-6) && (actual === 0 ? bound < 1e-9 : bound <= 3 * actual),
                 `actual ${(100 * actual).toPrecision(3)} %, bound ${(100 * bound).toPrecision(3)} %`);
         });
-        if (fc === 2e5) check('slow clock into 5 Ohm on 1 m: ground spreading matters (> 1 %)', lf[1].impact > 0.01, `${(100 * lf[1].impact).toPrecision(3)} %`);
+        if (fc === 2e5) check('slow clock into 5 Ohm on 1 m: ground spreading matters (> 1 %)', lf[2].impact > 0.01, `${(100 * lf[2].impact).toPrecision(3)} %`);
     }
 }
 
