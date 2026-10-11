@@ -1,6 +1,7 @@
 {
   "type": "module",
   "scripts": {
+    "serve": "node serve.mjs",
     "test": "node tests/run.mjs all",
     "test:fast": "node tests/run.mjs fast",
     "test:slow": "node tests/run.mjs slow",

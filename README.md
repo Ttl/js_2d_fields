@@ -20,7 +20,7 @@ Try it online: https://hforsten.com/field_solver.html
 ## Quick Start
 
 1. Build (or obtain) the WASM solver binaries (see below). They are not checked into git.
-2. Host src folder on a web server (for example `python -m http.server 8000`). Open `src/field_solver.html` in a browser.
+2. Serve the project: `npm run serve` (or `node serve.mjs [port] [dir]`) in the project root, then open http://localhost:8000/src/field_solver.html.
 
 ### Validity
 
