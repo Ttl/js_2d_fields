@@ -1,30 +1,14 @@
-// Geometric symmetry test + modal-decomposition classifier for a differential pair.
-//
-// Decides whether swapping the two signal conductors is an exact symmetry of the whole
-// cross-section (conductor geometry + dielectric stack). That is precisely the condition
-// under which the odd/even modal decomposition is exact and the 4-port S-matrix has
-// S22≡S11 — so when it holds we keep the odd/even path and expose no physical [C]/[L],
-// and when it fails we expose the asymmetric physical matrices.
-//
-// This replaces the |C11−C22| capacitance-imbalance heuristic that was previously used to
-// make the same decision. The symmetric/asymmetric distinction is a property of the INPUT
-// geometry, not of the discretised solve: a truly symmetric line has C11=C22 exactly, but
-// the FDM/FEM mesh breaks that equality by a resolution-dependent noise floor, so the
-// numeric test needed a hand-tuned threshold that was mesh-dependent and blind to small
-// real asymmetries. Reading symmetry from the geometry is exact and mesh-independent.
-//
-// Returns:
-//   true  — symmetric: swapping the two signals leaves geometry + dielectric invariant
-//   false — asymmetric: no such swap symmetry exists
-//   null  — cannot decide from geometry (not exactly two signals, or missing data);
-//           the caller should fall back to the numeric capacitance test.
+// Mirror symmetries of a cross-section, read from the geometry: the swap symmetry of a
+// differential pair (when the odd/even decomposition is exact), the x = 0 mirror for
+// half-domain solves, and the modal decomposition of a pair that has neither.
 
 import { eig2x2, mat2Mul, mat2Inv } from './matrix.js';
 import { isMirrorShape, translateShapeX } from './shapes.js';
 
-// All conductors/dielectrics are axis-aligned rectangles exposing x_min/x_max/y_min/y_max.
-// A swap symmetry must be a mirror across an axis-aligned plane (vertical for an edge-coupled
-// pair, horizontal for a broadside pair) — the perpendicular bisector of the two signals.
+// Conductors and dielectrics carry their bounding box as x_min/x_max/y_min/y_max, which is
+// the whole body for a rect. A shaped body (polygon, ring) also has `shape`, and the tests
+// below compare those separately, since a bounding box cannot tell a trapezoid from its
+// mirror image.
 
 function rectsBBoxScale(...lists) {
     let lo = Infinity, hi = -Infinity, blo = Infinity, bhi = -Infinity;
@@ -90,6 +74,10 @@ export function paintOrderMirrors(list, same, axis, coord, tol) {
     return true;
 }
 
+// True when swapping the two signal conductors leaves the conductors and the dielectric
+// stack unchanged, which makes the odd/even decomposition exact (S22 = S11). Read from
+// the geometry, so it is exact where C11 = C22 on a mesh only holds to the mesh noise.
+// null when the geometry cannot decide (not exactly two signals, or missing data).
 export function conductorSwapSymmetric(conductors, dielectrics) {
     if (!conductors || !dielectrics) return null;
     const signals = conductors.filter(c => c.is_signal);
@@ -219,44 +207,29 @@ function signalsMirrorOpposite(conductors, tol) {
         && Math.abs(p.y_min - c.y_min) < tol && Math.abs(p.y_max - c.y_max) < tol));
 }
 
-// Modal-decomposition classifier for a differential pair, shared by BOTH backends
-// (FieldSolver2D._solve_modal_differential and TriBackend._prepareStaticModal) so the
-// symmetric/asymmetric decision, thresholds, and odd/even mode ordering can never drift
-// between them — the same geometry must get the same 4-port S-matrix shape from either
-// solver.
+// Modal decomposition of a differential pair, shared by both backends
+// (FieldSolver2D._solve_modal_differential, TriBackend._prepareStaticModal) so the same
+// geometry gets the same decision and mode order from either.
 //
-// Inputs: the physical 2×2 Maxwell capacitance matrices [C] (dielectric) and [C0]
-// (vacuum), BOTH in F/m, plus the geometry lists for the exact swap-symmetry test.
-// Diagonalises [C0]⁻¹[C] (eps_eff = eigenvalues, modal voltage ratios = eigenvectors)
-// and applies the guard chain:
+// C and C0 are the 2x2 Maxwell capacitance matrices (dielectric, vacuum) in F/m. The
+// eigenpairs of C0^-1 C give eps_eff and the modal voltage vectors. Three outcomes:
 //
-//   1. SYMMETRIC — swap symmetry from the geometry (exact, mesh-independent); when the
-//      geometric test cannot decide (null: not exactly two signals / missing data) fall
-//      back to the |C11−C22| capacitance imbalance against a mesh-noise floor (≈3e-6
-//      fine … ≈1.3e-3 coarse; a 5% broadside height imbalance ≈7e-3, 10% ≈1.5e-2;
-//      5e-3 separates the two). The odd/even decomposition is exact: no physMatrix.
-//   2. DEGENERATE — asymmetric but velocity-degenerate modes (homogeneous dielectric,
-//      relative eigenvalue separation below DEGENERATE_SEP): the eigenvectors of
-//      [C0]⁻¹[C] are arbitrary, so no per-mode rebuild is possible (modalVecs null,
-//      physMatrix without Tv). The asymmetric [C]/[L] still drive the MTL 4-port
-//      S-matrix; the caller keeps its odd/even per-mode results (loss [R]/[G] use the
-//      symmetric reconstruction). A homogeneous fill gives a separation of exactly 0
-//      (C and C0 come from the same mesh), while any inhomogeneity gives eigenvectors
-//      that are mesh-independent down to separations of 1e-5 and tend to a fixed basis
-//      as the separation shrinks. So only the numerical floor counts as degenerate: a
-//      larger cut would switch the reported modes between two different bases as the
-//      separation crosses it (a causal sweep, a small permittivity change).
-//   3. MODAL — non-degenerate asymmetric pair: physMatrix {C, L, Tv} plus
-//      modalVecs = [v_odd, v_even], ordered by differential character
-//      ((v0·v1)/|v|² — opposite-sign components → odd), for the caller to rebuild
-//      per-mode fields from the eigenvector combination of its per-trace solves.
+//   symmetric:  the geometry is swap symmetric (or, when that test cannot decide,
+//               |C11 - C22| is below 5e-3, above the mesh noise and below a 5%
+//               broadside height imbalance). The odd/even drives are exact.
+//               Returns { physMatrix: null, modalVecs: null }.
+//   degenerate: asymmetric, but the eigenvalues separate by less than DEGENERATE_SEP,
+//               so the eigenvectors are arbitrary. A homogeneous fill gives exactly 0,
+//               any inhomogeneity a mesh-independent basis down to ~1e-5, so only the
+//               numerical floor counts (a larger cut would switch bases mid-sweep).
+//               Returns physMatrix { C, L } without Tv, modalVecs null; the caller
+//               keeps its odd/even results.
+//   modal:      physMatrix { C, L, Tv } and modalVecs [v_odd, v_even], ordered by
+//               v0*v1/|v|^2 (opposite signs: odd). Uncoupled lines tie on that score,
+//               and the mode on the first conductor comes first.
 //
-// globalThis.__MODAL_FORCE__ = 'on' | 'off' is a test override: 'off' forces SYMMETRIC,
-// 'on' skips the symmetry AND degeneracy gates.
-//
-// Returns { physMatrix, modalVecs }:
-//   physMatrix — null (symmetric) or {C, L: (1/c²)[C0]⁻¹, Tv?: [v_odd, v_even]}
-//   modalVecs  — null (symmetric or degenerate) or [v_odd, v_even]
+// L = C0^-1 / c^2. globalThis.__MODAL_FORCE__ (tests): 'off' forces symmetric, 'on'
+// skips the symmetry and degeneracy checks.
 const DEGENERATE_SEP = 1e-6;
 
 export function classifyModalDecomposition(C, C0, conductors, dielectrics) {
@@ -274,7 +247,13 @@ export function classifyModalDecomposition(C, C0, conductors, dielectrics) {
     const physMatrix = { C, L: [[C0inv[0][0] * kL, C0inv[0][1] * kL], [C0inv[1][0] * kL, C0inv[1][1] * kL]] };
     if (force !== 'on' && sep < DEGENERATE_SEP) return { physMatrix, modalVecs: null };
     const diffScore = v => { const n = v[0] * v[0] + v[1] * v[1]; return n > 0 ? v[0] * v[1] / n : 0; };
-    const order = diffScore(vecs[0]) <= diffScore(vecs[1]) ? [0, 1] : [1, 0];
+    // Uncoupled lines (a ground plane between them) give single-line modes whose
+    // scores differ only by round-off. The mode on the first conductor then comes
+    // first, so both backends label the modes alike.
+    const s0 = diffScore(vecs[0]), s1 = diffScore(vecs[1]);
+    const order = Math.abs(s0 - s1) < 1e-9
+        ? (Math.abs(vecs[0][0]) >= Math.abs(vecs[1][0]) ? [0, 1] : [1, 0])
+        : (s0 <= s1 ? [0, 1] : [1, 0]);
     const modalVecs = [vecs[order[0]], vecs[order[1]]];
     physMatrix.Tv = modalVecs;
     return { physMatrix, modalVecs };
