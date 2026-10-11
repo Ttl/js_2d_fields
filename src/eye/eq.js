@@ -1,12 +1,24 @@
 // Equalization: transmitter FIR (pre-shoot / de-emphasis), receiver CTLE and DFE, and
 // the peak-distortion eye estimate used to choose their settings.
 
-// PCIe 3.0+ transmitter presets: [pre-shoot dB, de-emphasis dB]. P10's de-emphasis is
-// set by the transmitter's full-swing and low-frequency limits; -9.5 dB is typical.
+// PCIe 3.0+ transmitter presets: [pre-shoot dB, de-emphasis dB]. P10 is not fixed: its
+// de-emphasis follows the LF level the transmitter advertises in training; -9.5 dB is the
+// nominal maximum boost at full swing (+-1.5 dB). Reduced swing implements only
+// REDUCED_SWING_PRESETS.
+
 const PCIE_PRESETS = {
     P0: [0, -6.0], P1: [0, -3.5], P2: [0, -4.4], P3: [0, -2.5], P4: [0, 0],
     P5: [1.9, 0], P6: [2.5, 0], P7: [3.5, -6.0], P8: [3.5, -3.5], P9: [3.5, 0], P10: [0, -9.5],
 };
+
+const REDUCED_SWING_PRESETS = ['P4', 'P1', 'P9', 'P5', 'P6', 'P3'];
+
+// Boost 20 log(Vd / Vb): the isolated-bit level against a long run's, the quantity the
+// PCIe limits are stated in.
+function boostDb([cm, c0, cp]) {
+    const a = -cm, b = -cp;
+    return 20 * Math.log10((a + c0 + b) / (c0 - a - b));
+}
 
 /**
  * Taps [c-1, c0, c+1] of a 3-tap FIR from pre-shoot and de-emphasis (dB), normalized to
@@ -48,14 +60,22 @@ function ctleTransfer(adcDb, fp1, fp2) {
     };
 }
 
+// DFE tap k (1-based) for post-cursor value h: h within the tap's limit (V, absent or
+// non-positive: unlimited).
+function dfeTap(h, k, limits) {
+    const lim = limits && limits[k - 1];
+    return lim > 0 ? Math.max(-lim, Math.min(lim, h)) : h;
+}
+
 /**
  * Peak-distortion eye estimate from a sampled pulse response q (the response to +1
  * minus that to -1, halved: the signal is base + sum_m d_m q(t - m UI), d = +-1).
- * The inner eye height at sampling index n0 is 2 (q(n0) - sum |q(n0 + k spb)|) over the
- * cursors not cancelled by a DFE of `dfeTaps` taps (k = 1..dfeTaps). The best index is
- * searched within half a UI of the pulse peak. Returns { height, n0, cursors }.
+ * The inner eye height at sampling index n0 is 2 (q(n0) - sum |residual cursors|): every
+ * cursor, the first `dfeTaps` post-cursors less their DFE taps (clamped to `dfeLimits`).
+ * The best index is searched within half a UI of the pulse peak. Returns { height, n0,
+ * cursors }.
  */
-function pdaEye(q, spb, dfeTaps = 0, span = 64) {
+function pdaEye(q, spb, dfeTaps = 0, dfeLimits = null, span = 64) {
     const N = q.length;
     let peak = 0;
     for (let n = 1; n < N; n++) if (q[n] > q[peak]) peak = n;
@@ -64,9 +84,10 @@ function pdaEye(q, spb, dfeTaps = 0, span = 64) {
     for (let n0 = Math.max(0, peak - half); n0 <= Math.min(N - 1, peak + half); n0++) {
         let isi = 0;
         for (let k = -span; k <= span; k++) {
-            if (k === 0 || (k >= 1 && k <= dfeTaps)) continue;
+            if (k === 0) continue;
             const i = n0 + k * spb;
-            if (i >= 0 && i < N) isi += Math.abs(q[i]);
+            if (i < 0 || i >= N) continue;
+            isi += k >= 1 && k <= dfeTaps ? Math.abs(q[i] - dfeTap(q[i], k, dfeLimits)) : Math.abs(q[i]);
         }
         const h = 2 * (q[n0] - isi);
         if (h > best) { best = h; bestN = n0; }
@@ -79,4 +100,4 @@ function pdaEye(q, spb, dfeTaps = 0, span = 64) {
     return { height: best, n0: bestN, cursors };
 }
 
-export { PCIE_PRESETS, firFromPresetDb, presetDbFromFir, ctleTransfer, pdaEye };
+export { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctleTransfer, pdaEye, dfeTap };

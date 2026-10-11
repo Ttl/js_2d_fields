@@ -5,7 +5,7 @@ import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
 import { requiredBandwidth } from './stimulus.js';
 import { patternBits } from './pattern.js';
 import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX, SKIN_ERR } from './sensitivity.js';
-import { PCIE_PRESETS, firFromPresetDb } from './eq.js';
+import { PCIE_PRESETS, REDUCED_SWING_PRESETS, firFromPresetDb } from './eq.js';
 
 // Accuracy notes the tab quantifies on the waveform instead of logging them.
 const QUANTIFIED = new Set(['narrow-gap', 'skin-transition', 'ground-spreading']);
@@ -70,6 +70,7 @@ const EYE_FIELDS = [
     ['eye_fp1', 'eye-fp1', 'eye', 'freq'],
     ['eye_fp2', 'eye-fp2', 'eye', 'freq'],
     ['eye_dfe', 'eye-dfe', 'eye', 'num'],
+    ['eye_dfelim', 'eye-dfelim', 'text'],
     ['eye_spe', 'eye-spe', 'eye', 'num'],
     ['eye_span', 'eye-span', 'eye', 'time'],
 ];
@@ -87,7 +88,7 @@ const EYE_DEFAULTS = {
     eye_bitrate: 10e9, eye_pattern: 'prbs7', eye_bits: '0011010111', eye_nbits: 32767,
     eye_driver: 'voltage', eye_iout: 3.5e-3, eye_rout: 1e4, eye_vcm: 1.2, eye_padtx: 0, eye_padrx: 0,
     eye_rup: 130, eye_rdn: 82, eye_vsup: 3.3, eye_txeq: 'none', eye_deemph: -3.5, eye_preshoot: 0,
-    eye_ctle: 'off', eye_adc: -6, eye_adcmin: -12, eye_adcmax: -6, eye_fp1: 2e9, eye_fp2: 8e9, eye_dfe: 0,
+    eye_ctle: 'off', eye_adc: -6, eye_adcmin: -12, eye_adcmax: -6, eye_fp1: 2e9, eye_fp2: 8e9, eye_dfe: 0, eye_dfelim: '',
 };
 
 // Whether a setting applies to the selected options; links leave out the others.
@@ -109,6 +110,7 @@ function eyeKeyActive(settings, key) {
         case 'eye_adc': return v('eye_stim') === 'pattern' && v('eye_ctle') === 'fixed';
         case 'eye_adcmin': case 'eye_adcmax': return v('eye_stim') === 'pattern' && v('eye_ctle') === 'auto';
         case 'eye_fp1': case 'eye_fp2': return v('eye_stim') === 'pattern' && v('eye_ctle') !== 'off';
+        case 'eye_dfelim': return v('eye_stim') === 'pattern' && v('eye_dfe') > 0;
         case 'eye_ctx': return !!v('eye_tx_ac');
         case 'eye_crx': return !!v('eye_rx_ac');
         case 'eye_rt': return ['vtt', 'r', 'rc'].includes(v('eye_term'));
@@ -300,6 +302,7 @@ function readConfig() {
     if (type === 'pattern') {
         const tx = $('eye-txeq').value;
         if (tx === 'auto') txEq = { auto: true };
+        else if (tx === 'auto-rs') txEq = { auto: true, presets: REDUCED_SWING_PRESETS };
         else if (tx === 'db') {
             stimulus.fir = firFromPresetDb(parseQuantity('eye-preshoot', 'num', 'Pre-shoot'), parseQuantity('eye-deemph', 'num', 'De-emphasis'));
             txEq = { name: null };
@@ -310,6 +313,17 @@ function readConfig() {
         const ctle = $('eye-ctle').value;
         rxEq = { dfeTaps: Math.round(parseQuantity('eye-dfe', 'num', 'DFE taps')) };
         if (!(rxEq.dfeTaps >= 0 && rxEq.dfeTaps <= 16)) throw new Error('DFE taps: 0 to 16.');
+        // Tap limits in tap order, e.g. "30 mV, 20 mV"; empty: unlimited.
+        const lim = $('eye-dfelim').value.trim();
+        if (rxEq.dfeTaps > 0 && lim) {
+            rxEq.dfeLimits = lim.split(/[,;]/).map(s => s.trim()).filter(Boolean).map((s, i) => {
+                const m = s.replace(/^[±+]/, '').match(/^(\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?\s*(mv|v)?$/i);
+                if (!m) throw new Error(`DFE tap limit ${i + 1}: "${s}" is not a voltage.`);
+                const v = parseFloat(s.replace(/^[±+]/, '')) * ((m[2] || 'mv').toLowerCase() === 'v' ? 1 : 1e-3);
+                if (!(v > 0)) throw new Error(`DFE tap limit ${i + 1} must be positive.`);
+                return v;
+            });
+        }
         if (ctle !== 'off') {
             const fp1 = parseQuantity('eye-fp1', 'freq', 'CTLE pole 1'), fp2 = parseQuantity('eye-fp2', 'freq', 'CTLE pole 2');
             if (!(fp1 > 0 && fp2 > fp1)) throw new Error('CTLE: the poles must be positive, pole 2 above pole 1.');
@@ -358,6 +372,7 @@ function updateVisibility() {
     const txeq = $('eye-txeq').value, ctle = $('eye-ctle').value;
     for (const id of ['eye-row-deemph', 'eye-row-preshoot']) show(id, txeq === 'db');
     show('eye-row-adc', ctle === 'fixed');
+    show('eye-row-dfelim', ($('eye-dfe').value.trim() || '0') !== '0');
     for (const id of ['eye-row-adcmin', 'eye-row-adcmax']) show(id, ctle === 'auto');
     for (const id of ['eye-row-fp1', 'eye-row-fp2']) show(id, ctle !== 'off');
     // A current-mode source is a current: not on the voltage plot.
@@ -773,7 +788,8 @@ function drawPulse(res) {
         const dfe = c.filter(x => x.k >= 1 && x.k <= r.pulse.dfeTaps), other = c.filter(x => !(x.k >= 1 && x.k <= r.pulse.dfeTaps));
         traces.push({ x: other.map(x => x.k), y: other.map(x => x.value), type: 'scatter', mode: 'markers', name: 'Cursors',
             marker: { color: COLORS[1], size: 7 }, hovertemplate: 'cursor %{x}: %{y:.4g} V<extra></extra>' });
-        if (dfe.length) traces.push({ x: dfe.map(x => x.k), y: dfe.map(x => x.value), type: 'scatter', mode: 'markers', name: 'DFE taps',
+        // The taps themselves (equal to the cursors unless at their limits).
+        if (dfe.length) traces.push({ x: dfe.map(x => x.k), y: dfe.map(x => r.pulse.dfe && r.pulse.dfe[x.k - 1] !== undefined ? r.pulse.dfe[x.k - 1] : x.value), type: 'scatter', mode: 'markers', name: 'DFE taps',
             marker: { color: COLORS[2], size: 9, symbol: 'diamond' }, hovertemplate: 'DFE tap %{x}: %{y:.4g} V<extra></extra>' });
     };
     if (frozen && frozen.pulse) add(frozen, true);
@@ -828,14 +844,14 @@ function toggleFreeze() {
 // Typical starting values per interface (input id -> value; true/false for checkboxes).
 const PRESET_BASE = {
     'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-tx-ac': false, 'eye-rx-ac': false,
-    'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-dfe': '0', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
+    'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-dfe': '0', 'eye-dfelim': '', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
 };
 const pcie = (rate, tr, extra) => ({
     'eye-vlow': '0 V', 'eye-vhigh': '1 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
     'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', ...extra,
 });
-const pcieEq = (adcMin, adcMax, fp1, fp2, dfe) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',
-    'eye-adcmin': adcMin, 'eye-adcmax': adcMax, 'eye-fp1': fp1, 'eye-fp2': fp2, 'eye-dfe': dfe });
+const pcieEq = (adcMin, adcMax, fp1, fp2, dfe, dfelim) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',
+    'eye-adcmin': adcMin, 'eye-adcmax': adcMax, 'eye-fp1': fp1, 'eye-fp2': fp2, 'eye-dfe': dfe, 'eye-dfelim': dfelim });
 const lvcmos = (v, rs, tr) => ({ 'eye-vlow': '0 V', 'eye-vhigh': v, 'eye-rs': rs, 'eye-stim': 'clock', 'eye-clock-freq': '100 MHz',
     'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': tr, 'eye-tf': tr, 'eye-term': 'open', 'eye-padrx': '3 pF' });
 const PRESETS = {
@@ -844,9 +860,11 @@ const PRESETS = {
         'eye-term': 'diff', 'eye-rdiff': '100' },
     pcie1: { differential: true, ...pcie('2.5 Gb/s', '80 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-3.5', 'eye-preshoot': '0' }) },
     pcie2: { differential: true, ...pcie('5 Gb/s', '40 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-6', 'eye-preshoot': '0' }) },
-    pcie3: { differential: true, ...pcie('8 Gb/s', '25 ps', pcieEq('-12', '-6', '2 GHz', '8 GHz', '1')) },
-    pcie4: { differential: true, ...pcie('16 Gb/s', '12.5 ps', pcieEq('-12', '-6', '4 GHz', '16 GHz', '2')) },
-    pcie5: { differential: true, ...pcie('32 Gb/s', '6.25 ps', pcieEq('-15', '-5', '8 GHz', '32 GHz', '3')) },
+    pcie3: { differential: true, ...pcie('8 Gb/s', '25 ps', pcieEq('-12', '-6', '2 GHz', '8 GHz', '1', '30 mV')) },
+    // Gen3 and Gen4: the base spec's behavioral CTLE (poles 2 / 8 GHz and 2 / 16 GHz, DC gain
+    // -6 to -12 dB in 1 dB steps) and 1- / 2-tap DFE. Gen5: the same form with scaled poles.
+    pcie4: { differential: true, ...pcie('16 Gb/s', '12.5 ps', pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')) },
+    pcie5: { differential: true, ...pcie('32 Gb/s', '10 ps', pcieEq('-15', '-5', '8 GHz', '32 GHz', '3', '')) },
     lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
         'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V' },
     lvcmos33: lvcmos('3.3 V', '25', '1 ns'),

@@ -32,7 +32,7 @@ import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
 import { buildNetwork, makeTransfer } from '../src/eye/network.js';
 import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
 import { prbsBits, prbsPeriod, patternBits, PRBS } from '../src/eye/pattern.js';
-import { PCIE_PRESETS, firFromPresetDb, presetDbFromFir } from '../src/eye/eq.js';
+import { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir } from '../src/eye/eq.js';
 import { computeSParamsSingleEnded, computeSParamsDifferentialMTL } from '../src/sparameters.js';
 
 const fft = await loadFFT();
@@ -547,6 +547,9 @@ const valueAt = (r, name, t) => {
             rt = Math.max(rt, Math.abs(db.preshoot - PCIE_PRESETS[p][0]), Math.abs(db.deemphasis - PCIE_PRESETS[p][1]));
         }
         check('PCIe presets: taps within 0.003 of the published values, dB round trip', e < 3e-3 && rt < 1e-9, `${e.toExponential(1)}, ${rt.toExponential(1)} dB`);
+        // P10: no pre-cursor (Va / Vd = 1) and 9.5 dB nominal maximum boost.
+        const p10 = firFromPresetDb(...PCIE_PRESETS.P10);
+        check('PCIe P10: c-1 = 0, boost 9.5 dB', p10[0] === 0 && Math.abs(boostDb(p10) - 9.5) < 1e-9, `boost ${boostDb(p10).toFixed(3)} dB`);
     }
     // FIR source levels: P7 on PRBS7, the source takes the levels 1 - 2a, 1 - 2b,
     // 1 - 2a - 2b and 1 (times the half swing).
@@ -594,6 +597,24 @@ const valueAt = (r, name, t) => {
             `DFE ${(height(dfe) * 1e3).toFixed(1)} >= ${(dfe.eqChoice.pdaHeight * 1e3).toFixed(1)}, auto ${(height(auto) * 1e3).toFixed(1)} >= ${(auto.eqChoice.pdaHeight * 1e3).toFixed(1)} mV`);
         check('automatic preset + CTLE + DFE beats no equalization', height(auto) > height(none),
             `${auto.eqChoice.firName}, CTLE ${auto.eqChoice.adc} dB: ${(height(auto) * 1e3).toFixed(1)} mV`);
+        // DFE tap limits: a tap stops at its limit, and the rest of its post-cursor counts
+        // in the eye estimate. The 4-tap DFE above, with limits below its taps.
+        const t = dfe.eqChoice.dfe, lim = t.map(x => 0.5 * Math.abs(x));
+        const lim2 = simulateLink(skinPair, { ...base, rxEq: { dfeTaps: 4, dfeLimits: lim } }, fft);
+        const clamped = lim2.eqChoice.dfe.every((x, k) => Math.abs(Math.abs(x) - lim[k]) < 1e-12);
+        check('DFE tap limits: taps clamped, eye smaller than unlimited, at least the estimate',
+            clamped && height(lim2) < height(dfe) && height(lim2) >= lim2.eqChoice.pdaHeight - 1e-6,
+            `taps ${lim2.eqChoice.dfe.map(x => (x * 1e3).toFixed(1)).join('/')} mV (limits ${lim.map(x => (x * 1e3).toFixed(1)).join('/')}), `
+            + `eye ${(height(lim2) * 1e3).toFixed(1)} vs ${(height(dfe) * 1e3).toFixed(1)} mV, estimate ${(lim2.eqChoice.pdaHeight * 1e3).toFixed(1)} mV`);
+        // Reduced swing: only P4, P1, P9, P5, P6, P3. A lossier line at 16 Gb/s, where full
+        // swing picks a preset reduced swing lacks.
+        const lossy = { ...base, length: 3.0, stimulus: { ...base.stimulus, bitRate: 16e9, tr: 15e-12, tf: 15e-12 } };
+        const full = simulateLink(skinPair, { ...lossy, txEq: { auto: true }, rxEq: { dfeTaps: 0, ctle: null } }, fft);
+        const rs = simulateLink(skinPair, { ...lossy, txEq: { auto: true, presets: REDUCED_SWING_PRESETS }, rxEq: { dfeTaps: 0, ctle: null } }, fft);
+        check('reduced-swing preset search stays within P4, P1, P9, P5, P6, P3 and never beats full swing',
+            REDUCED_SWING_PRESETS.includes(rs.eqChoice.firName) && !REDUCED_SWING_PRESETS.includes(full.eqChoice.firName)
+            && rs.eqChoice.pdaHeight < full.eqChoice.pdaHeight,
+            `full swing ${full.eqChoice.firName} ${(full.eqChoice.pdaHeight * 1e3).toFixed(1)} mV, reduced ${rs.eqChoice.firName} ${(rs.eqChoice.pdaHeight * 1e3).toFixed(1)} mV`);
     }
 }
 
