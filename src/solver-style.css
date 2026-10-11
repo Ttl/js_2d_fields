@@ -352,6 +352,109 @@ button.stop-mode:hover {
 .modes-list tr.nullspace td.status { color: #888; }
 .modes-body .plot-container { flex: 1; min-height: 400px; }
 
+/* Eye Tab */
+#tab-eye .results-controls {
+    flex-wrap: wrap;
+    gap: 6px 12px;
+}
+#tab-eye .results-controls .checkbox-label,
+#tab-eye .results-controls button,
+#eye-status { white-space: nowrap; }
+#eye-view { width: auto; }
+.eye-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+.eye-settings {
+    flex: 0 0 290px;
+    overflow-y: auto;
+    border-right: 1px solid var(--border-color);
+    padding: 6px 10px;
+}
+.eye-settings fieldset {
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    margin: 0 0 8px;
+    padding: 4px 8px 6px;
+}
+.eye-settings legend {
+    color: var(--text-muted);
+    font-size: 0.8em;
+    font-weight: 600;
+    padding: 0 4px;
+}
+.eye-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 4px 0;
+}
+.eye-row > label {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    flex: 1;
+}
+.eye-row input[type="text"], .eye-row select {
+    width: 120px;
+    flex: 0 0 120px;
+    padding: 4px 6px;
+    font-size: 0.85em;
+}
+.eye-row input:disabled { opacity: 0.45; }
+.eye-note {
+    font-size: 0.75em;
+    color: var(--text-muted);
+    text-align: right;
+    margin: -2px 0 4px;
+}
+.eye-note:empty { display: none; }
+.eye-note-inline {
+    font-weight: normal;
+    font-size: 0.95em;
+}
+.eye-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.eye-main .plot-container { flex: 1; min-height: 360px; }
+.eye-metrics {
+    padding: 6px 12px 10px;
+    font-size: 0.8em;
+    border-top: 1px solid var(--border-color);
+    max-height: 40%;
+    overflow-y: auto;
+}
+.eye-metrics:empty { display: none; }
+.eye-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 2px 24px;
+}
+.eye-metric-grid > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    white-space: nowrap;
+}
+.eye-metric-grid > div > span:first-child { color: var(--text-muted); }
+.eye-info {
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+.eye-notice {
+    margin: 6px 10px 0;
+    padding: 6px 10px;
+    background: #3d3520;
+    border-left: 3px solid #f59e0b;
+    font-size: 0.8em;
+    border-radius: 3px;
+    color: #fbbf24;
+}
+
 /* S-Parameters Tab */
 .sparam-controls {
     display: flex;
@@ -1046,3 +1149,8 @@ dialog.custom-choice h3 { margin-top: 0; color: var(--text-color); }
 dialog.custom-choice p { line-height: 1.5; color: var(--text-muted); }
 .custom-choice-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .custom-choice-buttons button { width: auto; font-size: 13px; padding: 7px 14px; }
+
+@media (max-width: 768px) {
+    .eye-body { flex-direction: column; }
+    .eye-settings { flex: 0 0 auto; max-height: 45vh; border-right: none; border-bottom: 1px solid var(--border-color); }
+}

@@ -10,3 +10,5 @@
 /eigen_solver.wasm
 /gmsh.js
 /gmsh.wasm
+/fft.js
+/fft.wasm

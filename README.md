@@ -13,6 +13,7 @@ Try it online: https://hforsten.com/field_solver.html
 - Full RLGC Extraction: Resistance, inductance, capacitance, conductance per unit length
 - Loss Modeling: Conductor losses (skin effect, surface roughness) and dielectric losses
 - S-Parameter Export: Touchstone .s2p and .s4p file generation
+- Time Domain: transient response of the line to a step, a pulse or a clock, with the driver, AC coupling and receiver termination (Eye tab)
 - Visualization: 2D potential plots, E-field streamlines, frequency-dependent plots
 - Adaptive Meshing: Automatic mesh refinement for accurate field solutions
 
@@ -58,6 +59,7 @@ of them live in `src/wasm_solver/`:
 | `solver.{js,wasm}`       | `solver.cpp`       | quasi-static FDM backend |
 | `eigen_solver.{js,wasm}` | `eigen_solver.cpp` | full-wave backend        |
 | `gmsh.{js,wasm}`         | `gmsh/` submodule  | full-wave mesh generation |
+| `fft.{js,wasm}`          | `fft.cpp`          | Eye tab (time domain)    |
 
 #### Prerequisites
 
@@ -95,7 +97,7 @@ git submodule update --init --recursive
 
 ```bash
 cd src/wasm_solver
-make all          # builds solver.{js,wasm} and eigen_solver.{js,wasm}
+make all          # builds solver.{js,wasm}, eigen_solver.{js,wasm} and fft.{js,wasm}
 ```
 
 Building gmsh is heavier: it additionally needs OpenCASCADE cross-compiled to

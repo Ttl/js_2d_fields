@@ -50,6 +50,7 @@ const TIERS = {
         { file: 'tests/test_custom_geometry_text.js', cost: 1 },
         { file: 'tests/test_custom_geometry_equivalence.js', cost: 25 },
         { file: 'tests/test_dc_inductance.js', cost: 1 },
+        { file: 'tests/test_eye_transient.mjs', cost: 1 },
     ],
     slow: [
         { file: 'tests/test_fullwave_correctness.js', cost: 98 },
@@ -109,6 +110,7 @@ const TIERS = {
         'tests/e2e_modes.mjs',
         'tests/e2e_waveguide.mjs',
         'tests/e2e_custom_geometry.mjs',
+        'tests/e2e_eye.mjs',
     ],
     fuzz: [
         { file: 'tests/fuzz_qs_vs_fullwave.js', args: ['40', '1', '15'], label: 'tests/fuzz_qs_vs_fullwave.js [N=40 seed=1]', cost: 600 },

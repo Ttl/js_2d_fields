@@ -2,7 +2,8 @@
 #
 #   make solver        -> solver.{js,wasm}        quasi-static FDM sparse solver
 #   make eigen_solver  -> eigen_solver.{js,wasm}  full-wave FEM eigen / QEP solver
-#   make all           -> solver + eigen_solver
+#   make fft           -> fft.{js,wasm}           real FFTs for the eye/transient simulation
+#   make all           -> solver + eigen_solver + fft
 #   make gmsh          -> gmsh.{js,wasm}          OCC-enabled 2D mesher (see README)
 #
 # Requirements: emscripten (emcc / emcmake on PATH). `make gmsh` additionally
@@ -13,7 +14,7 @@
 
 EMCC ?= emcc
 
-all: solver eigen_solver
+all: solver eigen_solver fft
 
 # --- eigen patch --------------------------------------------------------------
 # SparseLU out-of-memory robustness (see eigen.patch): upstream's storage
@@ -53,6 +54,17 @@ eigen_solver.js: eigen_solver.cpp | eigen spectra
 	  -s EXPORTED_RUNTIME_METHODS='["HEAP32","HEAPF64"]' \
 	  -s ALLOW_MEMORY_GROWTH=1 -msimd128 -s STACK_SIZE=33554432 \
 	  -o eigen_solver.js
+
+# --- real FFT (eye / transient simulation) ------------------------------------
+# Eigen's unsupported FFT module, default kissfft backend (header-only).
+fft: fft.js
+fft.js: fft.cpp | eigen
+	$(EMCC) fft.cpp -I eigen -O3 \
+	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,worker,node \
+	  -s EXPORTED_FUNCTIONS='["_irfft_batch","_rfft","_malloc","_free"]' \
+	  -s EXPORTED_RUNTIME_METHODS='["HEAPF64"]' \
+	  -s ALLOW_MEMORY_GROWTH=1 -msimd128 \
+	  -o fft.js
 
 # --- gmsh mesher (OCC-enabled) ----------------------------------------------
 # gmsh.{js,wasm} is vendored (checked in) because rebuilding it needs OpenCASCADE
@@ -103,6 +115,6 @@ gmsh: gmsh-lib
 	cp $(GMSH_BUILD)/gmsh.js $(GMSH_BUILD)/gmsh.wasm .
 
 clean:
-	rm -f solver.js solver.wasm eigen_solver.js eigen_solver.wasm
+	rm -f solver.js solver.wasm eigen_solver.js eigen_solver.wasm fft.js fft.wasm
 
-.PHONY: all solver eigen_solver gmsh gmsh-patch gmsh-configure gmsh-lib clean
+.PHONY: all solver eigen_solver fft gmsh gmsh-patch gmsh-configure gmsh-lib clean

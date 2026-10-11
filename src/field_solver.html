@@ -606,6 +606,7 @@
         <button class="tab-button active" data-tab="geometry">Geometry</button>
         <button class="tab-button" data-tab="results">Results</button>
         <button class="tab-button" data-tab="sparams">S-Parameters</button>
+        <button class="tab-button" data-tab="eye">Eye</button>
         <button class="tab-button" data-tab="sweep">Parameter Sweep</button>
         <button class="tab-button" data-tab="modes">Modes</button>
         <button class="tab-button" data-tab="about">About</button>
@@ -765,6 +766,112 @@
             <button id="export-snp">Export SnP file</button>
             <div id="sparam-notice" style="display: none; padding: 6px 10px; background: #3d3520; border-left: 3px solid #f59e0b; font-size: 0.8em; border-radius: 3px; flex-shrink: 0; color: #fbbf24;">
                 <strong>⚠</strong> <span id="sparam-notice-text"></span>
+            </div>
+        </div>
+    </div>
+
+    <div id="tab-eye" class="tab-content">
+        <div class="results-controls">
+            <select id="eye-view">
+                <option value="wave">Waveform</option>
+                <option value="eye">Clock eye</option>
+                <option value="spectrum">Channel response</option>
+            </select>
+            <label class="checkbox-label"><input type="checkbox" id="eye-show-rx" checked> RX</label>
+            <label class="checkbox-label"><input type="checkbox" id="eye-show-tx"> TX pad</label>
+            <label class="checkbox-label"><input type="checkbox" id="eye-show-src"> Source</label>
+            <label class="checkbox-label" id="eye-show-legs-label"><input type="checkbox" id="eye-show-legs"> P/N legs</label>
+            <label class="checkbox-label" id="eye-show-cm-label"><input type="checkbox" id="eye-show-cm"> Common mode</label>
+            <button id="btn-eye-run" style="width:auto; padding:8px 18px;">Simulate</button>
+            <button id="btn-eye-stop" style="width:auto; padding:8px 18px; display:none; background:#f44336;">Stop</button>
+            <button id="eye-freeze-btn" style="width:auto; padding:6px 12px; font-size:0.85em;">Freeze</button>
+            <button id="eye-export-btn" style="width:auto; padding:6px 12px; font-size:0.85em;" disabled>Export CSV</button>
+            <span id="eye-status" style="color:var(--text-muted); font-size:0.85em;"></span>
+            <span class="help-icon" onclick="showHelpModal('eye', event)">?</span>
+        </div>
+        <div id="eye-notice" class="eye-notice" style="display: none;"></div>
+        <div id="eye-warnings" class="eye-notice" style="display: none;"></div>
+        <div class="eye-body">
+            <div id="eye-settings" class="eye-settings">
+                <fieldset>
+                    <legend>Line</legend>
+                    <div class="eye-row"><label for="eye-length">Length</label><input type="text" id="eye-length" value="100 mm"></div>
+                </fieldset>
+                <fieldset>
+                    <legend>Stimulus <span class="help-icon" onclick="showHelpModal('eye_stimulus', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-stim">Type</label>
+                        <select id="eye-stim">
+                            <option value="pulse" selected>Single pulse</option>
+                            <option value="step">Step</option>
+                            <option value="clock">Clock</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-width"><label for="eye-width">Pulse width (50 %)</label><input type="text" id="eye-width" value="1 ns"></div>
+                    <div class="eye-row" id="eye-row-clock-freq"><label for="eye-clock-freq">Clock frequency</label><input type="text" id="eye-clock-freq" value="1 GHz"></div>
+                    <div class="eye-note" id="eye-rate-note"></div>
+                    <div class="eye-row" id="eye-row-duty"><label for="eye-duty">Duty cycle (%)</label><input type="text" id="eye-duty" value="50"></div>
+                    <div class="eye-row" id="eye-row-clock-mode"><label for="eye-clock-mode">Clock</label>
+                        <select id="eye-clock-mode">
+                            <option value="steady" selected>Steady state</option>
+                            <option value="burst">Burst from rest</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-cycles"><label for="eye-cycles">Cycles</label><input type="text" id="eye-cycles" value="8"></div>
+                    <div class="eye-row"><label for="eye-delay">Start delay</label><input type="text" id="eye-delay" value="0 ps"></div>
+                </fieldset>
+                <fieldset>
+                    <legend>Driver <span class="help-icon" onclick="showHelpModal('eye_driver', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-vlow">Low level (EMF)</label><input type="text" id="eye-vlow" value="0 V"></div>
+                    <div class="eye-row"><label for="eye-vhigh">High level (EMF)</label><input type="text" id="eye-vhigh" value="1 V"></div>
+                    <div class="eye-note" id="eye-level-note"></div>
+                    <div class="eye-row"><label for="eye-rs">Source resistance (&Omega;)</label><input type="text" id="eye-rs" value="50"></div>
+                    <div class="eye-row"><label for="eye-tr">Rise time</label><input type="text" id="eye-tr" value="35 ps"></div>
+                    <div class="eye-row"><label for="eye-tf">Fall time</label><input type="text" id="eye-tf" value="35 ps"></div>
+                    <div class="eye-row"><label for="eye-edge-def">Edge times</label>
+                        <select id="eye-edge-def">
+                            <option value="10-90" selected>10-90 %</option>
+                            <option value="20-80">20-80 %</option>
+                        </select></div>
+                    <div class="eye-row"><label for="eye-edge-shape">Edge shape</label>
+                        <select id="eye-edge-shape">
+                            <option value="rcos" selected>Raised cosine</option>
+                            <option value="gauss">Gaussian</option>
+                            <option value="ramp">Linear ramp</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-skew"><label for="eye-skew">P/N skew (N later)</label><input type="text" id="eye-skew" value="0 ps"></div>
+                </fieldset>
+                <fieldset>
+                    <legend>Coupling <span class="help-icon" onclick="showHelpModal('eye_coupling', event)">?</span></legend>
+                    <div class="eye-row"><label class="checkbox-label"><input type="checkbox" id="eye-tx-ac"> AC at TX</label><input type="text" id="eye-ctx" value="100 nF"></div>
+                    <div class="eye-row"><label class="checkbox-label"><input type="checkbox" id="eye-rx-ac"> AC at RX</label><input type="text" id="eye-crx" value="100 nF"></div>
+                </fieldset>
+                <fieldset>
+                    <legend>RX termination <span id="eye-term-label" class="eye-note-inline"></span> <span class="help-icon" onclick="showHelpModal('eye_termination', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-term">Type</label>
+                        <select id="eye-term">
+                            <option value="r" selected>Resistor to ground</option>
+                            <option value="vtt">Resistor to V_TT</option>
+                            <option value="rc">Resistor + capacitor to ground</option>
+                            <option value="diff">Differential resistor</option>
+                            <option value="open">Open (high impedance)</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-rt"><label for="eye-rt">Resistance (&Omega;)</label><input type="text" id="eye-rt" value="50"></div>
+                    <div class="eye-row" id="eye-row-vtt"><label for="eye-vtt">V_TT</label><input type="text" id="eye-vtt" value="1.2 V"></div>
+                    <div class="eye-row" id="eye-row-ct"><label for="eye-ct">Capacitance</label><input type="text" id="eye-ct" value="100 nF"></div>
+                    <div class="eye-row" id="eye-row-rdiff"><label for="eye-rdiff">Resistance P-N (&Omega;)</label><input type="text" id="eye-rdiff" value="100"></div>
+                </fieldset>
+                <fieldset>
+                    <legend>Simulation <span class="help-icon" onclick="showHelpModal('eye_simulation', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-spe">Samples per edge</label><input type="text" id="eye-spe" value="16"></div>
+                    <div class="eye-row"><label for="eye-span">Time span</label><input type="text" id="eye-span" value="" placeholder="auto"></div>
+                </fieldset>
+            </div>
+            <div class="eye-main">
+                <div id="eye-plot" class="plot-container">
+                    <div class="plotly-loading">
+                        <div class="plotly-loading-spinner"></div>
+                        <span>Loading Plotly library...</span>
+                    </div>
+                </div>
+                <div id="eye-metrics" class="eye-metrics"></div>
             </div>
         </div>
     </div>
@@ -1301,6 +1408,34 @@
         copylink: {
             title: 'Copy link',
             body: '<p>Copies URL to clip board with all transmission line parameters encoded in it. Opening it will load the same parameters.</p>'
+        },
+        eye: {
+            title: 'Eye tab',
+            body: '<p>Time-domain response of the solved line, of the given length, between a driver and a receiver termination. Stage 1: a step, a single pulse or a clock.</p>' +
+                '<p><b>Line parameters.</b> The R, L, G, C of the line (the physical 2&times;2 matrices of a pair) from DC up to about three times the knee frequency 0.35/t<sub>r</sub> of the fastest edge. The last solve is reused when it is of the current geometry, starts at DC and reaches that frequency (an interpolating sweep, or a discrete one dense enough); otherwise the tab runs its own interpolating sweep. Above the sweep stop R grows as &radic;f, G as f, the internal inductance falls as 1/&radic;f and C is held.</p>' +
+                '<p><b>Circuit.</b> The line enters as its exact admittance matrix, with the driver, the coupling capacitors and the termination around it. Every response starts from the DC operating point. The response is the inverse FFT of the transfer function times the edge spectra. AC coupling time constants longer than the simulated window are integrated exactly in time instead, so droop and the baseline shift are correct on any time span.</p>' +
+                '<p><b>Views.</b> Waveform: the voltages against time, the dotted lines mark the first source edge and its arrival after the line delay. Clock eye: the receiver waveform folded over 2 UI (UI = half the clock period). Channel response: |V<sub>RX</sub>/EMF| with the edge spectrum.</p>' +
+                '<p>Use causal materials for time-domain work: a constant loss tangent is not causal and the receiver then responds before the signal can arrive (a warning says so).</p>'
+        },
+        eye_stimulus: {
+            title: 'Stimulus',
+            body: '<p><b>Step</b>: one rising edge. <b>Single pulse</b>: a rising and a falling edge, the width between their 50 % points. <b>Clock</b>: a square wave of the given frequency and duty cycle, either its periodic steady state (exact, all reflections and coupling droop settled) or a burst of N cycles from rest.</p><p>The start delay is the time before the first edge begins. A clock of frequency f carries data at 2f.</p>'
+        },
+        eye_driver: {
+            title: 'Driver',
+            body: '<p>A voltage source with a series resistance on every leg. The levels are its open-circuit (EMF) levels: a 50 &Omega; driver into a matched 50 &Omega; line puts half of the EMF swing on the line.</p><p>A pair is driven complementary: the P leg goes low to high when the N leg goes high to low, the differential EMF swings &plusmn;(high &minus; low). The skew delays the N leg.</p><p>Rise and fall times are the 10-90 % or 20-80 % times of the EMF. Raised-cosine edges have a compact support and a fast falling spectrum, Gaussian ones are band limited. A linear ramp has corners, which show a little band-limit ringing.</p>'
+        },
+        eye_coupling: {
+            title: 'Coupling',
+            body: '<p>DC coupling connects the driver, the line and the receiver directly. AC coupling puts a series capacitor in every leg at the transmitter (between the driver and the line) or at the receiver (between the line and the termination).</p><p>A receiver behind a coupling capacitor with only a differential or no termination has no DC path: its common-mode level is set by the receiver bias network, which is not modelled (a 1 G&Omega; leak holds it at 0 V).</p>'
+        },
+        eye_termination: {
+            title: 'RX termination',
+            body: '<p><b>Resistor to ground</b> and <b>resistor to V_TT</b>: R on every leg to ground, or to a termination supply V_TT (which sets the DC level). <b>Resistor + capacitor</b>: R in series with C to ground on every leg (AC termination, no DC load). <b>Differential resistor</b>: R between P and N, pairs only. <b>Open</b>: no termination.</p>'
+        },
+        eye_simulation: {
+            title: 'Simulation',
+            body: '<p>Samples per edge set the time step (the shorter of the rise and fall times divided by it). The time span is automatic: the edges, the line delay and the reflections until they settle. A longer span shows the slow AC coupling relaxation; a shorter one crops the plot.</p>'
         },
         freeze: {
             title: 'Freeze Trace',

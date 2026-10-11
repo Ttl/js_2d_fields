@@ -37,6 +37,17 @@ npx esbuild src/solve_worker.js \
   --external:./tri_solver/* \
   --outfile=dist/solve_worker.js
 
+# Eye worker: third entry point, constructed by eye/eye_ui.js with
+# `new Worker(new URL("eye_worker.js", import.meta.url))`, so it sits next to the app
+# bundle. It carries the FFT module, whose fft.wasm is fetched next to it.
+npx esbuild src/eye/eye_worker.js \
+  --bundle \
+  --minify \
+  --format=esm \
+  --sourcemap \
+  --platform=node \
+  --outfile=dist/eye_worker.js
+
 # CSS
 npx postcss src/solver-style.css \
   --use cssnano \
@@ -60,6 +71,7 @@ npx html-minifier-terser \
 cp src/plotly-3.3.0.min.js dist/
 
 cp src/wasm_solver/solver.wasm dist/solver.wasm
+cp src/wasm_solver/fft.wasm dist/fft.wasm
 cp src/.htaccess dist/.htaccess
 
 # Full-wave (triangular) backend runtime: shipped as a verbatim ES-module tree —
@@ -117,10 +129,14 @@ WASM_HASH=$(sha256sum dist/solver.wasm | cut -c1-8)
 # WASM.
 sed -i "s|\"solver\.wasm\"|\"solver.wasm?v=${WASM_HASH}\"|g" dist/app_solver.js dist/solve_worker.js
 
-# The worker is fetched by URL from inside the app bundle, so its hash must be injected
-# BEFORE the app bundle is hashed — same ordering argument as solver.wasm above.
+# The workers are fetched by URL from inside the app bundle, so their hashes must be
+# injected BEFORE the app bundle is hashed — same ordering argument as solver.wasm above.
 WORKER_HASH=$(sha256sum dist/solve_worker.js | cut -c1-8)
 sed -i "s|\"solve_worker\.js\"|\"solve_worker.js?v=${WORKER_HASH}\"|g" dist/app_solver.js
+FFT_HASH=$(sha256sum dist/fft.wasm | cut -c1-8)
+sed -i "s|\"fft\.wasm\"|\"fft.wasm?v=${FFT_HASH}\"|g" dist/eye_worker.js
+EYE_WORKER_HASH=$(sha256sum dist/eye_worker.js | cut -c1-8)
+sed -i "s|\"eye_worker\.js\"|\"eye_worker.js?v=${EYE_WORKER_HASH}\"|g" dist/app_solver.js
 
 JS_HASH=$(sha256sum dist/app_solver.js | cut -c1-8)
 
