@@ -423,7 +423,8 @@ async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance }) {
         if (!simSweep || simJob !== job) throw new Error('The solve to reuse is no longer available.');
         const [a, b] = simSweepRange;
         const rows = [simDCRow, ...simSweep.buildResults(logGrid(a, b, EYE_TABLE_PER_DECADE))];
-        return { rows: stripSweep(rows), fMax: b };
+        const warnings = [...((simDCRow.result && simDCRow.result.warnings) || []), ...(simSweep.warnings || [])];
+        return { rows: stripSweep(rows), fMax: b, warnings };
     }
     const key = JSON.stringify(params);
     if (eyeChannel && eyeChannel.key === key && eyeChannel.fMax >= fNeed) {

@@ -14,12 +14,16 @@
 //  11. Non-causal dielectric model: precursor warning.
 //  12. Open end, strongly mismatched source, skin-effect line: the low-frequency
 //      ringing settles inside the window (no wrap-around before the arrival).
+//  13. Low-frequency model notes (narrow gap, ground spreading): the bound on the
+//      receiver change holds against perturbed steady-state runs and separates GHz
+//      links (negligible) from slow, low-impedance ones.
 import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
 import { buildStimulus, edgeValue, erfc } from '../src/eye/stimulus.js';
 import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
 import { buildNetwork, makeTransfer } from '../src/eye/network.js';
+import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
 import { computeSParamsSingleEnded, computeSParamsDifferentialMTL } from '../src/sparameters.js';
 
 const fft = await loadFFT();
@@ -345,6 +349,47 @@ const valueAt = (r, name, t) => {
         for (let i = 0; i < r.t.length && r.t[i] < tArrive; i++) pre = Math.max(pre, Math.abs(r.traces.rx[i]));
         check(`open end, ${rs} Ohm source: nothing before the arrival`, pre < 3.3e-4 && r.warnings.length === 0,
             `max ${pre.toExponential(2)} V of 3.3 V, window ${(r.info.window * 1e9).toFixed(0)} ns${r.warnings.length ? ', ' + r.warnings.join(' | ') : ''}`);
+    }
+}
+
+// 13. Low-frequency notes.
+{
+    const sig = 5.8e7, mu0 = 4e-7 * Math.PI, w = 0.35e-3, t = 35e-6;
+    const skin = seTable(f => {
+        const Rdc = 1 / (sig * w * t), Rac = f > 0 ? Math.sqrt(Math.PI * f * mu0 / sig) / w : 0;
+        const R = Math.hypot(Rdc, Rac);
+        return { R, L: 300e-9 + (f > 0 ? Rac / (2 * Math.PI * f) : 0), G: 0, C: 120e-12 };
+    }, [0, ...Array.from({ length: 141 }, (_, i) => 1e3 * Math.pow(10, i / 20))]);
+    skin.lext = { L: 300e-9 };
+    const notes = lowFrequencyNotes([
+        { reason: 'narrow-gap', gap: 300e-6, sigma: sig }, { reason: 'narrow-gap', gap: 200e-6, sigma: sig },
+        { reason: 'ground-spreading', fOn: 594e3, gap: 210e-6 }, { reason: 'open-boundary' }]);
+    check('notes merged: narrowest gap, one spreading note', notes.length === 2 && notes[0].gap === 200e-6);
+    const mk = (len, r, stimulus) => ({ length: len, samplesPerEdge: 16,
+        network: { rs: r, tx: { ac: false }, rx: { ac: false }, term: { type: 'r', rt: r } },
+        stimulus: { vLow: 0, vHigh: 1, edgeDef: '10-90', shape: 'rcos', delay: 0, ...stimulus } });
+    const ghz = mk(0.1, 50, { type: 'pulse', width: 1e-9, tr: 35e-12, tf: 35e-12 });
+    const lfG = lowFrequencyImpact(skin, ghz, simulateLink(skin, ghz, fft), notes);
+    check('GHz pulse on a terminated line: notes negligible', lfG.every(x => x.impact < 1e-4),
+        lfG.map(x => `${x.reason} ${(100 * x.impact).toExponential(1)} %`).join(', '));
+    const dc = makeRLGCEvaluator(skin)(0);
+    for (const fc of [2e5, 1e7]) {
+        const cfg = mk(1, 5, { type: 'clock', clockFreq: fc, duty: 0.5, steady: true, tr: fc > 1e6 ? 1e-9 : 10e-9, tf: fc > 1e6 ? 1e-9 : 10e-9 });
+        const base = simulateLink(skin, cfg, fft);
+        const lf = lowFrequencyImpact(skin, cfg, base, notes);
+        notes.forEach((note, k) => {
+            const p = simulateLink(skin, { ...cfg, perturb: perturbation(note, dc, skin.lext) }, fft);
+            let e = 0, lo = Infinity, hi = -Infinity;
+            for (let i = 0; i < base.t.length; i++) {
+                e = Math.max(e, Math.abs(base.traces.rx[i] - p.traces.rx[i]));
+                lo = Math.min(lo, base.traces.rx[i]); hi = Math.max(hi, base.traces.rx[i]);
+            }
+            const actual = e / (hi - lo), bound = lf[k].impact;
+            check(`${fc / 1e3} kHz clock, 1 m, 5 Ohm, ${note.reason}: bound >= actual, within 3x`,
+                bound >= actual * (1 - 1e-6) && (actual === 0 ? bound < 1e-9 : bound <= 3 * actual),
+                `actual ${(100 * actual).toPrecision(3)} %, bound ${(100 * bound).toPrecision(3)} %`);
+        });
+        if (fc === 2e5) check('slow clock into 5 Ohm on 1 m: ground spreading matters (> 1 %)', lf[1].impact > 0.01, `${(100 * lf[1].impact).toPrecision(3)} %`);
     }
 }
 

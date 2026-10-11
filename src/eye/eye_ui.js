@@ -3,6 +3,14 @@
 import { darkAxis, darkBackground } from '../plot.js';
 import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
 import { requiredBandwidth } from './stimulus.js';
+import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX } from './sensitivity.js';
+
+// Accuracy notes the tab quantifies on the waveform instead of logging them.
+const QUANTIFIED = new Set(['narrow-gap', 'ground-spreading']);
+// Waveform change (fraction of the swing) above which such a note is a warning.
+const LOW_FREQ_WARN = 0.01;
+// Accuracy notes of sweep rows (discrete sweeps carry them per row).
+const rowWarnings = (rows) => rows.flatMap(r => (r.result && r.result.warnings) || []);
 
 const getPlotly = () => window.Plotly;
 const $ = (id) => document.getElementById(id);
@@ -299,7 +307,7 @@ async function getChannel(fNeed) {
     const params = app.getParams();
     const key = channelKey(params);
     if (channelCache && channelCache.key === key && channelCache.fMax >= fNeed) {
-        return { rows: channelCache.rows, source: channelCache.source };
+        return { rows: channelCache.rows, source: channelCache.source, warnings: channelCache.warnings };
     }
     const sw = app.getSweepState();
     let reason = 'there is no solve of the current geometry';
@@ -310,8 +318,8 @@ async function getChannel(fNeed) {
                 try {
                     const out = await app.solveJob('eyeChannel', { mode: 'reuse', job: sw.keptJob, fNeed }, {});
                     const source = `the last solve (interpolating sweep, DC to ${fmtHz(out.fMax)})`;
-                    channelCache = { key, fMax: out.fMax, rows: out.rows, source };
-                    return { rows: out.rows, source };
+                    channelCache = { key, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
+                    return channelCache;
                 } catch (e) {
                     reason = e.message;
                 }
@@ -319,8 +327,8 @@ async function getChannel(fNeed) {
                 const fMax = Math.max(...sw.rows.map(r => r.freq));
                 const source = `the last solve (DC to ${fmtHz(fMax)})`;
                 if (cov.warning) app.log(`⚠ Eye: ${cov.warning}.`);
-                channelCache = { key, fMax, rows: sw.rows, source };
-                return { rows: sw.rows, source };
+                channelCache = { key, fMax, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
+                return channelCache;
             } else {
                 reason = 'the last solve is no longer kept';
             }
@@ -338,10 +346,35 @@ async function getChannel(fNeed) {
         progress: (m) => setStatus(m.text || 'Channel sweep...'),
     });
     if (out.stopped) return null;
-    for (const w of new Set((out.warnings || []).map(w => w.message || String(w)))) app.log(`⚠ Eye channel: ${w}`);
+    const logged = (out.warnings || []).filter(w => !QUANTIFIED.has(w && w.reason));
+    for (const w of new Set(logged.map(w => w.message || String(w)))) app.log(`⚠ Eye channel: ${w}`);
     const source = `the channel sweep (DC to ${fmtHz(out.fMax)})`;
-    channelCache = { key, fMax: out.fMax, rows: out.rows, source };
-    return { rows: out.rows, source };
+    channelCache = { key, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
+    return channelCache;
+}
+
+// ---------------------------------------------------------------- low-frequency notes
+
+const NOTE_NAME = { 'narrow-gap': 'narrow-gap loss', 'ground-spreading': 'ground spreading' };
+
+// Warning text of a low-frequency note that changes the waveform noticeably.
+function lowFreqText(lf) {
+    const pct = `${+(100 * lf.impact).toPrecision(2)} %`;
+    if (lf.reason === 'narrow-gap') {
+        return `Below ${fmtHz(lf.band)} the quasi-static model overstates the skin-effect loss of closely facing conductors ` +
+            `(up to ${100 * GAP_ERR_MAX} %): its estimated error changes this receiver waveform by ${pct} of the swing. ` +
+            `The full-wave solver models the current in the gap.`;
+    }
+    return `Below ${fmtHz(lf.band)} the ground return spreads sideways, modelled as an ideal return: the resulting ` +
+        `inductance increase (up to a ${BOARD_WIDTH * 1e3} mm wide board) changes this receiver waveform by ${pct} of the swing. ` +
+        `Use custom geometry with finite grounds when this matters.`;
+}
+
+// One-line summary of the checked notes for the info line.
+function lowFreqSummary(list) {
+    if (!list || !list.length) return '';
+    return 'low-frequency model notes change the receiver by ' +
+        list.map(lf => `${lf.impact < 1e-5 ? '< 0.001' : +(100 * lf.impact).toPrecision(2)} % (${NOTE_NAME[lf.reason]} below ${fmtHz(lf.band)})`).join(', ');
 }
 
 // ---------------------------------------------------------------- run
@@ -370,10 +403,11 @@ async function runEye() {
         const table = channelTableFromRows(ch.rows);
         if (table.differential !== app.isDifferential()) throw new Error('The channel does not match the line type, solve again.');
         setStatus('Simulating...');
-        const res = await runEyeJob(table, cfg);
+        const res = await runEyeJob(table, { ...cfg, notes: lowFrequencyNotes(ch.warnings) });
         if (stopRequested) { setStatus('Stopped.'); return; }
         res.source = ch.source;
         res.cfg = cfg;
+        for (const lf of res.lowFreq || []) if (lf.impact > LOW_FREQ_WARN) res.warnings.push(lowFreqText(lf));
         lastResult = res;
         $('eye-export-btn').disabled = false;
         setNotice(res.warnings);
@@ -539,7 +573,8 @@ function drawMetrics(res) {
     const info = `Line delay ${tau}${res.differential ? ' (odd / even)' : ''} · ` +
         (res.kind === 'steady' ? 'clock steady state' : `window ${fmtT(i.window)}`) +
         ` · ${i.N} samples, step ${fmtT(i.dt)}` + (i.slowModes ? ` · ${i.slowModes} slow coupling modes` : '') +
-        ` · line parameters from ${escapeHtml(res.source)}`;
+        ` · line parameters from ${escapeHtml(res.source)}` +
+        (res.lowFreq && res.lowFreq.length ? ` · ${escapeHtml(lowFreqSummary(res.lowFreq))}` : '');
     el.innerHTML = `<div class="eye-metric-grid">${rows}</div><div class="eye-info">${info}</div>`;
 }
 

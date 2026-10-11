@@ -110,7 +110,9 @@ function simulateLink(table, cfg, fft) {
     const steady = cfg.stimulus.type === 'clock' && cfg.stimulus.steady;
     const lead = steady ? 0 : 64 * dt0;
     const stim = buildStimulus({ ...cfg.stimulus, differential: diff, delay: (cfg.stimulus.delay || 0) + lead });
-    const ev = makeRLGCEvaluator(table);
+    // cfg.perturb(v, f): a change of the line parameters (tests of sensitivity.js).
+    const ev0 = makeRLGCEvaluator(table);
+    const ev = cfg.perturb ? (f) => cfg.perturb(ev0(f), f) : ev0;
     const net = buildNetwork({ ...cfg.network, differential: diff });
     const fTop = table.freqs[table.freqs.length - 1];
     const warnings = [];
