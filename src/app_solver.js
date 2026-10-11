@@ -761,6 +761,8 @@ const LOG_MAX_LINES = 5000;
 let _logQueue = [], _logFlushScheduled = false, _logLineCount = 0;
 // Line for the collapsed log bar in place of the last logged line (a result summary).
 let _logStatus = null;
+// Warning lines logged since the current solve started, appended to its summary.
+let _solveWarnings = 0;
 
 function _flushLog() {
     _logFlushScheduled = false;
@@ -813,6 +815,9 @@ function formatZc(Zc, threshold = ZC_IM_THRESHOLD) {
 // `status` replaces the last line of `msg` in the collapsed log bar.
 function log(msg, status = null) {
     _logQueue.push(msg + '\n');
+    if (msg.trimStart().startsWith('\u26a0')) _solveWarnings++;
+    if (status !== null && _solveWarnings)
+        status += `,  ${_solveWarnings} warning${_solveWarnings === 1 ? '' : 's'}`;
     _logStatus = status;
     if (_logFlushScheduled) return;
     _logFlushScheduled = true;
@@ -1693,6 +1698,7 @@ async function runSimulation() {
     btn.textContent = 'Stop';
     btn.classList.add('stop-mode');
     logSolveStarted();
+    _solveWarnings = 0;
     isSimulating = true;
     // A simulate job replaces the worker's kept solve.
     plotFieldsSolver = null; plotFieldsJob = null;
@@ -2162,6 +2168,7 @@ async function runParameterSweep() {
     updateSweepNotice();
 
     heartbeatStart(progressText);
+    _solveWarnings = 0;
     log(`Parameter sweep: ${cfg.label} ${minDisplay}–${maxDisplay}${displayUnit ? ' ' + displayUnit : ''} (${nPoints} pts) @ ${(freqHz/1e9).toFixed(3)} GHz`);
 
     try {
@@ -2208,7 +2215,8 @@ async function runParameterSweep() {
 
         parameterSweepResults = out.results.map(r => ({ ...r, result: reviveResult(r.result) }));
         redrawSweepPlot();
-        log(`Sweep complete: ${parameterSweepResults.length} points.`);
+        const done = `Sweep complete: ${parameterSweepResults.length} points`;
+        log(done + '.', done);
     } catch(e) {
         console.error(e);
         log('Sweep error: ' + e.message);
