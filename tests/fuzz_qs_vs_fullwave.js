@@ -725,9 +725,12 @@ export async function evaluateCase(i, spec, cfg) {
     // structure from the stitched-ground quasi-static line, with an eps_eff that
     // depends on the domain width (or none at all where the mode leaks). So does an
     // 'eigen-ambiguous' pick (the mode split across near-degenerate eigenpairs, e.g.
-    // a box mode near its cutoff). Their Z0/C are not compared, only counted.
+    // a box mode near its cutoff), and 'wall-tied-grounds' (grounds connected only
+    // through enclosure side walls: the same parallel-plate wave, as box modes). Their
+    // Z0/C are not compared, only counted.
     const nModes = Math.min(qs.modes.length, fw.modes.length);
-    const floatingMode = m => fw.warns.some(w => (w.type === 'floating-grounds' || w.type === 'eigen-ambiguous') && (w.mode === m || w.mode === 'all'));
+    const SKIP_TYPES = ['floating-grounds', 'eigen-ambiguous', 'wall-tied-grounds'];
+    const floatingMode = m => fw.warns.some(w => SKIP_TYPES.includes(w.type) && (w.mode === m || w.mode === 'all'));
     let worst = null, floating = null;
     for (let mi = 0; mi < nModes; mi++) {
         const q = qs.modes[mi], w = fw.modes[mi];
@@ -826,7 +829,7 @@ export function printSummary(results, cfg) {
         `${loss.length} loss-discrepancy (${unwarned.length} unwarned, ${loss.length - unwarned.length} warned) | ` +
         `${pick('rlgc').length} G/L-discrepancy | ${pick('badMesh').length} bad-mesh | ` +
         `${count('crash')} one-sided-fail | ${count('rejected')} meshability-rejected | ${count('skipped')} skipped(invalid) | ` +
-        `${floating.length} floating-grounds/ambiguous (Z0/C not compared, max ` +
+        `${floating.length} floating/wall-tied-grounds/ambiguous (Z0/C not compared, max ` +
         `${(100 * Math.max(0, ...floating.map(r => r.floating.dMax))).toFixed(0)}%)`);
     if (unwarned.length) {
         console.log(`unwarned loss rows (investigate, do not just raise the gate):`);

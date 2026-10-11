@@ -1871,13 +1871,6 @@ export class FieldSolver2D {
             }
             return Z_cache.get(key);
         };
-        // Plating metal alone on a face (no bulk under it) with roughness r. With dc the
-        // layered plating over the bulk stands in, see layeredZ.
-        const platingOnlyZ = (ci, key, r, dc) => {
-            if (dc) return layeredZ(ci, r, dc);
-            if (!Z_cache.has(key)) Z_cache.set(key, calculate_Zrough(this.freq, this.conductors[ci].plating.sigma, r));
-            return Z_cache.get(key);
-        };
         // Fraction w of Za, the rest Zb.
         const blend = (w, Za, Zb) => new Complex(w * Za.re + (1 - w) * Zb.re, w * Za.im + (1 - w) * Zb.im);
         const getZsurf = (ci, direction, i, j, dl, xStart = null, dc = false) => {
@@ -1943,8 +1936,11 @@ export class FieldSolver2D {
                 const fraction = dl > 0 ? Math.min((left_overlap + right_overlap) / dl, 1.0) : 0;
 
                 if (fraction > 0) {
-                    // Side plating material with bulk surface roughness
-                    const Z_plating = platingOnlyZ(ci, `${ci}_corner_plating`, bareRq(ci), dc);
+                    // Side plating material with the bulk surface roughness, as the
+                    // layered impedance: the bulk next to the plating column carries the
+                    // current a layer thinner than its skin depth lets through (the
+                    // plating metal alone read up to 25% high on a pair's odd mode).
+                    const Z_plating = layeredZ(ci, bareRq(ci), dc);
                     if (fraction >= 1.0) return Z_plating;
                     // Weighted average: covered part uses plating, rest uses bulk
                     return blend(fraction, Z_plating, Z_bare);
@@ -1961,8 +1957,8 @@ export class FieldSolver2D {
                 const corner_size = Math.min(cond.width, Math.abs(cond.height)) / 10;
 
                 // Corner plating impedance: plating sigma (it extends from the sides) and
-                // the bulk roughness (the bottom surface preparation), no bulk under it.
-                const Z_corner = platingOnlyZ(ci, `${ci}_corner_plating`, bareRq(ci), dc);
+                // the bulk roughness (the bottom surface preparation), layered as above.
+                const Z_corner = layeredZ(ci, bareRq(ci), dc);
 
                 // If mesh cell is small (pure corner region), use pure corner plating impedance
                 if (dl < corner_size) {

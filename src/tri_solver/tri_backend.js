@@ -220,18 +220,23 @@ function makePlatingZs(solver, condRect, freq) {
     const sigmaOf = (ri) => (roles[ri] && roles[ri].sigma) || sigmaBase;
     const bareOf = (ri) => ((rqOf(ri) === rqBase && sigmaOf(ri) === sigmaBase)
         ? Zbare : zSingle(sigmaOf(ri), rqOf(ri)));
+    // Layered plating over the bulk of rect ri, outer roughness rqOut.
+    const zLayered = (ri, rqOut) => {
+        const pl = roles[ri].plating;
+        const key = `${pl.sigma}|${rqOut}|${pl.rq_interface}|${pl.thickness}|${sigmaOf(ri)}`;
+        let z = layeredCache.get(key);
+        if (!z) {
+            z = calculate_Zrough_layered(freq, sigmaOf(ri), rqOut, pl.sigma, pl.thickness ?? 0,
+                pl.rq_interface ?? rqOut);
+            layeredCache.set(key, z);
+        }
+        return z;
+    };
     const zForFace = (ri, face) => {
         const pl = roles[ri] && roles[ri].plating;
         if (solidPlated(roles[ri])) return zSingle(pl.sigma, pl.rq ?? 0);
         if (!(pl && pl[face] && pl.sigma > 0)) return bareOf(ri);
-        const key = `${pl.sigma}|${pl.rq}|${pl.rq_interface}|${pl.thickness}|${sigmaOf(ri)}`;
-        let z = layeredCache.get(key);
-        if (!z) {
-            z = calculate_Zrough_layered(freq, sigmaOf(ri), pl.rq ?? 0, pl.sigma, pl.thickness ?? 0,
-                pl.rq_interface ?? pl.rq ?? 0);
-            layeredCache.set(key, z);
-        }
-        return z;
+        return zLayered(ri, pl.rq ?? 0);
     };
     // Single-layer plating impedance (no bulk underneath) for wrap-around regions.
     const zSingle = (sigma, rq) => {
@@ -243,7 +248,7 @@ function makePlatingZs(solver, condRect, freq) {
     // zForFace plus the thick-corner wrap of the FDM backend (getZsurf in
     // field_solver.js): with the sides plated, the bottom bare and thick_corners on,
     // the side plating covers the bottom face within one plating thickness of each
-    // corner, as single-layer plating with the bulk roughness. Unlike getZsurf the
+    // corner, as layered plating with the bulk roughness. Unlike getZsurf the
     // wrap is a step at the query point rather than a fractional cell coverage, and
     // top-only plating does not extend down the sides.
     const zAt = (ri, face, x, y) => {
@@ -252,7 +257,7 @@ function makePlatingZs(solver, condRect, freq) {
         if (pl && pl.sigma > 0 && r && !r.shape && (pl.thickness ?? 0) > 0 && !solidPlated(roles[ri]) &&
             face === 'bottom' && pl.sides && !pl.bottom && pl.thick_corners) {
             const d = Math.min(x - r.xmin, r.xmax - x);
-            if (d <= pl.thickness) return zSingle(pl.sigma, rqOf(ri));
+            if (d <= pl.thickness) return zLayered(ri, rqOf(ri));
         }
         return zForFace(ri, face);
     };
@@ -278,9 +283,13 @@ function meshedPlatingCR(cr) {
         const outer = rects.length;
         rects.push(r);
         const rqIface = pl.rq_interface ?? pl.rq ?? 0;
-        const platingIface = rqIface > 0 ? { ...pl, rq: pl.rq ?? 0, rq_interface: rqIface,
-            sigmaBulk: role.sigma || null } : null;
-        rectRoles.push({ ...role, plating: null, sigma: pl.sigma, rq: pl.rq ?? 0, platingIface,
+        // The roughness of the layer's faces is all in the additive term (buildFaceDZ),
+        // the layer itself is smooth metal.
+        const rqBulk = role.rq ?? null;
+        const platingIface = (rqIface > 0 || (pl.rq ?? 0) > 0 || rqBulk > 0)
+            ? { ...pl, rq: pl.rq ?? 0, rq_interface: rqIface, sigmaBulk: role.sigma || null, rqBulk,
+                rqIfaceOwn: pl.rq_interface ?? null } : null;
+        rectRoles.push({ ...role, plating: null, sigma: pl.sigma, rq: 0, platingIface,
             platingLayer: pl.thickness });
         for (const k of core) {
             rects.push({ ...k, symmetry: r.symmetry, xmin_domain: r.xmin_domain, ymin_domain: r.ymin_domain, is_signal: r.is_signal,
@@ -358,23 +367,27 @@ function buildFaceZs(solver, condRect, freq) {
     };
 }
 
-// Surface impedance added on the plated faces of meshed plating for the roughness of
-// the plating/bulk interface: the layered model with that interface rough minus the
-// same with it smooth, the 1D increment over a bulk under the plating. null where no
-// plated face has a rough interface (bare faces are faces of the core).
+// Surface impedance added on the faces of a meshed plating layer for its roughness,
+// which the mesh holds smooth: the layered model with the outer surface and the
+// plating/bulk interface rough minus the same smooth, the 1D increment over a bulk
+// under the plating. It is not the plating metal's own roughness factor: on a layer
+// thinner than its skin depth the plating loss goes as t^3, and the thickness the two
+// rough surfaces leave varies. A face of the layer the plating leaves bare (the bottom
+// strip under thick-corner side plating) takes the bulk roughness, as the QS backend.
+// null where the layer has no roughness (bare faces are faces of the core).
 function buildFaceDZ(solver, condRect, freq) {
     const rects = condRect.rects || [], roles = condRect.rectRoles || [];
     if (!roles.some(r => r && r.platingIface)) return null;
     const tol = platingTol(condRect);
     const sigmaBase = solver.sigma_cond ?? 5.8e7;
     const cache = new Map();
-    const dzOf = (pi) => {
+    const dzOf = (pi, rq, rqi) => {
         const sb = pi.sigmaBulk || sigmaBase;
-        const key = `${pi.sigma}|${pi.thickness}|${pi.rq}|${pi.rq_interface}|${sb}`;
+        const key = `${pi.sigma}|${pi.thickness}|${rq}|${rqi}|${sb}`;
         let z = cache.get(key);
         if (!z) {
-            const rough = calculate_Zrough_layered(freq, sb, pi.rq, pi.sigma, pi.thickness, pi.rq_interface);
-            const smooth = calculate_Zrough_layered(freq, sb, pi.rq, pi.sigma, pi.thickness, 0);
+            const rough = calculate_Zrough_layered(freq, sb, rq, pi.sigma, pi.thickness, rqi);
+            const smooth = calculate_Zrough_layered(freq, sb, 0, pi.sigma, pi.thickness, 0);
             z = { re: rough.re - smooth.re, im: rough.im - smooth.im };
             cache.set(key, z);
         }
@@ -399,7 +412,10 @@ function buildFaceDZ(solver, condRect, freq) {
                 if (!face) continue;
             }
             const pi = roles[ri] && roles[ri].platingIface;
-            return pi && (pi.all || pi[face]) ? dzOf(pi) : null;
+            if (!pi) return null;
+            if (pi.all || pi[face]) return dzOf(pi, pi.rq, pi.rq_interface);
+            const rqB = pi.rqBulk ?? solver.rq ?? 0;
+            return rqB > 0 ? dzOf(pi, rqB, pi.rqIfaceOwn ?? rqB) : null;
         }
         return null;
     };
@@ -1676,14 +1692,17 @@ export class TriBackend {
         // a dielectric left over a trace) is meshed as slivers spanning it, its faces
         // held by the refiner, and their shape is the layer's aspect, which the field
         // along the layer does not need resolved. The lines are the edges of the
-        // dielectric and conductor rects, each over its own span.
+        // dielectric and conductor rects, each over its own span, and of the meshed box
+        // (a layer under a ground wall).
         try {
             const skip = new Uint8Array(mesh.nTris);
-            const rects = this.condRect.rects || [];
+            const cr = this.condRect, rects = cr.rects || [];
             const tolL = 1e-9 * (this.domain.x_max - this.domain.x_min);
             const boxes = (this.solver.dielectrics || []).filter(d => !d.shape)
                 .map(d => [d.x_min, d.x_max, d.y_min, d.y_max])
                 .concat(rects.filter(r => !r.shape).map(r => [r.xmin, r.xmax, r.ymin, r.ymax]));
+            if ([cr.xmin_domain, cr.xmax_domain, cr.ymin_domain, cr.ymax_domain].every(Number.isFinite))
+                boxes.push([cr.xmin_domain, cr.xmax_domain, cr.ymin_domain, cr.ymax_domain]);
             // Lines along axis a (0: horizontal, y = const; 1: vertical, x = const) as
             // [position, span lo, span hi].
             const lines = [0, 1].map(a => boxes.flatMap(b => a === 0
@@ -2468,14 +2487,18 @@ export class TriBackend {
     // Ground bodies under a solve's wall map: a wall is PEC when its abc entry is absent
     // (Dirichlet), so the odd mode's PEC symmetry plane counts as a tie. Memoized per
     // conductor map (set on every refinement pass, unlike this.mesh) and wall map.
-    _groundsFloat(abc) {
-        const key = ['left', 'right', 'top', 'bottom'].map(k => (abc[k] === undefined ? 1 : 0)).join('');
+    // dropSides: count as if the outer side walls were not metal (the symmetry plane
+    // stays as it is), see _groundsWallTied.
+    _groundsFloat(abc, dropSides = false) {
+        const side = k => dropSides && (k === 'right' || (k === 'left' && !this.symmetry));
+        const isPEC = k => abc[k] === undefined && !side(k);
+        const key = ['left', 'right', 'top', 'bottom'].map(k => (isPEC(k) ? 1 : 0)).join('');
         const cr = this.condRect;
         if (!this._groundBodies || this._groundBodies.condRect !== cr)
             this._groundBodies = { condRect: cr, byKey: {} };
         const cache = this._groundBodies.byKey;
         if (cache[key] === undefined) {
-            const wallPEC = Object.fromEntries(['left', 'right', 'top', 'bottom'].map(k => [k, abc[k] === undefined]));
+            const wallPEC = Object.fromEntries(['left', 'right', 'top', 'bottom'].map(k => [k, isPEC(k)]));
             cache[key] = groundBodyCount(cr.rects || [], cr.rectRoles || [], wallPEC,
                 { X0: cr.xmin_domain, X1: cr.xmax_domain, Y0: cr.ymin_domain, Y1: cr.ymax_domain },
                 cr.geomTol || 0) > 1;
@@ -2522,6 +2545,15 @@ export class TriBackend {
 
     _eigenRadiates(abc, epsMap) {
         return this._groundsFloat(abc) && this._fillInhomogeneous(epsMap);
+    }
+
+    // Grounds that form one body only through the outer side walls (a stripline or a
+    // lidded line in a side-walled enclosure) on an inhomogeneous fill: the mode drives
+    // the parallel-plate wave between the grounds as with floating grounds, and the
+    // side walls turn it into box modes, so eps_eff at frequency depends on the wall
+    // spacing (_warnFloatingGrounds).
+    _groundsWallTied(abc, epsMap) {
+        return !this._groundsFloat(abc) && this._groundsFloat(abc, true) && this._fillInhomogeneous(epsMap);
     }
 
     // One exact quasi-TEM eigensolve at f for a prepared mode. Returns { fw, fwErr }.
@@ -2946,6 +2978,17 @@ export class TriBackend {
                         `stitched-ground line the quasi-static solver models. Enclosure side walls at the ` +
                         `via-fence spacing connect the grounds.` },
                         w => w.type === 'floating-grounds' && w.mode === mode);
+                } else if (this._modeWarnings && Math.abs(eps_d / eps_eff_static - 1) > 0.05
+                    && this._groundsWallTied(st.abc, this.mesh.epsMap)) {
+                    // Ordinary dispersion moves eps_eff a few percent at these
+                    // frequencies, hence the wider margin than for floating grounds.
+                    this._warnOnce({ type: 'wall-tied-grounds', mode, freq: f, message:
+                        `${mode} mode: the grounds are connected only through the enclosure side walls and the ` +
+                        `dielectric differs between them, so at ${(f / 1e9).toFixed(2)} GHz the mode couples to the ` +
+                        `parallel-plate wave between the grounds, which the side walls turn into box modes ` +
+                        `(full-wave ε_eff ${eps_d.toFixed(3)} vs ${eps_eff_static.toFixed(3)} static). This depends ` +
+                        `on the side-wall spacing and is not modelled by the quasi-static solver.` },
+                        w => w.type === 'wall-tied-grounds' && w.mode === mode);
                 }
             }
         }
