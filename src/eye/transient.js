@@ -41,6 +41,7 @@ function lineEstimates(ev, f, len, diff) {
 function termImpedance(term, modeIdx) {
     switch (term.type) {
         case 'vtt': case 'r': case 'rc': return term.rt;
+        case 'thev': return term.rup * term.rdn / (term.rup + term.rdn);
         case 'diff': return modeIdx === 0 ? term.rdiff / 2 : Infinity;
         default: return Infinity;
     }
@@ -634,6 +635,16 @@ function clockMetrics(t, v, s, P, ctx) {
         dly += Math.max(0, Math.round((tau - dly) / P)) * P;
         m.push({ label: 'Delay (50 %)', value: fmtTime(dly), note: 'source to receiver, unwrapped with the line delay' });
     }
+    // Peaks against the driver rails (the source levels), and the crossings of the mid
+    // level: more than two per period are non-monotonic edges (double clocking).
+    if (!ctx.net.current) {
+        m.push({ label: 'Maximum / minimum', value: `${fmtV(vmax)} / ${fmtV(vmin)}` });
+        m.push({ label: 'Beyond the driver rails (above / below)', value: `${fmtV(Math.max(0, vmax - smax))} / ${fmtV(Math.max(0, smin - vmin))}`,
+            note: 'overshoot above the high source level and undershoot below the low one' });
+    }
+    let nCross = 0;
+    for (let i = 0; i < n; i++) if ((v[i] - mid < 0) !== (v[(i + 1) % n] - mid < 0)) nCross++;
+    m.push({ label: 'Mid-level crossings per period', value: nCross <= 2 ? `${nCross} (monotonic)` : `${nCross} (non-monotonic edges: double clocking risk)` });
     // Eye of the clock (UI = P/2): the waveform against itself shifted by one UI.
     const ui = P / 2;
     const at = (x) => {

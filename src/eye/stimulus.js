@@ -73,8 +73,8 @@ function edgeSpectrum(e, f) {
  *
  * cfg: { type: 'step' | 'pulse' | 'clock' | 'pattern', differential, vLow, vHigh, tr, tf,
  *        edgeDef, shape, delay, width (pulse), clockFreq, duty, steady (clock steady
- *        state), cycles (clock burst), bitRate, bits (pattern, Uint8Array),
- *        skew (N leg delay) }
+ *        state), cycles (clock burst), bitRate, bits (pattern, Uint8Array), fir (pattern
+ *        transmitter taps [c-1, c0, c+1], |c| summing to 1), skew (N leg delay) }
  *
  * Voltages are the open-circuit source levels. Each leg is v0 plus a list of signed
  * steps { t, dv, edge } (t the 50 % time). A clock lists the edges of its first period
@@ -146,7 +146,9 @@ function buildStimulus(cfg) {
 }
 
 // Periodic NRZ bit pattern: bit k occupies [k, k + 1) / bitRate, the transitions at the
-// bit boundaries. The period starts at the level of the last bit (v0).
+// bit boundaries. The period starts at the level of the last bit (v0). A transmitter FIR
+// sets the level of bit n to mid + (swing / 2) sum_j c_j d_(n-j), d = +-1, j = -1, 0, 1:
+// the low and high levels are its full swing.
 function patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax }) {
     if (!(cfg.bitRate > 0)) throw new Error('Bit rate must be positive.');
     const bits = cfg.bits;
@@ -154,16 +156,19 @@ function patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax }) {
     const ui = 1 / cfg.bitRate, n = bits.length;
     if (2 * halfMax > ui) throw new Error('The rise and fall times are too long for this bit rate: the edges overlap.');
     if (Math.abs(skew) > 0.5 * ui) throw new Error('The P/N skew must stay below half a bit.');
+    const fir = cfg.fir || [0, 1, 0];
     const legEdges = (vLo, vHi, shift) => {
-        const lvl = (b) => b ? vHi : vLo;
+        const mid = 0.5 * (vLo + vHi), half = 0.5 * (vHi - vLo);
+        const d = (k) => 2 * bits[((k % n) + n) % n] - 1;
+        const levels = new Float64Array(n);
+        for (let k = 0; k < n; k++) levels[k] = mid + half * (fir[0] * d(k + 1) + fir[1] * d(k) + fir[2] * d(k - 1));
         const edges = [];
         for (let k = 0; k < n; k++) {
-            const prev = bits[(k + n - 1) % n];
-            if (bits[k] === prev) continue;
-            const dv = lvl(bits[k]) - lvl(prev);
+            const dv = levels[k] - levels[(k + n - 1) % n];
+            if (Math.abs(dv) <= 1e-12 * Math.abs(half)) continue;
             edges.push({ t: k * ui + shift, dv, edge: edgeFor(dv) });
         }
-        return { v0: lvl(bits[n - 1]), edges };
+        return { v0: levels[n - 1], edges };
     };
     // Every edge inside [0, period): a negative skew moves the P leg later instead.
     const t0 = Math.max(0, -skew);
@@ -171,7 +176,7 @@ function patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax }) {
     if (cfg.differential) legs.push(legEdges(cfg.vHigh, cfg.vLow, t0 + skew));
     return {
         type: 'pattern', differential: !!cfg.differential, legs, period: n * ui, count: Infinity, steady: true,
-        t0, tEnd: n * ui, tStart: 0, dV, up, down, bits, ui, bitRate: cfg.bitRate,
+        t0, tEnd: n * ui, tStart: 0, dV, up, down, bits, ui, bitRate: cfg.bitRate, fir,
         edgeMin: Math.min(cfg.tr, cfg.tf), t1090Min: Math.min(up.t1090, down.t1090), halfMax,
     };
 }

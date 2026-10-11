@@ -8,7 +8,14 @@
 // a constant. The slow modes are integrated exactly over one period with the initial
 // state that makes them periodic. The mean of everything is the DC operating point at
 // the legs' mean levels.
-import { legMean, edgeSpectrum, edgeValue } from './stimulus.js';
+//
+// Receiver equalization acts on the main receiver signal (RX, or RX P - RX N): the CTLE
+// output is a further output whose step responses are the main ones through the CTLE
+// transfer; an ideal DFE then subtracts, over each bit, its post-cursors times the
+// previous transmitted bits. TX preset and CTLE gain can be chosen automatically by the
+// peak-distortion eye of the pulse response (eq.js).
+import { legMean, edgeSpectrum, edgeValue, buildStimulus } from './stimulus.js';
+import { ctleTransfer, pdaEye, PCIE_PRESETS, firFromPresetDb, presetDbFromFir } from './eq.js';
 import { makeTransfer, dcSolve } from './network.js';
 import { smoothSize } from './fft.js';
 import { fmtHz } from './channel_grid.js';
@@ -26,7 +33,8 @@ const EYE_T_BINS = 320, EYE_V_BINS = 240;
  * Step responses of every (output, leg, edge direction) on a window of N samples.
  * offsets[l]: the 50 % time of leg l's edge in the window. Returns { s (Float64Array per
  * response, index (o * nl + l) * 2 + e, e = 0 rising, 1 falling), tail, extrapFraction,
- * hplot }.
+ * hplot, main }: main holds the spectra of the main receiver signal per (leg, edge) for
+ * receiver equalization (mainSteps).
  */
 function edgeResponses(ctx, transfer, slowRes, N, dt, offsets) {
     const { stim, net, ev, out, fft, fTop, diff } = ctx;
@@ -34,6 +42,10 @@ function edgeResponses(ctx, transfer, slowRes, N, dt, offsets) {
     const K = N / 2, df = 1 / (N * dt), fNyq = K * df;
     const spec = new Float64Array(nr * (K + 1) * 2);
     const O0 = new Float64Array(nr);
+    // Main signal (RX, or RX P - RX N) per (leg, edge): the same spectra combined.
+    const mspec = new Float64Array(nl * 2 * (K + 1) * 2), mO0 = new Float64Array(nl * 2);
+    const mainRow = (arrRe, arrIm, l) => diff
+        ? [arrRe[l] - arrRe[nl + l], arrIm[l] - arrIm[nl + l]] : [arrRe[l], arrIm[l]];
     const scratch = { re: new Float64Array(no * nl), im: new Float64Array(no * nl) };
     const plotStride = Math.max(1, Math.floor(K / 2000));
     const hf = [], hm = [], hp = [], sm = [];
@@ -59,6 +71,7 @@ function edgeResponses(ctx, transfer, slowRes, N, dt, offsets) {
             for (let o = 0; o < no; o++) for (let l = 0; l < nl; l++) for (let e = 0; e < 2; e++) {
                 O0[(o * nl + l) * 2 + e] = H.re[o * nl + l];
             }
+            for (let l = 0; l < nl; l++) for (let e = 0; e < 2; e++) mO0[l * 2 + e] = mainRow(H.re, H.im, l)[0];
             continue;
         }
         if (k === K) continue;
@@ -78,6 +91,10 @@ function edgeResponses(ctx, transfer, slowRes, N, dt, offsets) {
                     const base = 2 * (((o * nl + l) * 2 + e) * (K + 1) + k);
                     spec[base] = si * sc; spec[base + 1] = -sr * sc;
                 }
+                const [hr, hi] = mainRow(H.re, H.im, l);
+                const sr = hr * ur - hi * ui, si = hr * ui + hi * ur;
+                const base = 2 * ((l * 2 + e) * (K + 1) + k);
+                mspec[base] = si * sc; mspec[base + 1] = -sr * sc;
             }
         }
     }
@@ -95,9 +112,54 @@ function edgeResponses(ctx, transfer, slowRes, N, dt, offsets) {
         s.push(v);
     }
     return {
+        main: { spec: mspec, O0: mO0, N, K, df },
         s, tail: eAll > 0 ? eTail / eAll : 0, extrapFraction: eTot > 0 ? eExt / eTot : 0,
         hplot: { f: Float64Array.from(hf), mag: Float64Array.from(hm), phase: Float64Array.from(hp), stim: Float64Array.from(sm) },
     };
+}
+
+// Step responses of the main signal through a filter C (f -> [re, im], C(0) real) per
+// (leg, edge), index l * 2 + e. C null: the main signal itself.
+function mainSteps(ctx, main, C) {
+    const { N, K, df } = main, nr = main.O0.length;
+    const spec = new Float64Array(main.spec.length), O0 = new Float64Array(nr);
+    for (let r = 0; r < nr; r++) {
+        O0[r] = main.O0[r] * (C ? C(0)[0] : 1);
+        for (let k = 1; k < K; k++) {
+            const i = 2 * (r * (K + 1) + k);
+            const [cr, ci] = C ? C(k * df) : [1, 0];
+            const a = main.spec[i], b = main.spec[i + 1];
+            spec[i] = a * cr - b * ci; spec[i + 1] = a * ci + b * cr;
+        }
+    }
+    const p = ctx.fft.irfftBatch(N, nr, spec);
+    const out = [];
+    for (let r = 0; r < nr; r++) {
+        const v = new Float64Array(N), p0 = p[r * N];
+        for (let n = 0; n < N; n++) v[n] = O0[r] * n / N + p[r * N + n] - p0;
+        out.push(v);
+    }
+    return out;
+}
+
+// Pulse response q of the main signal (signal = base + sum d_m q(t - m UI), d = +-1)
+// from its step responses, with transmitter FIR taps [c-1, c0, c+1].
+function pulseResponse(stim, steps, spb, fir) {
+    const N = steps[0].length, nl = steps.length / 2, dV = stim.dV;
+    const p = new Float64Array(N);
+    const at = (a, n) => n >= 0 ? a[n] : 0;
+    for (let n = 0; n < N; n++) {
+        // One isolated bit: P rises then falls a UI later; N the opposite.
+        let v = dV * (steps[0][n] - at(steps[1], n - spb));
+        if (nl > 1) v += -dV * (steps[2 * 1 + 1][n] - at(steps[2 * 1 + 0], n - spb));
+        p[n] = 0.5 * v;
+    }
+    const q = new Float64Array(N);
+    for (let n = 0; n < N; n++) {
+        // Level of bit n = sum_j c_j d_(n-j): c-1 takes the next bit (one UI earlier).
+        q[n] = fir[0] * (n + spb < N ? p[n + spb] : 0) + fir[1] * p[n] + fir[2] * (n - spb >= 0 ? p[n - spb] : 0);
+    }
+    return q;
 }
 
 // One period of a driver leg on the grid n * dt (edges at k * UI + shift).
@@ -177,20 +239,52 @@ function patternSim(ctx, dt0) {
         return swing > 0 ? pre / swing : 0;
     };
 
+    // Settling of a response: the share of its derivative energy in the last 10 %.
+    const tailOf = (v, N) => {
+        let eAll = 0, eTail = 0;
+        for (let n = 1; n < N; n++) { const d = (v(n) - v(n - 1)) ** 2; eAll += d; if (n > 0.9 * N) eTail += d; }
+        return eAll > 0 ? eTail / eAll : 0;
+    };
+    // Amplitude settling, for the common mode: a sharp skew pulse dominates its energy, so
+    // a slow ring after it passes the energy measure. Largest deviation from the final
+    // value in the last 10 %, relative to the peak.
+    const tailAmp = (v, N) => {
+        let peak = 0, dev = 0;
+        const fin = v(N - 1);
+        for (let n = 0; n < N; n++) { peak = Math.max(peak, Math.abs(v(n))); if (n > 0.9 * N) dev = Math.max(dev, Math.abs(v(n) - fin)); }
+        return peak > 0 ? dev / peak : 0;
+    };
+    const CM_SETTLED = 1e-4;
+    // Common mode of a P rise with an N fall: zero for a balanced pair; with an open
+    // common mode at both ends (a current driver into a differential termination) it
+    // rings long, which only matters when the drive excites it.
+    const cmStep = (s) => (n) => 0.5 * ((s[iRes(0, 0, 0)][n] + s[iRes(1, 0, 0)][n]) - (s[iRes(0, 1, 1)][n] + s[iRes(1, 1, 1)][n]));
+
+    const cmExcited = (s, N) => {
+        const cm = cmStep(s), ms = mainStep(s);
+        let cmMax = 0, mMax = 0;
+        for (let n = 0; n < N; n++) { cmMax = Math.max(cmMax, Math.abs(cm(n))); mMax = Math.max(mMax, Math.abs(ms(n))); }
+        return cmMax > 0.01 * mMax;
+    };
+
     const transfer = makeTransfer(net, len, out.nodes);
-    let resp = null, N = 0, nonCausal = false, prevPre = Infinity;
+    let resp = null, N = 0, nonCausal = false, prevPre = Infinity, tail = 0;
     for (let attempt = 0; attempt < 5; attempt++) {
         N = Math.min(N_MAX, smoothSize(T / dt));
         resp = edgeResponses(ctx, transfer, split.slowRes, N, dt, offsets);
-        if (resp.tail <= 1e-6 || 2 * T > split.tCap || N >= N_MAX) break;
+        tail = tailOf(mainStep(resp.s), N);
+        const cmOpen = diff && cmExcited(resp.s, N) && tailAmp(cmStep(resp.s), N) > CM_SETTLED;
+        if ((tail <= 1e-6 && !cmOpen) || 2 * T > split.tCap || N >= N_MAX) break;
         const pre = precursor(mainStep(resp.s), N);
         nonCausal = pre > 2e-3 && pre > 0.7 * prevPre;
         if (nonCausal) break;
         prevPre = pre;
         T *= 2;
     }
-    if (resp.tail > 1e-6 && !nonCausal) {
+    if (tail > 1e-6 && !nonCausal) {
         warnings.push('The step responses have not settled within their window (reflections still ringing); the eye is not accurate.');
+    } else if (diff && cmExcited(resp.s, N) && tailAmp(cmStep(resp.s), N) > CM_SETTLED && !nonCausal) {
+        warnings.push('The common mode the drive excites (skew, unequal edges or an asymmetric pair) has not settled within the window: the common-mode traces are not accurate, the differential eye is.');
     }
     const preRel = precursor(mainStep(resp.s), N);
     if (preRel > 2e-3) {
@@ -202,15 +296,47 @@ function patternSim(ctx, dt0) {
             + `${fmtHz(fTop)}, where the line parameters are extrapolated.`);
     }
 
+    // Receiver and transmitter equalization: choose the TX preset and the CTLE gain
+    // (automatic settings) by the peak-distortion eye of the pulse response.
+    const eq = ctx.cfg.rxEq || {}, txEq = ctx.cfg.txEq || {};
+    const dfeTaps = Math.max(0, Math.round(eq.dfeTaps || 0));
+    const ctleCands = !eq.ctle ? [null]
+        : eq.ctle.auto ? Array.from({ length: Math.round(eq.ctle.adcMax - eq.ctle.adcMin) + 1 }, (_, i) => eq.ctle.adcMin + i)
+        : [eq.ctle.adcDb];
+    const firCands = txEq.auto
+        ? Object.entries(PCIE_PRESETS).map(([name, [ps, de]]) => ({ name, fir: firFromPresetDb(ps, de) }))
+        : [{ name: txEq.name || null, fir: stim.fir || [0, 1, 0] }];
+    let choice = null;
+    const eqActive = !!eq.ctle || dfeTaps > 0 || txEq.auto;
+    if (eqActive) {
+        for (const adc of ctleCands) {
+            const C = adc === null ? null : ctleTransfer(adc, eq.ctle.fp1, eq.ctle.fp2);
+            const steps = mainSteps(ctx, resp.main, C);
+            for (const fc of firCands) {
+                const q = pulseResponse(stim, steps, spb, fc.fir);
+                const pda = pdaEye(q, spb, dfeTaps);
+                if (!choice || pda.height > choice.pda.height) choice = { adc, C, steps, fir: fc.fir, firName: fc.name, q, pda };
+            }
+        }
+    }
+    let st = stim;
+    if (choice && txEq.auto) {
+        st = buildStimulus({ ...ctx.cfg.stimulus, differential: diff, fir: choice.fir });
+    }
+
     // Circular convolution over the period: edge trains (impulses on the bit boundaries)
-    // with the folded step differences.
+    // with the folded step differences. With a CTLE the equalized main signal is one more
+    // output ('eq').
+    const useEqOut = !!(choice && choice.C);
+    const nOut = no + (useEqOut ? 1 : 0);
+    const respOf = (o, l, e) => o < no ? resp.s[iRes(o, l, e)] : choice.steps[l * 2 + e];
     const L = smoothSize(2 * M), K = L / 2;
-    const acc = Array.from({ length: no }, () => new Float64Array(2 * (K + 1)));
+    const acc = Array.from({ length: nOut }, () => new Float64Array(2 * (K + 1)));
     const buf = new Float64Array(L);
     for (let l = 0; l < nl; l++) {
-        const leg = stim.legs[l];
+        const leg = st.legs[l];
         // Bit boundary of each edge (the leg's skew is in its responses).
-        const boundary = (e) => Math.round((e.t - (l === 1 ? skew : 0) - stim.t0) / ui);
+        const boundary = (e) => Math.round((e.t - (l === 1 ? skew : 0) - st.t0) / ui);
         for (let e = 0; e < 2; e++) {
             buf.fill(0);
             let any = false;
@@ -221,8 +347,8 @@ function patternSim(ctx, dt0) {
             }
             if (!any) continue;
             const A = fft.rfft(buf);
-            for (let o = 0; o < no; o++) {
-                const s = resp.s[iRes(o, l, e)];
+            for (let o = 0; o < nOut; o++) {
+                const s = respOf(o, l, e);
                 buf.fill(0);
                 for (let n = 0; n < N; n++) buf[n % M] += n === 0 ? s[0] : s[n] - s[n - 1];
                 const D = fft.rfft(buf), a = acc[o];
@@ -234,19 +360,24 @@ function patternSim(ctx, dt0) {
             }
         }
     }
-    const conv = fft.irfftBatch(L, no, (() => {
-        const all = new Float64Array(no * 2 * (K + 1));
+    const conv = fft.irfftBatch(L, nOut, (() => {
+        const all = new Float64Array(nOut * 2 * (K + 1));
         acc.forEach((a, o) => all.set(a, o * 2 * (K + 1)));
         return all;
     })());
 
     // Driver legs over the period: bit boundaries at k * UI from t = 0.
-    const src = stim.legs.map((leg, l) => sampleLegPeriodic(stim, {
-        v0: leg.v0, edges: leg.edges.map(e => ({ ...e, t: e.t - stim.t0 })),
+    const src = st.legs.map((leg, l) => sampleLegPeriodic(st, {
+        v0: leg.v0, edges: leg.edges.map(e => ({ ...e, t: e.t - st.t0 })),
     }, M, dt));
-    const xdc = dcSolve(net, ctx.Gdc, stim.legs.map(leg => legMean(stim, leg)));
+    const xdc = dcSolve(net, ctx.Gdc, st.legs.map(leg => legMean(st, leg)));
     const o = {};
-    for (let k = 0; k < no; k++) {
+    // The equalized output: the CTLE's DC gain on the main signal's DC level.
+    const adcLin = useEqOut ? choice.C(0)[0] : 1;
+    const mainDc = diff ? xdc[out.nodes[0]] - xdc[out.nodes[1]] : xdc[out.nodes[0]];
+    const outName = (k) => k < no ? out.names[k] : 'eq';
+    const outBase = (k) => k < no ? xdc[out.nodes[k]] : adcLin * mainDc;
+    for (let k = 0; k < nOut; k++) {
         // Wrap the linear convolution to the period, integrate, align the edges to
         // t = k * UI, remove the mean.
         const c = new Float64Array(M);
@@ -256,9 +387,9 @@ function patternSim(ctx, dt0) {
         const G = new Float64Array(M);
         let run = 0, mean = 0;
         for (let m = 0; m < M; m++) { run += c[m]; G[m] = run; mean += run / M; }
-        const v = new Float64Array(M), base = xdc[out.nodes[k]];
+        const v = new Float64Array(M), base = outBase(k);
         for (let n = 0; n < M; n++) v[n] = base + G[(n + nLead) % M] - mean;
-        o[out.names[k]] = v;
+        o[outName(k)] = v;
     }
     // Slow modes: periodic steady state, without their mean (in the DC point).
     for (const sm of split.slowRes) {
@@ -272,13 +403,63 @@ function patternSim(ctx, dt0) {
                 const v = o[out.names[k]];
                 for (let n = 0; n < M; n++) v[n] += r * (z[n] - zm);
             }
+            // The slow modes lie far below the CTLE corners: its DC gain applies.
+            if (useEqOut) {
+                const r = adcLin * (diff ? sm.r[l] - sm.r[nl + l] : sm.r[l]);
+                const v = o.eq;
+                for (let n = 0; n < M; n++) v[n] += r * (z[n] - zm);
+            }
         }
     }
 
+    const eqTrace = o.eq;
+    delete o.eq;
     const full = deriveTraces(diff, o, src);
     const main = full[mainName(diff)];
-    const eye = eyeAnalysis(main, dt, ui, spb, nb);
+    // Slicer signal: the CTLE output (or the main signal), less the ideal DFE feedback.
+    let slicer = eqTrace || main, centre = null;
+    if (choice) {
+        // The main cursor of bit m sits at m UI + tau_s; the DFE corrects the bit's UI.
+        const tauS = (choice.pda.n0 - nLead) * dt;
+        centre = tauS;
+        if (dfeTaps > 0) {
+            slicer = Float64Array.from(slicer);
+            const d = (m) => 2 * stim.bits[((m % nb) + nb) % nb] - 1;
+            const h = Array.from({ length: dfeTaps }, (_, k) => {
+                const i = choice.pda.n0 + (k + 1) * spb;
+                return i < choice.q.length ? choice.q[i] : 0;
+            });
+            for (let m = 0; m < nb; m++) {
+                let fb = 0;
+                for (let k = 0; k < dfeTaps; k++) fb += h[k] * d(m - 1 - k);
+                const n0 = Math.round((m * ui + tauS - ui / 2) / dt);
+                for (let n = n0; n < n0 + spb; n++) slicer[((n % M) + M) % M] -= fb;
+            }
+            choice.dfe = h;
+        }
+        if (eqTrace || dfeTaps > 0) full.rxEq = slicer;
+    }
+    const eye = choice
+        ? eyeAnalysis(slicer, dt, ui, spb, nb, { centre, bits: stim.bits, crossings: dfeTaps === 0 })
+        : eyeAnalysis(main, dt, ui, spb, nb);
     const delayMetric = eyeDelay(eye, full[srcName(diff)], dt, ui, tauMin);
+    const eqMetrics = [];
+    if (choice) {
+        const pins = eyeAnalysis(main, dt, ui, spb, nb);
+        const ph = pins.metrics.find(m => m.label === 'Eye height (centre)');
+        if (ph) eqMetrics.push({ label: 'Eye height at the pins (no RX EQ)', value: ph.value });
+        if (txEq.auto || txEq.name || (stim.fir && stim.fir[1] !== 1)) {
+            const db = presetDbFromFir(choice.fir);
+            // Taps 0 / 1 / 0 (PCIe P4) send plain NRZ.
+            const plain = Math.abs(choice.fir[0]) < 1e-9 && Math.abs(choice.fir[2]) < 1e-9;
+            eqMetrics.push({ label: 'TX FIR' + (txEq.auto ? ' (chosen)' : ''), value: `${choice.firName ? choice.firName + ': ' : ''}`
+                + (plain ? 'no TX equalization' : `${db.preshoot.toFixed(1)} dB pre-shoot, ${db.deemphasis.toFixed(1)} dB de-emphasis`),
+                note: `taps ${choice.fir.map(c => c.toFixed(3)).join(' / ')}` });
+        }
+        if (choice.adc !== null) eqMetrics.push({ label: 'CTLE DC gain' + (eq.ctle.auto ? ' (chosen)' : ''), value: `${choice.adc} dB` });
+        if (choice.dfe) eqMetrics.push({ label: 'DFE taps', value: choice.dfe.map(x => fmtV(x)).join(', '), note: 'ideal decisions, post-cursors at the sampling point' });
+        eqMetrics.push({ label: 'Pulse-response eye estimate', value: fmtV(choice.pda.height), note: 'peak distortion: main cursor minus the residual ISI, worst case' });
+    }
 
     // The shown waveform: the first bits of the period.
     const nShow = Math.min(M, SHOW_BITS * spb);
@@ -288,13 +469,18 @@ function patternSim(ctx, dt0) {
     const metrics = { list: [
         { label: 'Bit rate / UI', value: `${+(stim.bitRate / 1e9).toPrecision(4)} Gb/s / ${fmtTime(ui)}` },
         { label: 'Pattern length', value: `${nb} bits` },
-        ...eye.metrics, delayMetric,
+        ...eye.metrics, delayMetric, ...eqMetrics,
     ].filter(Boolean), crossTime: NaN };
     const res = {
         kind: 'pattern', t, traces, metrics, hplot: resp.hplot,
         info: { dt, N, window: N * dt, slowModes: split.slow.length, trips, samplesPerBit: spb, periodSamples: M },
         eyeHist: eye.hist, eyeInfo: eye.info,
+        eyeAt: choice && (eqTrace || dfeTaps > 0) ? 'slicer' : 'pins',
     };
+    if (choice) {
+        res.pulse = pulseOutput(choice, dt, spb, dfeTaps, nLead);
+        res.eqChoice = { firName: choice.firName, fir: choice.fir, adc: choice.adc, pdaHeight: choice.pda.height, dfe: choice.dfe || [] };
+    }
     packOutput(res);
     return res;
 }
@@ -302,7 +488,11 @@ function patternSim(ctx, dt0) {
 // Eye of one period of the main receiver trace: crossings at the threshold half way
 // between the mean one and zero levels at the eye centre, the centre half a UI from the
 // mean crossing phase. Returns { metrics, hist, info }.
-function eyeAnalysis(v, dt, ui, spb, nb) {
+// opts.centre (time of bit 0's sampling point) and opts.bits (transmitted bits) fix the
+// centre and the decisions instead (an equalized slicer signal); the width is then the
+// span of phases with an open eye. opts.crossings: also report the crossing jitter.
+function eyeAnalysis(v, dt, ui, spb, nb, opts = null) {
+    if (opts) return eyeAtCentre(v, dt, ui, nb, opts);
     const M = v.length;
     const at = (t) => {
         const x = ((t / dt) % M + M) % M, n = Math.floor(x), f = x - n;
@@ -373,6 +563,70 @@ function eyeAnalysis(v, dt, ui, spb, nb) {
         widthLeft: 0.5 + dmax / ui, widthRight: 1.5 + dmin / ui,
     });
     return { metrics, hist: histogram(v, dt, ui, start), info };
+}
+
+function eyeAtCentre(v, dt, ui, nb, { centre, bits, crossings }) {
+    const M = v.length;
+    const at = (t) => {
+        const x = ((t / dt) % M + M) % M, n = Math.floor(x), f = x - n;
+        return v[n] + (v[(n + 1) % M] - v[n]) * f;
+    };
+    const opening = (off) => {
+        let min1 = Infinity, max0 = -Infinity, s1 = 0, s0 = 0, n1 = 0, n0 = 0;
+        for (let m = 0; m < nb; m++) {
+            const x = at(m * ui + centre + off);
+            if (bits[m]) { min1 = Math.min(min1, x); s1 += x; n1++; } else { max0 = Math.max(max0, x); s0 += x; n0++; }
+        }
+        return { min1, max0, m1: s1 / n1, m0: s0 / n0, h: min1 - max0 };
+    };
+    const c = opening(0), thr = 0.5 * (c.m1 + c.m0), amp = c.m1 - c.m0;
+    const metrics = [];
+    let best = c.h, bestOff = 0, left = 0, right = 0;
+    const steps = 64;
+    for (let j = -steps / 2; j <= steps / 2; j++) {
+        const off = j * ui / steps, h = opening(off).h;
+        if (h > best + 1e-9 * Math.abs(amp)) { best = h; bestOff = off; }
+    }
+    // Open span around the centre (inner opening > 0), within +-UI/2.
+    if (c.h > 0) {
+        for (let j = 1; j <= steps / 2 && opening(-j * ui / steps).h > 0; j++) left = -j * ui / steps;
+        for (let j = 1; j <= steps / 2 && opening(j * ui / steps).h > 0; j++) right = j * ui / steps;
+    }
+    metrics.push({ label: 'Eye height (centre)', value: c.h > 0 ? `${fmtV(c.h)} (${fmtPct(c.h / amp)})` : 'closed', note: 'percentage of the eye amplitude' });
+    metrics.push({ label: 'Eye height (best phase)', value: best > 0 ? `${fmtV(best)} at ${bestOff >= 0 ? '+' : ''}${fmtTime(bestOff)}` : 'closed',
+        note: 'largest inner opening over the sampling phase, relative to the centre' });
+    metrics.push({ label: 'Eye width (open phases)', value: c.h > 0 ? `${fmtTime(right - left)} (${fmtPct((right - left) / ui)} UI)` : 'closed',
+        note: 'span of sampling phases with an open eye, in steps of UI/64' });
+    if (crossings) {
+        const ph = [];
+        for (let n = 0; n < M; n++) {
+            const a = v[n] - thr, b = v[(n + 1) % M] - thr;
+            if ((a < 0) !== (b < 0)) { let d = ((n + a / (a - b)) * dt) - centre - ui / 2; d -= ui * Math.round(d / ui); ph.push(d); }
+        }
+        if (ph.length) {
+            const jpp = Math.max(...ph) - Math.min(...ph);
+            const mean = ph.reduce((s, x) => s + x, 0) / ph.length;
+            const jrms = Math.sqrt(ph.reduce((s, x) => s + (x - mean) ** 2, 0) / ph.length);
+            metrics.push({ label: 'Crossing jitter pk-pk / rms', value: `${fmtTime(jpp)} / ${fmtTime(jrms)}`, note: 'data-dependent (ISI) jitter at the threshold' });
+        }
+    }
+    metrics.push({ label: 'One / zero level (centre)', value: `${fmtV(c.m1)} / ${fmtV(c.m0)}` });
+    metrics.push({ label: 'Eye amplitude', value: fmtV(amp) });
+    const tc = ((centre % ui) + ui) % ui, start = tc - ui;
+    const info = { thr, centre: 1, ui, crossPhase: ((tc - ui / 2) % ui + ui) % ui, centreTime: tc, start,
+        heightTop: c.min1, heightBottom: c.max0, widthLeft: 1 + left / ui, widthRight: 1 + right / ui };
+    return { metrics, hist: histogram(v, dt, ui, start), info };
+}
+
+// Pulse response for the plot: q around the main cursor, in UI from it, and its cursors.
+function pulseOutput(choice, dt, spb, dfeTaps, nLead) {
+    const q = choice.q, n0 = choice.pda.n0;
+    const i0 = Math.max(0, n0 - 5 * spb), i1 = Math.min(q.length, n0 + 40 * spb);
+    const stride = Math.max(1, Math.floor((i1 - i0) / 4000));
+    const x = [], y = [];
+    for (let i = i0; i < i1; i += stride) { x.push((i - n0) / spb); y.push(q[i]); }
+    return { x: Float64Array.from(x), y: Float64Array.from(y), cursors: choice.pda.cursors, dfeTaps,
+        delay: (n0 - nLead) * dt };
 }
 
 // 2 UI density histogram of a periodic trace folded every UI, from `start`. Every bit

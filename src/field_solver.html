@@ -775,6 +775,7 @@
             <select id="eye-view">
                 <option value="wave">Waveform</option>
                 <option value="eye">Eye diagram</option>
+                <option value="pulse">Pulse response</option>
                 <option value="spectrum">Channel response</option>
             </select>
             <label class="checkbox-label"><input type="checkbox" id="eye-show-rx" checked> RX</label>
@@ -793,6 +794,23 @@
         <div id="eye-warnings" class="eye-notice" style="display: none;"></div>
         <div class="eye-body">
             <div id="eye-settings" class="eye-settings">
+                <fieldset>
+                    <legend>Interface preset <span class="help-icon" onclick="showHelpModal('eye_presets', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-preset">Fill typical values</label>
+                        <select id="eye-preset">
+                            <option value="" selected>Choose...</option>
+                            <option value="lvds">LVDS</option>
+                            <option value="pcie1">PCIe Gen1 (2.5 GT/s)</option>
+                            <option value="pcie2">PCIe Gen2 (5 GT/s)</option>
+                            <option value="pcie3">PCIe Gen3 (8 GT/s)</option>
+                            <option value="pcie4">PCIe Gen4 (16 GT/s)</option>
+                            <option value="pcie5">PCIe Gen5 (32 GT/s)</option>
+                            <option value="lvpecl">LVPECL 3.3 V clock</option>
+                            <option value="lvcmos33">LVCMOS 3.3 V clock</option>
+                            <option value="lvcmos25">LVCMOS 2.5 V clock</option>
+                            <option value="lvcmos18">LVCMOS 1.8 V clock</option>
+                        </select></div>
+                </fieldset>
                 <fieldset>
                     <legend>Line</legend>
                     <div class="eye-row"><label for="eye-length">Length</label><input type="text" id="eye-length" value="100 mm"></div>
@@ -833,10 +851,18 @@
                 </fieldset>
                 <fieldset>
                     <legend>Driver <span class="help-icon" onclick="showHelpModal('eye_driver', event)">?</span></legend>
-                    <div class="eye-row"><label for="eye-vlow">Low level (EMF)</label><input type="text" id="eye-vlow" value="0 V"></div>
-                    <div class="eye-row"><label for="eye-vhigh">High level (EMF)</label><input type="text" id="eye-vhigh" value="1 V"></div>
+                    <div class="eye-row"><label for="eye-driver">Type</label>
+                        <select id="eye-driver">
+                            <option value="voltage" selected>Voltage mode</option>
+                            <option value="current">Current mode (LVDS)</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-vlow"><label for="eye-vlow">Low level (EMF)</label><input type="text" id="eye-vlow" value="0 V"></div>
+                    <div class="eye-row" id="eye-row-vhigh"><label for="eye-vhigh">High level (EMF)</label><input type="text" id="eye-vhigh" value="1 V"></div>
+                    <div class="eye-row" id="eye-row-rs"><label for="eye-rs">Source resistance (&Omega;)</label><input type="text" id="eye-rs" value="50"></div>
+                    <div class="eye-row" id="eye-row-iout"><label for="eye-iout">Output current</label><input type="text" id="eye-iout" value="3.5 mA"></div>
+                    <div class="eye-row" id="eye-row-rout"><label for="eye-rout">Output resistance (&Omega;)</label><input type="text" id="eye-rout" value="10k"></div>
+                    <div class="eye-row" id="eye-row-vcm"><label for="eye-vcm">Common-mode voltage</label><input type="text" id="eye-vcm" value="1.2 V"></div>
                     <div class="eye-note" id="eye-level-note"></div>
-                    <div class="eye-row"><label for="eye-rs">Source resistance (&Omega;)</label><input type="text" id="eye-rs" value="50"></div>
                     <div class="eye-row"><label for="eye-tr">Rise time</label><input type="text" id="eye-tr" value="35 ps"></div>
                     <div class="eye-row"><label for="eye-tf">Fall time</label><input type="text" id="eye-tf" value="35 ps"></div>
                     <div class="eye-row"><label for="eye-edge-def">Edge times</label>
@@ -851,6 +877,29 @@
                             <option value="ramp">Linear ramp</option>
                         </select></div>
                     <div class="eye-row" id="eye-row-skew"><label for="eye-skew">P/N skew (N later)</label><input type="text" id="eye-skew" value="0 ps"></div>
+                    <div class="eye-row"><label for="eye-padtx">TX pad capacitance</label><input type="text" id="eye-padtx" value="0 pF"></div>
+                </fieldset>
+                <fieldset id="eye-txeq-set">
+                    <legend>TX equalization <span class="help-icon" onclick="showHelpModal('eye_equalization', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-txeq">FIR</label>
+                        <select id="eye-txeq">
+                            <option value="none" selected>None</option>
+                            <option value="db">De-emphasis / pre-shoot</option>
+                            <option value="P0">PCIe preset P0</option>
+                            <option value="P1">PCIe preset P1</option>
+                            <option value="P2">PCIe preset P2</option>
+                            <option value="P3">PCIe preset P3</option>
+                            <option value="P4">PCIe preset P4</option>
+                            <option value="P5">PCIe preset P5</option>
+                            <option value="P6">PCIe preset P6</option>
+                            <option value="P7">PCIe preset P7</option>
+                            <option value="P8">PCIe preset P8</option>
+                            <option value="P9">PCIe preset P9</option>
+                            <option value="P10">PCIe preset P10</option>
+                            <option value="auto">Best PCIe preset</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-deemph"><label for="eye-deemph">De-emphasis (dB)</label><input type="text" id="eye-deemph" value="-3.5"></div>
+                    <div class="eye-row" id="eye-row-preshoot"><label for="eye-preshoot">Pre-shoot (dB)</label><input type="text" id="eye-preshoot" value="0"></div>
                 </fieldset>
                 <fieldset>
                     <legend>Coupling <span class="help-icon" onclick="showHelpModal('eye_coupling', event)">?</span></legend>
@@ -865,12 +914,32 @@
                             <option value="vtt">Resistor to V_TT</option>
                             <option value="rc">Resistor + capacitor to ground</option>
                             <option value="diff">Differential resistor</option>
+                            <option value="thev">Thevenin (pull-up + pull-down)</option>
                             <option value="open">Open (high impedance)</option>
                         </select></div>
                     <div class="eye-row" id="eye-row-rt"><label for="eye-rt">Resistance (&Omega;)</label><input type="text" id="eye-rt" value="50"></div>
                     <div class="eye-row" id="eye-row-vtt"><label for="eye-vtt">V_TT</label><input type="text" id="eye-vtt" value="1.2 V"></div>
                     <div class="eye-row" id="eye-row-ct"><label for="eye-ct">Capacitance</label><input type="text" id="eye-ct" value="100 nF"></div>
                     <div class="eye-row" id="eye-row-rdiff"><label for="eye-rdiff">Resistance P-N (&Omega;)</label><input type="text" id="eye-rdiff" value="100"></div>
+                    <div class="eye-row" id="eye-row-rup"><label for="eye-rup">Pull-up to supply (&Omega;)</label><input type="text" id="eye-rup" value="130"></div>
+                    <div class="eye-row" id="eye-row-rdn"><label for="eye-rdn">Pull-down to ground (&Omega;)</label><input type="text" id="eye-rdn" value="82"></div>
+                    <div class="eye-row" id="eye-row-vsup"><label for="eye-vsup">Supply</label><input type="text" id="eye-vsup" value="3.3 V"></div>
+                    <div class="eye-row"><label for="eye-padrx">RX pad / input capacitance</label><input type="text" id="eye-padrx" value="0 pF"></div>
+                </fieldset>
+                <fieldset id="eye-rxeq-set">
+                    <legend>RX equalization <span class="help-icon" onclick="showHelpModal('eye_equalization', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-ctle">CTLE</label>
+                        <select id="eye-ctle">
+                            <option value="off" selected>Off</option>
+                            <option value="fixed">Fixed DC gain</option>
+                            <option value="auto">Best DC gain</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-adc"><label for="eye-adc">DC gain (dB)</label><input type="text" id="eye-adc" value="-6"></div>
+                    <div class="eye-row" id="eye-row-adcmin"><label for="eye-adcmin">DC gain from (dB)</label><input type="text" id="eye-adcmin" value="-12"></div>
+                    <div class="eye-row" id="eye-row-adcmax"><label for="eye-adcmax">DC gain to (dB)</label><input type="text" id="eye-adcmax" value="-6"></div>
+                    <div class="eye-row" id="eye-row-fp1"><label for="eye-fp1">Pole 1</label><input type="text" id="eye-fp1" value="2 GHz"></div>
+                    <div class="eye-row" id="eye-row-fp2"><label for="eye-fp2">Pole 2</label><input type="text" id="eye-fp2" value="8 GHz"></div>
+                    <div class="eye-row"><label for="eye-dfe">DFE taps</label><input type="text" id="eye-dfe" value="0"></div>
                 </fieldset>
                 <fieldset>
                     <legend>Simulation <span class="help-icon" onclick="showHelpModal('eye_simulation', event)">?</span></legend>
@@ -1440,15 +1509,27 @@
         },
         eye_driver: {
             title: 'Driver',
-            body: '<p>A voltage source with a series resistance on every leg. The levels are its open-circuit (EMF) levels: a 50 &Omega; driver into a matched 50 &Omega; line puts half of the EMF swing on the line.</p><p>A pair is driven complementary: the P leg goes low to high when the N leg goes high to low, the differential EMF swings &plusmn;(high &minus; low). The skew delays the N leg.</p><p>Rise and fall times are the 10-90 % or 20-80 % times of the EMF. Raised-cosine edges have a compact support and a fast falling spectrum, Gaussian ones are band limited. A linear ramp has corners, which show a little band-limit ringing.</p>'
+            body: '<p><b>Voltage mode</b>: a voltage source with a series resistance on every leg. The levels are its open-circuit (EMF) levels: a 50 &Omega; driver into a matched 50 &Omega; line puts half of the EMF swing on the line. <b>Current mode</b> (LVDS): every leg is a current source of &plusmn;I in parallel with its output resistance to the common-mode voltage; a pair steers I through the termination (3.5 mA into 100 &Omega; give 350 mV), the output resistance sets the reflections at the driver.</p><p>A pair is driven complementary: the P leg goes low to high when the N leg goes high to low, the differential EMF swings &plusmn;(high &minus; low). The skew delays the N leg.</p><p>Rise and fall times are the 10-90 % or 20-80 % times of the EMF. Raised-cosine edges have a compact support and a fast falling spectrum, Gaussian ones are band limited. A linear ramp has corners, which show a little band-limit ringing.</p>'
         },
         eye_coupling: {
             title: 'Coupling',
             body: '<p>DC coupling connects the driver, the line and the receiver directly. AC coupling puts a series capacitor in every leg at the transmitter (between the driver and the line) or at the receiver (between the line and the termination).</p><p>A receiver behind a coupling capacitor with only a differential or no termination has no DC path: its common-mode level is set by the receiver bias network, which is not modelled (a 1 G&Omega; leak holds it at 0 V).</p>'
         },
+        eye_presets: {
+            title: 'Interface presets',
+            body: '<p>Fill the stimulus, driver, coupling, termination and equalization with typical values of an interface; every value stays editable and the line length is kept. They are starting points, not data sheet models: check the levels, edge rates, impedances and capacitances of the parts used.</p>' +
+                '<p><b>LVDS</b>: current-mode driver, 3.5 mA into 100 &Omega; differential (350 mV), 1.2 V common mode. <b>PCIe</b>: 50 &Omega; voltage-mode driver with 1 V differential peak-to-peak into a matched load, TX AC coupling, 2 &times; 50 &Omega; receiver termination; Gen1/2 with fixed de-emphasis, Gen3 to 5 with the best TX preset, a CTLE with the best DC gain and a 1/2/3-tap DFE. <b>LVPECL</b>: emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V. <b>LVCMOS</b>: CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver of 3 pF input capacitance.</p>' +
+                '<p>The drivers and receivers are linear. A real CMOS or emitter-follower output changes its resistance with the output voltage, and receiver clamp diodes limit overshoot on unterminated lines, which this model does not.</p>'
+        },
+        eye_equalization: {
+            title: 'Equalization (bit patterns)',
+            body: '<p><b>TX FIR</b>: three taps c<sub>-1</sub>, c<sub>0</sub>, c<sub>+1</sub>, |c<sub>-1</sub>| + c<sub>0</sub> + |c<sub>+1</sub>| = 1 so the low and high levels are the full swing. De-emphasis = 20 log(V<sub>b</sub>/V<sub>a</sub>) and pre-shoot = 20 log(V<sub>c</sub>/V<sub>b</sub>) as defined by PCIe (V<sub>a</sub>: the bit after a transition, V<sub>b</sub>: a long run, V<sub>c</sub>: the bit before a transition). The PCIe 3.0+ presets P0 to P10 are those pairs (P10: &minus;9.5 dB, which depends on the transmitter). <b>Best PCIe preset</b> tries all of them.</p>' +
+                '<p><b>CTLE</b>: H(s) = &omega;<sub>p2</sub>(s + A&omega;<sub>p1</sub>)/((s + &omega;<sub>p1</sub>)(s + &omega;<sub>p2</sub>)), the PCIe 3.0 reference form with DC gain A, poles f<sub>p1</sub>, f<sub>p2</sub> and a zero at A f<sub>p1</sub> (2 and 8 GHz, &minus;6 to &minus;12 dB at 8 GT/s). The Gen4 and Gen5 presets scale the poles with the rate, which is not the reference CTLE of those generations. <b>Best DC gain</b> tries every dB of the range. <b>DFE</b>: ideal decisions; each tap cancels one post-cursor of the pulse response at the sampling point.</p>' +
+                '<p>The best settings maximize the worst-case (peak-distortion) eye height of the pulse response at the slicer; the eye diagram and its metrics then show the slicer signal (after the CTLE and DFE), with the eye height at the pins listed for comparison. The pulse response view shows the equalized pulse with its cursors, the DFE taps marked.</p>'
+        },
         eye_termination: {
             title: 'RX termination',
-            body: '<p><b>Resistor to ground</b> and <b>resistor to V_TT</b>: R on every leg to ground, or to a termination supply V_TT (which sets the DC level). <b>Resistor + capacitor</b>: R in series with C to ground on every leg (AC termination, no DC load). <b>Differential resistor</b>: R between P and N, pairs only. <b>Open</b>: no termination.</p>'
+            body: '<p><b>Resistor to ground</b> and <b>resistor to V_TT</b>: R on every leg to ground, or to a termination supply V_TT (which sets the DC level). <b>Resistor + capacitor</b>: R in series with C to ground on every leg (AC termination, no DC load). <b>Thevenin</b>: a pull-up to a supply and a pull-down to ground on every leg (LVPECL: 130 &Omega; and 82 &Omega; from 3.3 V give 50 &Omega; to 1.28 V). <b>Differential resistor</b>: R between P and N, pairs only. <b>Open</b>: no termination.</p><p>The RX pad / input capacitance is a capacitor to ground on every receiver pin (behind the AC coupling capacitor); the TX pad capacitance is the same at the driver pins.</p>'
         },
         eye_simulation: {
             title: 'Simulation',

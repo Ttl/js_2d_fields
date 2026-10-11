@@ -13,7 +13,7 @@ Try it online: https://hforsten.com/field_solver.html
 - Full RLGC Extraction: Resistance, inductance, capacitance, conductance per unit length
 - Loss Modeling: Conductor losses (skin effect, surface roughness) and dielectric losses
 - S-Parameter Export: Touchstone .s2p and .s4p file generation
-- Time Domain: transient response of the line to a step, a pulse or a clock, with the driver, AC coupling and receiver termination (Eye tab)
+- Time Domain (Eye tab): step, pulse, clock and PRBS/custom bit-pattern responses with eye diagrams; voltage- and current-mode (LVDS) drivers, AC coupling, pad capacitance, receiver terminations, TX FIR (PCIe presets), CTLE and DFE; presets for LVDS, PCIe Gen1-5, LVPECL and LVCMOS
 - Visualization: 2D potential plots, E-field streamlines, frequency-dependent plots
 - Adaptive Meshing: Automatic mesh refinement for accurate field solutions
 

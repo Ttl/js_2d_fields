@@ -115,6 +115,29 @@ const leg = await fresh.evaluate(() => [document.getElementById('eye-length').va
 const legacyOk = leg[0] === '500 mm' && leg[1] === '5 ps' && leg[2] === 'step';
 console.log('legacy string link loads:', legacyOk, leg);
 
+// Interface presets on a differential line: LVDS (current mode) and PCIe Gen3 (TX preset,
+// CTLE and DFE chosen automatically), the eye after equalization and the pulse response.
+await page.click('.tab-button[data-tab="geometry"]');
+await page.selectOption('#tl_type', 'diff_microstrip');
+await page.click('.tab-button[data-tab="eye"]');
+const presetRun = async (preset) => {
+    await page.selectOption('#eye-preset', preset);
+    const st = await runAndWait();
+    const m = await page.$$eval('#eye-metrics .eye-metric-grid > div', els => Object.fromEntries(els.map(e => [e.children[0].textContent, e.children[1].textContent])));
+    return { st, m };
+};
+const lvds = await presetRun('lvds');
+const lvdsOk = /Done/.test(lvds.st) && /mV/.test(lvds.m['Eye height (centre)'] || '');
+console.log('LVDS preset:', lvdsOk, lvds.st, lvds.m['Eye height (centre)'], lvds.m['Eye amplitude']);
+const pcie = await presetRun('pcie3');
+await page.selectOption('#eye-view', 'pulse');
+await page.waitForTimeout(500);
+const pulseTraces = await page.$eval('#eye-plot', el => (el.data || []).map(t => t.name));
+const pcieOk = /Done/.test(pcie.st) && /^P\d+: (no TX equalization|-?[\d.]+ dB pre-shoot)/.test(pcie.m['TX FIR (chosen)'] || '') && /dB/.test(pcie.m['CTLE DC gain (chosen)'] || '')
+    && 'DFE taps' in pcie.m && pulseTraces.includes('Pulse response') && pulseTraces.includes('DFE taps');
+console.log('PCIe Gen3 preset:', pcieOk, pcie.st, pcie.m['TX FIR (chosen)'], pcie.m['CTLE DC gain (chosen)'], pcie.m['Eye height (centre)'], pulseTraces);
+await page.selectOption('#eye-view', 'wave');
+
 // A waveguide has no time-domain simulation.
 await page.selectOption('#tl_type', 'rect_waveguide');
 await page.click('.tab-button[data-tab="eye"]');
@@ -123,6 +146,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

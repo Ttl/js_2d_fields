@@ -5,6 +5,7 @@ import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
 import { requiredBandwidth } from './stimulus.js';
 import { patternBits } from './pattern.js';
 import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX, SKIN_ERR } from './sensitivity.js';
+import { PCIE_PRESETS, firFromPresetDb } from './eq.js';
 
 // Accuracy notes the tab quantifies on the waveform instead of logging them.
 const QUANTIFIED = new Set(['narrow-gap', 'skin-transition', 'ground-spreading']);
@@ -50,6 +51,25 @@ const EYE_FIELDS = [
     ['eye_pattern', 'eye-pattern', 'text'],
     ['eye_bits', 'eye-bits', 'text'],
     ['eye_nbits', 'eye-nbits', 'eye', 'num'],
+    ['eye_driver', 'eye-driver', 'text'],
+    ['eye_iout', 'eye-iout', 'eye', 'cur'],
+    ['eye_rout', 'eye-rout', 'eye', 'res'],
+    ['eye_vcm', 'eye-vcm', 'eye', 'volt'],
+    ['eye_padtx', 'eye-padtx', 'eye', 'cap'],
+    ['eye_padrx', 'eye-padrx', 'eye', 'cap'],
+    ['eye_rup', 'eye-rup', 'eye', 'res'],
+    ['eye_rdn', 'eye-rdn', 'eye', 'res'],
+    ['eye_vsup', 'eye-vsup', 'eye', 'volt'],
+    ['eye_txeq', 'eye-txeq', 'text'],
+    ['eye_deemph', 'eye-deemph', 'eye', 'num'],
+    ['eye_preshoot', 'eye-preshoot', 'eye', 'num'],
+    ['eye_ctle', 'eye-ctle', 'text'],
+    ['eye_adc', 'eye-adc', 'eye', 'num'],
+    ['eye_adcmin', 'eye-adcmin', 'eye', 'num'],
+    ['eye_adcmax', 'eye-adcmax', 'eye', 'num'],
+    ['eye_fp1', 'eye-fp1', 'eye', 'freq'],
+    ['eye_fp2', 'eye-fp2', 'eye', 'freq'],
+    ['eye_dfe', 'eye-dfe', 'eye', 'num'],
     ['eye_spe', 'eye-spe', 'eye', 'num'],
     ['eye_span', 'eye-span', 'eye', 'time'],
 ];
@@ -65,6 +85,9 @@ const EYE_DEFAULTS = {
     eye_rx_ac: 0, eye_crx: 1e-7, eye_term: 'r', eye_rt: 50, eye_vtt: 1.2, eye_ct: 1e-7,
     eye_rdiff: 100, eye_spe: 16, eye_span: NaN,
     eye_bitrate: 10e9, eye_pattern: 'prbs7', eye_bits: '0011010111', eye_nbits: 32767,
+    eye_driver: 'voltage', eye_iout: 3.5e-3, eye_rout: 1e4, eye_vcm: 1.2, eye_padtx: 0, eye_padrx: 0,
+    eye_rup: 130, eye_rdn: 82, eye_vsup: 3.3, eye_txeq: 'none', eye_deemph: -3.5, eye_preshoot: 0,
+    eye_ctle: 'off', eye_adc: -6, eye_adcmin: -12, eye_adcmax: -6, eye_fp1: 2e9, eye_fp2: 8e9, eye_dfe: 0,
 };
 
 // Whether a setting applies to the selected options; links leave out the others.
@@ -78,6 +101,14 @@ function eyeKeyActive(settings, key) {
         case 'eye_bits': return v('eye_stim') === 'pattern' && v('eye_pattern') === 'custom';
         case 'eye_nbits': return v('eye_stim') === 'pattern' && ['prbs23', 'prbs31'].includes(v('eye_pattern'));
         case 'eye_delay': case 'eye_span': return v('eye_stim') !== 'pattern';
+        case 'eye_vlow': case 'eye_vhigh': case 'eye_rs': return v('eye_driver') !== 'current';
+        case 'eye_iout': case 'eye_rout': case 'eye_vcm': return v('eye_driver') === 'current';
+        case 'eye_rup': case 'eye_rdn': case 'eye_vsup': return v('eye_term') === 'thev';
+        case 'eye_txeq': case 'eye_ctle': case 'eye_dfe': return v('eye_stim') === 'pattern';
+        case 'eye_deemph': case 'eye_preshoot': return v('eye_stim') === 'pattern' && v('eye_txeq') === 'db';
+        case 'eye_adc': return v('eye_stim') === 'pattern' && v('eye_ctle') === 'fixed';
+        case 'eye_adcmin': case 'eye_adcmax': return v('eye_stim') === 'pattern' && v('eye_ctle') === 'auto';
+        case 'eye_fp1': case 'eye_fp2': return v('eye_stim') === 'pattern' && v('eye_ctle') !== 'off';
         case 'eye_ctx': return !!v('eye_tx_ac');
         case 'eye_crx': return !!v('eye_rx_ac');
         case 'eye_rt': return ['vtt', 'r', 'rc'].includes(v('eye_term'));
@@ -107,6 +138,7 @@ const SHOW = {
     freq: [[1e9, 1e9, 'GHz'], [1e6, 1e6, 'MHz'], [1e3, 1e3, 'kHz'], [0, 1, 'Hz']],
     cap: [[1e-6, 1e-6, 'µF'], [1e-9, 1e-9, 'nF'], [0, 1e-12, 'pF']],
     volt: [[0, 1, 'V']],
+    cur: [[1, 1, 'A'], [1e-3, 1e-3, 'mA'], [0, 1e-6, 'µA']],
     rate: [[1e9, 1e9, 'Gb/s'], [1e6, 1e6, 'Mb/s'], [1e3, 1e3, 'kb/s'], [0, 1, 'b/s']],
     res: [[0, 1, '']],
     num: [[0, 1, '']],
@@ -133,11 +165,12 @@ const UNIT = {
     cap: { f: 1, mf: 1e-3, uf: 1e-6, 'μf': 1e-6, nf: 1e-9, pf: 1e-12, ff: 1e-15 },
     res: { '': 1, ohm: 1, ohms: 1, 'ω': 1, k: 1e3, kohm: 1e3, 'kω': 1e3 },
     volt: { v: 1, mv: 1e-3 },
+    cur: { a: 1, ma: 1e-3, ua: 1e-6, 'μa': 1e-6 },
     rate: { 'b/s': 1, bps: 1, 'kb/s': 1e3, kbps: 1e3, 'mb/s': 1e6, mbps: 1e6, 'gb/s': 1e9, gbps: 1e9, 'tb/s': 1e12, tbps: 1e12 },
     pct: { '%': 1 },
     num: {},
 };
-const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', res: 'ohm', volt: 'v', pct: '%', num: '', rate: 'gb/s' };
+const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', res: 'ohm', volt: 'v', pct: '%', num: '', rate: 'gb/s', cur: 'ma' };
 
 // Value of a text input in SI units. Throws with the field label on a bad value.
 function parseQuantity(id, kind, label, { optional = false } = {}) {
@@ -157,7 +190,7 @@ function parseQuantity(id, kind, label, { optional = false } = {}) {
     const unit = (m[2] || DEFAULT_UNIT[kind]).toLowerCase();
     const table = UNIT[kind];
     if (kind === 'num') {
-        if (m[2]) throw new Error(`${label}: no unit expected.`);
+        if (m[2] && m[2].toLowerCase() !== 'db') throw new Error(`${label}: no unit expected.`);
         return parseFloat(m[1]);
     }
     if (!(unit in table)) throw new Error(`${label}: unknown unit "${m[2]}".`);
@@ -207,10 +240,14 @@ function runEyeJob(table, cfg) {
 function readConfig() {
     const diff = app.isDifferential();
     const type = $('eye-stim').value;
+    const current = $('eye-driver').value === 'current';
+    // A current-mode leg switches between -I and +I (A instead of V).
+    const iout = current ? parseQuantity('eye-iout', 'cur', 'Output current') : 0;
+    if (current && !(iout > 0)) throw new Error('Output current must be positive.');
     const stimulus = {
         type,
-        vLow: parseQuantity('eye-vlow', 'volt', 'Low level'),
-        vHigh: parseQuantity('eye-vhigh', 'volt', 'High level'),
+        vLow: current ? -iout : parseQuantity('eye-vlow', 'volt', 'Low level'),
+        vHigh: current ? iout : parseQuantity('eye-vhigh', 'volt', 'High level'),
         tr: parseQuantity('eye-tr', 'time', 'Rise time'),
         tf: parseQuantity('eye-tf', 'time', 'Fall time'),
         edgeDef: $('eye-edge-def').value,
@@ -242,12 +279,49 @@ function readConfig() {
         if (!diff) throw new Error('A differential termination needs a differential line.');
         term.rdiff = parseQuantity('eye-rdiff', 'res', 'Differential termination');
     }
+    if (term.type === 'thev') {
+        term.rup = parseQuantity('eye-rup', 'res', 'Pull-up resistance');
+        term.rdn = parseQuantity('eye-rdn', 'res', 'Pull-down resistance');
+        term.vsup = parseQuantity('eye-vsup', 'volt', 'Supply');
+    }
     const network = {
-        rs: parseQuantity('eye-rs', 'res', 'Driver resistance'),
+        driver: current ? 'current' : 'voltage',
+        rs: current ? 0 : parseQuantity('eye-rs', 'res', 'Driver resistance'),
+        rout: current ? parseQuantity('eye-rout', 'res', 'Output resistance') : 0,
+        vcm: current ? parseQuantity('eye-vcm', 'volt', 'Common-mode voltage') : 0,
+        padTx: parseQuantity('eye-padtx', 'cap', 'TX pad capacitance'),
+        padRx: parseQuantity('eye-padrx', 'cap', 'RX pad capacitance'),
         tx: { ac: $('eye-tx-ac').checked },
         rx: { ac: $('eye-rx-ac').checked },
         term,
     };
+    // Equalization (bit patterns).
+    let txEq = null, rxEq = null;
+    if (type === 'pattern') {
+        const tx = $('eye-txeq').value;
+        if (tx === 'auto') txEq = { auto: true };
+        else if (tx === 'db') {
+            stimulus.fir = firFromPresetDb(parseQuantity('eye-preshoot', 'num', 'Pre-shoot'), parseQuantity('eye-deemph', 'num', 'De-emphasis'));
+            txEq = { name: null };
+        } else if (PCIE_PRESETS[tx]) {
+            stimulus.fir = firFromPresetDb(...PCIE_PRESETS[tx]);
+            txEq = { name: tx };
+        }
+        const ctle = $('eye-ctle').value;
+        rxEq = { dfeTaps: Math.round(parseQuantity('eye-dfe', 'num', 'DFE taps')) };
+        if (!(rxEq.dfeTaps >= 0 && rxEq.dfeTaps <= 16)) throw new Error('DFE taps: 0 to 16.');
+        if (ctle !== 'off') {
+            const fp1 = parseQuantity('eye-fp1', 'freq', 'CTLE pole 1'), fp2 = parseQuantity('eye-fp2', 'freq', 'CTLE pole 2');
+            if (!(fp1 > 0 && fp2 > fp1)) throw new Error('CTLE: the poles must be positive, pole 2 above pole 1.');
+            rxEq.ctle = ctle === 'auto'
+                ? { auto: true, adcMin: parseQuantity('eye-adcmin', 'num', 'DC gain from'), adcMax: parseQuantity('eye-adcmax', 'num', 'DC gain to'), fp1, fp2 }
+                : { adcDb: parseQuantity('eye-adc', 'num', 'CTLE DC gain'), fp1, fp2 };
+            if (rxEq.ctle.auto && !(rxEq.ctle.adcMax >= rxEq.ctle.adcMin && rxEq.ctle.adcMax - rxEq.ctle.adcMin <= 40)) {
+                throw new Error('CTLE: the DC gain range must run upwards, at most 40 dB.');
+            }
+            if ((rxEq.ctle.adcDb ?? rxEq.ctle.adcMax) > 0) throw new Error('CTLE: the DC gain is at most 0 dB (the high-frequency gain is 0 dB).');
+        }
+    }
     if (network.tx.ac) network.tx.c = parseQuantity('eye-ctx', 'cap', 'TX coupling capacitor');
     if (network.rx.ac) network.rx.c = parseQuantity('eye-crx', 'cap', 'RX coupling capacitor');
     const spe = parseQuantity('eye-spe', 'num', 'Samples per edge');
@@ -256,7 +330,7 @@ function readConfig() {
     const length = parseQuantity('eye-length', 'len', 'Line length');
     if (!(length > 0)) throw new Error('Line length must be positive.');
     return {
-        length, network, stimulus, samplesPerEdge: spe, span: span || 0,
+        length, network, stimulus, samplesPerEdge: spe, span: span || 0, txEq, rxEq,
         causal: !!($('chk_causal_materials') && $('chk_causal_materials').checked),
     };
 }
@@ -275,6 +349,19 @@ function updateVisibility() {
     show('eye-row-nbits', type === 'pattern' && (pat === 'prbs23' || pat === 'prbs31'));
     for (const id of ['eye-row-delay', 'eye-row-span']) show(id, type !== 'pattern');
     show('eye-row-skew', diff);
+    const current = $('eye-driver').value === 'current';
+    for (const id of ['eye-row-vlow', 'eye-row-vhigh', 'eye-row-rs']) show(id, !current);
+    for (const id of ['eye-row-iout', 'eye-row-rout', 'eye-row-vcm']) show(id, current);
+    for (const id of ['eye-row-rup', 'eye-row-rdn', 'eye-row-vsup']) show(id, term === 'thev');
+    show('eye-txeq-set', type === 'pattern');
+    show('eye-rxeq-set', type === 'pattern');
+    const txeq = $('eye-txeq').value, ctle = $('eye-ctle').value;
+    for (const id of ['eye-row-deemph', 'eye-row-preshoot']) show(id, txeq === 'db');
+    show('eye-row-adc', ctle === 'fixed');
+    for (const id of ['eye-row-adcmin', 'eye-row-adcmax']) show(id, ctle === 'auto');
+    for (const id of ['eye-row-fp1', 'eye-row-fp2']) show(id, ctle !== 'off');
+    // A current-mode source is a current: not on the voltage plot.
+    $('eye-show-src').disabled = current;
     show('eye-row-rt', ['vtt', 'r', 'rc'].includes(term));
     show('eye-row-vtt', term === 'vtt');
     show('eye-row-ct', term === 'rc');
@@ -289,8 +376,13 @@ function updateVisibility() {
     // Level readout and clock data rate.
     let note = '';
     try {
-        const lo = parseQuantity('eye-vlow', 'volt', 'Low level'), hi = parseQuantity('eye-vhigh', 'volt', 'High level');
-        note = diff ? `${fmtVolt(2 * Math.abs(hi - lo))} pp differential, ${fmtVolt((hi + lo) / 2)} common mode` : '';
+        if ($('eye-driver').value === 'current') {
+            const i = parseQuantity('eye-iout', 'cur', 'I');
+            note = diff ? `${fmtVolt(100 * i)} differential into 100 Ω` : `±${+(i * 1e3).toPrecision(3)} mA`;
+        } else {
+            const lo = parseQuantity('eye-vlow', 'volt', 'Low level'), hi = parseQuantity('eye-vhigh', 'volt', 'High level');
+            note = diff ? `${fmtVolt(2 * Math.abs(hi - lo))} pp differential, ${fmtVolt((hi + lo) / 2)} common mode` : '';
+        }
     } catch { note = ''; }
     $('eye-level-note').textContent = note;
     let rate = '';
@@ -299,6 +391,8 @@ function updateVisibility() {
     const hasEye = type === 'clock' || type === 'pattern';
     $('eye-view').querySelector('option[value="eye"]').disabled = !hasEye;
     if (!hasEye && $('eye-view').value === 'eye') $('eye-view').value = 'wave';
+    $('eye-view').querySelector('option[value="pulse"]').disabled = type !== 'pattern';
+    if (type !== 'pattern' && $('eye-view').value === 'pulse') $('eye-view').value = 'wave';
     const wg = app.isSelfReferenced();
     $('btn-eye-run').disabled = wg || busy;
     setNotice(wg ? ['Time-domain simulation needs a TEM or quasi-TEM line: not available for a waveguide.'] : null, 'eye-notice');
@@ -479,13 +573,14 @@ function timeUnit(tMax) {
 function selectedTraces(res) {
     const on = (id) => $(id) && $(id).checked;
     const out = [];
+    const eq = res.plot && res.plot.traces.rxEq ? [['rxEq', 'RX after equalization']] : [];
     if (!res.differential) {
-        if (on('eye-show-rx')) out.push(['rx', 'RX']);
+        if (on('eye-show-rx')) out.push(['rx', 'RX'], ...eq);
         if (on('eye-show-tx')) out.push(['tx', 'TX pad']);
         if (on('eye-show-src')) out.push(['src', 'Source EMF']);
         return out;
     }
-    if (on('eye-show-rx')) out.push(['rxDiff', 'RX diff']);
+    if (on('eye-show-rx')) out.push(['rxDiff', 'RX diff'], ...eq);
     if (on('eye-show-tx')) out.push(['txDiff', 'TX pad diff']);
     if (on('eye-show-src')) out.push(['srcDiff', 'Source EMF diff']);
     if (on('eye-show-legs')) {
@@ -496,8 +591,13 @@ function selectedTraces(res) {
     return out;
 }
 
-const LABEL_ORDER = ['rx', 'tx', 'src', 'rxDiff', 'txDiff', 'srcDiff', 'rxP', 'rxN', 'txP', 'txN', 'rxCM'];
-const colorOf = (key) => COLORS[LABEL_ORDER.indexOf(key) % COLORS.length];
+// One colour per trace; the single-ended and differential versions of a trace never
+// share a plot, so they share a colour.
+const TRACE_COLORS = {
+    rx: COLORS[0], rxDiff: COLORS[0], tx: COLORS[1], txDiff: COLORS[1], src: COLORS[2], srcDiff: COLORS[2],
+    rxP: COLORS[3], rxN: COLORS[4], txP: COLORS[5], txN: COLORS[6], rxCM: COLORS[7], rxEq: '#facc15',
+};
+const colorOf = (key) => TRACE_COLORS[key] || COLORS[0];
 
 function layoutBase(xTitle, yTitle) {
     return {
@@ -659,11 +759,41 @@ function drawMetrics(res) {
     el.innerHTML = `<div class="eye-metric-grid">${rows}</div><div class="eye-info">${info}</div>`;
 }
 
+// Pulse response at the slicer: the equalized response to one bit, in UI from its main
+// cursor, the cursors marked (DFE taps filled).
+function drawPulse(res) {
+    const Plotly = getPlotly();
+    const traces = [];
+    const add = (r, faint) => {
+        if (!r.pulse) return;
+        traces.push({ x: Array.from(r.pulse.x), y: Array.from(r.pulse.y), type: 'scatter', mode: 'lines',
+            name: faint ? 'Frozen' : 'Pulse response', line: { color: faint ? '#aaa' : COLORS[0], width: faint ? 1.5 : 2, dash: faint ? 'dot' : 'solid' } });
+        if (faint) return;
+        const c = r.pulse.cursors;
+        const dfe = c.filter(x => x.k >= 1 && x.k <= r.pulse.dfeTaps), other = c.filter(x => !(x.k >= 1 && x.k <= r.pulse.dfeTaps));
+        traces.push({ x: other.map(x => x.k), y: other.map(x => x.value), type: 'scatter', mode: 'markers', name: 'Cursors',
+            marker: { color: COLORS[1], size: 7 }, hovertemplate: 'cursor %{x}: %{y:.4g} V<extra></extra>' });
+        if (dfe.length) traces.push({ x: dfe.map(x => x.k), y: dfe.map(x => x.value), type: 'scatter', mode: 'markers', name: 'DFE taps',
+            marker: { color: COLORS[2], size: 9, symbol: 'diamond' }, hovertemplate: 'DFE tap %{x}: %{y:.4g} V<extra></extra>' });
+    };
+    if (frozen && frozen.pulse) add(frozen, true);
+    add(res, false);
+    if (!res.pulse) {
+        Plotly.newPlot('eye-plot', [], { ...layoutBase('UI', 'Voltage (V)'), annotations: [{ text: 'The pulse response is computed with TX or RX equalization.', showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: '#888' } }] }, { responsive: true });
+        return;
+    }
+    const layout = layoutBase('Time from the main cursor (UI)', 'Voltage (V)');
+    layout.xaxis.dtick = 1;
+    layout.xaxis.range = [-4, Math.max(16, res.pulse.dfeTaps + 4)];
+    Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
+}
+
 function draw() {
     const Plotly = getPlotly();
     if (!Plotly || !lastResult) return;
     const view = $('eye-view').value;
     if (view === 'eye' && (lastResult.eye || lastResult.eyeHist)) drawEyeDiagram(lastResult);
+    else if (view === 'pulse') drawPulse(lastResult);
     else if (view === 'spectrum') drawSpectrum(lastResult);
     else drawWave(lastResult);
     drawMetrics(lastResult);
@@ -693,6 +823,55 @@ function toggleFreeze() {
     draw();
 }
 
+// ---------------------------------------------------------------- interface presets
+
+// Typical starting values per interface (input id -> value; true/false for checkboxes).
+const PRESET_BASE = {
+    'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-tx-ac': false, 'eye-rx-ac': false,
+    'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-dfe': '0', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
+};
+const pcie = (rate, tr, extra) => ({
+    'eye-vlow': '0 V', 'eye-vhigh': '1 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
+    'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', ...extra,
+});
+const pcieEq = (adcMin, adcMax, fp1, fp2, dfe) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',
+    'eye-adcmin': adcMin, 'eye-adcmax': adcMax, 'eye-fp1': fp1, 'eye-fp2': fp2, 'eye-dfe': dfe });
+const lvcmos = (v, rs, tr) => ({ 'eye-vlow': '0 V', 'eye-vhigh': v, 'eye-rs': rs, 'eye-stim': 'clock', 'eye-clock-freq': '100 MHz',
+    'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': tr, 'eye-tf': tr, 'eye-term': 'open', 'eye-padrx': '3 pF' });
+const PRESETS = {
+    lvds: { differential: true, 'eye-driver': 'current', 'eye-iout': '3.5 mA', 'eye-rout': '10k', 'eye-vcm': '1.2 V',
+        'eye-stim': 'pattern', 'eye-bitrate': '1 Gb/s', 'eye-pattern': 'prbs7', 'eye-tr': '300 ps', 'eye-tf': '300 ps',
+        'eye-term': 'diff', 'eye-rdiff': '100' },
+    pcie1: { differential: true, ...pcie('2.5 Gb/s', '80 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-3.5', 'eye-preshoot': '0' }) },
+    pcie2: { differential: true, ...pcie('5 Gb/s', '40 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-6', 'eye-preshoot': '0' }) },
+    pcie3: { differential: true, ...pcie('8 Gb/s', '25 ps', pcieEq('-12', '-6', '2 GHz', '8 GHz', '1')) },
+    pcie4: { differential: true, ...pcie('16 Gb/s', '12.5 ps', pcieEq('-12', '-6', '4 GHz', '16 GHz', '2')) },
+    pcie5: { differential: true, ...pcie('32 Gb/s', '6.25 ps', pcieEq('-15', '-5', '8 GHz', '32 GHz', '3')) },
+    lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
+        'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V' },
+    lvcmos33: lvcmos('3.3 V', '25', '1 ns'),
+    lvcmos25: lvcmos('2.5 V', '30', '800 ps'),
+    lvcmos18: lvcmos('1.8 V', '35', '700 ps'),
+};
+
+function applyPreset(name) {
+    const p = PRESETS[name];
+    if (!p) return;
+    for (const [id, v] of Object.entries({ ...PRESET_BASE, ...p })) {
+        const el = $(id);
+        if (!el) continue;
+        if (el.type === 'checkbox') el.checked = !!v; else el.value = v;
+    }
+    updateVisibility();
+    const label = $('eye-preset').selectedOptions[0].textContent;
+    if (p.differential && !app.isDifferential()) {
+        setNotice([`${label} is a differential interface: choose a differential line type for it.`]);
+    } else {
+        setNotice(null);
+        setStatus(`${label}: typical values filled in. Simulate to run.`);
+    }
+}
+
 // ---------------------------------------------------------------- setup
 
 /**
@@ -709,6 +888,7 @@ function initEyeTab(ctx) {
     for (const id of ['eye-show-rx', 'eye-show-tx', 'eye-show-src', 'eye-show-legs', 'eye-show-cm']) {
         $(id).addEventListener('change', draw);
     }
+    $('eye-preset').addEventListener('change', (e) => applyPreset(e.target.value));
     const panel = $('eye-settings');
     panel.addEventListener('change', updateVisibility);
     panel.addEventListener('input', updateVisibility);

@@ -165,17 +165,25 @@ function lineAdmittance(f, v, len, differential) {
 
 /**
  * Circuit of the link.
- * cfg: { differential, rs, tx: { ac, c }, rx: { ac, c },
- *        term: { type: 'vtt' | 'rc' | 'r' | 'diff' | 'open', rt, vtt, ct, rdiff } }
- * Returns the node map, the real conductance and capacitance matrices without the
- * line, the input matrix (driver EMF of each leg to node currents) and the constant
- * V_TT source vector.
+ * cfg: { differential, driver: 'voltage' | 'current', rs (voltage-mode source
+ *        resistance), rout, vcm (current-mode output resistance to the common-mode
+ *        supply), padTx, padRx (pad capacitance per leg at the driver and receiver pins),
+ *        tx: { ac, c }, rx: { ac, c },
+ *        term: { type: 'vtt' | 'rc' | 'r' | 'thev' | 'diff' | 'open', rt, vtt, ct, rup,
+ *                rdn, vsup, rdiff } }
+ * The driver input of a leg is its EMF (voltage mode) or its output current (current
+ * mode). Returns the node map, the real conductance and capacitance matrices without
+ * the line, the input matrix (driver inputs to node currents) and the vector of the
+ * constant sources (V_TT, the Thevenin supply, the current-mode common mode).
  */
 function buildNetwork(cfg) {
     const diff = !!cfg.differential, nl = diff ? 2 : 1;
     const pos = (x, what) => { if (!(x > 0) || !isFinite(x)) throw new Error(`${what} must be a positive number.`); return x; };
-    const rs = pos(cfg.rs, 'Driver resistance');
+    const current = cfg.driver === 'current';
+    const rs = current ? pos(cfg.rout, 'Driver output resistance') : pos(cfg.rs, 'Driver resistance');
     const term = cfg.term || { type: 'open' };
+    const cap = (x, what) => { if (!(x >= 0) || !isFinite(x)) throw new Error(`${what} must be zero or positive.`); return x; };
+    const padTx = cap(cfg.padTx || 0, 'TX pad capacitance'), padRx = cap(cfg.padRx || 0, 'RX pad capacitance');
     let n = 0;
     const a = [], b = [], c = [], d = [], mid = [];
     const gst = [], cst = [];   // [i, j, value], j = -1 is ground
@@ -186,6 +194,10 @@ function buildNetwork(cfg) {
         c[l] = n++;
         d[l] = cfg.rx && cfg.rx.ac ? n++ : c[l];
         gst.push([a[l], -1, 1 / rs]);
+        // Current mode: the output resistance returns to the common-mode supply.
+        if (current) vttI.push([a[l], (cfg.vcm || 0) / rs]);
+        if (padTx > 0) cst.push([a[l], -1, padTx]);
+        if (padRx > 0) cst.push([d[l], -1, padRx]);
         if (cfg.tx && cfg.tx.ac) cst.push([a[l], b[l], pos(cfg.tx.c, 'TX coupling capacitance')]);
         if (cfg.rx && cfg.rx.ac) cst.push([c[l], d[l], pos(cfg.rx.c, 'RX coupling capacitance')]);
         switch (term.type) {
@@ -198,6 +210,13 @@ function buildNetwork(cfg) {
             case 'r':
                 gst.push([d[l], -1, 1 / pos(term.rt, 'Termination resistance')]);
                 break;
+            case 'thev': {
+                // R_up to the supply and R_down to ground (a Thevenin bias network).
+                const gu = 1 / pos(term.rup, 'Pull-up resistance'), gd = 1 / pos(term.rdn, 'Pull-down resistance');
+                gst.push([d[l], -1, gu + gd]);
+                vttI.push([d[l], (term.vsup || 0) * gu]);
+                break;
+            }
             case 'rc':
                 mid[l] = n++;
                 gst.push([d[l], mid[l], 1 / pos(term.rt, 'Termination resistance')]);
@@ -233,7 +252,7 @@ function buildNetwork(cfg) {
     for (const s of gst) stamp(G, s);
     for (const s of cst) stamp(C, s);
     const B = new Float64Array(n * nl);
-    for (let l = 0; l < nl; l++) B[a[l] * nl + l] = 1 / rs;
+    for (let l = 0; l < nl; l++) B[a[l] * nl + l] = current ? 1 : 1 / rs;
     const vtt = new Float64Array(n);
     for (const [i, cur] of vttI) vtt[i] += cur;
 
@@ -242,7 +261,8 @@ function buildNetwork(cfg) {
         nodes: { a, b, c, d, mid },
         rxFloating: d.some(i => floating.includes(i)),
         floating,
-        term, rs,
+        // rs: the source resistance seen by the line (reflection estimates).
+        term, rs, current,
     };
 }
 

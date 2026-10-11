@@ -20,6 +20,10 @@
 //  14. Bit patterns: PRBS generators maximal length; the periodic pattern engine equals
 //      the clock steady state for clock-like patterns (DC and AC coupled, a pair with
 //      skew); eye metrics and histogram on a lossless line; AC-coupled baseline wander.
+//  15. Drivers, pads, terminations and equalization: LVDS current-mode levels, Thevenin
+//      termination levels, RX pad capacitance as an RC; PCIe preset taps, FIR source
+//      levels, a CTLE of 0 dB with far poles leaves the signal, the CTLE's DC gain; DFE
+//      and the automatic choices beat no equalization.
 import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
@@ -28,6 +32,7 @@ import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
 import { buildNetwork, makeTransfer } from '../src/eye/network.js';
 import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
 import { prbsBits, prbsPeriod, patternBits, PRBS } from '../src/eye/pattern.js';
+import { PCIE_PRESETS, firFromPresetDb, presetDbFromFir } from '../src/eye/eq.js';
 import { computeSParamsSingleEnded, computeSParamsDifferentialMTL } from '../src/sparameters.js';
 
 const fft = await loadFFT();
@@ -485,6 +490,110 @@ const valueAt = (r, name, t) => {
         const mAc = mean(ac.traces.rx), mDc = mean(dc.traces.rx), want = 0.1 * 80 / (30 + 2 + 80);
         check('AC-coupled unbalanced pattern: zero-mean receiver; DC coupled: divided mean', Math.abs(mAc) < 1e-6 && Math.abs(mDc - want) < 1e-4,
             `AC mean ${mAc.toExponential(2)} V, DC mean ${mDc.toFixed(5)} V (want ${want.toFixed(5)})`);
+    }
+}
+
+// 15. Drivers, pads, terminations, equalization.
+{
+    const odd = { R: 5, L: 300e-9, G: 0, C: 120e-12 }, even = { R: 8, L: 400e-9, G: 0, C: 90e-12 };
+    const pair = pairTable(() => fromModes(odd, even));
+    // LVDS: +-3.5 mA steered through 100 Ohm, 10 kOhm output resistance to 1.2 V.
+    {
+        const cfg = { length: 0.1, samplesPerEdge: 16,
+            network: { driver: 'current', rout: 1e4, vcm: 1.2, tx: { ac: false }, rx: { ac: false }, term: { type: 'diff', rdiff: 100 } },
+            stimulus: { type: 'step', vLow: -3.5e-3, vHigh: 3.5e-3, tr: 200e-12, tf: 200e-12, edgeDef: '20-80', shape: 'rcos', delay: 0 }, span: 20e-9 };
+        const r = simulateLink(pair, cfg, fft);
+        const d = r.traces.rxDiff, cm = r.traces.rxCM;
+        // Odd half circuit: 3.5 mA into 10 kOhm || (0.5 Ohm line + 50 Ohm), the far end
+        // across the 50 Ohm half of the termination.
+        const rl = 0.5, leg = 3.5e-3 * (1e4 * (rl + 50)) / (1e4 + rl + 50) * 50 / (rl + 50), want = 2 * leg;
+        check('LVDS current mode: +-348 mV differential, 1.2 V common mode',
+            Math.abs(d[d.length - 1] - want) < 1e-4 && Math.abs(d[0] + want) < 1e-4 && Math.abs(cm[cm.length - 1] - 1.2) < 1e-6,
+            `diff ${(d[0] * 1e3).toFixed(2)} -> ${(d[d.length - 1] * 1e3).toFixed(2)} mV (want ${(want * 1e3).toFixed(2)}), CM ${cm[cm.length - 1].toFixed(5)} V`);
+    }
+    // Thevenin termination: 130 / 82 Ohm from 3.3 V, driver 7 Ohm, EMF 1.6 -> 2.4 V.
+    {
+        const lossy = seTable(() => ({ R: 2, L: L0, G: 0, C: C0 }));
+        const cfg = { length: 0.1, samplesPerEdge: 16, span: 10e-9,
+            network: { rs: 7, tx: { ac: false }, rx: { ac: false }, term: { type: 'thev', rup: 130, rdn: 82, vsup: 3.3 } },
+            stimulus: { type: 'step', vLow: 1.6, vHigh: 2.4, tr: 200e-12, tf: 200e-12, edgeDef: '20-80', shape: 'rcos', delay: 0 } };
+        const r = simulateLink(lossy, cfg, fft), v = r.traces.rx;
+        const rth = 130 * 82 / 212, vth = 3.3 * 82 / 212, rser = 7 + 0.2;
+        const lvl = (e) => (e * rth + vth * rser) / (rth + rser);
+        check('Thevenin termination: DC levels', Math.abs(v[0] - lvl(1.6)) < 1e-6 && Math.abs(v[v.length - 1] - lvl(2.4)) < 1e-4,
+            `${v[0].toFixed(5)} / ${v[v.length - 1].toFixed(5)} V (want ${lvl(1.6).toFixed(5)} / ${lvl(2.4).toFixed(5)})`);
+    }
+    // RX pad capacitance on a 1 mm line, open end: v = 1 - exp(-t / (Rs C)).
+    {
+        const cfg = { length: 1e-3, samplesPerEdge: 16, span: 3e-9,
+            network: { rs: 50, padRx: 10e-12, tx: { ac: false }, rx: { ac: false }, term: { type: 'open' } },
+            stimulus: { type: 'step', vLow: 0, vHigh: 1, tr: 10e-12, tf: 10e-12, edgeDef: '10-90', shape: 'gauss', delay: 0 } };
+        const r = simulateLink(lossless, cfg, fft);
+        const st = buildStimulus({ ...cfg.stimulus, differential: false });
+        // The 1 mm line adds its own 0.1 pF and 5 ps of delay; its 0.25 nH make the RC a
+        // second-order circuit, up to L / (R^2 C) = 1 % off the RC curve.
+        const tau = 50 * (10e-12 + C0 * 1e-3), td = 1e-3 * Math.sqrt(L0 * C0);
+        const e = maxErr(r, 'rx', t => t < st.t0 + td ? 0 : 1 - Math.exp(-(t - st.t0 - td) / tau), st.t0 + 50e-12, st.t0 + 2.5e-9);
+        check('RX pad capacitance: RC charging through the source resistance', e < 5e-3, `max err ${e.toExponential(2)} V`);
+    }
+    // PCIe preset taps (published coefficients) and their dB round trip.
+    {
+        const want = { P0: [0, 0.75, -0.25], P1: [0, 0.833, -0.167], P4: [0, 1, 0], P5: [-0.1, 0.9, 0], P7: [-0.1, 0.7, -0.2], P8: [-0.125, 0.75, -0.125], P9: [-0.167, 0.833, 0] };
+        let e = 0, rt = 0;
+        for (const [p, w] of Object.entries(want)) {
+            const c = firFromPresetDb(...PCIE_PRESETS[p]);
+            e = Math.max(e, ...c.map((x, i) => Math.abs(x - w[i])));
+            const db = presetDbFromFir(c);
+            rt = Math.max(rt, Math.abs(db.preshoot - PCIE_PRESETS[p][0]), Math.abs(db.deemphasis - PCIE_PRESETS[p][1]));
+        }
+        check('PCIe presets: taps within 0.003 of the published values, dB round trip', e < 3e-3 && rt < 1e-9, `${e.toExponential(1)}, ${rt.toExponential(1)} dB`);
+    }
+    // FIR source levels: P7 on PRBS7, the source takes the levels 1 - 2a, 1 - 2b,
+    // 1 - 2a - 2b and 1 (times the half swing).
+    {
+        const fir = firFromPresetDb(...PCIE_PRESETS.P7);
+        const cfg = { length: 0.1, samplesPerEdge: 16, network: { rs: 50, tx: { ac: false }, rx: { ac: false }, term: { type: 'r', rt: 50 } },
+            stimulus: { type: 'pattern', bitRate: 5e9, bits: patternBits({ pattern: 'prbs7' }), fir, vLow: 0, vHigh: 1, tr: 30e-12, tf: 30e-12, edgeDef: '10-90', shape: 'rcos' } };
+        const r = simulateLink(lossless, cfg, fft);
+        const ui = 200e-12, a = -fir[0], b = -fir[2], want = [1, 1 - 2 * a, 1 - 2 * b, 1 - 2 * a - 2 * b];
+        const lv = new Set();
+        for (let k = 0; k < 127; k++) lv.add((2 * valueAt(r, 'src', (k + 0.5) * ui) - 1).toFixed(4));
+        const got = [...lv].map(Number).map(Math.abs);
+        const ok = got.every(g => want.some(w => Math.abs(g - w) < 1e-4)) && want.every(w => got.some(g => Math.abs(g - w) < 1e-4));
+        check('TX FIR P7: source levels', ok, [...lv].sort().join(' '));
+    }
+    // CTLE: 0 dB with poles far above the signal leaves it; the DC gain scales the mean.
+    {
+        const lossy = seTable(() => ({ R: 20, L: L0, G: 0, C: C0 }));
+        const base = { length: 0.1, samplesPerEdge: 16, network: { rs: 50, tx: { ac: false }, rx: { ac: false }, term: { type: 'r', rt: 50 } },
+            stimulus: { type: 'pattern', bitRate: 2e9, bits: patternBits({ pattern: 'prbs7' }), vLow: 0, vHigh: 1, tr: 50e-12, tf: 50e-12, edgeDef: '10-90', shape: 'rcos' } };
+        const r0 = simulateLink(lossy, { ...base, rxEq: { ctle: { adcDb: 0, fp1: 1e13, fp2: 2e13 }, dfeTaps: 0 } }, fft);
+        let e = 0;
+        for (let i = 0; i < r0.t.length; i++) e = Math.max(e, Math.abs(r0.traces.rxEq[i] - r0.traces.rx[i]));
+        check('CTLE at 0 dB with far poles: equalized = RX', e < 2e-3, `max diff ${e.toExponential(2)} V`);
+        const r6 = simulateLink(lossy, { ...base, rxEq: { ctle: { adcDb: -6, fp1: 2e9, fp2: 8e9 }, dfeTaps: 0 } }, fft);
+        const mean = (v) => v.reduce((s, x) => s + x, 0) / v.length;
+        // Over the shown 127-bit period the means relate by the DC gain.
+        const ratio = mean(r6.traces.rxEq) / mean(r6.traces.rx);
+        check('CTLE: DC gain on the mean level', Math.abs(ratio - Math.pow(10, -6 / 20)) < 1e-6, ratio.toFixed(6));
+    }
+    // DFE and automatic choices on a lossy pair at 10 Gb/s.
+    {
+        const skinPair = pairTable(f => {
+            const ff = Math.max(f, 1e6), r = 5 + 4e-4 * Math.sqrt(ff), li = 4e-4 * Math.sqrt(ff) / (2 * Math.PI * ff);
+            return { R11: r, R12: 0.1 * r, R22: r, L11: 330e-9 + li, L12: 50e-9, L22: 330e-9 + li, G11: 0, G12: 0, G22: 0, C11: 110e-12, C12: -10e-12, C22: 110e-12 };
+        });
+        const base = { length: 0.5, samplesPerEdge: 16, network: { rs: 50, tx: { ac: true, c: 220e-9 }, rx: { ac: false }, term: { type: 'r', rt: 50 } },
+            stimulus: { type: 'pattern', bitRate: 10e9, bits: patternBits({ pattern: 'prbs9' }), vLow: 0, vHigh: 1, tr: 25e-12, tf: 25e-12, edgeDef: '20-80', shape: 'rcos' } };
+        const height = (r) => { const m = r.metrics.list.find(x => x.label === 'Eye height (centre)'); return m.value === 'closed' ? 0 : parseFloat(m.value) * (m.value.includes(' mV') ? 1e-3 : 1); };
+        const none = simulateLink(skinPair, base, fft);
+        const dfe = simulateLink(skinPair, { ...base, rxEq: { dfeTaps: 4 } }, fft);
+        const auto = simulateLink(skinPair, { ...base, txEq: { auto: true }, rxEq: { ctle: { auto: true, adcMin: -12, adcMax: 0, fp1: 2.5e9, fp2: 10e9 }, dfeTaps: 2 } }, fft);
+        check('DFE (4 taps) opens the eye beyond no equalization', height(dfe) > height(none), `${(height(none) * 1e3).toFixed(1)} -> ${(height(dfe) * 1e3).toFixed(1)} mV`);
+        check('the eye is at least the peak-distortion estimate', height(dfe) >= dfe.eqChoice.pdaHeight - 1e-6 && height(auto) >= auto.eqChoice.pdaHeight - 1e-6,
+            `DFE ${(height(dfe) * 1e3).toFixed(1)} >= ${(dfe.eqChoice.pdaHeight * 1e3).toFixed(1)}, auto ${(height(auto) * 1e3).toFixed(1)} >= ${(auto.eqChoice.pdaHeight * 1e3).toFixed(1)} mV`);
+        check('automatic preset + CTLE + DFE beats no equalization', height(auto) > height(none),
+            `${auto.eqChoice.firName}, CTLE ${auto.eqChoice.adc} dB: ${(height(auto) * 1e3).toFixed(1)} mV`);
     }
 }
 
