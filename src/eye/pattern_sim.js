@@ -15,7 +15,7 @@
 // previous transmitted bits. TX preset and CTLE gain can be chosen automatically by the
 // peak-distortion eye of the pulse response (eq.js).
 import { legMean, edgeSpectrum, edgeValue, buildStimulus } from './stimulus.js';
-import { ctleTransfer, pdaEye, dfeTap, PCIE_PRESETS, firFromPresetDb, presetDbFromFir, boostDb } from './eq.js';
+import { ctleOf, pdaEye, dfeTap, PCIE_PRESETS, firFromPresetDb, presetDbFromFir, boostDb } from './eq.js';
 import { makeTransfer, dcSolve } from './network.js';
 import { smoothSize } from './fft.js';
 import { fmtHz } from './channel_grid.js';
@@ -300,7 +300,8 @@ function patternSim(ctx, dt0) {
     // (automatic settings) by the peak-distortion eye of the pulse response.
     const eq = ctx.cfg.rxEq || {}, txEq = ctx.cfg.txEq || {};
     const dfeTaps = Math.max(0, Math.round(eq.dfeTaps || 0));
-    // Tap magnitude limits (V) of the DFE taps in order; missing ones are unlimited.
+    // Tap magnitude limits of the DFE taps in order, V or { rel } of the cursor; missing ones
+    // are unlimited.
     const dfeLimits = eq.dfeLimits || null;
     const ctleCands = !eq.ctle ? [null]
         : eq.ctle.auto ? Array.from({ length: Math.round(eq.ctle.adcMax - eq.ctle.adcMin) + 1 }, (_, i) => eq.ctle.adcMin + i)
@@ -314,7 +315,7 @@ function patternSim(ctx, dt0) {
     const eqActive = !!eq.ctle || dfeTaps > 0 || txEq.auto;
     if (eqActive) {
         for (const adc of ctleCands) {
-            const C = adc === null ? null : ctleTransfer(adc, eq.ctle.fp1, eq.ctle.fp2);
+            const C = adc === null ? null : ctleOf(eq.ctle, adc);
             const steps = mainSteps(ctx, resp.main, C);
             for (const fc of firCands) {
                 const q = pulseResponse(stim, steps, spb, fc.fir);
@@ -431,7 +432,7 @@ function patternSim(ctx, dt0) {
             const d = (m) => 2 * stim.bits[((m % nb) + nb) % nb] - 1;
             const h = Array.from({ length: dfeTaps }, (_, k) => {
                 const i = choice.pda.n0 + (k + 1) * spb;
-                return dfeTap(i < choice.q.length ? choice.q[i] : 0, k + 1, dfeLimits);
+                return dfeTap(i < choice.q.length ? choice.q[i] : 0, k + 1, dfeLimits, choice.q[choice.pda.n0]);
             });
             choice.dfeLimited = h.map((x, k) => {
                 const i = choice.pda.n0 + (k + 1) * spb;
@@ -466,7 +467,8 @@ function patternSim(ctx, dt0) {
                 + (choice.firName === 'P10' ? ' (nominal maximum boost; the real one follows the transmitter\'s LF)' : ''),
                 note: `taps ${choice.fir.map(c => c.toFixed(3)).join(' / ')}` });
         }
-        if (choice.adc !== null) eqMetrics.push({ label: 'CTLE DC gain' + (eq.ctle.auto ? ' (chosen)' : ''), value: `${choice.adc} dB` });
+        if (choice.adc !== null) eqMetrics.push({ label: 'CTLE DC gain' + (eq.ctle.auto ? ' (chosen)' : ''), value: `${choice.adc} dB`,
+            note: eq.ctle.order === 2 ? '2nd-order CTLE' : '1st-order CTLE' });
         if (choice.dfe) eqMetrics.push({ label: 'DFE taps', value: choice.dfe.map((x, k) => fmtV(x) + (choice.dfeLimited[k] ? ' (at its limit)' : '')).join(', '),
             note: 'ideal decisions; each tap the post-cursor at the sampling point, within its limit' });
         eqMetrics.push({ label: 'Pulse-response eye estimate', value: fmtV(choice.pda.height), note: 'peak distortion: main cursor minus the residual ISI, worst case' });

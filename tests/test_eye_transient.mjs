@@ -32,7 +32,7 @@ import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
 import { buildNetwork, makeTransfer } from '../src/eye/network.js';
 import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
 import { prbsBits, prbsPeriod, patternBits, PRBS } from '../src/eye/pattern.js';
-import { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir } from '../src/eye/eq.js';
+import { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctle2Transfer } from '../src/eye/eq.js';
 import { computeSParamsSingleEnded, computeSParamsDifferentialMTL } from '../src/sparameters.js';
 
 const fft = await loadFFT();
@@ -579,6 +579,27 @@ const valueAt = (r, name, t) => {
         // Over the shown 127-bit period the means relate by the DC gain.
         const ratio = mean(r6.traces.rxEq) / mean(r6.traces.rx);
         check('CTLE: DC gain on the mean level', Math.abs(ratio - Math.pow(10, -6 / 20)) < 1e-6, ratio.toFixed(6));
+        const r10 = simulateLink(lossy, { ...base, rxEq: { ctle: { order: 2, adcDb: -10, fz1: 450e6, fp2: 9.5e9, fp3: 28e9 }, dfeTaps: 0 } }, fft);
+        const ratio2 = mean(r10.traces.rxEq) / mean(r10.traces.rx);
+        check('2nd-order CTLE: DC gain on the mean level', Math.abs(ratio2 - Math.pow(10, -10 / 20)) < 1e-6, ratio2.toFixed(6));
+    }
+    // 2nd-order CTLE (PCIe 32 / 64 GT/s) against the formula in magnitude and phase form:
+    // |H| = k prod |s + z| / prod |s + p|, arg H = sum atan(w / z) - sum atan(w / p).
+    {
+        const tw = (f) => 2 * Math.PI * f, A = Math.pow(10, -9 / 20);
+        const wz1 = tw(450e6), wp1 = tw(1.65 * 450e6), wp2 = tw(9.5e9), wp3 = tw(28e9);
+        const H = ctle2Transfer(-9, 450e6, 9.5e9, 28e9);
+        let e = 0;
+        for (const f of [0, 1e8, 7e8, 3e9, 1.6e10, 6e10]) {
+            const w = tw(f), m = (a) => Math.hypot(a, w), ph = (a) => Math.atan2(w, a);
+            const mag = (wp1 * wp3 * wp3 / wz1) * m(wz1) * m(A * wp2) / (m(wp1) * m(wp2) * m(wp3) * m(wp3));
+            const arg = ph(wz1) + ph(A * wp2) - ph(wp1) - ph(wp2) - 2 * ph(wp3);
+            const [re, im] = H(f);
+            e = Math.max(e, Math.hypot(re - mag * Math.cos(arg), im - mag * Math.sin(arg)) / mag);
+        }
+        const [dc] = H(0), peak = Math.max(...Array.from({ length: 400 }, (_, i) => Math.hypot(...H(1e8 * Math.pow(1.02, i)))));
+        check('2nd-order CTLE = PCIe 32 GT/s formula, DC gain A', e < 1e-12 && Math.abs(dc - A) < 1e-12,
+            `rel diff ${e.toExponential(1)}, DC ${dc.toFixed(6)}, peaking ${(20 * Math.log10(peak / dc)).toFixed(2)} dB over DC`);
     }
     // DFE and automatic choices on a lossy pair at 10 Gb/s.
     {
@@ -606,6 +627,13 @@ const valueAt = (r, name, t) => {
             clamped && height(lim2) < height(dfe) && height(lim2) >= lim2.eqChoice.pdaHeight - 1e-6,
             `taps ${lim2.eqChoice.dfe.map(x => (x * 1e3).toFixed(1)).join('/')} mV (limits ${lim.map(x => (x * 1e3).toFixed(1)).join('/')}), `
             + `eye ${(height(lim2) * 1e3).toFixed(1)} vs ${(height(dfe) * 1e3).toFixed(1)} mV, estimate ${(lim2.eqChoice.pdaHeight * 1e3).toFixed(1)} mV`);
+        // A limit relative to the cursor (PCIe 32 GT/s: |d1| <= 0.8 h0): same taps as the
+        // equivalent voltage limit.
+        const h0 = lim2.pulse.cursors.find(c => c.k === 0).value;
+        const rel = simulateLink(skinPair, { ...base, rxEq: { dfeTaps: 4, dfeLimits: lim.map(x => ({ rel: x / h0 })) } }, fft);
+        const dRel = Math.max(...rel.eqChoice.dfe.map((x, k) => Math.abs(x - lim2.eqChoice.dfe[k])));
+        check('DFE tap limit as a ratio to the cursor = the same limit in volts', dRel < 1e-12 && Math.abs(height(rel) - height(lim2)) < 1e-9,
+            `tap diff ${dRel.toExponential(1)} V`);
         // Reduced swing: only P4, P1, P9, P5, P6, P3. A lossier line at 16 Gb/s, where full
         // swing picks a preset reduced swing lacks.
         const lossy = { ...base, length: 3.0, stimulus: { ...base.stimulus, bitRate: 16e9, tr: 15e-12, tf: 15e-12 } };

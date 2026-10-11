@@ -45,8 +45,9 @@ function presetDbFromFir([cm, c0, cp]) {
 }
 
 /**
- * CTLE of the PCIe 3.0 reference form: H(s) = wp2 (s + A wp1) / ((s + wp1)(s + wp2)), a
- * DC gain A (adcDb), a zero at A fp1, poles at fp1 and fp2. Returns f -> [re, im].
+ * 1st-order CTLE, the PCIe 8 and 16 GT/s behavioral form:
+ * H(s) = wp2 (s + A wp1) / ((s + wp1)(s + wp2)), a DC gain A (adcDb), a zero at A fp1,
+ * poles at fp1 and fp2. Returns f -> [re, im].
  */
 function ctleTransfer(adcDb, fp1, fp2) {
     const A = Math.pow(10, adcDb / 20), w1 = 2 * Math.PI * fp1, w2 = 2 * Math.PI * fp2;
@@ -60,10 +61,41 @@ function ctleTransfer(adcDb, fp1, fp2) {
     };
 }
 
-// DFE tap k (1-based) for post-cursor value h: h within the tap's limit (V, absent or
-// non-positive: unlimited).
-function dfeTap(h, k, limits) {
-    const lim = limits && limits[k - 1];
+/**
+ * 2nd-order CTLE, the PCIe 32 GT/s behavioral form:
+ * H(s) = (wp1 wp3 wp4 / wz1) (s + wz1)(s + A wp2) / ((s + wp1)(s + wp2)(s + wp3)(s + wp4)),
+ * with fp1 = 1.65 fz1 and fp4 = fp3: a DC gain A, a low-frequency zero / pole pair at fz1 /
+ * fp1 and the peaking zero at A fp2. Returns f -> [re, im].
+ */
+function ctle2Transfer(adcDb, fz1, fp2, fp3) {
+    const A = Math.pow(10, adcDb / 20), w = (f) => 2 * Math.PI * f;
+    const wz1 = w(fz1), wp1 = w(1.65 * fz1), wp2 = w(fp2), wp3 = w(fp3);
+    const k = wp1 * wp3 * wp3 / wz1;
+    const zeros = [wz1, A * wp2], poles = [wp1, wp2, wp3, wp3];
+    return (f) => {
+        const x = w(f);
+        // product of (a + j x) factors
+        let re = k, im = 0;
+        const mul = (a, inv) => {
+            const d = inv ? a * a + x * x : 1, cr = a / d, ci = (inv ? -x : x) / d;
+            const r = re * cr - im * ci; im = re * ci + im * cr; re = r;
+        };
+        for (const z of zeros) mul(z, false);
+        for (const p of poles) mul(p, true);
+        return [re, im];
+    };
+}
+
+// Transfer function of a CTLE setting ({ order, fp1, fp2, fz1, fp3 }) at DC gain adcDb.
+function ctleOf(ctle, adcDb) {
+    return ctle.order === 2 ? ctle2Transfer(adcDb, ctle.fz1, ctle.fp2, ctle.fp3) : ctleTransfer(adcDb, ctle.fp1, ctle.fp2);
+}
+
+// DFE tap k (1-based) for post-cursor value h: h within the tap's limit, a voltage or
+// { rel } for |d_k| <= rel * h0, h0 the cursor (absent or non-positive: unlimited).
+function dfeTap(h, k, limits, h0) {
+    const l = limits && limits[k - 1];
+    const lim = l && typeof l === 'object' ? l.rel * Math.abs(h0) : l;
     return lim > 0 ? Math.max(-lim, Math.min(lim, h)) : h;
 }
 
@@ -87,7 +119,7 @@ function pdaEye(q, spb, dfeTaps = 0, dfeLimits = null, span = 64) {
             if (k === 0) continue;
             const i = n0 + k * spb;
             if (i < 0 || i >= N) continue;
-            isi += k >= 1 && k <= dfeTaps ? Math.abs(q[i] - dfeTap(q[i], k, dfeLimits)) : Math.abs(q[i]);
+            isi += k >= 1 && k <= dfeTaps ? Math.abs(q[i] - dfeTap(q[i], k, dfeLimits, q[n0])) : Math.abs(q[i]);
         }
         const h = 2 * (q[n0] - isi);
         if (h > best) { best = h; bestN = n0; }
@@ -100,4 +132,4 @@ function pdaEye(q, spb, dfeTaps = 0, dfeLimits = null, span = 64) {
     return { height: best, n0: bestN, cursors };
 }
 
-export { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctleTransfer, pdaEye, dfeTap };
+export { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctleTransfer, ctle2Transfer, ctleOf, pdaEye, dfeTap };
