@@ -9,47 +9,102 @@ const $ = (id) => document.getElementById(id);
 
 const COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#17becf'];
 
-// Settings of the tab: key, input id, kind. text inputs keep their string (units
-// included) in the settings and links.
+// Settings of the tab: key, input id, kind. 'eye' inputs are stored in the settings and
+// links as SI numbers (qty says how to read and show them), 'text' keeps a select value.
 const EYE_FIELDS = [
-    ['eye_length', 'eye-length', 'text'],
+    ['eye_length', 'eye-length', 'eye', 'len'],
     ['eye_stim', 'eye-stim', 'text'],
-    ['eye_delay', 'eye-delay', 'text'],
-    ['eye_width', 'eye-width', 'text'],
-    ['eye_clock_freq', 'eye-clock-freq', 'text'],
-    ['eye_duty', 'eye-duty', 'text'],
+    ['eye_delay', 'eye-delay', 'eye', 'time'],
+    ['eye_width', 'eye-width', 'eye', 'time'],
+    ['eye_clock_freq', 'eye-clock-freq', 'eye', 'freq'],
+    ['eye_duty', 'eye-duty', 'eye', 'num'],
     ['eye_clock_mode', 'eye-clock-mode', 'text'],
-    ['eye_cycles', 'eye-cycles', 'text'],
-    ['eye_vlow', 'eye-vlow', 'text'],
-    ['eye_vhigh', 'eye-vhigh', 'text'],
-    ['eye_tr', 'eye-tr', 'text'],
-    ['eye_tf', 'eye-tf', 'text'],
+    ['eye_cycles', 'eye-cycles', 'eye', 'num'],
+    ['eye_vlow', 'eye-vlow', 'eye', 'volt'],
+    ['eye_vhigh', 'eye-vhigh', 'eye', 'volt'],
+    ['eye_tr', 'eye-tr', 'eye', 'time'],
+    ['eye_tf', 'eye-tf', 'eye', 'time'],
     ['eye_edge_def', 'eye-edge-def', 'text'],
     ['eye_edge_shape', 'eye-edge-shape', 'text'],
-    ['eye_rs', 'eye-rs', 'text'],
-    ['eye_skew', 'eye-skew', 'text'],
+    ['eye_rs', 'eye-rs', 'eye', 'res'],
+    ['eye_skew', 'eye-skew', 'eye', 'time'],
     ['eye_tx_ac', 'eye-tx-ac', 'chk'],
-    ['eye_ctx', 'eye-ctx', 'text'],
+    ['eye_ctx', 'eye-ctx', 'eye', 'cap'],
     ['eye_rx_ac', 'eye-rx-ac', 'chk'],
-    ['eye_crx', 'eye-crx', 'text'],
+    ['eye_crx', 'eye-crx', 'eye', 'cap'],
     ['eye_term', 'eye-term', 'text'],
-    ['eye_rt', 'eye-rt', 'text'],
-    ['eye_vtt', 'eye-vtt', 'text'],
-    ['eye_ct', 'eye-ct', 'text'],
-    ['eye_rdiff', 'eye-rdiff', 'text'],
-    ['eye_spe', 'eye-spe', 'text'],
-    ['eye_span', 'eye-span', 'text'],
+    ['eye_rt', 'eye-rt', 'eye', 'res'],
+    ['eye_vtt', 'eye-vtt', 'eye', 'volt'],
+    ['eye_ct', 'eye-ct', 'eye', 'cap'],
+    ['eye_rdiff', 'eye-rdiff', 'eye', 'res'],
+    ['eye_spe', 'eye-spe', 'eye', 'num'],
+    ['eye_span', 'eye-span', 'eye', 'time'],
 ];
+const QTY = Object.fromEntries(EYE_FIELDS.filter(f => f[2] === 'eye').map(f => [f[1], f[3]]));
 
-// Defaults, the same as the HTML values (links only carry what differs).
+// Defaults, the same as the HTML values (links only carry what differs). NaN: empty
+// (automatic span).
 const EYE_DEFAULTS = {
-    eye_length: '100 mm', eye_stim: 'pulse', eye_delay: '0 ps', eye_width: '1 ns',
-    eye_clock_freq: '1 GHz', eye_duty: '50', eye_clock_mode: 'steady', eye_cycles: '8',
-    eye_vlow: '0 V', eye_vhigh: '1 V', eye_tr: '35 ps', eye_tf: '35 ps', eye_edge_def: '10-90',
-    eye_edge_shape: 'rcos', eye_rs: '50', eye_skew: '0 ps', eye_tx_ac: 0, eye_ctx: '100 nF',
-    eye_rx_ac: 0, eye_crx: '100 nF', eye_term: 'r', eye_rt: '50', eye_vtt: '1.2 V', eye_ct: '100 nF',
-    eye_rdiff: '100', eye_spe: '16', eye_span: '',
+    eye_length: 0.1, eye_stim: 'pulse', eye_delay: 0, eye_width: 1e-9,
+    eye_clock_freq: 1e9, eye_duty: 50, eye_clock_mode: 'steady', eye_cycles: 8,
+    eye_vlow: 0, eye_vhigh: 1, eye_tr: 35e-12, eye_tf: 35e-12, eye_edge_def: '10-90',
+    eye_edge_shape: 'rcos', eye_rs: 50, eye_skew: 0, eye_tx_ac: 0, eye_ctx: 1e-7,
+    eye_rx_ac: 0, eye_crx: 1e-7, eye_term: 'r', eye_rt: 50, eye_vtt: 1.2, eye_ct: 1e-7,
+    eye_rdiff: 100, eye_spe: 16, eye_span: NaN,
 };
+
+// Whether a setting applies to the selected options; links leave out the others.
+function eyeKeyActive(settings, key) {
+    const v = (k) => settings[k] ?? EYE_DEFAULTS[k];
+    switch (key) {
+        case 'eye_width': return v('eye_stim') === 'pulse';
+        case 'eye_clock_freq': case 'eye_duty': case 'eye_clock_mode': return v('eye_stim') === 'clock';
+        case 'eye_cycles': return v('eye_stim') === 'clock' && v('eye_clock_mode') === 'burst';
+        case 'eye_ctx': return !!v('eye_tx_ac');
+        case 'eye_crx': return !!v('eye_rx_ac');
+        case 'eye_rt': return ['vtt', 'r', 'rc'].includes(v('eye_term'));
+        case 'eye_vtt': return v('eye_term') === 'vtt';
+        case 'eye_ct': return v('eye_term') === 'rc';
+        case 'eye_rdiff': return v('eye_term') === 'diff';
+        default: return true;
+    }
+}
+
+// Settings value of an 'eye' input: SI number to 12 significant digits (so a typed
+// "35 ps" equals the default 35e-12), NaN when empty or invalid.
+function readEyeSetting(id) {
+    try {
+        const v = parseQuantity(id, QTY[id], id, { optional: true });
+        return v === null ? NaN : parseFloat(v.toPrecision(12));
+    } catch {
+        return NaN;
+    }
+}
+
+// Display units of each quantity: [threshold, scale, unit], the first whose threshold
+// the magnitude reaches.
+const SHOW = {
+    len: [[0, 1e-3, 'mm']],
+    time: [[1e-3, 1e-3, 'ms'], [1e-6, 1e-6, 'µs'], [1e-9, 1e-9, 'ns'], [0, 1e-12, 'ps']],
+    freq: [[1e9, 1e9, 'GHz'], [1e6, 1e6, 'MHz'], [1e3, 1e3, 'kHz'], [0, 1, 'Hz']],
+    cap: [[1e-6, 1e-6, 'µF'], [1e-9, 1e-9, 'nF'], [0, 1e-12, 'pF']],
+    volt: [[0, 1, 'V']],
+    res: [[0, 1, '']],
+    num: [[0, 1, '']],
+};
+
+// Put a settings value into an 'eye' input: a number with a fitting unit, or a string
+// as it is (settings saved before the numeric form).
+function writeEyeSetting(id, value) {
+    const el = $(id);
+    if (!el) return;
+    if (typeof value === 'string') { el.value = value; return; }
+    if (value === null || value === undefined || !isFinite(value)) { el.value = ''; return; }
+    const a = Math.abs(value);
+    const [, scale, unit] = SHOW[QTY[id]].find(([th]) => a >= th) || SHOW[QTY[id]].at(-1);
+    const shown = parseFloat((value / scale).toPrecision(12));
+    el.value = unit ? `${shown} ${unit}` : `${shown}`;
+}
 
 // ---------------------------------------------------------------- input parsing
 
@@ -307,6 +362,7 @@ async function runEye() {
     $('btn-eye-run').style.display = 'none';
     $('btn-eye-stop').style.display = '';
     setNotice(null);
+    setStatus('Preparing...');
     const t0 = Date.now();
     try {
         const ch = await getChannel(fNeed);
@@ -554,4 +610,5 @@ function onEyeTabShown() {
     }
 }
 
-export { initEyeTab, onEyeTabShown, isBusy as eyeBusy, updateVisibility as updateEyeVisibility, EYE_FIELDS, EYE_DEFAULTS, parseQuantity };
+export { initEyeTab, onEyeTabShown, isBusy as eyeBusy, updateVisibility as updateEyeVisibility, EYE_FIELDS, EYE_DEFAULTS,
+    eyeKeyActive, readEyeSetting, writeEyeSetting, parseQuantity };

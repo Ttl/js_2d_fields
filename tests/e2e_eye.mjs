@@ -61,6 +61,33 @@ const restored = await linkPage.evaluate(() => ({
 const linkOk = restored.tr === '20 ps' && restored.term === 'vtt' && restored.vtt === '0.8 V' && restored.rxAc && restored.stim === 'clock';
 console.log('share link restores the Eye settings:', linkOk, restored);
 
+// Link contents: SI numbers, no inactive settings, nothing at all for the defaults.
+const linkJson = async (p) => {
+    await p.evaluate(() => { window.__copiedURL = null; document.getElementById('copy-link-btn').click(); });
+    await p.waitForTimeout(300);
+    const u = new globalThis.URL(await p.evaluate(() => window.__copiedURL));
+    const enc = u.searchParams.get('params');
+    return enc ? JSON.parse(decodeURIComponent(atob(enc))) : {};
+};
+const j1 = await linkJson(page);
+await page.selectOption('#eye-term', 'r');
+const j2 = await linkJson(page);
+const fresh = await browser.newPage();
+await fresh.addInitScript(() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
+    value: { writeText: (t) => { window.__copiedURL = t; return Promise.resolve(); } } }));
+await fresh.goto(URL, { waitUntil: 'networkidle' });
+const j0 = await linkJson(fresh);
+const contentOk = j1.eye_tr === 2e-11 && j1.eye_vtt === 0.8 && !('eye_width' in j1) && !('eye_cycles' in j1)
+    && !('eye_vtt' in j2) && Object.keys(j0).length === 0;
+console.log('link contents:', contentOk, JSON.stringify(j1), '| after term=r:', JSON.stringify(j2), '| defaults:', JSON.stringify(j0));
+
+// A link from before the numeric form (unit strings) still loads.
+const legacy = btoa(encodeURIComponent(JSON.stringify({ eye_length: '500 mm', eye_tr: '5 ps', eye_stim: 'step' })));
+await fresh.goto(URL + '?params=' + legacy, { waitUntil: 'networkidle' });
+const leg = await fresh.evaluate(() => [document.getElementById('eye-length').value, document.getElementById('eye-tr').value, document.getElementById('eye-stim').value]);
+const legacyOk = leg[0] === '500 mm' && leg[1] === '5 ps' && leg[2] === 'step';
+console.log('legacy string link loads:', legacyOk, leg);
+
 // A waveguide has no time-domain simulation.
 await page.selectOption('#tl_type', 'rect_waveguide');
 await page.click('.tab-button[data-tab="eye"]');
@@ -69,6 +96,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = linkOk && wgOff && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = linkOk && contentOk && legacyOk && wgOff && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

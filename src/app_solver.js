@@ -10,7 +10,8 @@ import { solverToGeometryText, setParamInText } from './custom_geometry_text.js'
 import { initLayoutPanels, syncLogPanel, setLogStatus, logSolveStarted } from './layout_panels.js';
 import { buildSolverFromParams as _buildSolverFromParams, platingOptions } from './solver_factory.js';
 import { DEFAULT_GRID_N } from './mesher.js';
-import { initEyeTab, onEyeTabShown, eyeBusy, updateEyeVisibility, EYE_FIELDS, EYE_DEFAULTS } from './eye/eye_ui.js';
+import { initEyeTab, onEyeTabShown, eyeBusy, updateEyeVisibility, EYE_FIELDS, EYE_DEFAULTS,
+    eyeKeyActive, readEyeSetting, writeEyeSetting } from './eye/eye_ui.js';
 
 // Lazy Plotly access - allows app to function while Plotly is loading
 const getPlotly = () => window.Plotly;
@@ -179,7 +180,9 @@ const DEFAULT_SETTINGS = {
     sigma: 5.8e7,
     freq_start: 0.1,   // GHz
     freq_stop: 10,     // GHz
-    freq_points: 10,
+    // The one default changed after links existed: a link that leaves it out and was
+    // made with 10 points loads with 200.
+    freq_points: 200,
     trace_spacing: 0.2, // mm
     gap: 0.1,          // mm
     via_gap: 0.1,      // mm
@@ -268,7 +271,7 @@ const DEFAULT_SETTINGS = {
     custom_geom: '',
     custom_sigma: 5.8e7,
 
-    // Eye tab (strings with their units, as typed)
+    // Eye tab (SI numbers and select values)
     ...EYE_DEFAULTS,
 };
 
@@ -392,7 +395,9 @@ function readSetting(id, kind) {
                 parseFloat(el.value);
             // Convert back to display units for serialization
             const unitMap = { 'mm': 1e3, 'μm': 1e6, 'GHz': 1e-9, 'm': 1 };
-            return siValue * (unitMap[defaultUnit] || 1);
+            // 12 significant digits drop the float noise of the unit conversion
+            // (0.21 mm -> 0.21000000000000002), which would make defaults look changed.
+            return parseFloat((siValue * (unitMap[defaultUnit] || 1)).toPrecision(12));
         }
         case 'num': return getInputValueUnitless(id);
         case 'int': return parseInt(el.value);
@@ -402,8 +407,10 @@ function readSetting(id, kind) {
         // The input is in percent. The solvers (and saved settings / share links)
         // use the fraction.
         case 'pct': return getInputValueUnitless(id) / 100;
-        // The input text as typed (value with its unit, or a select value).
+        // A select value.
         case 'text': return el ? el.value : '';
+        // An Eye tab quantity, in SI units.
+        case 'eye': return readEyeSetting(id);
     }
 }
 
@@ -505,6 +512,7 @@ function nonDefaultSettings(settings) {
     for (const key in settings) {
         if (excluded && excluded.has(key)) continue;
         if (otherTypeKeys.has(key)) continue;
+        if (key.startsWith('eye_') && !eyeKeyActive(settings, key)) continue;
 
         const value = settings[key];
         const defaultValue = DEFAULT_SETTINGS[key];
@@ -612,6 +620,7 @@ function restoreSettings(settings) {
         for (const [key, id, kind] of fieldsFor('s')) {
             const value = fullSettings[key];
             if (kind === 'unit') { setValueWithUnit(id, value); continue; }
+            if (kind === 'eye') { writeEyeSetting(id, value); continue; }
             if (key === 'min_converged_passes' && value === undefined) continue;
             const el = document.getElementById(id);
             if (kind === 'chk') el.checked = !!value;
