@@ -774,7 +774,7 @@
         <div class="results-controls">
             <select id="eye-view">
                 <option value="wave">Waveform</option>
-                <option value="eye">Clock eye</option>
+                <option value="eye">Eye diagram</option>
                 <option value="spectrum">Channel response</option>
             </select>
             <label class="checkbox-label"><input type="checkbox" id="eye-show-rx" checked> RX</label>
@@ -804,7 +804,21 @@
                             <option value="pulse" selected>Single pulse</option>
                             <option value="step">Step</option>
                             <option value="clock">Clock</option>
+                            <option value="pattern">Bit pattern</option>
                         </select></div>
+                    <div class="eye-row" id="eye-row-bitrate"><label for="eye-bitrate">Bit rate</label><input type="text" id="eye-bitrate" value="10 Gb/s"></div>
+                    <div class="eye-row" id="eye-row-pattern"><label for="eye-pattern">Pattern</label>
+                        <select id="eye-pattern">
+                            <option value="prbs7" selected>PRBS7</option>
+                            <option value="prbs9">PRBS9</option>
+                            <option value="prbs11">PRBS11</option>
+                            <option value="prbs15">PRBS15</option>
+                            <option value="prbs23">PRBS23</option>
+                            <option value="prbs31">PRBS31</option>
+                            <option value="custom">Custom bits</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-bits"><label for="eye-bits">Bits</label><input type="text" id="eye-bits" value="0011010111"></div>
+                    <div class="eye-row" id="eye-row-nbits"><label for="eye-nbits">Bits simulated</label><input type="text" id="eye-nbits" value="32767"></div>
                     <div class="eye-row" id="eye-row-width"><label for="eye-width">Pulse width (50 %)</label><input type="text" id="eye-width" value="1 ns"></div>
                     <div class="eye-row" id="eye-row-clock-freq"><label for="eye-clock-freq">Clock frequency</label><input type="text" id="eye-clock-freq" value="1 GHz"></div>
                     <div class="eye-note" id="eye-rate-note"></div>
@@ -815,7 +829,7 @@
                             <option value="burst">Burst from rest</option>
                         </select></div>
                     <div class="eye-row" id="eye-row-cycles"><label for="eye-cycles">Cycles</label><input type="text" id="eye-cycles" value="8"></div>
-                    <div class="eye-row"><label for="eye-delay">Start delay</label><input type="text" id="eye-delay" value="0 ps"></div>
+                    <div class="eye-row" id="eye-row-delay"><label for="eye-delay">Start delay</label><input type="text" id="eye-delay" value="0 ps"></div>
                 </fieldset>
                 <fieldset>
                     <legend>Driver <span class="help-icon" onclick="showHelpModal('eye_driver', event)">?</span></legend>
@@ -861,7 +875,7 @@
                 <fieldset>
                     <legend>Simulation <span class="help-icon" onclick="showHelpModal('eye_simulation', event)">?</span></legend>
                     <div class="eye-row"><label for="eye-spe">Samples per edge</label><input type="text" id="eye-spe" value="16"></div>
-                    <div class="eye-row"><label for="eye-span">Time span</label><input type="text" id="eye-span" value="" placeholder="auto"></div>
+                    <div class="eye-row" id="eye-row-span"><label for="eye-span">Time span</label><input type="text" id="eye-span" value="" placeholder="auto"></div>
                 </fieldset>
             </div>
             <div class="eye-main">
@@ -1414,12 +1428,15 @@
             body: '<p>Time-domain response of the solved line, of the given length, between a driver and a receiver termination. Stage 1: a step, a single pulse or a clock.</p>' +
                 '<p><b>Line parameters.</b> The R, L, G, C of the line (the physical 2&times;2 matrices of a pair) from DC up to about three times the knee frequency 0.35/t<sub>r</sub> of the fastest edge. The last solve is reused when it is of the current geometry, starts at DC and reaches that frequency (an interpolating sweep, or a discrete one dense enough); otherwise the tab runs its own interpolating sweep. Above the sweep stop R grows as &radic;f, G as f, the internal inductance falls as 1/&radic;f and C is held.</p>' +
                 '<p><b>Circuit.</b> The line enters as its exact admittance matrix, with the driver, the coupling capacitors and the termination around it. Every response starts from the DC operating point. The response is the inverse FFT of the transfer function times the edge spectra. AC coupling time constants longer than the simulated window are integrated exactly in time instead, so droop and the baseline shift are correct on any time span.</p>' +
-                '<p><b>Views.</b> Waveform: the voltages against time, the dotted lines mark the first source edge and its arrival after the line delay. Clock eye: the receiver waveform folded over 2 UI (UI = half the clock period). Channel response: |V<sub>RX</sub>/EMF| with the edge spectrum.</p>' +
+                '<p><b>Views.</b> Waveform: the voltages against time, the dotted lines mark the first source edge and its arrival after the line delay (a pattern shows its first 200 bits). Eye diagram: the receiver waveform folded over 2 UI; a clock as lines (UI = half the clock period), a pattern as the density of the whole period with the eye height and width marked. Channel response: |V<sub>RX</sub>/EMF| with the edge spectrum.</p>' +
+                '<p><b>Eye metrics</b> (patterns): the threshold is half way between the mean one and zero levels at the eye centre, half a UI from the mean crossing. Eye height: smallest one minus largest zero at the centre, and the largest such opening over the sampling phase. Eye width: UI minus the peak-to-peak spread of the threshold crossings, which is also the data-dependent jitter. No noise or random jitter is included.</p>' +
                 '<p>Use causal materials for time-domain work: a constant loss tangent is not causal and the receiver then responds before the signal can arrive (a warning says so).</p>'
         },
         eye_stimulus: {
             title: 'Stimulus',
-            body: '<p><b>Step</b>: one rising edge. <b>Single pulse</b>: a rising and a falling edge, the width between their 50 % points. <b>Clock</b>: a square wave of the given frequency and duty cycle, either its periodic steady state (exact, all reflections and coupling droop settled) or a burst of N cycles from rest.</p><p>The start delay is the time before the first edge begins. A clock of frequency f carries data at 2f.</p>'
+            body: '<p><b>Step</b>: one rising edge. <b>Single pulse</b>: a rising and a falling edge, the width between their 50 % points. <b>Clock</b>: a square wave of the given frequency and duty cycle, either its periodic steady state (exact, all reflections and coupling droop settled) or a burst of N cycles from rest. <b>Bit pattern</b>: NRZ data at the bit rate, repeated indefinitely.</p>' +
+                '<p>Patterns: PRBS7 to PRBS31 (x<sup>n</sup> + x<sup>k</sup> + 1, maximal length 2<sup>n</sup> &minus; 1 bits: n = 7, 9, 11, 15, 23, 31 with k = 6, 5, 9, 14, 18, 28) or custom bits (0 and 1, spaces ignored). PRBS23 and PRBS31 are simulated over the given number of their first bits, repeated. The result is the periodic steady state of the repeating pattern, so AC coupling shows its settled baseline wander.</p>' +
+                '<p>The start delay is the time before the first edge begins (not used for patterns). A clock of frequency f carries data at 2f.</p>'
         },
         eye_driver: {
             title: 'Driver',

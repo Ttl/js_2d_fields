@@ -17,6 +17,9 @@
 //  13. Low-frequency model notes (narrow gap, skin transition, ground spreading): the bound on the
 //      receiver change holds against perturbed steady-state runs and separates GHz
 //      links (negligible) from slow, low-impedance ones.
+//  14. Bit patterns: PRBS generators maximal length; the periodic pattern engine equals
+//      the clock steady state for clock-like patterns (DC and AC coupled, a pair with
+//      skew); eye metrics on a lossless line; AC-coupled baseline wander.
 import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
@@ -24,6 +27,7 @@ import { buildStimulus, edgeValue, erfc } from '../src/eye/stimulus.js';
 import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
 import { buildNetwork, makeTransfer } from '../src/eye/network.js';
 import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
+import { prbsBits, prbsPeriod, patternBits, PRBS } from '../src/eye/pattern.js';
 import { computeSParamsSingleEnded, computeSParamsDifferentialMTL } from '../src/sparameters.js';
 
 const fft = await loadFFT();
@@ -392,6 +396,89 @@ const valueAt = (r, name, t) => {
                 `actual ${(100 * actual).toPrecision(3)} %, bound ${(100 * bound).toPrecision(3)} %`);
         });
         if (fc === 2e5) check('slow clock into 5 Ohm on 1 m: ground spreading matters (> 1 %)', lf[2].impact > 0.01, `${(100 * lf[2].impact).toPrecision(3)} %`);
+    }
+}
+
+// 14. Bit patterns.
+{
+    for (const name of ['prbs7', 'prbs9', 'prbs11', 'prbs15']) {
+        const P = prbsPeriod(name), n = PRBS[name][0], b = prbsBits(name, 2 * P);
+        let ones = 0, periodic = true, shorter = false, run = 0, r1 = 0;
+        for (let i = 0; i < P; i++) { ones += b[i]; if (b[i] !== b[i + P]) periodic = false; }
+        for (const q of [1, 3, 7, P / 7, P / 31].filter(q => Number.isInteger(q) && q < P)) {
+            let same = true;
+            for (let i = 0; i < P; i++) if (b[i] !== b[(i + q) % P]) { same = false; break; }
+            if (same) shorter = true;
+        }
+        for (let i = 0; i < 2 * P; i++) { run = i && b[i] === b[i - 1] ? run + 1 : 1; if (b[i]) r1 = Math.max(r1, run); }
+        check(`${name}: period 2^${n}-1, ${2 ** (n - 1)} ones, longest run ${n}`, periodic && !shorter && ones === 2 ** (n - 1) && r1 === n,
+            `ones ${ones}, longest run ${r1}`);
+    }
+    const lossy = seTable(() => ({ R: 20, L: L0, G: 0, C: C0 }));
+    const pcfg = (stim, net = {}, len = 0.1) => ({ length: len, samplesPerEdge: 16,
+        network: { rs: 30, tx: { ac: false }, rx: { ac: false }, term: { type: 'r', rt: 80 }, ...net },
+        stimulus: { vLow: 0, vHigh: 1, tr: 30e-12, tf: 30e-12, edgeDef: '10-90', shape: 'rcos', delay: 0, ...stim } });
+    // Pattern at 2 Gb/s vs the clock steady state, compared at mid-bit times of the
+    // receiver (the line delay is 0.5 ns, one UI).
+    const atPeriodic = (r, name, t, P) => {
+        const n = r.t.length, dtc = r.t[1] - r.t[0], x = (((t % P) + P) % P) / dtc, i = Math.floor(x), f = x - i;
+        const v = r.traces[name], m = Math.round(P / dtc);
+        return v[i % m] + (v[(i + 1) % m] - v[i % m]) * f;
+    };
+    for (const [bits, fClk, duty] of [['01', 1e9, 0.5], ['0011', 0.5e9, 0.5], ['0111', 0.5e9, 0.75]]) {
+        for (const ac of [false, true]) {
+            const net = ac ? { tx: { ac: true, c: 1e-9 }, rx: { ac: true, c: 1e-9 } } : {};
+            const rp = simulateLink(lossy, pcfg({ type: 'pattern', bitRate: 2e9, bits: patternBits({ pattern: 'custom', bits }) }, net), fft);
+            const rc = simulateLink(lossy, pcfg({ type: 'clock', clockFreq: fClk, duty, steady: true }, net), fft);
+            const sc = buildStimulus({ ...pcfg({ type: 'clock', clockFreq: fClk, duty, steady: true }).stimulus, differential: false });
+            const ui = 0.5e-9, tRise = (bits.indexOf('01') + 1) * ui, P = 1 / fClk;
+            let e = 0;
+            // The pattern result holds one period of the pattern.
+            for (let k = 0; k < bits.length; k++) {
+                const t = (k + 0.5) * ui;
+                e = Math.max(e, Math.abs(atPeriodic(rp, 'rx', t, bits.length * ui) - atPeriodic(rc, 'rx', t - tRise + sc.t0, P)));
+            }
+            check(`pattern ${bits} = clock steady state (${ac ? 'AC' : 'DC'} coupled), mid-bit`, e < 2e-4, `max diff ${e.toExponential(2)} V`);
+        }
+    }
+    // Pair with negative skew: pattern '01' vs the clock.
+    {
+        const odd = { R: 10, L: 300e-9, G: 0, C: 120e-12 }, even = { R: 15, L: 400e-9, G: 0, C: 90e-12 };
+        const pair = pairTable(() => fromModes(odd, even));
+        const net = { term: { type: 'diff', rdiff: 90 } };
+        const rp = simulateLink(pair, pcfg({ type: 'pattern', bitRate: 2e9, skew: -40e-12, bits: patternBits({ pattern: 'custom', bits: '01' }) }, net), fft);
+        const rc = simulateLink(pair, pcfg({ type: 'clock', clockFreq: 1e9, duty: 0.5, steady: true, skew: -40e-12 }, net), fft);
+        const sc = buildStimulus({ ...pcfg({ type: 'clock', clockFreq: 1e9, duty: 0.5, steady: true, skew: -40e-12 }).stimulus, differential: true });
+        const sp = buildStimulus({ ...pcfg({ type: 'pattern', bitRate: 2e9, skew: -40e-12, bits: Uint8Array.of(0, 1) }).stimulus, differential: true });
+        let e = 0;
+        for (const name of ['rxDiff', 'rxCM']) for (let k = 0; k < 2; k++) {
+            const t = (k + 0.5) * 0.5e-9;
+            // The pattern's P leg rises at 0.5 ns (bit 1), the clock's at sc.t0.
+            e = Math.max(e, Math.abs(atPeriodic(rp, name, t, 1e-9) - atPeriodic(rc, name, t - 0.5e-9 + sc.t0, 1e-9)));
+        }
+        void sp;
+        check('pair pattern with -40 ps skew = clock steady state (diff and common mode)', e < 2e-4, `max diff ${e.toExponential(2)} V`);
+    }
+    // Lossless matched line: a fully open eye, no jitter, the line delay.
+    {
+        const r = simulateLink(lossless, pcfg({ type: 'pattern', bitRate: 10e9, bits: patternBits({ pattern: 'prbs7' }) }, { rs: 50, term: { type: 'r', rt: 50 } }), fft);
+        const m = Object.fromEntries(r.metrics.list.map(x => [x.label, x.value]));
+        check('lossless PRBS7: eye height = amplitude, width = UI, no jitter, 500 ps delay',
+            m['Eye height (centre)'].startsWith('500 mV') && m['Eye width (at threshold)'].startsWith('100 ps')
+            && m['Crossing jitter pk-pk / rms'] === '0 ps / 0 ps' && m['Delay (50 %)'] === '500 ps',
+            JSON.stringify([m['Eye height (centre)'], m['Eye width (at threshold)'], m['Crossing jitter pk-pk / rms'], m['Delay (50 %)']]));
+        check('eye histogram filled', r.eyeHist && r.eyeHist.counts.some(c => c > 0));
+    }
+    // AC coupling: an unbalanced pattern settles around its mean (baseline wander), the
+    // mean of the receiver is zero; DC coupled the mean is the divided mean level.
+    {
+        const bits = patternBits({ pattern: 'custom', bits: '0000000001' });
+        const ac = simulateLink(lossy, pcfg({ type: 'pattern', bitRate: 2e9, bits }, { tx: { ac: true, c: 1e-9 }, rx: { ac: true, c: 1e-9 } }), fft);
+        const dc = simulateLink(lossy, pcfg({ type: 'pattern', bitRate: 2e9, bits }), fft);
+        const mean = (v) => v.reduce((a, x) => a + x, 0) / v.length;
+        const mAc = mean(ac.traces.rx), mDc = mean(dc.traces.rx), want = 0.1 * 80 / (30 + 2 + 80);
+        check('AC-coupled unbalanced pattern: zero-mean receiver; DC coupled: divided mean', Math.abs(mAc) < 1e-6 && Math.abs(mDc - want) < 1e-4,
+            `AC mean ${mAc.toExponential(2)} V, DC mean ${mDc.toFixed(5)} V (want ${want.toFixed(5)})`);
     }
 }
 

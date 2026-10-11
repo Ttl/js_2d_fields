@@ -44,6 +44,18 @@ console.log('spectrum traces:', specTraces);
 const warn = await page.$eval('#eye-warnings', el => el.style.display === 'block' ? el.textContent : '');
 console.log('warnings:', warn);
 
+// Bit pattern: PRBS7, the density eye and its metrics.
+await page.selectOption('#eye-stim', 'pattern');
+const s3 = await runAndWait();
+await page.selectOption('#eye-view', 'eye');
+await page.waitForTimeout(500);
+const heat = await page.$eval('#eye-plot', el => (el.data || []).some(t => t.type === 'heatmap'));
+const eyeMetrics = await page.$$eval('#eye-metrics .eye-metric-grid span', els => els.map(e => e.textContent));
+const patternOk = /Done/.test(s3) && heat && eyeMetrics.includes('Eye height (centre)') && eyeMetrics.includes('Eye width (at threshold)');
+console.log('PRBS7 eye:', patternOk, s3, eyeMetrics.slice(0, 12).join(' | '));
+await page.selectOption('#eye-view', 'wave');
+await page.selectOption('#eye-stim', 'clock');
+
 // Share link: non-default Eye settings come back.
 await page.fill('#eye-tr', '20 ps');
 await page.selectOption('#eye-term', 'vtt');
@@ -81,6 +93,21 @@ const contentOk = j1.eye_tr === 2e-11 && j1.eye_vtt === 0.8 && !('eye_width' in 
     && !('eye_vtt' in j2) && Object.keys(j0).length === 0;
 console.log('link contents:', contentOk, JSON.stringify(j1), '| after term=r:', JSON.stringify(j2), '| defaults:', JSON.stringify(j0));
 
+// Pattern settings in a link: the bit rate as a number, the custom bits only when used.
+await page.selectOption('#eye-stim', 'pattern');
+await page.fill('#eye-bitrate', '16 Gb/s');
+await page.selectOption('#eye-pattern', 'custom');
+await page.fill('#eye-bits', '0101 1100');
+const j3 = await linkJson(page);
+await page.selectOption('#eye-pattern', 'prbs9');
+const j4 = await linkJson(page);
+const fresh2 = await browser.newPage();
+await fresh2.goto(URL + '?params=' + btoa(encodeURIComponent(JSON.stringify(j3))), { waitUntil: 'networkidle' });
+const back = await fresh2.evaluate(() => [document.getElementById('eye-bitrate').value, document.getElementById('eye-pattern').value, document.getElementById('eye-bits').value]);
+const patLinkOk = j3.eye_bitrate === 16e9 && j3.eye_bits === '0101 1100' && !('eye_bits' in j4) && j4.eye_pattern === 'prbs9'
+    && back[0] === '16 Gb/s' && back[1] === 'custom' && back[2] === '0101 1100';
+console.log('pattern link:', patLinkOk, JSON.stringify(j3), '| prbs9:', JSON.stringify(j4), '| restored', back);
+
 // A link from before the numeric form (unit strings) still loads.
 const legacy = btoa(encodeURIComponent(JSON.stringify({ eye_length: '500 mm', eye_tr: '5 ps', eye_stim: 'step' })));
 await fresh.goto(URL + '?params=' + legacy, { waitUntil: 'networkidle' });
@@ -96,6 +123,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = linkOk && contentOk && legacyOk && wgOff && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

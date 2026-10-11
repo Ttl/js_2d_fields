@@ -3,6 +3,7 @@
 import { darkAxis, darkBackground } from '../plot.js';
 import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
 import { requiredBandwidth } from './stimulus.js';
+import { patternBits } from './pattern.js';
 import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX, SKIN_ERR } from './sensitivity.js';
 
 // Accuracy notes the tab quantifies on the waveform instead of logging them.
@@ -45,6 +46,10 @@ const EYE_FIELDS = [
     ['eye_vtt', 'eye-vtt', 'eye', 'volt'],
     ['eye_ct', 'eye-ct', 'eye', 'cap'],
     ['eye_rdiff', 'eye-rdiff', 'eye', 'res'],
+    ['eye_bitrate', 'eye-bitrate', 'eye', 'rate'],
+    ['eye_pattern', 'eye-pattern', 'text'],
+    ['eye_bits', 'eye-bits', 'text'],
+    ['eye_nbits', 'eye-nbits', 'eye', 'num'],
     ['eye_spe', 'eye-spe', 'eye', 'num'],
     ['eye_span', 'eye-span', 'eye', 'time'],
 ];
@@ -59,6 +64,7 @@ const EYE_DEFAULTS = {
     eye_edge_shape: 'rcos', eye_rs: 50, eye_skew: 0, eye_tx_ac: 0, eye_ctx: 1e-7,
     eye_rx_ac: 0, eye_crx: 1e-7, eye_term: 'r', eye_rt: 50, eye_vtt: 1.2, eye_ct: 1e-7,
     eye_rdiff: 100, eye_spe: 16, eye_span: NaN,
+    eye_bitrate: 10e9, eye_pattern: 'prbs7', eye_bits: '0011010111', eye_nbits: 32767,
 };
 
 // Whether a setting applies to the selected options; links leave out the others.
@@ -68,6 +74,10 @@ function eyeKeyActive(settings, key) {
         case 'eye_width': return v('eye_stim') === 'pulse';
         case 'eye_clock_freq': case 'eye_duty': case 'eye_clock_mode': return v('eye_stim') === 'clock';
         case 'eye_cycles': return v('eye_stim') === 'clock' && v('eye_clock_mode') === 'burst';
+        case 'eye_bitrate': case 'eye_pattern': return v('eye_stim') === 'pattern';
+        case 'eye_bits': return v('eye_stim') === 'pattern' && v('eye_pattern') === 'custom';
+        case 'eye_nbits': return v('eye_stim') === 'pattern' && ['prbs23', 'prbs31'].includes(v('eye_pattern'));
+        case 'eye_delay': case 'eye_span': return v('eye_stim') !== 'pattern';
         case 'eye_ctx': return !!v('eye_tx_ac');
         case 'eye_crx': return !!v('eye_rx_ac');
         case 'eye_rt': return ['vtt', 'r', 'rc'].includes(v('eye_term'));
@@ -97,6 +107,7 @@ const SHOW = {
     freq: [[1e9, 1e9, 'GHz'], [1e6, 1e6, 'MHz'], [1e3, 1e3, 'kHz'], [0, 1, 'Hz']],
     cap: [[1e-6, 1e-6, 'µF'], [1e-9, 1e-9, 'nF'], [0, 1e-12, 'pF']],
     volt: [[0, 1, 'V']],
+    rate: [[1e9, 1e9, 'Gb/s'], [1e6, 1e6, 'Mb/s'], [1e3, 1e3, 'kb/s'], [0, 1, 'b/s']],
     res: [[0, 1, '']],
     num: [[0, 1, '']],
 };
@@ -122,10 +133,11 @@ const UNIT = {
     cap: { f: 1, mf: 1e-3, uf: 1e-6, 'μf': 1e-6, nf: 1e-9, pf: 1e-12, ff: 1e-15 },
     res: { '': 1, ohm: 1, ohms: 1, 'ω': 1, k: 1e3, kohm: 1e3, 'kω': 1e3 },
     volt: { v: 1, mv: 1e-3 },
+    rate: { 'b/s': 1, bps: 1, 'kb/s': 1e3, kbps: 1e3, 'mb/s': 1e6, mbps: 1e6, 'gb/s': 1e9, gbps: 1e9, 'tb/s': 1e12, tbps: 1e12 },
     pct: { '%': 1 },
     num: {},
 };
-const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', res: 'ohm', volt: 'v', pct: '%', num: '' };
+const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', res: 'ohm', volt: 'v', pct: '%', num: '', rate: 'gb/s' };
 
 // Value of a text input in SI units. Throws with the field label on a bad value.
 function parseQuantity(id, kind, label, { optional = false } = {}) {
@@ -140,7 +152,7 @@ function parseQuantity(id, kind, label, { optional = false } = {}) {
         if (!isFinite(v)) throw new Error(`${label}: "${raw}" is not a length.`);
         return v;
     }
-    const m = raw.match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*([a-zμω%]*)$/i);
+    const m = raw.match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*([a-zμω%/]*)$/i);
     if (!m) throw new Error(`${label}: "${raw}" is not a number.`);
     const unit = (m[2] || DEFAULT_UNIT[kind]).toLowerCase();
     const table = UNIT[kind];
@@ -207,6 +219,12 @@ function readConfig() {
         skew: diff ? parseQuantity('eye-skew', 'time', 'P/N skew') : 0,
     };
     if (type === 'pulse') stimulus.width = parseQuantity('eye-width', 'time', 'Pulse width');
+    if (type === 'pattern') {
+        stimulus.bitRate = parseQuantity('eye-bitrate', 'rate', 'Bit rate');
+        const nbits = Math.round(parseQuantity('eye-nbits', 'num', 'Bits simulated'));
+        if (!(nbits >= 2)) throw new Error('Bits simulated: at least 2.');
+        stimulus.bits = patternBits({ pattern: $('eye-pattern').value, bits: $('eye-bits').value, nbits });
+    }
     if (type === 'clock') {
         stimulus.clockFreq = parseQuantity('eye-clock-freq', 'freq', 'Clock frequency');
         stimulus.duty = parseQuantity('eye-duty', 'num', 'Duty cycle') / 100;
@@ -251,6 +269,11 @@ function updateVisibility() {
     show('eye-row-width', type === 'pulse');
     for (const id of ['eye-row-clock-freq', 'eye-row-duty', 'eye-row-clock-mode']) show(id, type === 'clock');
     show('eye-row-cycles', type === 'clock' && $('eye-clock-mode').value === 'burst');
+    const pat = $('eye-pattern').value;
+    for (const id of ['eye-row-bitrate', 'eye-row-pattern']) show(id, type === 'pattern');
+    show('eye-row-bits', type === 'pattern' && pat === 'custom');
+    show('eye-row-nbits', type === 'pattern' && (pat === 'prbs23' || pat === 'prbs31'));
+    for (const id of ['eye-row-delay', 'eye-row-span']) show(id, type !== 'pattern');
     show('eye-row-skew', diff);
     show('eye-row-rt', ['vtt', 'r', 'rc'].includes(term));
     show('eye-row-vtt', term === 'vtt');
@@ -273,8 +296,9 @@ function updateVisibility() {
     let rate = '';
     try { if (type === 'clock') rate = `= ${+(2 * parseQuantity('eye-clock-freq', 'freq', 'f') / 1e9).toPrecision(4)} Gb/s data rate`; } catch { rate = ''; }
     $('eye-rate-note').textContent = rate;
-    $('eye-view').querySelector('option[value="eye"]').disabled = type !== 'clock';
-    if (type !== 'clock' && $('eye-view').value === 'eye') $('eye-view').value = 'wave';
+    const hasEye = type === 'clock' || type === 'pattern';
+    $('eye-view').querySelector('option[value="eye"]').disabled = !hasEye;
+    if (!hasEye && $('eye-view').value === 'eye') $('eye-view').value = 'wave';
     const wg = app.isSelfReferenced();
     $('btn-eye-run').disabled = wg || busy;
     setNotice(wg ? ['Time-domain simulation needs a TEM or quasi-TEM line: not available for a waveguide.'] : null, 'eye-notice');
@@ -516,7 +540,57 @@ function drawWave(res) {
     Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
 }
 
+// Density eye of a pattern: log counts over 2 UI, the eye height and width marked.
+function drawEyeHeatmap(res) {
+    const Plotly = getPlotly();
+    const h = res.eyeHist, inf = res.eyeInfo;
+    const z = [];
+    for (let iy = 0; iy < h.vBins; iy++) {
+        const row = new Array(h.tBins);
+        for (let ix = 0; ix < h.tBins; ix++) {
+            const c = h.counts[iy * h.tBins + ix];
+            row[ix] = c > 0 ? Math.log10(1 + c) : null;
+        }
+        z.push(row);
+    }
+    const x = Array.from({ length: h.tBins }, (_, i) => 2 * (i + 0.5) / h.tBins);
+    const y = Array.from({ length: h.vBins }, (_, i) => h.y0 + (h.y1 - h.y0) * (i + 0.5) / h.vBins);
+    const traces = [{
+        type: 'heatmap', x, y, z, showscale: false, hoverongaps: false, zsmooth: false,
+        colorscale: [[0, '#1d2f6f'], [0.35, '#2c7fb8'], [0.7, '#f2c14e'], [1, '#ffffff']],
+        hovertemplate: '%{x:.3f} UI<br>%{y:.4g} V<extra></extra>', name: 'RX',
+    }];
+    if (frozen && frozen.eyeHist && frozen.eyeHist.tBins === h.tBins) {
+        const f = frozen.eyeHist, fz = [];
+        for (let iy = 0; iy < f.vBins; iy++) {
+            const row = new Array(f.tBins);
+            for (let ix = 0; ix < f.tBins; ix++) row[ix] = f.counts[iy * f.tBins + ix] > 0 ? 1 : 0;
+            fz.push(row);
+        }
+        traces.push({ type: 'contour', x, y: Array.from({ length: f.vBins }, (_, i) => f.y0 + (f.y1 - f.y0) * (i + 0.5) / f.vBins),
+            z: fz, showscale: false, contours: { coloring: 'lines', start: 0.5, end: 0.5, size: 1 },
+            line: { color: '#ddd', width: 1, dash: 'dot' }, name: 'Frozen', hoverinfo: 'skip' });
+    }
+    const layout = layoutBase(`Time (UI = ${fmtT(inf.ui)})`, 'Voltage (V)');
+    layout.xaxis.range = [0, 2];
+    layout.showlegend = false;
+    layout.shapes = [];
+    layout.annotations = [];
+    if (isFinite(inf.heightTop)) {
+        const open = inf.heightTop > inf.heightBottom;
+        const mark = { color: open ? '#4ade80' : '#f87171', width: 2 };
+        layout.shapes.push({ type: 'line', x0: 1, x1: 1, y0: inf.heightBottom, y1: inf.heightTop, line: mark });
+        if (inf.widthRight > inf.widthLeft) {
+            layout.shapes.push({ type: 'line', x0: inf.widthLeft, x1: inf.widthRight, y0: inf.thr, y1: inf.thr, line: mark });
+        }
+        layout.annotations.push({ x: 1, y: inf.heightTop, text: open ? 'eye height' : 'closed', showarrow: false,
+            yanchor: 'bottom', font: { color: mark.color, size: 10 } });
+    }
+    Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
+}
+
 function drawEyeDiagram(res) {
+    if (res.eyeHist) { drawEyeHeatmap(res); return; }
     const Plotly = getPlotly();
     const traces = [];
     const add = (r, faint) => {
@@ -576,7 +650,9 @@ function drawMetrics(res) {
     const i = res.info;
     const tau = res.tau.map(fmtT).join(' / ');
     const info = `Line delay ${tau}${res.differential ? ' (odd / even)' : ''} · ` +
-        (res.kind === 'steady' ? 'clock steady state' : `window ${fmtT(i.window)}`) +
+        (res.kind === 'steady' ? 'clock steady state'
+            : res.kind === 'pattern' ? `pattern steady state, ${i.samplesPerBit} samples per bit, step responses over ${fmtT(i.window)}`
+            : `window ${fmtT(i.window)}`) +
         ` · ${i.N} samples, step ${fmtT(i.dt)}` + (i.slowModes ? ` · ${i.slowModes} slow coupling modes` : '') +
         ` · line parameters from ${escapeHtml(res.source)}` +
         (res.lowFreq && res.lowFreq.length ? ` · ${escapeHtml(lowFreqSummary(res.lowFreq))}` : '');
@@ -587,7 +663,7 @@ function draw() {
     const Plotly = getPlotly();
     if (!Plotly || !lastResult) return;
     const view = $('eye-view').value;
-    if (view === 'eye' && lastResult.eye) drawEyeDiagram(lastResult);
+    if (view === 'eye' && (lastResult.eye || lastResult.eyeHist)) drawEyeDiagram(lastResult);
     else if (view === 'spectrum') drawSpectrum(lastResult);
     else drawWave(lastResult);
     drawMetrics(lastResult);

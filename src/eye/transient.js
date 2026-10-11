@@ -16,6 +16,7 @@ import { buildStimulus, legDerivSpectrum, legNetChange, legMean, sampleLeg, legV
 import { makeRLGCEvaluator, fmtHz } from './channel_grid.js';
 import { buildNetwork, makeTransfer, dcMatrix, dcSolve, lumpedModes } from './network.js';
 import { smoothSize } from './fft.js';
+import { patternSim } from './pattern_sim.js';
 
 const N_MAX = 1 << 21;
 const PLOT_BUCKETS = 6000;
@@ -107,7 +108,7 @@ function simulateLink(table, cfg, fft) {
     const dt0 = Math.min(cfg.stimulus.tr, cfg.stimulus.tf) / spe;
     // A quiet lead before the first edge: the spectral integration takes its constant
     // from the first sample. The time axis is shifted back by it.
-    const steady = cfg.stimulus.type === 'clock' && cfg.stimulus.steady;
+    const steady = (cfg.stimulus.type === 'clock' && cfg.stimulus.steady) || cfg.stimulus.type === 'pattern';
     const lead = steady ? 0 : 64 * dt0;
     const stim = buildStimulus({ ...cfg.stimulus, differential: diff, delay: (cfg.stimulus.delay || 0) + lead });
     // cfg.perturb(v, f): a change of the line parameters (tests of sensitivity.js).
@@ -126,7 +127,7 @@ function simulateLink(table, cfg, fft) {
             ? 'The receiver has no DC path: its common-mode level is set by the receiver bias network, not modelled here (a 1 GOhm leak holds it at 0 V).'
             : 'The receiver has no DC path: its DC level is set by the receiver bias network, not modelled here (a 1 GOhm leak holds it at 0 V).');
     }
-    const res = stim.steady ? steadyState(ctx, dt0) : transient(ctx, dt0);
+    const res = stim.type === 'pattern' ? patternSim(ctx, dt0) : stim.steady ? steadyState(ctx, dt0) : transient(ctx, dt0);
     res.differential = diff;
     res.stimType = stim.type;
     res.period = stim.period;
@@ -158,29 +159,9 @@ function transient(ctx, dt0) {
     const edgeLong = Math.max(stim.up.t1090, stim.down.t1090);
     const tBase = stim.tEnd + tauMax * (1 + 2 * trips) + 20 * edgeLong + 2 * stim.halfMax;
 
-    // Lumped modes too slow for the window are handled in the time domain.
-    // noSlowSplit (tests): every mode below 1 ms in the window, the brute-force
-    // reference (the 1 GOhm leaks of floating nodes stay slow).
-    const tCap = ctx.cfg.noSlowSplit ? 5e-3 : Math.min(64 * tBase, N_MAX * dt0);
-    let T = tBase;
-    const slow = [];
-    const order = modes.lambda.map((l, i) => i).filter(i => modes.lambda[i] > 0)
-        .sort((i, j) => modes.lambda[i] - modes.lambda[j]);
-    for (const i of order) {
-        const lam = modes.lambda[i];
-        if (5 * lam <= T) continue;
-        if (5 * lam <= tCap) { T = 5 * lam; continue; }
-        slow.push(i);
-    }
-
-    // Slow-mode residues at the outputs: c[o][l] / (1 + j w lambda).
-    const slowRes = slow.map(i => {
-        const r = new Float64Array(no * nl);
-        for (let o = 0; o < no; o++) for (let l = 0; l < nl; l++) {
-            r[o * nl + l] = modes.P[out.nodes[o] * net.n + i] * modes.beta[i * nl + l];
-        }
-        return { lambda: modes.lambda[i], r };
-    });
+    const split = slowSplit(ctx, tBase, dt0);
+    const { tCap, slow, slowRes } = split;
+    let T = split.T;
 
     // Receiver response before the first possible arrival, relative to its swing.
     let tEdge0 = Infinity;
@@ -306,6 +287,35 @@ function transient(ctx, dt0) {
     if (stim.type === 'clock') res.eye = foldEye(t, main, stim.period, metrics.crossTime, stim.count, nFine);
     packOutput(res);
     return res;
+}
+
+// Lumped modes too slow for the window, handled in the time domain, and the window that
+// holds the others. noSlowSplit (tests): every mode below 1 ms in the window, the
+// brute-force reference (the 1 GOhm leaks of floating nodes stay slow).
+// Returns { T, tCap, slow, slowRes }: slowRes the residues at the outputs,
+// r[o][l] / (1 + j w lambda).
+function slowSplit(ctx, tBase, dt0) {
+    const { modes, net, out } = ctx;
+    const nl = net.nl, no = out.nodes.length;
+    const tCap = ctx.cfg.noSlowSplit ? 5e-3 : Math.min(64 * tBase, N_MAX * dt0);
+    let T = tBase;
+    const slow = [];
+    const order = modes.lambda.map((l, i) => i).filter(i => modes.lambda[i] > 0)
+        .sort((i, j) => modes.lambda[i] - modes.lambda[j]);
+    for (const i of order) {
+        const lam = modes.lambda[i];
+        if (5 * lam <= T) continue;
+        if (5 * lam <= tCap) { T = 5 * lam; continue; }
+        slow.push(i);
+    }
+    const slowRes = slow.map(i => {
+        const r = new Float64Array(no * nl);
+        for (let o = 0; o < no; o++) for (let l = 0; l < nl; l++) {
+            r[o * nl + l] = modes.P[out.nodes[o] * net.n + i] * modes.beta[i * nl + l];
+        }
+        return { lambda: modes.lambda[i], r };
+    });
+    return { T, tCap, slow, slowRes };
 }
 
 function cfg_span(ctx, T) {
@@ -733,8 +743,10 @@ function fmtTime(s) {
 }
 function fmtV(v) {
     if (!isFinite(v)) return '-';
+    if (Math.abs(v) < 1e-7) return '0 mV';
     return Math.abs(v) >= 1 ? `${+v.toPrecision(4)} V` : `${+(v * 1e3).toPrecision(4)} mV`;
 }
 const fmtPct = (x) => isFinite(x) ? `${+(100 * x).toPrecision(3)} %` : '-';
 
-export { simulateLink, requiredBandwidth, lineEstimates, fmtTime, fmtV, mainName, srcName };
+export { simulateLink, requiredBandwidth, lineEstimates, reflectionTrips, taper, outputs, deriveTraces, firstOrder,
+    slowSplit, packOutput, crossing, N_MAX, fmtTime, fmtV, fmtPct, mainName, srcName };

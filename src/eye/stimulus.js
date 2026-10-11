@@ -71,13 +71,15 @@ function edgeSpectrum(e, f) {
 /**
  * Stimulus of the driver legs (one leg single-ended, P and N for a pair).
  *
- * cfg: { type: 'step' | 'pulse' | 'clock', differential, vLow, vHigh, tr, tf, edgeDef,
- *        shape, delay, width (pulse), clockFreq, duty, steady (clock steady state),
- *        cycles (clock burst), skew (N leg delay) }
+ * cfg: { type: 'step' | 'pulse' | 'clock' | 'pattern', differential, vLow, vHigh, tr, tf,
+ *        edgeDef, shape, delay, width (pulse), clockFreq, duty, steady (clock steady
+ *        state), cycles (clock burst), bitRate, bits (pattern, Uint8Array),
+ *        skew (N leg delay) }
  *
  * Voltages are the open-circuit source levels. Each leg is v0 plus a list of signed
  * steps { t, dv, edge } (t the 50 % time). A clock lists the edges of its first period
- * and repeats them `count` times every `period` (steady: indefinitely).
+ * and repeats them `count` times every `period` (steady: indefinitely). A bit pattern
+ * is periodic like a steady clock: its transitions sit on the bit boundaries k / bitRate.
  */
 function buildStimulus(cfg) {
     const dV = cfg.vHigh - cfg.vLow;
@@ -93,6 +95,7 @@ function buildStimulus(cfg) {
 
     // Data transition times of one period and the level change of the P leg at each.
     let times, period = null, count = 1, steady = false;
+    if (cfg.type === 'pattern') return patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax });
     if (cfg.type === 'step') {
         times = [t0];
     } else if (cfg.type === 'pulse') {
@@ -139,6 +142,37 @@ function buildStimulus(cfg) {
         edgeMin: Math.min(cfg.tr, cfg.tf),
         t1090Min: Math.min(up.t1090, down.t1090),
         halfMax,
+    };
+}
+
+// Periodic NRZ bit pattern: bit k occupies [k, k + 1) / bitRate, the transitions at the
+// bit boundaries. The period starts at the level of the last bit (v0).
+function patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax }) {
+    if (!(cfg.bitRate > 0)) throw new Error('Bit rate must be positive.');
+    const bits = cfg.bits;
+    if (!bits || bits.length < 2) throw new Error('The pattern needs at least two bits.');
+    const ui = 1 / cfg.bitRate, n = bits.length;
+    if (2 * halfMax > ui) throw new Error('The rise and fall times are too long for this bit rate: the edges overlap.');
+    if (Math.abs(skew) > 0.5 * ui) throw new Error('The P/N skew must stay below half a bit.');
+    const legEdges = (vLo, vHi, shift) => {
+        const lvl = (b) => b ? vHi : vLo;
+        const edges = [];
+        for (let k = 0; k < n; k++) {
+            const prev = bits[(k + n - 1) % n];
+            if (bits[k] === prev) continue;
+            const dv = lvl(bits[k]) - lvl(prev);
+            edges.push({ t: k * ui + shift, dv, edge: edgeFor(dv) });
+        }
+        return { v0: lvl(bits[n - 1]), edges };
+    };
+    // Every edge inside [0, period): a negative skew moves the P leg later instead.
+    const t0 = Math.max(0, -skew);
+    const legs = [legEdges(cfg.vLow, cfg.vHigh, t0)];
+    if (cfg.differential) legs.push(legEdges(cfg.vHigh, cfg.vLow, t0 + skew));
+    return {
+        type: 'pattern', differential: !!cfg.differential, legs, period: n * ui, count: Infinity, steady: true,
+        t0, tEnd: n * ui, tStart: 0, dV, up, down, bits, ui, bitRate: cfg.bitRate,
+        edgeMin: Math.min(cfg.tr, cfg.tf), t1090Min: Math.min(up.t1090, down.t1090), halfMax,
     };
 }
 
@@ -231,11 +265,12 @@ function legNetChange(stim, leg) {
     return s * (isFinite(stim.count) ? stim.count : 1);
 }
 
-// Mean level of a steady clock leg over one period.
+// Mean level of a steady clock or pattern leg over one period.
 function legMean(stim, leg) {
     const P = stim.period;
     // Level changes at the edge times inside the period [0, P): the leg sits at v0
-    // before the first and returns to it after the last.
+    // before the first and returns to it after the last. The edges are odd-symmetric
+    // about their 50 % points, so those points alone fix the mean.
     let m = leg.v0;
     const ts = leg.edges.map(e => ((e.t % P) + P) % P);
     for (let i = 0; i < leg.edges.length; i++) m += leg.edges[i].dv * (P - ts[i]) / P;
@@ -245,9 +280,12 @@ function legMean(stim, leg) {
 // Highest frequency the sweep has to cover for this stimulus: about three times the
 // knee frequency 0.35/t_r of the fastest edge, and five clock harmonics.
 function requiredBandwidth(cfg) {
-    const stim = buildStimulus({ ...cfg, differential: false, skew: 0 });
+    // Only the edges and the rate matter, a two-bit pattern stands in for the bits.
+    const c = cfg.type === 'pattern' ? { ...cfg, bits: Uint8Array.of(0, 1) } : cfg;
+    const stim = buildStimulus({ ...c, differential: false, skew: 0 });
     let f = 1 / stim.t1090Min;
-    if (stim.period) f = Math.max(f, 5 / stim.period);
+    if (stim.type === 'pattern') f = Math.max(f, 2.5 * stim.bitRate);
+    else if (stim.period) f = Math.max(f, 5 / stim.period);
     return f;
 }
 
