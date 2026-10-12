@@ -781,7 +781,7 @@
             <label class="checkbox-label"><input type="checkbox" id="eye-show-rx" checked> RX</label>
             <label class="checkbox-label"><input type="checkbox" id="eye-show-tx"> TX pad</label>
             <label class="checkbox-label"><input type="checkbox" id="eye-show-src"> Source</label>
-            <label class="checkbox-label" id="eye-show-legs-label"><input type="checkbox" id="eye-show-legs"> P/N legs</label>
+            <label class="checkbox-label" id="eye-show-legs-label"><input type="checkbox" id="eye-show-legs"> P/N single-ended</label>
             <label class="checkbox-label" id="eye-show-cm-label"><input type="checkbox" id="eye-show-cm"> Common mode</label>
             <button id="btn-eye-run" style="width:auto; padding:8px 18px;">Simulate</button>
             <button id="btn-eye-stop" style="width:auto; padding:8px 18px; display:none; background:#f44336;">Stop</button>
@@ -880,7 +880,7 @@
                     <div class="eye-row"><label for="eye-padtx">TX pad capacitance</label><input type="text" id="eye-padtx" value="0 pF"></div>
                 </fieldset>
                 <fieldset id="eye-txeq-set">
-                    <legend>TX equalization <span class="help-icon" onclick="showHelpModal('eye_equalization', event)">?</span></legend>
+                    <legend>TX equalization <span class="help-icon" onclick="showHelpModal('eye_tx_equalization', event)">?</span></legend>
                     <div class="eye-row"><label for="eye-txeq">FIR</label>
                         <select id="eye-txeq">
                             <option value="none" selected>None</option>
@@ -928,7 +928,7 @@
                     <div class="eye-row"><label for="eye-padrx">RX pad / input capacitance</label><input type="text" id="eye-padrx" value="0 pF"></div>
                 </fieldset>
                 <fieldset id="eye-rxeq-set">
-                    <legend>RX equalization <span class="help-icon" onclick="showHelpModal('eye_equalization', event)">?</span></legend>
+                    <legend>RX equalization <span class="help-icon" onclick="showHelpModal('eye_rx_equalization', event)">?</span></legend>
                     <div class="eye-row"><label for="eye-ctle">CTLE</label>
                         <select id="eye-ctle">
                             <option value="off" selected>Off</option>
@@ -1503,46 +1503,204 @@
         },
         eye: {
             title: 'Eye tab',
-            body: '<p>Time-domain response of the solved line, of the given length, between a driver and a receiver termination. Stage 1: a step, a single pulse or a clock.</p>' +
-                '<p><b>Line parameters.</b> The R, L, G, C of the line (the physical 2&times;2 matrices of a pair) from DC up to about three times the knee frequency 0.35/t<sub>r</sub> of the fastest edge. The last solve is reused when it is of the current geometry, starts at DC and reaches that frequency (an interpolating sweep, or a discrete one dense enough); otherwise the tab runs its own interpolating sweep. Above the sweep stop R grows as &radic;f, G as f, the internal inductance falls as 1/&radic;f and C is held.</p>' +
-                '<p><b>Circuit.</b> The line enters as its exact admittance matrix, with the driver, the coupling capacitors and the termination around it. Every response starts from the DC operating point. The response is the inverse FFT of the transfer function times the edge spectra. AC coupling time constants longer than the simulated window are integrated exactly in time instead, so droop and the baseline shift are correct on any time span.</p>' +
-                '<p><b>Views.</b> Waveform: the voltages against time, the dotted lines mark the first source edge and its arrival after the line delay (a pattern shows its first 200 bits). Eye diagram: the receiver waveform folded over 2 UI; a clock as lines (UI = half the clock period), a pattern as the density of the whole period with the eye height and width marked. Channel response: |V<sub>RX</sub>/EMF| with the edge spectrum.</p>' +
-                '<p><b>Eye metrics</b> (patterns): the threshold is half way between the mean one and zero levels at the eye centre, half a UI from the mean crossing. Eye height: smallest one minus largest zero at the centre, and the largest such opening over the sampling phase. Eye width: UI minus the peak-to-peak spread of the threshold crossings, which is also the data-dependent jitter. No noise or random jitter is included.</p>' +
-                '<p>Use causal materials for time-domain work: a constant loss tangent is not causal and the receiver then responds before the signal can arrive (a warning says so).</p>'
+            wide: true,
+            body: `<p>Time-domain response of the solved line, of the given length, between a driver and a receiver termination.</p>
+                <h4>Line parameters</h4>
+                <ul>
+                    <li>R, L, G, C of the line (the physical 2&times;2 matrices of a pair) from DC up to about three times the knee frequency 0.35/t<sub>r</sub> of the fastest edge.</li>
+                    <li>The last solve is reused when it is of the current geometry, starts at DC and reaches that frequency (an interpolating sweep, or a discrete one dense enough). Otherwise the tab runs its own interpolating sweep.</li>
+                    <li>Above the sweep stop R grows as &radic;f, G as f, the internal inductance falls as 1/&radic;f and C is held.</li>
+                </ul>
+                <h4>Circuit</h4>
+                <ul>
+                    <li>The line enters as its exact admittance matrix, with the driver, the coupling capacitors and the termination around it.</li>
+                    <li>Every response starts from the DC operating point.</li>
+                    <li>The response is the inverse FFT of the transfer function times the edge spectra.</li>
+                    <li>AC coupling time constants longer than the simulated window are integrated exactly in time instead, so droop and the baseline shift are correct on any time span.</li>
+                </ul>
+                <h4>Views</h4>
+                <table>
+                    <tr><th>Waveform</th><td>The voltages against time. The dotted lines mark the first source edge and its arrival after the line delay. A pattern shows its first 200 bits.</td></tr>
+                    <tr><th>Eye diagram</th><td>The receiver waveform folded over 2 UI. A clock is drawn as lines (UI = half the clock period), a pattern as the density of the whole period with the eye height and width marked.</td></tr>
+                    <tr><th>Pulse response</th><td>The equalized single-bit response with its cursors and the DFE taps marked (only with TX or RX equalization).</td></tr>
+                    <tr><th>Channel response</th><td>|V<sub>RX</sub>/EMF| with the edge spectrum.</td></tr>
+                </table>
+                <h4>Eye metrics (patterns)</h4>
+                <ul>
+                    <li><b>Threshold</b>: half way between the mean one and zero levels at the eye centre, half a UI from the mean crossing.</li>
+                    <li><b>Eye height</b>: smallest one minus largest zero at the centre, and the largest such opening over the sampling phase.</li>
+                    <li><b>Eye width</b>: UI minus the peak-to-peak spread of the threshold crossings, which is also the data-dependent jitter.</li>
+                    <li>No noise or random jitter is included.</li>
+                </ul>
+                <p class="help-note">Use causal materials for time-domain work: a constant loss tangent is not causal and the receiver responds before the signal can arrive.</p>`
         },
         eye_stimulus: {
             title: 'Stimulus',
-            body: '<p><b>Step</b>: one rising edge. <b>Single pulse</b>: a rising and a falling edge, the width between their 50 % points. <b>Clock</b>: a square wave of the given frequency and duty cycle, either its periodic steady state (exact, all reflections and coupling droop settled) or a burst of N cycles from rest. <b>Bit pattern</b>: NRZ data at the bit rate, repeated indefinitely.</p>' +
-                '<p>Patterns: PRBS7 to PRBS31 (x<sup>n</sup> + x<sup>k</sup> + 1, maximal length 2<sup>n</sup> &minus; 1 bits: n = 7, 9, 11, 15, 23, 31 with k = 6, 5, 9, 14, 18, 28) or custom bits (0 and 1, spaces ignored). PRBS23 and PRBS31 are simulated over the given number of their first bits, repeated. The result is the periodic steady state of the repeating pattern, so AC coupling shows its settled baseline wander.</p>' +
-                '<p>The start delay is the time before the first edge begins (not used for patterns). A clock of frequency f carries data at 2f.</p>'
+            body: `<table>
+                    <tr><th>Step</th><td>One rising edge.</td></tr>
+                    <tr><th>Single pulse</th><td>A rising and a falling edge, the width between their 50 % points.</td></tr>
+                    <tr><th>Clock</th><td>A square wave of the given frequency and duty cycle, either its periodic steady state (exact, all reflections and coupling droop settled) or a burst of N cycles from rest.</td></tr>
+                    <tr><th>Bit pattern</th><td>NRZ data at the bit rate, repeated indefinitely.</td></tr>
+                </table>
+                <h4>Patterns</h4>
+                <ul>
+                    <li><b>PRBS</b>: x<sup>n</sup> + x<sup>k</sup> + 1, maximal length 2<sup>n</sup> &minus; 1 bits.
+                        <table>
+                            <tr><th>Pattern</th><td>PRBS7</td><td>PRBS9</td><td>PRBS11</td><td>PRBS15</td><td>PRBS23</td><td>PRBS31</td></tr>
+                            <tr><th>k</th><td>6</td><td>5</td><td>9</td><td>14</td><td>18</td><td>28</td></tr>
+                        </table>
+                        PRBS23 and PRBS31 are simulated over the given number of their first bits, repeated.</li>
+                    <li><b>Custom</b>: 0 and 1, spaces ignored.</li>
+                    <li>The result is the periodic steady state of the repeating pattern, so AC coupling shows its settled baseline wander.</li>
+                </ul>
+                <p>The start delay is the time before the first edge begins (not used for patterns).</p>`
         },
         eye_driver: {
             title: 'Driver',
-            body: '<p><b>Voltage mode</b>: a voltage source with a series resistance on every leg. The levels are its open-circuit (EMF) levels: a 50 &Omega; driver into a matched 50 &Omega; line puts half of the EMF swing on the line. <b>Current mode</b> (LVDS): every leg is a current source of &plusmn;I in parallel with its output resistance to the common-mode voltage; a pair steers I through the termination (3.5 mA into 100 &Omega; give 350 mV), the output resistance sets the reflections at the driver.</p><p>A pair is driven complementary: the P leg goes low to high when the N leg goes high to low, the differential EMF swings &plusmn;(high &minus; low). The skew delays the N leg.</p><p>Rise and fall times are the 10-90 % or 20-80 % times of the EMF. Raised-cosine edges have a compact support and a fast falling spectrum, Gaussian ones are band limited. A linear ramp has corners, which show a little band-limit ringing.</p>'
+            body: `<h4>Voltage mode</h4>
+                <p>Each output pad is driven by a voltage source through a series resistance. The levels are the source's open-circuit (EMF) levels: a 50 &Omega; driver into a matched 50 &Omega; line puts half of the EMF swing on the line.</p>
+                <h4>Current mode (LVDS)</h4>
+                <p>Each output pad is driven by a current source of &plusmn;I, in parallel with an output resistance to the common-mode voltage. A pair steers I through the termination (3.5 mA into 100 &Omega; gives 350 mV). The output resistance sets the reflections at the driver.</p>
+                <h4>Pairs</h4>
+                <p>P and N are driven complementary: P goes low to high while N goes high to low, so the differential EMF swings &plusmn;(high &minus; low). The skew delays the N output relative to P; a negative skew makes N earlier.</p>
+                <h4>Edges</h4>
+                <p>Rise and fall times are the 10-90 % or 20-80 % times of the EMF.</p>
+                <ul>
+                    <li><b>Raised cosine</b>: compact support and a fast falling spectrum.</li>
+                    <li><b>Gaussian</b>: band limited.</li>
+                    <li><b>Linear ramp</b>: has corners, which show a little band-limit ringing.</li>
+                </ul>`
         },
         eye_coupling: {
             title: 'Coupling',
-            body: '<p>DC coupling connects the driver, the line and the receiver directly. AC coupling puts a series capacitor in every leg at the transmitter (between the driver and the line) or at the receiver (between the line and the termination).</p><p>A receiver behind a coupling capacitor with only a differential or no termination has no DC path: its common-mode level is set by the receiver bias network, which is not modelled (a 1 G&Omega; leak holds it at 0 V).</p>'
+            body: `<ul>
+                    <li><b>DC coupling</b> connects the driver, the line and the receiver directly.</li>
+                    <li><b>AC at TX</b> puts a series capacitor at each pad, between the driver and the line.</li>
+                    <li><b>AC at RX</b> puts it between the line and the termination.</li>
+                </ul>
+                <p class="help-note">A receiver behind a coupling capacitor with only a differential or no termination has no DC path: its common-mode level is set by the receiver bias network, which is not modelled (a 1 G&Omega; leak holds it at 0 V).</p>`
         },
         eye_presets: {
             title: 'Interface presets',
-            body: '<p>Fill the stimulus, driver, coupling, termination and equalization with typical values of an interface; every value stays editable and the line length is kept. They are starting points, not data sheet models: check the levels, edge rates, impedances and capacitances of the parts used.</p>' +
-                '<p><b>LVDS</b>: current-mode driver, 3.5 mA into 100 &Omega; differential (350 mV), 1.2 V common mode. <b>PCIe</b>: 50 &Omega; voltage-mode driver with 800 mV differential peak-to-peak into a matched load (the minimum full swing V<sub>TX-DIFF-PP</sub>, 800-1000 mV, set by the high level), TX AC coupling, 2 &times; 50 &Omega; receiver termination; Gen1/2 with fixed de-emphasis and no receiver equalization (none is defined), Gen3 to 5 with the best TX preset and the behavioral CTLE and DFE of the base spec (1st-order CTLE at Gen3 and 4, 2nd order at Gen5; 1-, 2- and 3-tap DFE with the spec&#39;s tap limits). The spec gives no transmitter rise time; the Gen4 and Gen5 edges (16.5 and 10 ps, 20-80 %) lie in its stressed-eye generator ranges of 14-19 ps at 16 GT/s and 7.5-15 ps at 32 GT/s, Gen1-3 use 0.2 UI. Receiver package, jitter (Rj, Sj) and the behavioral CDR of compliance testing are not modeled. <b>LVPECL</b>: emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V. <b>LVCMOS</b>: CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver of 3 pF input capacitance.</p>' +
-                '<p>The drivers and receivers are linear. A real CMOS or emitter-follower output changes its resistance with the output voltage, and receiver clamp diodes limit overshoot on unterminated lines, which this model does not.</p>'
+            wide: true,
+            body: `<p>Fill the stimulus, driver, coupling, termination and equalization with typical values of an interface. The line length is kept and every value stays editable. They are starting points. Check the levels, edge rates, impedances and capacitances of the parts used.</p>
+                <h4>LVDS</h4>
+                <p>Current-mode driver, 3.5 mA into 100 &Omega; differential (350 mV), 1.2 V common mode.</p>
+                <h4>PCIe</h4>
+                <ul>
+                    <li>50 &Omega; voltage-mode driver, 800 mV differential peak-to-peak into a matched load (the minimum full swing V<sub>TX-DIFF-PP</sub> of 800-1000 mV, set by the high level).</li>
+                    <li>TX AC coupling, 2 &times; 50 &Omega; receiver termination.</li>
+                </ul>
+                <table>
+                    <tr><th></th><th>TX FIR</th><th>CTLE</th><th>DFE</th><th>Edge (20-80 %)</th></tr>
+                    <tr><th>Gen1/2</th><td>Fixed de-emphasis</td><td>None defined</td><td>None</td><td>0.2 UI</td></tr>
+                    <tr><th>Gen3</th><td>Best preset</td><td>1st order</td><td>1 tap</td><td>0.2 UI</td></tr>
+                    <tr><th>Gen4</th><td>Best preset</td><td>1st order</td><td>2 taps</td><td>16.5 ps</td></tr>
+                    <tr><th>Gen5</th><td>Best preset</td><td>2nd order</td><td>3 taps</td><td>10 ps</td></tr>
+                </table>
+                <p>The CTLE and DFE are the behavioral ones of the base spec, with its tap limits. The spec gives no transmitter rise time, the Gen4 and Gen5 edges are from stressed-eye generator ranges of 14-19 ps at 16 GT/s and 7.5-15 ps at 32 GT/s.</p>
+                <p>Not modeled: receiver package, jitter (Rj, Sj) and the behavioral CDR of compliance testing.</p>
+                <h4>LVPECL</h4>
+                <p>Emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V.</p>
+                <h4>LVCMOS</h4>
+                <p>CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver of 3 pF input capacitance.</p>
+                <p class="help-note">The drivers and receivers are linear. A real CMOS or emitter-follower output changes its resistance with the output voltage, and receiver clamp diodes limit overshoot on unterminated lines.</p>`
         },
-        eye_equalization: {
-            title: 'Equalization (bit patterns)',
-            body: '<p><b>TX FIR</b>: three taps c<sub>-1</sub>, c<sub>0</sub>, c<sub>+1</sub>, |c<sub>-1</sub>| + c<sub>0</sub> + |c<sub>+1</sub>| = 1 so the low and high levels are the full swing. De-emphasis = 20 log(V<sub>b</sub>/V<sub>a</sub>) and pre-shoot = 20 log(V<sub>c</sub>/V<sub>b</sub>) as defined by PCIe (V<sub>a</sub>: the bit after a transition, V<sub>b</sub>: a long run, V<sub>c</sub>: the bit before a transition). The PCIe 3.0+ presets P0 to P10 are those pairs. P10 is not a fixed preset: its de-emphasis follows the LF level the transmitter advertises in link training; it is simulated at its nominal maximum boost of 9.5 dB (full swing, &plusmn;1.5 dB). Boost = 20 log(V<sub>d</sub>/V<sub>b</sub>), V<sub>d</sub> the isolated-bit level, is reported too. <b>Best PCIe preset</b> tries all eleven (full swing) or only P4, P1, P9, P5, P6 and P3, the presets reduced-swing signaling implements.</p>' +
-                '<p><b>CTLE</b>: H(s) = &omega;<sub>p2</sub>(s + A&omega;<sub>p1</sub>)/((s + &omega;<sub>p1</sub>)(s + &omega;<sub>p2</sub>)), the PCIe behavioral CTLE with DC gain A, poles f<sub>p1</sub>, f<sub>p2</sub> and a zero at A f<sub>p1</sub>: 2 and 8 GHz at 8 GT/s, 2 and 16 GHz at 16 GT/s, A from &minus;6 to &minus;12 dB in 1 dB steps, with a 1-tap (8 GT/s) or 2-tap (16 GT/s) DFE. The <b>2nd-order</b> form of 32 GT/s is H(s) = (&omega;<sub>p1</sub>&omega;<sub>p3</sub>&omega;<sub>p4</sub>/&omega;<sub>z1</sub>)(s + &omega;<sub>z1</sub>)(s + A&omega;<sub>p2</sub>)/((s + &omega;<sub>p1</sub>)(s + &omega;<sub>p2</sub>)(s + &omega;<sub>p3</sub>)(s + &omega;<sub>p4</sub>)) with f<sub>z1</sub> = 450 MHz, f<sub>p1</sub> = 1.65 f<sub>z1</sub>, f<sub>p2</sub> = 9.5 GHz, f<sub>p3</sub> = f<sub>p4</sub> = 28 GHz and A from &minus;5 to &minus;15 dB in 1 dB steps. 2.5 and 5 GT/s define no behavioral receiver equalization; 64 GT/s (PAM4, not simulated) uses a six-pole, three-zero CTLE.  The behavioral equalizer serves compliance measurements, it is not a model of real receivers. <b>Best DC gain</b> tries every dB of the range. <b>DFE</b>: ideal decisions; each tap cancels one post-cursor of the pulse response at the sampling point, up to its limit: a list in tap order of voltages or ratios to the cursor h<sub>0</sub>, e.g. <code>0.8 h0, 20 mV, 20 mV</code>. The PCIe behavioral DFE has 1 tap at 8 GT/s, 2 at 16 GT/s and 3 at 32 GT/s; d1 is limited to &plusmn;30 mV at 8 and 16 GT/s and to |d1| &le; 0.8 h<sub>0</sub> at 32 GT/s, d2 and d3 to &plusmn;20 mV. The limits bound the reference receiver only. A limited tap leaves the rest of its post-cursor as ISI.</p>' +
-                '<p>The best settings maximize the worst-case (peak-distortion) eye height of the pulse response at the slicer; the eye diagram and its metrics then show the slicer signal (after the CTLE and DFE), with the eye height at the pins listed for comparison. The pulse response view shows the equalized pulse with its cursors, the DFE taps marked.</p>'
+        eye_tx_equalization: {
+            title: 'TX equalization (bit patterns)',
+            wide: true,
+            body: `<p>A three-tap FIR c<sub>-1</sub>, c<sub>0</sub>, c<sub>+1</sub> with |c<sub>-1</sub>| + c<sub>0</sub> + |c<sub>+1</sub>| = 1, so the low and high levels are the full swing.</p>
+                <h4>Levels (PCIe definitions)</h4>
+                <table>
+                    <tr><th>V<sub>a</sub></th><td>The bit after a transition</td></tr>
+                    <tr><th>V<sub>b</sub></th><td>A long run</td></tr>
+                    <tr><th>V<sub>c</sub></th><td>The bit before a transition</td></tr>
+                    <tr><th>V<sub>d</sub></th><td>An isolated bit</td></tr>
+                </table>
+                <ul>
+                    <li><b>De-emphasis</b> = 20 log(V<sub>b</sub>/V<sub>a</sub>)</li>
+                    <li><b>Pre-shoot</b> = 20 log(V<sub>c</sub>/V<sub>b</sub>)</li>
+                    <li><b>Boost</b> = 20 log(V<sub>d</sub>/V<sub>b</sub>), reported with the result</li>
+                </ul>
+                <h4>PCIe 3.0+ presets</h4>
+                <table>
+                    <tr><th>Preset</th><td>P0</td><td>P1</td><td>P2</td><td>P3</td><td>P4</td><td>P5</td><td>P6</td><td>P7</td><td>P8</td><td>P9</td><td>P10</td></tr>
+                    <tr><th>Pre-shoot (dB)</th><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1.9</td><td>2.5</td><td>3.5</td><td>3.5</td><td>3.5</td><td>0</td></tr>
+                    <tr><th>De-emphasis (dB)</th><td>&minus;6.0</td><td>&minus;3.5</td><td>&minus;4.4</td><td>&minus;2.5</td><td>0</td><td>0</td><td>0</td><td>&minus;6.0</td><td>&minus;3.5</td><td>0</td><td>&minus;9.5</td></tr>
+                </table>
+                <p>P10 is not a fixed preset: its de-emphasis follows the LF level the transmitter advertises in link training. It is simulated at its nominal maximum boost of 9.5 dB (full swing, &plusmn;1.5 dB).</p>
+                <h4>Best PCIe preset</h4>
+                <ul>
+                    <li><b>Full swing</b> tries all eleven presets.</li>
+                    <li><b>Reduced swing</b> tries only P4, P1, P9, P5, P6 and P3, the presets reduced-swing signaling implements.</li>
+                    <li>The best preset maximizes the worst-case (peak-distortion) eye height of the pulse response at the slicer.</li>
+                </ul>`
+        },
+        eye_rx_equalization: {
+            title: 'RX equalization (bit patterns)',
+            wide: true,
+            body: `<p>The behavioral receiver equalizer of PCIe: a Continuous Time Linear Equalizer (CTLE) followed by a Decision Feedback Equalizer (DFE). Uses ideal equations and doesn't model full analog receiver. It is useful for compliance measurements for the channel.</p>
+                <h4>CTLE, 1st order (8 and 16 GT/s)</h4>
+                <div class="help-formula">H(s) = &omega;<sub>p2</sub>(s + A&omega;<sub>p1</sub>) / ((s + &omega;<sub>p1</sub>)(s + &omega;<sub>p2</sub>))</div>
+                <p>DC gain A, poles f<sub>p1</sub>, f<sub>p2</sub> and a zero at A f<sub>p1</sub>.</p>
+                <table>
+                    <tr><th></th><th>f<sub>p1</sub></th><th>f<sub>p2</sub></th><th>A</th></tr>
+                    <tr><th>8 GT/s</th><td>2 GHz</td><td>8 GHz</td><td>&minus;6 to &minus;12 dB</td></tr>
+                    <tr><th>16 GT/s</th><td>2 GHz</td><td>16 GHz</td><td>&minus;6 to &minus;12 dB</td></tr>
+                </table>
+                <h4>CTLE, 2nd order (32 GT/s)</h4>
+                <div class="help-formula">H(s) = (&omega;<sub>p1</sub>&omega;<sub>p3</sub>&omega;<sub>p4</sub>/&omega;<sub>z1</sub>) &middot; (s + &omega;<sub>z1</sub>)(s + A&omega;<sub>p2</sub>) / ((s + &omega;<sub>p1</sub>)(s + &omega;<sub>p2</sub>)(s + &omega;<sub>p3</sub>)(s + &omega;<sub>p4</sub>))</div>
+                <table>
+                    <tr><th>f<sub>z1</sub></th><td>450 MHz</td></tr>
+                    <tr><th>f<sub>p1</sub></th><td>1.65 f<sub>z1</sub></td></tr>
+                    <tr><th>f<sub>p2</sub></th><td>9.5 GHz</td></tr>
+                    <tr><th>f<sub>p3</sub> = f<sub>p4</sub></th><td>28 GHz</td></tr>
+                    <tr><th>A</th><td>&minus;5 to &minus;15 dB</td></tr>
+                </table>
+                <p>A is stepped in 1 dB. 2.5 and 5 GT/s define no behavioral receiver equalization.</p>
+                <p><b>Best DC gain</b> tries every dB of the range.</p>
+                <h4>DFE</h4>
+                <ul>
+                    <li>Ideal decisions: each tap cancels one post-cursor of the pulse response at the sampling point, up to its limit.</li>
+                    <li><b>Tap limits</b>: a list in tap order of voltages or ratios to the cursor h<sub>0</sub>, e.g. <code>0.8 h0, 20 mV, 20 mV</code>. Empty means no limit.</li>
+                    <li>A limited tap leaves the rest of its post-cursor as ISI.</li>
+                </ul>
+                <table>
+                    <tr><th></th><th>Taps</th><th>d1 limit</th><th>d2, d3 limit</th></tr>
+                    <tr><th>8 GT/s</th><td>1</td><td>&plusmn;30 mV</td><td>&ndash;</td></tr>
+                    <tr><th>16 GT/s</th><td>2</td><td>&plusmn;30 mV</td><td>&plusmn;20 mV</td></tr>
+                    <tr><th>32 GT/s</th><td>3</td><td>|d1| &le; 0.8 h<sub>0</sub></td><td>&plusmn;20 mV</td></tr>
+                </table>
+                <p>The limits apply to the reference receiver only. Implementations can use different limits.</p>
+                <h4>Results</h4>
+                <ul>
+                    <li>The best settings maximize the worst-case (peak-distortion) eye height of the pulse response at the slicer.</li>
+                    <li>The eye diagram and its metrics show the slicer signal (after the CTLE and DFE), with the eye height at the pins listed for comparison.</li>
+                    <li>The pulse response view shows the equalized pulse with its cursors, the DFE taps marked.</li>
+                </ul>`
         },
         eye_termination: {
             title: 'RX termination',
-            body: '<p><b>Resistor to ground</b> and <b>resistor to V_TT</b>: R on every leg to ground, or to a termination supply V_TT (which sets the DC level). <b>Resistor + capacitor</b>: R in series with C to ground on every leg (AC termination, no DC load). <b>Thevenin</b>: a pull-up to a supply and a pull-down to ground on every leg (LVPECL: 130 &Omega; and 82 &Omega; from 3.3 V give 50 &Omega; to 1.28 V). <b>Differential resistor</b>: R between P and N, pairs only. <b>Open</b>: no termination.</p><p>The RX pad / input capacitance is a capacitor to ground on every receiver pin (behind the AC coupling capacitor); the TX pad capacitance is the same at the driver pins.</p>'
+            body: `<table>
+                    <tr><th>Resistor to ground</th><td>R from each receiver pad to ground.</td></tr>
+                    <tr><th>Resistor to V_TT</th><td>R from each receiver pad to a termination supply V_TT, which sets the DC level.</td></tr>
+                    <tr><th>Resistor + capacitor</th><td>R in series with C from each receiver pad to ground (AC termination, no DC load).</td></tr>
+                    <tr><th>Differential resistor</th><td>R between P and N, differential only.</td></tr>
+                    <tr><th>Thevenin</th><td>A pull-up to a supply and a pull-down to ground at each receiver pad (LVPECL: 130 &Omega; and 82 &Omega; from 3.3 V give 50 &Omega; to 1.28 V).</td></tr>
+                    <tr><th>Open</th><td>No termination.</td></tr>
+                </table>
+                <h4>Pad capacitance</h4>
+                <ul>
+                    <li><b>RX pad / input capacitance</b>: a capacitor to ground on every receiver pin (behind the AC coupling capacitor).</li>
+                    <li><b>TX pad capacitance</b>: the same at the driver pins.</li>
+                </ul>`
         },
         eye_simulation: {
             title: 'Simulation',
-            body: '<p>Samples per edge set the time step (the shorter of the rise and fall times divided by it). The time span is automatic: the edges, the line delay and the reflections until they settle. A longer span shows the slow AC coupling relaxation; a shorter one crops the plot.</p>'
+            body: `<ul>
+                    <li><b>Samples per edge</b> set the time step: the shorter of the rise and fall times divided by it.</li>
+                    <li><b>Time span</b> is automatic: the edges, the line delay and the reflections until they settle. A longer span shows the slow AC coupling relaxation; a shorter one crops the plot. Not used for bit patterns, which are simulated over one period of the repeating pattern.</li>
+                </ul>`
         },
         freeze: {
             title: 'Freeze Trace',
@@ -1621,6 +1779,7 @@
         if (content) {
             document.getElementById('helpModalTitle').textContent = content.title;
             document.getElementById('helpModalBody').innerHTML = content.body;
+            document.querySelector('#helpModal .help-modal-content').classList.toggle('wide', !!content.wide);
             document.getElementById('helpModal').style.display = 'block';
         }
     }

@@ -381,7 +381,11 @@ function updateVisibility() {
     for (const id of ['eye-row-bitrate', 'eye-row-pattern']) show(id, type === 'pattern');
     show('eye-row-bits', type === 'pattern' && pat === 'custom');
     show('eye-row-nbits', type === 'pattern' && (pat === 'prbs23' || pat === 'prbs31'));
-    for (const id of ['eye-row-delay', 'eye-row-span']) show(id, type !== 'pattern');
+    // A pattern simulates one period of its steady state: no start delay, no span.
+    for (const id of ['eye-delay', 'eye-span']) {
+        $(id).disabled = type === 'pattern';
+        $(id).title = type === 'pattern' ? 'Not used for bit patterns' : '';
+    }
     show('eye-row-skew', diff);
     const current = $('eye-driver').value === 'current';
     for (const id of ['eye-row-vlow', 'eye-row-vhigh', 'eye-row-rs']) show(id, !current);
@@ -410,7 +414,7 @@ function updateVisibility() {
     if (diffOpt) diffOpt.disabled = !diff;
     show('eye-show-legs-label', diff);
     show('eye-show-cm-label', diff);
-    $('eye-term-label').textContent = diff ? 'per leg' : '';
+    $('eye-term-label').textContent = diff ? 'per pad' : '';
     // Level readout and clock data rate.
     let note = '';
     try {
@@ -870,7 +874,7 @@ const PRESET_BASE = {
     'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-ctleorder': '1', 'eye-dfe': '0', 'eye-dfelim': '', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
 };
 // VTX-DIFF-PP is 800-1000 mV (full swing, no equalization, long runs into the load): the
-// presets launch the 800 mV minimum, 0.8 V EMF steps per leg behind 50 ohm.
+// presets launch the 800 mV minimum, 0.8 V EMF steps per pad behind 50 ohm.
 const pcie = (rate, tr, extra) => ({
     'eye-vlow': '0 V', 'eye-vhigh': '0.8 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
     'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', ...extra,

@@ -568,6 +568,60 @@ button.stop-mode:hover {
     line-height: 1.6;
     color: var(--text-muted);
 }
+.help-modal-content.wide {
+    max-width: 720px;
+}
+.help-modal h4 {
+    margin: 18px 0 6px;
+    color: var(--text-color);
+    font-size: 1em;
+}
+.help-modal ul {
+    margin: 6px 0;
+    padding-left: 20px;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+.help-modal li {
+    margin: 4px 0;
+}
+.help-modal li b, .help-modal p b {
+    color: var(--text-color);
+}
+.help-modal table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 0.92em;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+.help-modal th, .help-modal td {
+    padding: 4px 10px 4px 0;
+    border-bottom: 1px solid var(--border-color);
+    text-align: left;
+    vertical-align: top;
+}
+.help-modal th {
+    color: var(--text-color);
+    font-weight: 600;
+    white-space: nowrap;
+}
+.help-modal .help-formula {
+    margin: 8px 0;
+    padding: 8px 10px;
+    background: var(--input-bg);
+    border-radius: 4px;
+    overflow-x: auto;
+    white-space: nowrap;
+    color: var(--text-color);
+}
+.help-modal .help-note {
+    padding-left: 10px;
+    border-left: 3px solid var(--border-color);
+}
 .help-modal a {
     color: var(--primary-color);
     text-decoration: none;
