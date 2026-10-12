@@ -914,8 +914,11 @@
                     <div class="eye-row" id="eye-row-pkgtx-fill"><label for="eye-pkgtx-fill">Fill in</label>
                         <select id="eye-pkgtx-fill">
                             <option value="" selected>&mdash;</option>
+                            <option value="pcie8Tx">PCIe 8 GT/s TX (approximate)</option>
+                            <option value="pcie8Rx">PCIe 8 GT/s RX (approximate)</option>
                             <option value="pcie16Root">PCIe 16 GT/s root port</option>
                             <option value="pcie16NonRoot">PCIe 16 GT/s non-root</option>
+                            <option value="pcie32Root">PCIe 32 GT/s root port</option>
                             <option value="fpga18">Generic 1.8 V FPGA I/O</option>
                         </select></div>
                     <div class="eye-row" id="eye-row-pkgtx-cpin"><label for="eye-pkgtx-cpin">Pin capacitance</label><input type="text" id="eye-pkgtx-cpin" value="0.25 pF"></div>
@@ -934,8 +937,11 @@
                     <div class="eye-row" id="eye-row-pkgrx-fill"><label for="eye-pkgrx-fill">Fill in</label>
                         <select id="eye-pkgrx-fill">
                             <option value="" selected>&mdash;</option>
+                            <option value="pcie8Tx">PCIe 8 GT/s TX (approximate)</option>
+                            <option value="pcie8Rx">PCIe 8 GT/s RX (approximate)</option>
                             <option value="pcie16Root">PCIe 16 GT/s root port</option>
                             <option value="pcie16NonRoot">PCIe 16 GT/s non-root</option>
+                            <option value="pcie32Root">PCIe 32 GT/s root port</option>
                             <option value="fpga18">Generic 1.8 V FPGA I/O</option>
                         </select></div>
                     <div class="eye-row" id="eye-row-pkgrx-cpin"><label for="eye-pkgrx-cpin">Pin capacitance</label><input type="text" id="eye-pkgrx-cpin" value="0.25 pF"></div>
@@ -1636,6 +1642,10 @@
                 <p>The <b>Package S-parameters</b> view plots S21 and S11 (pin side; S22 at the die in the legend) of both packages with their pad capacitances, 50 &Omega; per leg (SDD at 100 &Omega; for a pair). It needs no simulation and follows the inputs as they are edited, up to the bit rate (Nyquist marked) or 1 / rise time.</p>
                 <h4>PCIe 16 GT/s</h4>
                 <p>The behavioral packages of the base spec (8.5.1.1): C<sub>pin</sub> 0.25 pF, C<sub>pad</sub> 0.5 pF and a line fitted to the SDD21 curves of the spec's reference packages (&minus;3.08 dB non-root, &minus;5.02 dB root at 8 GHz, within 0.2 and 0.4 dB rms up to 15 GHz). The root port package is socketed and its ripple is only approximated. Fill in sets the pad capacitance too.</p>
+                <h4>PCIe 8 GT/s</h4>
+                <p>The spec gives only C<sub>pin</sub> 0.25 pF and C<sub>pad</sub> 1.0 pF (TX) / 0.8 pF (RX). The line between them is the 16 GT/s non-root one, an approximation. Gen1 and Gen2 channels are checked with the 8 GT/s package too.</p>
+                <h4>PCIe 32 GT/s</h4>
+                <p>The spec's reference packages are S-parameter models. The root port template is a line with C<sub>pin</sub> and C<sub>pad</sub> fitted to their plots: insertion loss &minus;8.4 dB at 16 GHz and within 0.7 dB rms to 30 GHz; board-side return loss within 1.8 dB rms of its ripple average, with a coarser ripple than the socketed original.</p>
                 <h4>Generic 1.8 V FPGA I/O</h4>
                 <p>IBIS package of a high-performance 1.8 V LVCMOS FPGA pin: R<sub>pkg</sub> 0.3 &Omega;, L<sub>pkg</sub> 5 nH, C<sub>pkg</sub> 1 pF (pin) and C_comp 4.5 pF (pad).</p>`
         },
@@ -1643,6 +1653,7 @@
             title: 'Interface presets',
             wide: true,
             body: `<p>Fill the stimulus, driver, coupling, termination and equalization with typical values of an interface. The line length is kept and every value stays editable. They are starting points. Check the levels, edge rates, impedances and capacitances of the parts used.</p>
+                <p>LVDS, LVPECL and LVCMOS put the generic 1.8 V FPGA I/O package at both ends (0.3 &Omega;, 5 nH, 1 pF pin, 4.5 pF pad).</p>
                 <h4>LVDS</h4>
                 <p>Current-mode driver, 3.5 mA into 100 &Omega; differential (350 mV), 1.2 V common mode.</p>
                 <h4>PCIe</h4>
@@ -1658,12 +1669,12 @@
                     <tr><th>Gen5</th><td>Best preset</td><td>2nd order</td><td>3 taps</td><td>10 ps</td></tr>
                 </table>
                 <p>The CTLE and DFE are the behavioral ones of the base spec, with its tap limits. The spec gives no transmitter rise time, the Gen4 and Gen5 edges are from stressed-eye generator ranges of 14-19 ps at 16 GT/s and 7.5-15 ps at 32 GT/s.</p>
-                <p>Gen4 adds the spec's behavioral 16 GT/s packages, root port transmitting (swap the two for the other direction).</p>
-                <p>Not modeled: packages of the other generations, jitter (Rj, Sj) and the behavioral CDR of compliance testing.</p>
+                <p>Packages (root port transmitting where the spec tells root and non-root apart): Gen1-3 the 8 GT/s TX and RX packages (approximate line), Gen4 the 16 GT/s root port and non-root packages, Gen5 the 32 GT/s root port package with the 16 GT/s non-root one at the receiver (the 32 GT/s non-root model is not fitted yet). See the Packages help.</p>
+                <p>Not modeled: jitter (Rj, Sj) and the behavioral CDR of compliance testing.</p>
                 <h4>LVPECL</h4>
                 <p>Emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V.</p>
                 <h4>LVCMOS</h4>
-                <p>CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver, both ends in the generic 1.8 V FPGA I/O package (0.3 &Omega;, 5 nH, 1 pF pin, 4.5 pF pad).</p>
+                <p>CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver.</p>
                 <p class="help-note">The drivers and receivers are linear. A real CMOS or emitter-follower output changes its resistance with the output voltage, and receiver clamp diodes limit overshoot on unterminated lines.</p>`
         },
         eye_tx_equalization: {

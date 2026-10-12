@@ -688,6 +688,8 @@ const valueAt = (r, name, t) => {
     check('package templates build', bad.length === 0, bad.map(b => b[0]).join(', '));
     const nr = PACKAGES.pcie16NonRoot, rt = PACKAGES.pcie16Root;
     const a = s21Db(nr.model, nr.pad, 8e9), b = s21Db(rt.model, rt.pad, 8e9);
+    const r32 = PACKAGES.pcie32Root, c = s21Db(r32.model, r32.pad, 16e9);
+    check('PCIe 32 GT/s root package: SDD21 at 16 GHz as Fig 8-61 (-8.40 dB)', Math.abs(c + 8.40) < 0.1, `${c.toFixed(3)} dB`);
     check('PCIe 16 GT/s packages: SDD21 at 8 GHz as Fig 8-60 (-3.08 / -5.02 dB)', Math.abs(a + 3.08) < 0.05 && Math.abs(b + 5.02) < 0.05,
         `${a.toFixed(3)} / ${b.toFixed(3)} dB`);
     // Lossy packages on both ends of a lossless line: causal, arrives after both delays.

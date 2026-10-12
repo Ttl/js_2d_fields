@@ -1013,19 +1013,22 @@ const PRESET_BASE = {
 };
 // VTX-DIFF-PP is 800-1000 mV (full swing, no equalization, long runs into the load): the
 // presets launch the 800 mV minimum, 0.8 V EMF steps per pad behind 50 ohm.
+// Packages default to the 8 GT/s ones (Gen1-3); extra may replace them.
 const pcie = (rate, tr, extra) => ({
     'eye-vlow': '0 V', 'eye-vhigh': '0.8 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
-    'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', ...extra,
+    'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50',
+    ...packageInputs('tx', 'pcie8Tx'), ...packageInputs('rx', 'pcie8Rx'), ...extra,
 });
 const pcieEq = (adcMin, adcMax, fp1, fp2, dfe, dfelim) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',
     'eye-adcmin': adcMin, 'eye-adcmax': adcMax, 'eye-fp1': fp1, 'eye-fp2': fp2, 'eye-dfe': dfe, 'eye-dfelim': dfelim });
+// The generic FPGA I/O package at both ends.
+const fpgaPins = { ...packageInputs('tx', 'fpga18'), ...packageInputs('rx', 'fpga18') };
 const lvcmos = (v, rs, tr) => ({ 'eye-vlow': '0 V', 'eye-vhigh': v, 'eye-rs': rs, 'eye-stim': 'clock', 'eye-clock-freq': '100 MHz',
-    'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': tr, 'eye-tf': tr, 'eye-term': 'open',
-    ...packageInputs('tx', 'fpga18'), ...packageInputs('rx', 'fpga18') });
+    'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': tr, 'eye-tf': tr, 'eye-term': 'open', ...fpgaPins });
 const PRESETS = {
     lvds: { differential: true, 'eye-driver': 'current', 'eye-iout': '3.5 mA', 'eye-rout': '10k', 'eye-vcm': '1.2 V',
         'eye-stim': 'pattern', 'eye-bitrate': '1 Gb/s', 'eye-pattern': 'prbs7', 'eye-tr': '300 ps', 'eye-tf': '300 ps',
-        'eye-term': 'diff', 'eye-rdiff': '100' },
+        'eye-term': 'diff', 'eye-rdiff': '100', ...fpgaPins },
     pcie1: { differential: true, ...pcie('2.5 Gb/s', '80 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-3.5', 'eye-preshoot': '0' }) },
     pcie2: { differential: true, ...pcie('5 Gb/s', '40 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-6', 'eye-preshoot': '0' }) },
     pcie3: { differential: true, ...pcie('8 Gb/s', '25 ps', pcieEq('-12', '-6', '2 GHz', '8 GHz', '1', '30 mV')) },
@@ -1039,9 +1042,11 @@ const PRESETS = {
     pcie4: { differential: true, ...pcie('16 Gb/s', '16.5 ps', pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')),
         ...packageInputs('tx', 'pcie16Root'), ...packageInputs('rx', 'pcie16NonRoot') },
     pcie5: { differential: true, ...pcie('32 Gb/s', '10 ps', { ...pcieEq('-15', '-5', '2 GHz', '9.5 GHz', '3', '0.8 h0, 20 mV, 20 mV'),
-        'eye-ctleorder': '2', 'eye-fz1': '450 MHz', 'eye-fp3': '28 GHz' }) },
+        'eye-ctleorder': '2', 'eye-fz1': '450 MHz', 'eye-fp3': '28 GHz',
+        // The 32 GT/s non-root model is not fitted: the 16 GT/s non-root package receives.
+        ...packageInputs('tx', 'pcie32Root'), ...packageInputs('rx', 'pcie16NonRoot') }) },
     lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
-        'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V' },
+        'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V', ...fpgaPins },
     lvcmos33: lvcmos('3.3 V', '25', '1 ns'),
     lvcmos25: lvcmos('2.5 V', '30', '800 ps'),
     lvcmos18: lvcmos('1.8 V', '35', '700 ps'),

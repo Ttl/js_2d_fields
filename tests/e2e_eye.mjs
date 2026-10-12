@@ -127,7 +127,8 @@ const presetRun = async (preset) => {
     return { st, m };
 };
 const lvds = await presetRun('lvds');
-const lvdsOk = /Done/.test(lvds.st) && /mV/.test(lvds.m['Eye height (centre)'] || '');
+const lvdsPkg = await page.evaluate(() => ['eye-pkgtx', 'eye-pkgrx', 'eye-padrx'].map(id => document.getElementById(id).value));
+const lvdsOk = /Done/.test(lvds.st) && /mV/.test(lvds.m['Eye height (centre)'] || '') && JSON.stringify(lvdsPkg) === JSON.stringify(['rl', 'rl', '4.5 pF']);
 console.log('LVDS preset:', lvdsOk, lvds.st, lvds.m['Eye height (centre)'], lvds.m['Eye amplitude']);
 const pcie = await presetRun('pcie3');
 await page.selectOption('#eye-view', 'pulse');
@@ -137,6 +138,15 @@ const pcieOk = /Done/.test(pcie.st) && /^P\d+: (no TX equalization|[\d.]+ dB boo
     && 'DFE taps' in pcie.m && pulseTraces.includes('Pulse response') && pulseTraces.includes('DFE taps');
 console.log('PCIe Gen3 preset:', pcieOk, pcie.st, pcie.m['TX FIR (chosen)'], pcie.m['CTLE DC gain (chosen)'], pcie.m['Eye height (centre)'], pulseTraces);
 await page.selectOption('#eye-view', 'wave');
+const gen3Pkg = await page.evaluate(() => ['eye-pkgtx', 'eye-pkgrx', 'eye-padtx', 'eye-padrx'].map(id => document.getElementById(id).value));
+const gen3PkgOk = JSON.stringify(gen3Pkg) === JSON.stringify(['line', 'line', '1 pF', '0.8 pF']);
+console.log('PCIe Gen3 packages (8 GT/s):', gen3PkgOk, gen3Pkg);
+
+// PCIe Gen5: 32 GT/s root port package at TX.
+const gen5 = await presetRun('pcie5');
+const gen5Pkg = await page.evaluate(() => ['eye-pkgtx-z0', 'eye-padtx', 'eye-pkgrx-z0'].map(id => document.getElementById(id).value));
+const gen5Ok = /Done/.test(gen5.st) && JSON.stringify(gen5Pkg) === JSON.stringify(['38.3', '0.44 pF', '41.3']);
+console.log('PCIe Gen5 preset with packages:', gen5Ok, gen5.st, gen5.m['Eye height (centre)'], gen5Pkg);
 
 // PCIe Gen4: the behavioral packages are filled in, simulated and kept in a link.
 const gen4 = await presetRun('pcie4');
@@ -186,6 +196,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);
