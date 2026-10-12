@@ -133,7 +133,7 @@ const pcie = await presetRun('pcie3');
 await page.selectOption('#eye-view', 'pulse');
 await page.waitForTimeout(500);
 const pulseTraces = await page.$eval('#eye-plot', el => (el.data || []).map(t => t.name));
-const pcieOk = /Done/.test(pcie.st) && /^P\d+: (no TX equalization|-?[\d.]+ dB pre-shoot)/.test(pcie.m['TX FIR (chosen)'] || '') && /dB/.test(pcie.m['CTLE DC gain (chosen)'] || '')
+const pcieOk = /Done/.test(pcie.st) && /^P\d+: (no TX equalization|[\d.]+ dB boost)/.test(pcie.m['TX FIR (chosen)'] || '') && /dB/.test(pcie.m['CTLE DC gain (chosen)'] || '')
     && 'DFE taps' in pcie.m && pulseTraces.includes('Pulse response') && pulseTraces.includes('DFE taps');
 console.log('PCIe Gen3 preset:', pcieOk, pcie.st, pcie.m['TX FIR (chosen)'], pcie.m['CTLE DC gain (chosen)'], pcie.m['Eye height (centre)'], pulseTraces);
 await page.selectOption('#eye-view', 'wave');

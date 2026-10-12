@@ -462,10 +462,10 @@ function patternSim(ctx, dt0) {
             // Taps 0 / 1 / 0 (PCIe P4) send plain NRZ.
             const plain = Math.abs(choice.fir[0]) < 1e-9 && Math.abs(choice.fir[2]) < 1e-9;
             eqMetrics.push({ label: 'TX FIR' + (txEq.auto ? ' (chosen)' : ''), value: `${choice.firName ? choice.firName + ': ' : ''}`
-                + (plain ? 'no TX equalization' : `${db.preshoot.toFixed(1)} dB pre-shoot, ${db.deemphasis.toFixed(1)} dB de-emphasis, `
-                    + `${boostDb(choice.fir).toFixed(1)} dB boost`)
-                + (choice.firName === 'P10' ? ' (nominal maximum boost; the real one follows the transmitter\'s LF)' : ''),
-                note: `taps ${choice.fir.map(c => c.toFixed(3)).join(' / ')}` });
+                + (plain ? 'no TX equalization' : `${boostDb(choice.fir).toFixed(1)} dB boost`),
+                note: (plain ? '' : `pre-shoot ${db.preshoot.toFixed(1)} dB, de-emphasis ${db.deemphasis.toFixed(1)} dB, `)
+                    + `taps ${choice.fir.map(c => c.toFixed(3)).join(' / ')}`
+                    + (choice.firName === 'P10' ? '; P10 at its nominal maximum boost, the real one follows the LF level the transmitter advertises' : '') });
         }
         if (choice.adc !== null) eqMetrics.push({ label: 'CTLE DC gain' + (eq.ctle.auto ? ' (chosen)' : ''), value: `${choice.adc} dB`,
             note: eq.ctle.order === 2 ? '2nd-order CTLE' : '1st-order CTLE' });

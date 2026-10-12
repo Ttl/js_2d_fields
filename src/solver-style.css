@@ -440,6 +440,7 @@ button.stop-mode:hover {
     gap: 10px;
 }
 .eye-metric-grid > div > span { white-space: nowrap; }
+.eye-metric-grid > div > span:last-child { white-space: normal; text-align: right; min-width: 0; }
 .eye-metric-grid > div > span:first-child { color: var(--text-muted); }
 .eye-info {
     color: var(--text-muted);
