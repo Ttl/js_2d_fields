@@ -127,6 +127,13 @@ const presetRun = async (preset) => {
     return { st, m };
 };
 const lvds = await presetRun('lvds');
+// Current drive: the channel response is relative to its low-frequency level (not V/A).
+await page.selectOption('#eye-view', 'spectrum');
+await page.waitForTimeout(300);
+const lvdsH = await page.$eval('#eye-plot', el => { const t = el.data[0]; return { name: t.name, y0: t.y[0], max: Math.max(...t.y) }; });
+const lvdsHOk = /relative to low frequency/.test(lvdsH.name) && Math.abs(lvdsH.y0) < 0.5 && lvdsH.max < 3;
+console.log('LVDS channel response near 0 dB:', lvdsHOk, lvdsH);
+await page.selectOption('#eye-view', 'wave');
 const lvdsPkg = await page.evaluate(() => ['eye-pkgtx', 'eye-pkgrx', 'eye-padrx'].map(id => document.getElementById(id).value));
 const lvdsOk = /Done/.test(lvds.st) && /mV/.test(lvds.m['Eye height (centre)'] || '') && JSON.stringify(lvdsPkg) === JSON.stringify(['rl', 'rl', '4.5 pF']);
 console.log('LVDS preset:', lvdsOk, lvds.st, lvds.m['Eye height (centre)'], lvds.m['Eye amplitude']);
@@ -196,6 +203,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

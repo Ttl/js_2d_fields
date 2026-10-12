@@ -136,6 +136,8 @@ function simulateLink(table, cfg, fft) {
     }
     const res = stim.type === 'pattern' ? patternSim(ctx, dt0) : stim.steady ? steadyState(ctx, dt0) : transient(ctx, dt0);
     res.differential = diff;
+    // A current-mode driver's transfer is a transimpedance (V/A).
+    res.currentDrive = net.current;
     res.stimType = stim.type;
     res.period = stim.period;
     res.warnings = warnings;

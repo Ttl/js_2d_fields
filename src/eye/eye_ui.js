@@ -826,7 +826,16 @@ function drawSpectrum(res) {
     const db = (a) => Array.from(a, v => 20 * Math.log10(Math.max(v, 1e-15)));
     const add = (r, faint) => {
         const x = Array.from(r.hplot.f, v => v / 1e9);
-        traces.push({ x, y: db(r.hplot.mag), name: faint ? 'Transfer (frozen)' : (r.differential ? 'Transfer, diff RX / diff EMF' : 'Transfer, RX / EMF'),
+        // Current drive: the transimpedance relative to its low-frequency level, the largest
+        // value below 100 MHz (above the corner of any coupling capacitor).
+        let ref = 1;
+        if (r.currentDrive && r.hplot.mag.length) {
+            ref = r.hplot.mag[0];
+            for (let i = 1; i < r.hplot.f.length && r.hplot.f[i] <= 1e8; i++) ref = Math.max(ref, r.hplot.mag[i]);
+        }
+        const what = r.currentDrive ? (r.differential ? 'diff RX / diff current, relative to low frequency' : 'RX / current, relative to low frequency')
+            : (r.differential ? 'diff RX / diff EMF' : 'RX / EMF');
+        traces.push({ x, y: db(Array.from(r.hplot.mag, v => v / ref)), name: faint ? 'Transfer (frozen)' : `Transfer, ${what}`,
             type: 'scatter', mode: 'lines', line: { color: COLORS[0], width: faint ? 1.5 : 2, dash: faint ? 'dot' : 'solid' }, opacity: faint ? 0.5 : 1 });
         if (!faint) traces.push({ x, y: db(r.hplot.stim), name: 'Rising edge spectrum', type: 'scatter', mode: 'lines',
             line: { color: COLORS[1], width: 1.5 } });
