@@ -702,6 +702,17 @@ const valueAt = (r, name, t) => {
     for (let i = 0; i < r.t.length; i++) if (r.t[i] < 0.98 * tArr) pre = Math.max(pre, Math.abs(r.traces.rx[i]));
     check('lossy packages: < 0.1 % of the swing before line + package delays, no warnings',
         pre < 5e-4 && r.warnings.length === 0, `${pre.toExponential(2)} V; ${r.warnings.join(' | ')}`);
+    // Termination location: without an RX package the pin and the die are one node; with one,
+    // the board termination changes the die waveform.
+    {
+        const run = (loc, pk) => simulateLink(lossless, base({ network: { padRx: 2e-12, pkgRx: pk, term: { type: 'r', rt: 50, loc } } }), fft).traces.rx;
+        const a = run('die', null), b = run('board', null);
+        const same = a.length === b.length && a.every((x, i) => x === b[i]);
+        const pk = PACKAGES.fpga18.model, c = run('die', pk), d = run('board', pk);
+        let diff = 0;
+        for (let i = 0; i < Math.min(c.length, d.length); i++) diff = Math.max(diff, Math.abs(c[i] - d[i]));
+        check('termination location: same node without a package, differs behind one', same && diff > 0.01, `max diff with package ${diff.toFixed(4)} V`);
+    }
     // DC: R + L packages (10 ohm each) in the 50 / 50 divider.
     const pk = { form: 'rl', cpin: 0.2e-12, r: 10, l: 1e-9 };
     const r2 = simulateLink(lossless, base({ network: { pkgTx: pk, pkgRx: pk } }), fft);

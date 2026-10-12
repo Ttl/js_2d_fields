@@ -190,6 +190,16 @@ console.log('PCIe Gen4 preset with packages:', gen4Ok, gen4.st, gen4.m['Eye heig
 await page.click('.tab-button[data-tab="geometry"]');
 await page.selectOption('#tl_type', 'microstrip');
 await page.click('.tab-button[data-tab="eye"]');
+// LVPECL: terminated on the board at the RX pin; the location row only with an RX package.
+const pecl = await presetRun('lvpecl');
+const vis = () => page.$eval('#eye-row-termloc', el => el.style.display !== 'none');
+const peclLoc = await page.$eval('#eye-termloc', el => el.value), peclVis = await vis();
+const jPecl = await linkJson(page);
+await page.selectOption('#eye-pkgrx', 'none');
+const hidNoPkg = !(await vis());
+const jNoPkg = await linkJson(page);
+const peclOk = /Done/.test(pecl.st) && peclLoc === 'board' && peclVis && hidNoPkg && jPecl.eye_termloc === 'board' && !('eye_termloc' in jNoPkg);
+console.log('LVPECL board termination:', peclOk, pecl.st, peclLoc, peclVis, hidNoPkg, jPecl.eye_termloc, 'eye_termloc' in jNoPkg);
 const cmos = await presetRun('lvcmos33');
 const cmosPkg = await page.evaluate(() => ['eye-pkgtx', 'eye-pkgrx', 'eye-pkgtx-l', 'eye-padtx', 'eye-padrx'].map(id => document.getElementById(id).value));
 const cmosOk = /Done/.test(cmos.st) && JSON.stringify(cmosPkg) === JSON.stringify(['rl', 'rl', '5 nH', '4.5 pF', '4.5 pF']);
@@ -203,6 +213,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = peclOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

@@ -44,6 +44,7 @@ const EYE_FIELDS = [
     ['eye_rx_ac', 'eye-rx-ac', 'chk'],
     ['eye_crx', 'eye-crx', 'eye', 'cap'],
     ['eye_term', 'eye-term', 'text'],
+    ['eye_termloc', 'eye-termloc', 'text'],
     ['eye_rt', 'eye-rt', 'eye', 'res'],
     ['eye_vtt', 'eye-vtt', 'eye', 'volt'],
     ['eye_ct', 'eye-ct', 'eye', 'cap'],
@@ -97,7 +98,7 @@ const EYE_DEFAULTS = {
     eye_clock_freq: 1e9, eye_duty: 50, eye_clock_mode: 'steady', eye_cycles: 8,
     eye_vlow: 0, eye_vhigh: 1, eye_tr: 35e-12, eye_tf: 35e-12, eye_edge_def: '10-90',
     eye_edge_shape: 'rcos', eye_rs: 50, eye_skew: 0, eye_tx_ac: 0, eye_ctx: 1e-7,
-    eye_rx_ac: 0, eye_crx: 1e-7, eye_term: 'r', eye_rt: 50, eye_vtt: 1.2, eye_ct: 1e-7,
+    eye_rx_ac: 0, eye_crx: 1e-7, eye_term: 'r', eye_termloc: 'die', eye_rt: 50, eye_vtt: 1.2, eye_ct: 1e-7,
     eye_rdiff: 100, eye_spe: 16, eye_span: NaN,
     eye_bitrate: 10e9, eye_pattern: 'prbs7', eye_bits: '0011010111', eye_nbits: 32767,
     eye_driver: 'voltage', eye_iout: 3.5e-3, eye_rout: 1e4, eye_vcm: 1.2, eye_padtx: 0, eye_padrx: 0,
@@ -135,6 +136,7 @@ function eyeKeyActive(settings, key) {
         case 'eye_vtt': return v('eye_term') === 'vtt';
         case 'eye_ct': return v('eye_term') === 'rc';
         case 'eye_rdiff': return v('eye_term') === 'diff';
+        case 'eye_termloc': return v('eye_term') !== 'open' && v('eye_pkgrx') !== 'none';
         default: {
             const m = key.match(/^eye_pkg(tx|rx)_(\w+)$/);
             if (!m) return true;
@@ -334,7 +336,7 @@ function readConfig() {
             throw new Error('Cycles: between 1 and 2000.');
         }
     }
-    const term = { type: $('eye-term').value };
+    const term = { type: $('eye-term').value, loc: $('eye-termloc').value };
     if (['vtt', 'r', 'rc'].includes(term.type)) term.rt = parseQuantity('eye-rt', 'res', 'Termination resistance');
     if (term.type === 'vtt') term.vtt = parseQuantity('eye-vtt', 'volt', 'V_TT');
     if (term.type === 'rc') term.ct = parseQuantity('eye-ct', 'cap', 'Termination capacitance');
@@ -466,6 +468,8 @@ function updateVisibility() {
     show('eye-row-vtt', term === 'vtt');
     show('eye-row-ct', term === 'rc');
     show('eye-row-rdiff', term === 'diff');
+    // Without an RX package the pin and the die are one node.
+    show('eye-row-termloc', term !== 'open' && $('eye-pkgrx').value !== 'none');
     for (const x of ['tx', 'rx']) {
         const form = $(`eye-pkg${x}`).value;
         for (const k of ['fill', 'cpin', 'z0', 'delay', 'lossc', 'lossd', 'r', 'l']) {
@@ -1017,7 +1021,7 @@ function toggleFreeze() {
 
 // Typical starting values per interface (input id -> value; true/false for checkboxes).
 const PRESET_BASE = {
-    'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-pkgtx': 'none', 'eye-pkgrx': 'none', 'eye-tx-ac': false, 'eye-rx-ac': false,
+    'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-pkgtx': 'none', 'eye-pkgrx': 'none', 'eye-termloc': 'die', 'eye-tx-ac': false, 'eye-rx-ac': false,
     'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-ctleorder': '1', 'eye-dfe': '0', 'eye-dfelim': '', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
 };
 // VTX-DIFF-PP is 800-1000 mV (full swing, no equalization, long runs into the load): the
@@ -1055,7 +1059,8 @@ const PRESETS = {
         // The 32 GT/s non-root model is not fitted: the 16 GT/s non-root package receives.
         ...packageInputs('tx', 'pcie32Root'), ...packageInputs('rx', 'pcie16NonRoot') }) },
     lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
-        'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V', ...fpgaPins },
+        'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V', ...fpgaPins,
+        'eye-termloc': 'board' },
     lvcmos33: lvcmos('3.3 V', '25', '1 ns'),
     lvcmos25: lvcmos('2.5 V', '30', '800 ps'),
     lvcmos18: lvcmos('1.8 V', '35', '700 ps'),

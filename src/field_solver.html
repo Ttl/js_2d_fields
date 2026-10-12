@@ -968,6 +968,11 @@
                             <option value="thev">Thevenin (pull-up + pull-down)</option>
                             <option value="open">Open (high impedance)</option>
                         </select></div>
+                    <div class="eye-row" id="eye-row-termloc"><label for="eye-termloc">Location</label>
+                        <select id="eye-termloc">
+                            <option value="die" selected>On die</option>
+                            <option value="board">On board (at the RX pin)</option>
+                        </select></div>
                     <div class="eye-row" id="eye-row-rt"><label for="eye-rt">Resistance (&Omega;)</label><input type="text" id="eye-rt" value="50"></div>
                     <div class="eye-row" id="eye-row-vtt"><label for="eye-vtt">V_TT</label><input type="text" id="eye-vtt" value="1.2 V"></div>
                     <div class="eye-row" id="eye-row-ct"><label for="eye-ct">Capacitance</label><input type="text" id="eye-ct" value="100 nF"></div>
@@ -1639,6 +1644,7 @@
                     <li><b>R + L</b>: the series R<sub>pkg</sub> and L<sub>pkg</sub> of an IBIS [Package]. With the pad capacitance as C_comp and the pin capacitance as C<sub>pkg</sub>.</li>
                 </ul>
                 <p>The receiver waveform and eye are at the receiver die pad, the TX waveform at the driver die pad.</p>
+                <p>The RX termination is on the die (behind the package) or on the board at the RX pin (RX termination, Location), where the package is an unterminated stub to the die pad. The AC coupling capacitors are on the board.</p>
                 <p>The <b>Package S-parameters</b> view plots S21 and S11 (pin side; S22 at the die in the legend) of both packages with their pad capacitances, 50 &Omega; per leg (SDD at 100 &Omega; for a pair). It needs no simulation and follows the inputs as they are edited, up to the bit rate (Nyquist marked) or 1 / rise time.</p>
                 <h4>PCIe 16 GT/s</h4>
                 <p>The behavioral packages of the base spec (8.5.1.1): C<sub>pin</sub> 0.25 pF, C<sub>pad</sub> 0.5 pF and a line fitted to the SDD21 curves of the spec's reference packages (&minus;3.08 dB non-root, &minus;5.02 dB root at 8 GHz, within 0.2 and 0.4 dB rms up to 15 GHz). The root port package is socketed and its ripple is only approximated. Fill in sets the pad capacitance too.</p>
@@ -1672,7 +1678,7 @@
                 <p>Packages (root port transmitting where the spec tells root and non-root apart): Gen1-3 the 8 GT/s TX and RX packages (approximate line), Gen4 the 16 GT/s root port and non-root packages, Gen5 the 32 GT/s root port package with the 16 GT/s non-root one at the receiver (the 32 GT/s non-root model is not fitted yet). See the Packages help.</p>
                 <p>Not modeled: jitter (Rj, Sj) and the behavioral CDR of compliance testing.</p>
                 <h4>LVPECL</h4>
-                <p>Emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V.</p>
+                <p>Emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V, terminated on the board at the receiver pin.</p>
                 <h4>LVCMOS</h4>
                 <p>CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver.</p>
                 <p class="help-note">The drivers and receivers are linear. A real CMOS or emitter-follower output changes its resistance with the output voltage, and receiver clamp diodes limit overshoot on unterminated lines.</p>`

@@ -289,7 +289,7 @@ function stampPackages(net, Ar, Ai, f) {
  *        supply), padTx, padRx (pad capacitance per leg at the driver and receiver pins),
  *        tx: { ac, c }, rx: { ac, c }, pkgTx, pkgRx (packageModel input or null),
  *        term: { type: 'vtt' | 'rc' | 'r' | 'thev' | 'diff' | 'open', rt, vtt, ct, rup,
- *                rdn, vsup, rdiff } }
+ *                rdn, vsup, rdiff, loc: 'die' (default) | 'board' (at the RX pin) } }
  * The driver input of a leg is its EMF (voltage mode) or its output current (current
  * mode). Returns the node map, the real conductance and capacitance matrices without
  * the line, the input matrix (driver inputs to node currents) and the vector of the
@@ -305,7 +305,7 @@ function buildNetwork(cfg) {
     const padTx = cap(cfg.padTx || 0, 'TX pad capacitance'), padRx = cap(cfg.padRx || 0, 'RX pad capacitance');
     const pkgTx = packageModel(cfg.pkgTx, 'TX'), pkgRx = packageModel(cfg.pkgRx, 'RX');
     let n = 0;
-    const a = [], p = [], b = [], c = [], q = [], d = [], mid = [];
+    const a = [], p = [], b = [], c = [], q = [], d = [], tn = [], mid = [];
     const gst = [], cst = [];   // [i, j, value], j = -1 is ground
     const vttI = [];            // [node, current] of the V_TT source
     for (let l = 0; l < nl; l++) {
@@ -322,28 +322,30 @@ function buildNetwork(cfg) {
         if (current) vttI.push([a[l], (cfg.vcm || 0) / rs]);
         if (padTx > 0) cst.push([a[l], -1, padTx]);
         if (padRx > 0) cst.push([d[l], -1, padRx]);
+        // Termination on the die, or on the board at the RX pin (the package a stub to the die).
+        tn[l] = term.loc === 'board' ? q[l] : d[l];
         if (cfg.tx && cfg.tx.ac) cst.push([p[l], b[l], pos(cfg.tx.c, 'TX coupling capacitance')]);
         if (cfg.rx && cfg.rx.ac) cst.push([c[l], q[l], pos(cfg.rx.c, 'RX coupling capacitance')]);
         switch (term.type) {
             case 'vtt': {
                 const g = 1 / pos(term.rt, 'Termination resistance');
-                gst.push([d[l], -1, g]);
-                vttI.push([d[l], (term.vtt || 0) * g]);
+                gst.push([tn[l], -1, g]);
+                vttI.push([tn[l], (term.vtt || 0) * g]);
                 break;
             }
             case 'r':
-                gst.push([d[l], -1, 1 / pos(term.rt, 'Termination resistance')]);
+                gst.push([tn[l], -1, 1 / pos(term.rt, 'Termination resistance')]);
                 break;
             case 'thev': {
                 // R_up to the supply and R_down to ground (a Thevenin bias network).
                 const gu = 1 / pos(term.rup, 'Pull-up resistance'), gd = 1 / pos(term.rdn, 'Pull-down resistance');
-                gst.push([d[l], -1, gu + gd]);
-                vttI.push([d[l], (term.vsup || 0) * gu]);
+                gst.push([tn[l], -1, gu + gd]);
+                vttI.push([tn[l], (term.vsup || 0) * gu]);
                 break;
             }
             case 'rc':
                 mid[l] = n++;
-                gst.push([d[l], mid[l], 1 / pos(term.rt, 'Termination resistance')]);
+                gst.push([tn[l], mid[l], 1 / pos(term.rt, 'Termination resistance')]);
                 cst.push([mid[l], -1, pos(term.ct, 'Termination capacitance')]);
                 break;
             case 'diff':
@@ -355,7 +357,7 @@ function buildNetwork(cfg) {
                 throw new Error(`Unknown termination "${term.type}".`);
         }
     }
-    if (term.type === 'diff') gst.push([d[0], d[1], 1 / pos(term.rdiff, 'Differential termination resistance')]);
+    if (term.type === 'diff') gst.push([tn[0], tn[1], 1 / pos(term.rdiff, 'Differential termination resistance')]);
 
     // Nodes with a resistive path to ground or a source: the line conducts end to end.
     const parent = Array.from({ length: n + 1 }, (_, i) => i);   // n is ground
@@ -389,7 +391,7 @@ function buildNetwork(cfg) {
     if (pkgRx) packages.push({ model: pkgRx, near: q, far: d });
     return {
         n, nl, differential: diff, G, C, B, vtt,
-        nodes: { a, p, b, c, q, d, mid },
+        nodes: { a, p, b, c, q, d, tn, mid },
         packages,
         // One-way delay of the packages in the path (line form only).
         pkgDelay: packages.reduce((s, pk) => s + pk.model.delay, 0),

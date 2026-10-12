@@ -9,7 +9,8 @@
 //   3. Terminations: V_TT, R + C to ground, open; step.
 //   4. Clock burst on a mismatched lossy line.
 //   5. Packages: R + L form at TX, line form (DC resistance only, an LTRA) at RX, with pin
-//      and pad capacitances.
+//      and pad capacitances; then the RX termination on the board at the pin, the R + L
+//      package a stub to the die pad.
 //
 // These cover the time-domain machinery (transform, DC point, AC coupling split,
 // terminations, settling window). The line transfer itself is checked exactly in
@@ -182,6 +183,20 @@ for (const term of [{ type: 'vtt', rt: 50, vtt: 1.2 }, { type: 'rc', rt: 50, ct:
     const sp = spice(body, ['d', 'a'], tEnd(res), 1e-12);
     const eR = compare(res, 'rx', sp, 'd'), eT = compare(res, 'tx', sp, 'a');
     check('packages (R + L at TX, line at RX): RX and TX die pads', eR < TOL && eT < TOL, `RX ${(100 * eR).toFixed(3)} %, TX ${(100 * eT).toFixed(3)} %`);
+}
+
+// 6. RX termination on the board, R + L package to the die.
+{
+    const pkgRx = { form: 'rl', cpin: 1e-12, r: 0.3, l: 5e-9 };
+    const { res, stim, cfg } = run(lossy, { network: { rs: 50, padRx: 4.5e-12, pkgRx, term: { type: 'r', rt: 50, loc: 'board' } } });
+    const body = [
+        `V1 src 0 ${pwl(stim, stim.legs[0], tEnd(res))}`, 'Rs src b 50',
+        ltra(20, 250e-9, 100e-12, 0.1),
+        'Cpinr c 0 1e-12', 'Rt c 0 50', 'Rpr c x 0.3', 'Lpr x d 5e-9', 'Cpadr d 0 4.5e-12',
+    ].join('\n');
+    const sp = spice(body, ['d', 'b'], tEnd(res), 1e-12);
+    const eR = compare(res, 'rx', sp, 'd'), eT = compare(res, 'tx', sp, 'b');
+    check('RX termination on the board, package stub to the die: RX die pad and TX', eR < TOL && eT < TOL, `RX ${(100 * eR).toFixed(3)} %, TX ${(100 * eT).toFixed(3)} %`);
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });
