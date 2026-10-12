@@ -953,7 +953,7 @@ function onEyeTabShown() {
     if (lastResult) draw();
     else if (Plotly && c && !c.data) {
         Plotly.newPlot('eye-plot', [], { ...layoutBase('Time', 'Voltage (V)'),
-            annotations: [{ text: 'Set the stimulus and the link, then Simulate.', showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: '#888' } }] },
+            annotations: [{ text: 'No results.', showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: '#888' } }] },
             { responsive: true });
     }
 }
