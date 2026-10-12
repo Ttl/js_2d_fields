@@ -1213,9 +1213,18 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 const dXs = sym * Cmag2 / (MU0 * MU0) * (rZimS[i] - RsI * rS[i]);
                 if (Math.abs(dXs) > Math.abs(dXi)) dXi = dXs;
             }
-            const Xi = Ri + dXi;
-            if (isSig) { R_trace += Ri * psiR; X_trace += Xi; sigS += Ri; sigPsi += Ri * psiR; }
-            else { R_gr += Ri * psiR; X_gr += Xi; }
+            let Xi = Ri + dXi, RiPsi = Ri * psiR;
+            // The core under a meshed plating layer has dielectric faces only where the
+            // plating leaves it bare, and most of its volume loss sits under the layer.
+            // Its roughness acts on those faces alone: (Zs - Rs) * |K|^2 over them, the
+            // same weight for R and X so the pair stays causal.
+            if (r.coreOf != null && opts.surfaceZs && rS[i] > 0) {
+                const w = sym * Cmag2 / (MU0 * MU0);
+                RiPsi = Ri + w * (rZreS[i] - RsI * rS[i]);
+                Xi = Ri + w * (rZimS[i] - RsI * rS[i]);
+            }
+            if (isSig) { R_trace += RiPsi; X_trace += Xi; sigS += Ri; sigPsi += RiPsi; }
+            else { R_gr += RiPsi; X_gr += Xi; }
         });
         if (sigS > 0) PsiR = sigPsi / sigS;
         if (gndS > 0) {

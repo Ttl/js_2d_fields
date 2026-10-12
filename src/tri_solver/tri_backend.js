@@ -271,8 +271,9 @@ function makePlatingZs(solver, condRect, freq) {
 // plating leaves bare is a face of the core. The layer keeps its plated faces and
 // the material under it in `platingIface`, for the plating/bulk interface roughness
 // the mesh holds smooth (buildFaceDZ), and its thickness in `platingLayer`. A core carries `coreOf`, the index of its layer,
-// so the plots draw the two as one conductor. null without plating cores.
-function meshedPlatingCR(cr) {
+// so the plots draw the two as one conductor. rqBase is the roughness of metal without
+// its own. null without plating cores.
+function meshedPlatingCR(cr, rqBase = 0) {
     const cores = cr.platingCores;
     if (!cores) return null;
     const rects = [], rectRoles = [];
@@ -286,7 +287,7 @@ function meshedPlatingCR(cr) {
         // The roughness of the layer's faces is all in the additive term (buildFaceDZ),
         // the layer itself is smooth metal.
         const rqBulk = role.rq ?? null;
-        const platingIface = (rqIface > 0 || (pl.rq ?? 0) > 0 || rqBulk > 0)
+        const platingIface = (rqIface > 0 || (pl.rq ?? 0) > 0 || (rqBulk ?? rqBase) > 0)
             ? { ...pl, rq: pl.rq ?? 0, rq_interface: rqIface, sigmaBulk: role.sigma || null, rqBulk,
                 rqIfaceOwn: pl.rq_interface ?? null } : null;
         rectRoles.push({ ...role, plating: null, sigma: pl.sigma, rq: 0, platingIface,
@@ -2789,7 +2790,8 @@ export class TriBackend {
     // meshedPlatingCR of this.condRect, built once per mesh.
     _meshedPlatingCR() {
         const cr = this.condRect;
-        if (!this._mpc || this._mpc.src !== cr) this._mpc = { src: cr, cr: meshedPlatingCR(cr) };
+        const rq = this.solver.rq ?? 0;
+        if (!this._mpc || this._mpc.src !== cr || this._mpc.rq !== rq) this._mpc = { src: cr, rq, cr: meshedPlatingCR(cr, rq) };
         return this._mpc.cr;
     }
 
