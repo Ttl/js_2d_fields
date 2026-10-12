@@ -3,10 +3,12 @@
 //
 // Per leg (one single-ended, P and N for a pair):
 //
-//   V_drv --R_s--(a)--[C_tx]--(b)== line ==(c)--[C_rx]--(d)-- termination
+//   V_drv --R_s--(a)--{pkg}--(p)--[C_tx]--(b)== line ==(c)--[C_rx]--(q)--{pkg}--(d)-- termination
 //
 // The driver is a Norton equivalent at (a). A DC-coupled side merges the nodes on both
-// sides of its capacitor. The line enters as its exact 2- or 4-port admittance matrix.
+// sides of its capacitor, a side without a package merges (a, p) or (q, d). The line
+// enters as its exact 2- or 4-port admittance matrix, a package as a 2-port per leg
+// (series element) plus its pin capacitance at (p) or (q).
 import { cholesky, forwardSub, backwardSubT, jacobiEigen, solveReal, solveComplexInPlace } from './dense.js';
 
 // Conductance to ground of a node without any DC path (1 GOhm).
@@ -161,6 +163,114 @@ function lineAdmittance(f, v, len, differential) {
     return { y11, y12 };
 }
 
+// ---------------------------------------------------------------- packages
+
+// Reference frequency of the package line: losses are given there and its delay and
+// impedance hold there.
+const PKG_F_REF = 1e9;
+const NP_PER_DB = Math.LN10 / 20;
+
+/**
+ * Behavioral package (one per side, the same for each leg): pin capacitance cpin at the
+ * board side, a series element towards the die. The die pad capacitance is the pad
+ * capacitance of the driver or receiver.
+ *   { form: 'rl', cpin, r, l }: series R + L (IBIS R_pkg, L_pkg).
+ *   { form: 'line', cpin, z0, delay, lossC, lossD, r }: uniform line of impedance z0 and
+ *     delay at PKG_F_REF, conductor loss lossC (dB at PKG_F_REF, ~ sqrt(f) above the skin
+ *     corner, with its internal reactance), DC resistance r, dielectric loss lossD (dB at
+ *     PKG_F_REF, ~ f^(1 - a/2) from a constant-Q permittivity, so that the line stays
+ *     causal). Internal impedance k sqrt(2) sqrt(f_c + j f) with f_c = r^2 / (2 k^2): r at DC,
+ *     (1 + j) k sqrt(f) above f_c.
+ * Returns the checked model with the line's per-length constants (length 1).
+ */
+function packageModel(p, side) {
+    if (!p) return null;
+    const pos = (x, what) => { if (!(x > 0) || !isFinite(x)) throw new Error(`${side} package ${what} must be a positive number.`); return x; };
+    const nonneg = (x, what) => { if (!(x >= 0) || !isFinite(x)) throw new Error(`${side} package ${what} must be zero or positive.`); return x; };
+    const cpin = nonneg(p.cpin || 0, 'pin capacitance');
+    if (p.form === 'rl') return { form: 'rl', cpin, r: nonneg(p.r || 0, 'resistance'), l: nonneg(p.l || 0, 'inductance'), delay: 0 };
+    if (p.form !== 'line') throw new Error(`Unknown package form "${p.form}".`);
+    const z0 = pos(p.z0, 'impedance'), delay = pos(p.delay, 'delay');
+    const lossC = nonneg(p.lossC || 0, 'conductor loss'), lossD = nonneg(p.lossD || 0, 'dielectric loss');
+    // Matched-line attenuation: R_ac / (2 z0) and pi f delay tan(d), in nepers.
+    const k = 2 * z0 * lossC * NP_PER_DB / Math.sqrt(PKG_F_REF);
+    const tand = lossD * NP_PER_DB / (Math.PI * PKG_F_REF * delay);
+    const r = nonneg(p.r || 0, 'resistance');
+    return { form: 'line', cpin, r, z0, delay, k, fc: k > 0 ? r * r / (2 * k * k) : 0, L: z0 * delay, C: delay / z0,
+        a: 2 * Math.atan(tand) / Math.PI };
+}
+
+// Package templates. pad: the die pad capacitance, set as the driver or receiver pad.
+// PCIe 16 GT/s: the behavioral packages of the base spec (8.5.1.1), Cpin 0.25 pF, Cpad 0.5 pF
+// and a line fitted to the SDD21 curves of Fig 8-60 (50 ohm reference, 0-15 GHz, -3.08 and
+// -5.02 dB at 8 GHz).
+// 1.8 V FPGA I/O: IBIS [Package] of an HP 1.8 V LVCMOS pin (Zynq 7000), C_comp as the pad.
+const PACKAGES = {
+    fpga18: { pad: 4.5e-12, model: { form: 'rl', cpin: 1e-12, r: 0.3, l: 5e-9 } },
+    pcie16NonRoot: { pad: 0.5e-12, model: { form: 'line', cpin: 0.25e-12, z0: 41.3, delay: 135e-12, lossC: 0.532, lossD: 0, r: 1.0 } },
+    pcie16Root: { pad: 0.5e-12, model: { form: 'line', cpin: 0.25e-12, z0: 35.8, delay: 203e-12, lossC: 1.054, lossD: 0.088, r: 1.3 } },
+};
+
+// Two-port admittance of a package's series element at f: { y11, y12 }, y22 = y11.
+function packageAdmittance(m, f) {
+    const w = 2 * Math.PI * f;
+    if (m.form === 'rl') {
+        const y = cdiv(1, 0, Math.max(m.r, R_FLOOR), w * m.l);
+        return { y11: y, y12: [-y[0], -y[1]] };
+    }
+    // Z = k sqrt(2) sqrt(f_c + j f) + j w L (r without skin loss), Y = j w C (j f / f_ref)^-a.
+    let zr = m.r, zi = w * m.L;
+    if (m.k > 0) {
+        const [sr, si] = csqrt(m.fc, f);
+        zr = Math.SQRT2 * m.k * sr; zi += Math.SQRT2 * m.k * si;
+    }
+    zr = Math.max(zr, R_FLOOR);
+    let yr = 0, yi = 0;
+    if (f > 0) {
+        const mag = w * m.C * Math.pow(f / PKG_F_REF, -m.a), ph = Math.PI / 2 * (1 - m.a);
+        yr = mag * Math.cos(ph); yi = mag * Math.sin(ph);
+    }
+    const [qr, qi] = cmul(yr, yi, zr, zi);
+    const h1 = hcoth(qr, qi), h2 = hcsch(qr, qi);
+    return { y11: cdiv(h1[0], h1[1], zr, zi), y12: cdiv(-h2[0], -h2[1], zr, zi) };
+}
+
+/**
+ * S-parameters of one package leg at f between ports of z ohm (a pair's SDD at 2 z), port 1
+ * at the pin (pin capacitance), port 2 at the die (pad capacitance cpad). m: packageModel.
+ * Returns { s11, s21, s22 } as [re, im].
+ */
+function packageSParams(m, cpad, f, z = 50) {
+    const w = 2 * Math.PI * f, Y = packageAdmittance(m, f);
+    // Normalized port admittances, then S = (I - y)(I + y)^-1 for the symmetric-y12 2-port.
+    const a = [1 + Y.y11[0] * z, (Y.y11[1] + w * m.cpin) * z], b = [1 + Y.y11[0] * z, (Y.y11[1] + w * cpad) * z];
+    const y12 = [Y.y12[0] * z, Y.y12[1] * z];
+    const [y2r, y2i] = cmul(y12[0], y12[1], y12[0], y12[1]);
+    const [abr, abi] = cmul(a[0], a[1], b[0], b[1]);
+    const dr = abr - y2r, di = abi - y2i;
+    // s11 = ((2 - a) b + y12^2) / D, s22 likewise, s21 = -2 y12 / D.
+    const [n1r, n1i] = cmul(2 - a[0], -a[1], b[0], b[1]);
+    const [n2r, n2i] = cmul(2 - b[0], -b[1], a[0], a[1]);
+    return {
+        s11: cdiv(n1r + y2r, n1i + y2i, dr, di),
+        s22: cdiv(n2r + y2r, n2i + y2i, dr, di),
+        s21: cdiv(-2 * y12[0], -2 * y12[1], dr, di),
+    };
+}
+
+// Stamp the package series elements (complex) at f into Ar, Ai.
+function stampPackages(net, Ar, Ai, f) {
+    const { n } = net;
+    const put = (i, j, z) => { Ar[i * n + j] += z[0]; Ai[i * n + j] += z[1]; };
+    for (const pk of net.packages) {
+        const Y = packageAdmittance(pk.model, f);
+        for (let l = 0; l < net.nl; l++) {
+            const i = pk.near[l], j = pk.far[l];
+            put(i, i, Y.y11); put(j, j, Y.y11); put(i, j, Y.y12); put(j, i, Y.y12);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- netlist
 
 /**
@@ -168,7 +278,7 @@ function lineAdmittance(f, v, len, differential) {
  * cfg: { differential, driver: 'voltage' | 'current', rs (voltage-mode source
  *        resistance), rout, vcm (current-mode output resistance to the common-mode
  *        supply), padTx, padRx (pad capacitance per leg at the driver and receiver pins),
- *        tx: { ac, c }, rx: { ac, c },
+ *        tx: { ac, c }, rx: { ac, c }, pkgTx, pkgRx (packageModel input or null),
  *        term: { type: 'vtt' | 'rc' | 'r' | 'thev' | 'diff' | 'open', rt, vtt, ct, rup,
  *                rdn, vsup, rdiff } }
  * The driver input of a leg is its EMF (voltage mode) or its output current (current
@@ -184,22 +294,27 @@ function buildNetwork(cfg) {
     const term = cfg.term || { type: 'open' };
     const cap = (x, what) => { if (!(x >= 0) || !isFinite(x)) throw new Error(`${what} must be zero or positive.`); return x; };
     const padTx = cap(cfg.padTx || 0, 'TX pad capacitance'), padRx = cap(cfg.padRx || 0, 'RX pad capacitance');
+    const pkgTx = packageModel(cfg.pkgTx, 'TX'), pkgRx = packageModel(cfg.pkgRx, 'RX');
     let n = 0;
-    const a = [], b = [], c = [], d = [], mid = [];
+    const a = [], p = [], b = [], c = [], q = [], d = [], mid = [];
     const gst = [], cst = [];   // [i, j, value], j = -1 is ground
     const vttI = [];            // [node, current] of the V_TT source
     for (let l = 0; l < nl; l++) {
         a[l] = n++;
-        b[l] = cfg.tx && cfg.tx.ac ? n++ : a[l];
+        p[l] = pkgTx ? n++ : a[l];
+        b[l] = cfg.tx && cfg.tx.ac ? n++ : p[l];
         c[l] = n++;
-        d[l] = cfg.rx && cfg.rx.ac ? n++ : c[l];
+        q[l] = cfg.rx && cfg.rx.ac ? n++ : c[l];
+        d[l] = pkgRx ? n++ : q[l];
+        if (pkgTx && pkgTx.cpin > 0) cst.push([p[l], -1, pkgTx.cpin]);
+        if (pkgRx && pkgRx.cpin > 0) cst.push([q[l], -1, pkgRx.cpin]);
         gst.push([a[l], -1, 1 / rs]);
         // Current mode: the output resistance returns to the common-mode supply.
         if (current) vttI.push([a[l], (cfg.vcm || 0) / rs]);
         if (padTx > 0) cst.push([a[l], -1, padTx]);
         if (padRx > 0) cst.push([d[l], -1, padRx]);
-        if (cfg.tx && cfg.tx.ac) cst.push([a[l], b[l], pos(cfg.tx.c, 'TX coupling capacitance')]);
-        if (cfg.rx && cfg.rx.ac) cst.push([c[l], d[l], pos(cfg.rx.c, 'RX coupling capacitance')]);
+        if (cfg.tx && cfg.tx.ac) cst.push([p[l], b[l], pos(cfg.tx.c, 'TX coupling capacitance')]);
+        if (cfg.rx && cfg.rx.ac) cst.push([c[l], q[l], pos(cfg.rx.c, 'RX coupling capacitance')]);
         switch (term.type) {
             case 'vtt': {
                 const g = 1 / pos(term.rt, 'Termination resistance');
@@ -238,7 +353,11 @@ function buildNetwork(cfg) {
     const find = (i) => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
     const unite = (i, j) => { parent[find(i)] = find(j); };
     for (const [i, j] of gst) unite(i, j < 0 ? n : j);
-    for (let l = 0; l < nl; l++) unite(b[l], c[l]);
+    for (let l = 0; l < nl; l++) {
+        unite(b[l], c[l]);
+        if (pkgTx) unite(a[l], p[l]);
+        if (pkgRx) unite(q[l], d[l]);
+    }
     const floating = [];
     for (let i = 0; i < n; i++) {
         if (find(i) !== find(n)) { floating.push(i); gst.push([i, -1, LEAK]); }
@@ -256,9 +375,15 @@ function buildNetwork(cfg) {
     const vtt = new Float64Array(n);
     for (const [i, cur] of vttI) vtt[i] += cur;
 
+    const packages = [];
+    if (pkgTx) packages.push({ model: pkgTx, near: a, far: p });
+    if (pkgRx) packages.push({ model: pkgRx, near: q, far: d });
     return {
         n, nl, differential: diff, G, C, B, vtt,
-        nodes: { a, b, c, d, mid },
+        nodes: { a, p, b, c, q, d, mid },
+        packages,
+        // One-way delay of the packages in the path (line form only).
+        pkgDelay: packages.reduce((s, pk) => s + pk.model.delay, 0),
         rxFloating: d.some(i => floating.includes(i)),
         floating,
         // rs: the source resistance seen by the line (reflection estimates).
@@ -296,6 +421,7 @@ function makeTransfer(net, len, outNodes) {
         const w = 2 * Math.PI * f;
         for (let i = 0; i < n * n; i++) { Ar[i] = net.G[i]; Ai[i] = w * net.C[i]; }
         stampLine(net, Ar, Ai, lineAdmittance(f, v, len, net.differential));
+        stampPackages(net, Ar, Ai, f);
         Br.set(net.B); Bi.fill(0);
         solveComplexInPlace(Ar, Ai, n, Br, Bi, nl);
         const re = out ? out.re : new Float64Array(no * nl), im = out ? out.im : new Float64Array(no * nl);
@@ -312,6 +438,7 @@ function dcMatrix(net, vdc, len) {
     const { n } = net;
     const Ar = Float64Array.from(net.G), Ai = new Float64Array(n * n);
     stampLine(net, Ar, Ai, lineAdmittance(0, vdc, len, net.differential));
+    stampPackages(net, Ar, Ai, 0);
     const S = new Float64Array(n * n);
     for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) S[i * n + j] = 0.5 * (Ar[i * n + j] + Ar[j * n + i]);
     return S;
@@ -377,4 +504,5 @@ function lumpedModes(net, Gdc) {
 }
 
 export { buildNetwork, lineAdmittance, makeTransfer, dcMatrix, dcSolve, lumpedModes, stampLine,
+    packageModel, packageAdmittance, packageSParams, PKG_F_REF, PACKAGES,
     hcoth, hcsch, hcothDeriv, hcschDeriv, matFun2, LEAK };

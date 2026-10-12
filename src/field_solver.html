@@ -777,6 +777,7 @@
                 <option value="eye">Eye diagram</option>
                 <option value="pulse">Pulse response</option>
                 <option value="spectrum">Channel response</option>
+                <option value="package">Package S-parameters</option>
             </select>
             <label class="checkbox-label"><input type="checkbox" id="eye-show-rx" checked> RX</label>
             <label class="checkbox-label"><input type="checkbox" id="eye-show-tx"> TX pad</label>
@@ -901,6 +902,49 @@
                         </select></div>
                     <div class="eye-row" id="eye-row-deemph"><label for="eye-deemph">De-emphasis (dB)</label><input type="text" id="eye-deemph" value="-3.5"></div>
                     <div class="eye-row" id="eye-row-preshoot"><label for="eye-preshoot">Pre-shoot (dB)</label><input type="text" id="eye-preshoot" value="0"></div>
+                </fieldset>
+                <fieldset id="eye-pkg-set">
+                    <legend>Packages <span class="help-icon" onclick="showHelpModal('eye_packages', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-pkgtx">TX package</label>
+                        <select id="eye-pkgtx">
+                            <option value="none" selected>None</option>
+                            <option value="line">Line</option>
+                            <option value="rl">R + L (IBIS)</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-pkgtx-fill"><label for="eye-pkgtx-fill">Fill in</label>
+                        <select id="eye-pkgtx-fill">
+                            <option value="" selected>&mdash;</option>
+                            <option value="pcie16Root">PCIe 16 GT/s root port</option>
+                            <option value="pcie16NonRoot">PCIe 16 GT/s non-root</option>
+                            <option value="fpga18">Generic 1.8 V FPGA I/O</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-pkgtx-cpin"><label for="eye-pkgtx-cpin">Pin capacitance</label><input type="text" id="eye-pkgtx-cpin" value="0.25 pF"></div>
+                    <div class="eye-row" id="eye-row-pkgtx-z0"><label for="eye-pkgtx-z0">Impedance (&Omega;)</label><input type="text" id="eye-pkgtx-z0" value="40"></div>
+                    <div class="eye-row" id="eye-row-pkgtx-delay"><label for="eye-pkgtx-delay">Delay</label><input type="text" id="eye-pkgtx-delay" value="150 ps"></div>
+                    <div class="eye-row" id="eye-row-pkgtx-lossc"><label for="eye-pkgtx-lossc">Conductor loss at 1 GHz (dB)</label><input type="text" id="eye-pkgtx-lossc" value="0.5"></div>
+                    <div class="eye-row" id="eye-row-pkgtx-lossd"><label for="eye-pkgtx-lossd">Dielectric loss at 1 GHz (dB)</label><input type="text" id="eye-pkgtx-lossd" value="0"></div>
+                    <div class="eye-row" id="eye-row-pkgtx-r"><label for="eye-pkgtx-r">DC resistance (&Omega;)</label><input type="text" id="eye-pkgtx-r" value="1"></div>
+                    <div class="eye-row" id="eye-row-pkgtx-l"><label for="eye-pkgtx-l">Inductance</label><input type="text" id="eye-pkgtx-l" value="1 nH"></div>
+                    <div class="eye-row"><label for="eye-pkgrx">RX package</label>
+                        <select id="eye-pkgrx">
+                            <option value="none" selected>None</option>
+                            <option value="line">Line</option>
+                            <option value="rl">R + L (IBIS)</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-pkgrx-fill"><label for="eye-pkgrx-fill">Fill in</label>
+                        <select id="eye-pkgrx-fill">
+                            <option value="" selected>&mdash;</option>
+                            <option value="pcie16Root">PCIe 16 GT/s root port</option>
+                            <option value="pcie16NonRoot">PCIe 16 GT/s non-root</option>
+                            <option value="fpga18">Generic 1.8 V FPGA I/O</option>
+                        </select></div>
+                    <div class="eye-row" id="eye-row-pkgrx-cpin"><label for="eye-pkgrx-cpin">Pin capacitance</label><input type="text" id="eye-pkgrx-cpin" value="0.25 pF"></div>
+                    <div class="eye-row" id="eye-row-pkgrx-z0"><label for="eye-pkgrx-z0">Impedance (&Omega;)</label><input type="text" id="eye-pkgrx-z0" value="40"></div>
+                    <div class="eye-row" id="eye-row-pkgrx-delay"><label for="eye-pkgrx-delay">Delay</label><input type="text" id="eye-pkgrx-delay" value="150 ps"></div>
+                    <div class="eye-row" id="eye-row-pkgrx-lossc"><label for="eye-pkgrx-lossc">Conductor loss at 1 GHz (dB)</label><input type="text" id="eye-pkgrx-lossc" value="0.5"></div>
+                    <div class="eye-row" id="eye-row-pkgrx-lossd"><label for="eye-pkgrx-lossd">Dielectric loss at 1 GHz (dB)</label><input type="text" id="eye-pkgrx-lossd" value="0"></div>
+                    <div class="eye-row" id="eye-row-pkgrx-r"><label for="eye-pkgrx-r">DC resistance (&Omega;)</label><input type="text" id="eye-pkgrx-r" value="1"></div>
+                    <div class="eye-row" id="eye-row-pkgrx-l"><label for="eye-pkgrx-l">Inductance</label><input type="text" id="eye-pkgrx-l" value="1 nH"></div>
                 </fieldset>
                 <fieldset>
                     <legend>Coupling <span class="help-icon" onclick="showHelpModal('eye_coupling', event)">?</span></legend>
@@ -1580,6 +1624,21 @@
                 </ul>
                 <p class="help-note">A receiver behind a coupling capacitor with only a differential or no termination has no DC path: its common-mode level is set by the receiver bias network, which is not modelled (a 1 G&Omega; leak holds it at 0 V).</p>`
         },
+        eye_packages: {
+            title: 'Packages',
+            body: `<p>A package per side, the same on each leg, between the die pad and the board pin:</p>
+                <p>die pad (pad capacitance of the driver or receiver) &mdash; series element &mdash; pin capacitance &mdash; board.</p>
+                <ul>
+                    <li><b>Line</b>: a uniform line of the given impedance and delay (at 1 GHz). The conductor loss grows as &radic;f above the skin corner, where the DC resistance takes over, and the dielectric loss about as f. Both are causal.</li>
+                    <li><b>R + L</b>: the series R<sub>pkg</sub> and L<sub>pkg</sub> of an IBIS [Package]. With the pad capacitance as C_comp and the pin capacitance as C<sub>pkg</sub>.</li>
+                </ul>
+                <p>The receiver waveform and eye are at the receiver die pad, the TX waveform at the driver die pad.</p>
+                <p>The <b>Package S-parameters</b> view plots S21 and S11 (pin side; S22 at the die in the legend) of both packages with their pad capacitances, 50 &Omega; per leg (SDD at 100 &Omega; for a pair). It needs no simulation and follows the inputs as they are edited, up to the bit rate (Nyquist marked) or 1 / rise time.</p>
+                <h4>PCIe 16 GT/s</h4>
+                <p>The behavioral packages of the base spec (8.5.1.1): C<sub>pin</sub> 0.25 pF, C<sub>pad</sub> 0.5 pF and a line fitted to the SDD21 curves of the spec's reference packages (&minus;3.08 dB non-root, &minus;5.02 dB root at 8 GHz, within 0.2 and 0.4 dB rms up to 15 GHz). The root port package is socketed and its ripple is only approximated. Fill in sets the pad capacitance too.</p>
+                <h4>Generic 1.8 V FPGA I/O</h4>
+                <p>IBIS package of a high-performance 1.8 V LVCMOS FPGA pin: R<sub>pkg</sub> 0.3 &Omega;, L<sub>pkg</sub> 5 nH, C<sub>pkg</sub> 1 pF (pin) and C_comp 4.5 pF (pad).</p>`
+        },
         eye_presets: {
             title: 'Interface presets',
             wide: true,
@@ -1599,11 +1658,12 @@
                     <tr><th>Gen5</th><td>Best preset</td><td>2nd order</td><td>3 taps</td><td>10 ps</td></tr>
                 </table>
                 <p>The CTLE and DFE are the behavioral ones of the base spec, with its tap limits. The spec gives no transmitter rise time, the Gen4 and Gen5 edges are from stressed-eye generator ranges of 14-19 ps at 16 GT/s and 7.5-15 ps at 32 GT/s.</p>
-                <p>Not modeled: receiver package, jitter (Rj, Sj) and the behavioral CDR of compliance testing.</p>
+                <p>Gen4 adds the spec's behavioral 16 GT/s packages, root port transmitting (swap the two for the other direction).</p>
+                <p>Not modeled: packages of the other generations, jitter (Rj, Sj) and the behavioral CDR of compliance testing.</p>
                 <h4>LVPECL</h4>
                 <p>Emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V.</p>
                 <h4>LVCMOS</h4>
-                <p>CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver of 3 pF input capacitance.</p>
+                <p>CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver, both ends in the generic 1.8 V FPGA I/O package (0.3 &Omega;, 5 nH, 1 pF pin, 4.5 pF pad).</p>
                 <p class="help-note">The drivers and receivers are linear. A real CMOS or emitter-follower output changes its resistance with the output voltage, and receiver clamp diodes limit overshoot on unterminated lines.</p>`
         },
         eye_tx_equalization: {

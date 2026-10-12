@@ -24,12 +24,15 @@
 //      termination levels, RX pad capacitance as an RC; PCIe preset taps, FIR source
 //      levels, a CTLE of 0 dB with far poles leaves the signal, the CTLE's DC gain; DFE
 //      and the automatic choices beat no equalization.
+//  16. Packages: line-form loss calibration (sqrt(f) and f terms), the PCIe 16 GT/s
+//      presets against the Fig 8-60 points at 8 GHz, no precursor through a lossy
+//      package, DC divider through the package resistance.
 import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
 import { buildStimulus, edgeValue, erfc } from '../src/eye/stimulus.js';
 import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
-import { buildNetwork, makeTransfer } from '../src/eye/network.js';
+import { buildNetwork, makeTransfer, packageModel, packageSParams, PACKAGES } from '../src/eye/network.js';
 import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
 import { prbsBits, prbsPeriod, patternBits, PRBS } from '../src/eye/pattern.js';
 import { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctle2Transfer } from '../src/eye/eq.js';
@@ -644,6 +647,64 @@ const valueAt = (r, name, t) => {
             && rs.eqChoice.pdaHeight < full.eqChoice.pdaHeight,
             `full swing ${full.eqChoice.firName} ${(full.eqChoice.pdaHeight * 1e3).toFixed(1)} mV, reduced ${rs.eqChoice.firName} ${(rs.eqChoice.pdaHeight * 1e3).toFixed(1)} mV`);
     }
+}
+
+// 16. Packages.
+{
+    // S21 in dB of the package between two 50 ohm ports, pin capacitance at port 1, c2 at port 2.
+    const mag = (z) => Math.hypot(z[0], z[1]);
+    const s21Db = (p, c2, f) => 20 * Math.log10(mag(packageSParams(packageModel(p, 'test'), c2, f).s21));
+    // Lossless package (line and L forms): |S11|^2 + |S21|^2 = 1 at both ports; lossy: < 1.
+    {
+        let e = 0, lossyOk = true;
+        const lossless = [{ form: 'line', cpin: 0.25e-12, z0: 35, delay: 150e-12, r: 0 }, { form: 'rl', cpin: 0.25e-12, r: 0, l: 1e-9 }];
+        const lossy = PACKAGES.pcie16Root.model;
+        for (const f of [1e8, 3e9, 1.1e10, 2.5e10]) {
+            for (const q of lossless) {
+                const S = packageSParams(packageModel(q, 'test'), 0.6e-12, f);
+                e = Math.max(e, Math.abs(mag(S.s11) ** 2 + mag(S.s21) ** 2 - 1), Math.abs(mag(S.s22) ** 2 + mag(S.s21) ** 2 - 1));
+            }
+            const S = packageSParams(packageModel(lossy, 'test'), 0.5e-12, f);
+            lossyOk &&= mag(S.s11) ** 2 + mag(S.s21) ** 2 < 1 && mag(S.s22) ** 2 + mag(S.s21) ** 2 < 1;
+        }
+        check('package S-parameters: lossless conserve power at both ports, lossy dissipate', e < 1e-6 && lossyOk, `max error ${e.toExponential(1)}`);
+    }
+    // Matched 50 ohm line: loss = lossC sqrt(f / 1 GHz) + lossD (f / 1 GHz)^(1 - a/2), the
+    // constant-Q capacitance falling as f^-a (the internal reactance and the dispersion move
+    // the impedance slightly).
+    const p = { form: 'line', cpin: 0, z0: 50, delay: 300e-12, lossC: 1, lossD: 0.5, r: 0 };
+    const pa = packageModel(p, 'test').a;
+    const e = Math.max(...[1e9, 4e9, 16e9].map(f => {
+        const want = Math.sqrt(f / 1e9) + 0.5 * Math.pow(f / 1e9, 1 - pa / 2);
+        return Math.abs(-s21Db(p, 0, f) - want) / want;
+    }));
+    check('package line: matched loss = lossC sqrt(f) + lossD f^(1 - a/2), first order', e < 0.02, `max diff ${(100 * e).toFixed(2)} %`);
+    // DC resistance: r at DC, the sqrt(f) skin loss well above the corner.
+    const pr = { ...p, lossD: 0, r: 2 };
+    const eDc = Math.abs(s21Db(pr, 0, 1) - 20 * Math.log10(100 / 102));
+    const eSk = Math.abs(-s21Db(pr, 0, 4e9) - 2) / 2;
+    check('package line: r at DC, skin loss above the corner', eDc < 1e-6 && eSk < 0.03, `${eDc.toExponential(1)} dB / ${(100 * eSk).toFixed(2)} %`);
+    const bad = Object.entries(PACKAGES).filter(([, t]) => { try { packageModel(t.model, 'test'); return !(t.pad >= 0); } catch { return true; } });
+    check('package templates build', bad.length === 0, bad.map(b => b[0]).join(', '));
+    const nr = PACKAGES.pcie16NonRoot, rt = PACKAGES.pcie16Root;
+    const a = s21Db(nr.model, nr.pad, 8e9), b = s21Db(rt.model, rt.pad, 8e9);
+    check('PCIe 16 GT/s packages: SDD21 at 8 GHz as Fig 8-60 (-3.08 / -5.02 dB)', Math.abs(a + 3.08) < 0.05 && Math.abs(b + 5.02) < 0.05,
+        `${a.toFixed(3)} / ${b.toFixed(3)} dB`);
+    // Lossy packages on both ends of a lossless line: causal, arrives after both delays.
+    const cfg = base({ network: { padTx: rt.pad, padRx: rt.pad, pkgTx: rt.model, pkgRx: rt.model }, stimulus: { tr: 15e-12, tf: 15e-12 } });
+    const r = simulateLink(lossless, cfg, fft);
+    const st = buildStimulus({ ...cfg.stimulus, differential: false });
+    const tArr = st.t0 - st.up.half + 0.1 * Math.sqrt(L0 * C0) + 2 * rt.model.delay;
+    // The sqrt(f) skin tail outlasts the window and leaves a small offset, as on lines.
+    let pre = 0;
+    for (let i = 0; i < r.t.length; i++) if (r.t[i] < 0.98 * tArr) pre = Math.max(pre, Math.abs(r.traces.rx[i]));
+    check('lossy packages: < 0.1 % of the swing before line + package delays, no warnings',
+        pre < 5e-4 && r.warnings.length === 0, `${pre.toExponential(2)} V; ${r.warnings.join(' | ')}`);
+    // DC: R + L packages (10 ohm each) in the 50 / 50 divider.
+    const pk = { form: 'rl', cpin: 0.2e-12, r: 10, l: 1e-9 };
+    const r2 = simulateLink(lossless, base({ network: { pkgTx: pk, pkgRx: pk } }), fft);
+    const fin = r2.traces.rx[r2.traces.rx.length - 1];
+    check('R + L packages: settled level 50 / 120', Math.abs(fin - 50 / 120) < 1e-4, fin.toFixed(6));
 }
 
 void makeRLGCEvaluator;

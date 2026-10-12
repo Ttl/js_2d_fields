@@ -138,6 +138,46 @@ const pcieOk = /Done/.test(pcie.st) && /^P\d+: (no TX equalization|[\d.]+ dB boo
 console.log('PCIe Gen3 preset:', pcieOk, pcie.st, pcie.m['TX FIR (chosen)'], pcie.m['CTLE DC gain (chosen)'], pcie.m['Eye height (centre)'], pulseTraces);
 await page.selectOption('#eye-view', 'wave');
 
+// PCIe Gen4: the behavioral packages are filled in, simulated and kept in a link.
+const gen4 = await presetRun('pcie4');
+const jPkg = await linkJson(page);
+const pkgPage = await browser.newPage();
+await pkgPage.goto(URL + '?params=' + btoa(encodeURIComponent(JSON.stringify(jPkg))), { waitUntil: 'networkidle' });
+const pkgBack = await pkgPage.evaluate(() => ['eye-pkgtx', 'eye-pkgtx-z0', 'eye-pkgrx-delay', 'eye-padrx'].map(id => document.getElementById(id).value));
+const gen4Ok = /Done/.test(gen4.st) && /mV/.test(gen4.m['Eye height (centre)'] || '') && jPkg.eye_pkgtx === 'line' && jPkg.eye_pkgrx === 'line'
+    && !('eye_pkgtx_l' in jPkg) && pkgBack[0] === 'line' && pkgBack[1] === '35.8' && pkgBack[2] === '135 ps' && pkgBack[3] === '0.5 pF';
+// Package S-parameter view: drawn from the inputs, redrawn while one is edited.
+await page.selectOption('#eye-view', 'package');
+await page.waitForTimeout(300);
+const pkgTraces = await page.$eval('#eye-plot', el => el.data.map(t => t.name));
+const s21At = () => page.$eval('#eye-plot', el => { const t = el.data.find(d => d.name === 'TX SDD21'); return t.y[t.y.length >> 1]; });
+const before = await s21At();
+await page.fill('#eye-pkgtx-lossc', '3');
+await page.waitForTimeout(300);
+const after = await s21At();
+await page.screenshot({ path: '/tmp/eye_package_view.png' });
+const pkgViewOk = ['TX SDD21', 'TX SDD11 (pin)', 'RX SDD21', 'RX SDD11 (pin)'].every(n => pkgTraces.includes(n)) && after < before - 1;
+console.log('package view, live update:', pkgViewOk, pkgTraces, `${before.toFixed(2)} -> ${after.toFixed(2)} dB`);
+// R + L template: the IBIS values and C_comp as the pad capacitance, the plot follows.
+await page.selectOption('#eye-pkgrx-fill', 'fpga18');
+await page.waitForTimeout(300);
+const fpga = await page.evaluate(() => ['eye-pkgrx', 'eye-pkgrx-cpin', 'eye-pkgrx-r', 'eye-pkgrx-l', 'eye-padrx', 'eye-pkgrx-fill']
+    .map(id => document.getElementById(id).value));
+const fpgaRows = await page.evaluate(() => ['l', 'z0'].map(k => document.getElementById(`eye-row-pkgrx-${k}`).style.display !== 'none'));
+const fpgaOk = JSON.stringify(fpga) === JSON.stringify(['rl', '1 pF', '0.3', '5 nH', '4.5 pF', '']) && fpgaRows[0] && !fpgaRows[1];
+console.log('1.8 V FPGA I/O template:', fpgaOk, fpga, fpgaRows);
+await page.selectOption('#eye-view', 'wave');
+console.log('PCIe Gen4 preset with packages:', gen4Ok, gen4.st, gen4.m['Eye height (centre)'], JSON.stringify(jPkg), pkgBack);
+
+// LVCMOS presets: the 1.8 V FPGA I/O package at both ends, on a single-ended line.
+await page.click('.tab-button[data-tab="geometry"]');
+await page.selectOption('#tl_type', 'microstrip');
+await page.click('.tab-button[data-tab="eye"]');
+const cmos = await presetRun('lvcmos33');
+const cmosPkg = await page.evaluate(() => ['eye-pkgtx', 'eye-pkgrx', 'eye-pkgtx-l', 'eye-padtx', 'eye-padrx'].map(id => document.getElementById(id).value));
+const cmosOk = /Done/.test(cmos.st) && JSON.stringify(cmosPkg) === JSON.stringify(['rl', 'rl', '5 nH', '4.5 pF', '4.5 pF']);
+console.log('LVCMOS 3.3 V preset with packages:', cmosOk, cmos.st, cmosPkg);
+
 // A waveguide has no time-domain simulation.
 await page.selectOption('#tl_type', 'rect_waveguide');
 await page.click('.tab-button[data-tab="eye"]');
@@ -146,6 +186,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

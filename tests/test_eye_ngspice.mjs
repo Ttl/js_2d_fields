@@ -8,6 +8,8 @@
 //      split).
 //   3. Terminations: V_TT, R + C to ground, open; step.
 //   4. Clock burst on a mismatched lossy line.
+//   5. Packages: R + L form at TX, line form (DC resistance only, an LTRA) at RX, with pin
+//      and pad capacitances.
 //
 // These cover the time-domain machinery (transform, DC point, AC coupling split,
 // terminations, settling window). The line transfer itself is checked exactly in
@@ -163,6 +165,23 @@ for (const term of [{ type: 'vtt', rt: 50, vtt: 1.2 }, { type: 'rc', rt: 50, ct:
     const sp = spice(seNetlist(stim, cfg, ltra(20, 250e-9, 100e-12, 0.1), tEnd(res)), ['d', 'a'], tEnd(res), 1e-12);
     const eR = compare(res, 'rx', sp, 'd');
     check('clock burst, 8 cycles at 2.5 GHz: RX', eR < TOL, `${(100 * eR).toFixed(3)} %`);
+}
+
+// 5. Packages at both ends.
+{
+    const pkgTx = { form: 'rl', cpin: 0.25e-12, r: 0.5, l: 1e-9 };
+    const pkgRx = { form: 'line', cpin: 0.25e-12, z0: 40, delay: 140e-12, r: 0.3 };
+    const { res, stim, cfg } = run(lossy, { network: { rs: 50, padTx: 1e-12, padRx: 0.5e-12, pkgTx, pkgRx, term: { type: 'r', rt: 50 } } });
+    const body = [
+        `V1 src 0 ${pwl(stim, stim.legs[0], tEnd(res))}`, 'Rs src a 50', 'Cpadt a 0 1e-12',
+        'Rpt a x 0.5', 'Lpt x b 1e-9', 'Cpint b 0 0.25e-12',
+        ltra(20, 250e-9, 100e-12, 0.1),
+        'Cpinr c 0 0.25e-12', `O2 c 0 d 0 pmod\n.model pmod ltra R=0.3 L=${40 * 140e-12} G=0 C=${140e-12 / 40} LEN=1`,
+        'Cpadr d 0 0.5e-12', 'Rt d 0 50',
+    ].join('\n');
+    const sp = spice(body, ['d', 'a'], tEnd(res), 1e-12);
+    const eR = compare(res, 'rx', sp, 'd'), eT = compare(res, 'tx', sp, 'a');
+    check('packages (R + L at TX, line at RX): RX and TX die pads', eR < TOL && eT < TOL, `RX ${(100 * eR).toFixed(3)} %, TX ${(100 * eT).toFixed(3)} %`);
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

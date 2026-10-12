@@ -52,9 +52,15 @@ function termImpedance(term, modeIdx) {
 // the least attenuation per trip.
 function reflectionTrips(est, net) {
     const m = est.modes[0];
-    const gs = (net.rs - m.Z) / (net.rs + m.Z);
+    const gam = (a, b) => isFinite(a) ? Math.abs((a - b) / (a + b)) : 1;
     const zl = termImpedance(net.term, 0);
-    const gl = isFinite(zl) ? (zl - m.Z) / (zl + m.Z) : 1;
+    // Each end reflects at its worst junction: the line, a line-form package, the source
+    // or the termination (behind an R + L package's resistance).
+    const end = (pkg, z) => !pkg ? gam(z, m.Z)
+        : pkg.form === 'line' ? Math.max(gam(z, m.Z), gam(pkg.z0, m.Z), gam(z, pkg.z0)) : gam(z + pkg.r, m.Z);
+    const pk = (near) => (net.packages || []).find(p => p.near === near);
+    const tx = pk(net.nodes.a), rx = net.nodes.q ? pk(net.nodes.q) : null;
+    const gs = end(tx && tx.model, net.rs), gl = end(rx && rx.model, zl);
     const rho = Math.abs(gs * gl) * Math.exp(-2 * m.alpha * m.tau / Math.sqrt(m.L * m.C));
     if (rho < 1e-12) return 0;
     if (rho >= 0.999) return 200;
@@ -154,9 +160,10 @@ function firstOrder(lambda, s, dt) {
 function transient(ctx, dt0) {
     const { stim, net, est, modes, warnings, ev, len, out, fTop, diff } = ctx;
     const nl = net.nl, no = out.nodes.length;
-    const tauMax = Math.max(...est.modes.map(m => m.tau));
-    const trips = reflectionTrips(lineEstimates(ev, 1 / (8 * tauMax), len, diff), net);
-    const tauMin = Math.min(...est.modes.map(m => m.tau));
+    const tauLine = Math.max(...est.modes.map(m => m.tau));
+    const trips = reflectionTrips(lineEstimates(ev, 1 / (8 * tauLine), len, diff), net);
+    // Delays of the path: the line modes plus the packages.
+    const tauMax = tauLine + net.pkgDelay, tauMin = Math.min(...est.modes.map(m => m.tau)) + net.pkgDelay;
     const edgeLong = Math.max(stim.up.t1090, stim.down.t1090);
     const tBase = stim.tEnd + tauMax * (1 + 2 * trips) + 20 * edgeLong + 2 * stim.halfMax;
 
@@ -283,7 +290,7 @@ function transient(ctx, dt0) {
     const res = {
         kind: 'transient', t, traces, metrics, hplot: fast.hplot,
         info: { dt, N, window: T, slowModes: slow.length, trips },
-        markers: [{ t: stim.t0 - ctx.lead, label: 'source 50 %' }, { t: stim.t0 - ctx.lead + tauMin, label: '+ line delay' }],
+        markers: [{ t: stim.t0 - ctx.lead, label: 'source 50 %' }, { t: stim.t0 - ctx.lead + tauMin, label: net.pkgDelay > 0 ? '+ line and package delay' : '+ line delay' }],
     };
     if (stim.type === 'clock') res.eye = foldEye(t, main, stim.period, metrics.crossTime, stim.count, nFine);
     packOutput(res);
@@ -630,7 +637,7 @@ function clockMetrics(t, v, s, P, ctx) {
     for (let i = 0; i < 2 * n; i++) s2[i] = s[i % n];
     const ts = crossing(t2, s2, 0.5 * (smin + smax), 1, 2 * n, 1);
     if (isFinite(ts)) {
-        const tau = Math.min(...ctx.est.modes.map(mm => mm.tau));
+        const tau = Math.min(...ctx.est.modes.map(mm => mm.tau)) + ctx.net.pkgDelay;
         let dly = ((tr - ts) % P + P) % P;
         dly += Math.max(0, Math.round((tau - dly) / P)) * P;
         m.push({ label: 'Delay (50 %)', value: fmtTime(dly), note: 'source to receiver, unwrapped with the line delay' });

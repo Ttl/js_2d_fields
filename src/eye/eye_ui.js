@@ -6,6 +6,7 @@ import { requiredBandwidth } from './stimulus.js';
 import { patternBits } from './pattern.js';
 import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX, SKIN_ERR } from './sensitivity.js';
 import { PCIE_PRESETS, REDUCED_SWING_PRESETS, firFromPresetDb } from './eq.js';
+import { PACKAGES, packageModel, packageSParams } from './network.js';
 
 // Accuracy notes the tab quantifies on the waveform instead of logging them.
 const QUANTIFIED = new Set(['narrow-gap', 'skin-transition', 'ground-spreading']);
@@ -57,6 +58,16 @@ const EYE_FIELDS = [
     ['eye_vcm', 'eye-vcm', 'eye', 'volt'],
     ['eye_padtx', 'eye-padtx', 'eye', 'cap'],
     ['eye_padrx', 'eye-padrx', 'eye', 'cap'],
+    ...['tx', 'rx'].flatMap(x => [
+        [`eye_pkg${x}`, `eye-pkg${x}`, 'text'],
+        [`eye_pkg${x}_cpin`, `eye-pkg${x}-cpin`, 'eye', 'cap'],
+        [`eye_pkg${x}_z0`, `eye-pkg${x}-z0`, 'eye', 'res'],
+        [`eye_pkg${x}_delay`, `eye-pkg${x}-delay`, 'eye', 'time'],
+        [`eye_pkg${x}_lossc`, `eye-pkg${x}-lossc`, 'eye', 'num'],
+        [`eye_pkg${x}_lossd`, `eye-pkg${x}-lossd`, 'eye', 'num'],
+        [`eye_pkg${x}_r`, `eye-pkg${x}-r`, 'eye', 'res'],
+        [`eye_pkg${x}_l`, `eye-pkg${x}-l`, 'eye', 'ind'],
+    ]),
     ['eye_rup', 'eye-rup', 'eye', 'res'],
     ['eye_rdn', 'eye-rdn', 'eye', 'res'],
     ['eye_vsup', 'eye-vsup', 'eye', 'volt'],
@@ -91,6 +102,8 @@ const EYE_DEFAULTS = {
     eye_bitrate: 10e9, eye_pattern: 'prbs7', eye_bits: '0011010111', eye_nbits: 32767,
     eye_driver: 'voltage', eye_iout: 3.5e-3, eye_rout: 1e4, eye_vcm: 1.2, eye_padtx: 0, eye_padrx: 0,
     eye_rup: 130, eye_rdn: 82, eye_vsup: 3.3, eye_txeq: 'none', eye_deemph: -3.5, eye_preshoot: 0,
+    ...Object.fromEntries(['tx', 'rx'].flatMap(x => [[`eye_pkg${x}`, 'none'], [`eye_pkg${x}_cpin`, 0.25e-12], [`eye_pkg${x}_z0`, 40],
+        [`eye_pkg${x}_delay`, 150e-12], [`eye_pkg${x}_lossc`, 0.5], [`eye_pkg${x}_lossd`, 0], [`eye_pkg${x}_r`, 1], [`eye_pkg${x}_l`, 1e-9]])),
     eye_ctle: 'off', eye_adc: -6, eye_adcmin: -12, eye_adcmax: -6, eye_fp1: 2e9, eye_fp2: 8e9, eye_ctleorder: '1', eye_fz1: 4.5e8, eye_fp3: 28e9, eye_dfe: 0, eye_dfelim: '',
 };
 
@@ -122,9 +135,18 @@ function eyeKeyActive(settings, key) {
         case 'eye_vtt': return v('eye_term') === 'vtt';
         case 'eye_ct': return v('eye_term') === 'rc';
         case 'eye_rdiff': return v('eye_term') === 'diff';
-        default: return true;
+        default: {
+            const m = key.match(/^eye_pkg(tx|rx)_(\w+)$/);
+            if (!m) return true;
+            const form = v(`eye_pkg${m[1]}`);
+            if (form === 'none') return false;
+            return PKG_ROWS[form].includes(m[2]);
+        }
     }
 }
+
+// Package inputs of each form.
+const PKG_ROWS = { line: ['cpin', 'z0', 'delay', 'lossc', 'lossd', 'r'], rl: ['cpin', 'r', 'l'] };
 
 // Settings value of an 'eye' input: SI number to 12 significant digits (so a typed
 // "35 ps" equals the default 35e-12), NaN when empty or invalid.
@@ -144,6 +166,7 @@ const SHOW = {
     time: [[1e-3, 1e-3, 'ms'], [1e-6, 1e-6, 'µs'], [1e-9, 1e-9, 'ns'], [0, 1e-12, 'ps']],
     freq: [[1e9, 1e9, 'GHz'], [1e6, 1e6, 'MHz'], [1e3, 1e3, 'kHz'], [0, 1, 'Hz']],
     cap: [[1e-6, 1e-6, 'µF'], [1e-9, 1e-9, 'nF'], [0, 1e-12, 'pF']],
+    ind: [[1e-6, 1e-6, 'µH'], [0, 1e-9, 'nH']],
     volt: [[0, 1, 'V']],
     cur: [[1, 1, 'A'], [1e-3, 1e-3, 'mA'], [0, 1e-6, 'µA']],
     rate: [[1e9, 1e9, 'Gb/s'], [1e6, 1e6, 'Mb/s'], [1e3, 1e3, 'kb/s'], [0, 1, 'b/s']],
@@ -170,6 +193,7 @@ const UNIT = {
     time: { s: 1, ms: 1e-3, us: 1e-6, 'μs': 1e-6, ns: 1e-9, ps: 1e-12, fs: 1e-15 },
     freq: { hz: 1, khz: 1e3, mhz: 1e6, ghz: 1e9, thz: 1e12 },
     cap: { f: 1, mf: 1e-3, uf: 1e-6, 'μf': 1e-6, nf: 1e-9, pf: 1e-12, ff: 1e-15 },
+    ind: { h: 1, mh: 1e-3, uh: 1e-6, 'μh': 1e-6, nh: 1e-9, ph: 1e-12 },
     res: { '': 1, ohm: 1, ohms: 1, 'ω': 1, k: 1e3, kohm: 1e3, 'kω': 1e3 },
     volt: { v: 1, mv: 1e-3 },
     cur: { a: 1, ma: 1e-3, ua: 1e-6, 'μa': 1e-6 },
@@ -177,7 +201,7 @@ const UNIT = {
     pct: { '%': 1 },
     num: {},
 };
-const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', res: 'ohm', volt: 'v', pct: '%', num: '', rate: 'gb/s', cur: 'ma' };
+const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', ind: 'nh', res: 'ohm', volt: 'v', pct: '%', num: '', rate: 'gb/s', cur: 'ma' };
 
 // Value of a text input in SI units. Throws with the field label on a bad value.
 function parseQuantity(id, kind, label, { optional = false } = {}) {
@@ -202,6 +226,38 @@ function parseQuantity(id, kind, label, { optional = false } = {}) {
     }
     if (!(unit in table)) throw new Error(`${label}: unknown unit "${m[2]}".`);
     return parseFloat(m[1]) * table[unit];
+}
+
+// Package of one side ('tx' or 'rx') from its inputs, null without one.
+function readPackage(x, side) {
+    const form = $(`eye-pkg${x}`).value;
+    if (form === 'none') return null;
+    const q = (k, kind, label) => parseQuantity(`eye-pkg${x}-${k}`, kind, `${side} package ${label}`);
+    const p = { form, cpin: q('cpin', 'cap', 'pin capacitance'), r: q('r', 'res', 'DC resistance') };
+    if (form === 'rl') return { ...p, l: q('l', 'ind', 'inductance') };
+    return { ...p, z0: q('z0', 'res', 'impedance'), delay: q('delay', 'time', 'delay'),
+        lossC: q('lossc', 'num', 'conductor loss'), lossD: q('lossd', 'num', 'dielectric loss') };
+}
+
+// Input values of a package template (PACKAGES key) on one side, its pad capacitance too.
+function packageInputs(x, name) {
+    const { pad, model: m } = PACKAGES[name];
+    const num = (v, scale = 1) => `${parseFloat((v * scale).toPrecision(6))}`;
+    const out = {
+        [`eye-pkg${x}`]: m.form, [`eye-pkg${x}-cpin`]: `${num(m.cpin, 1e12)} pF`, [`eye-pkg${x}-r`]: num(m.r),
+        [x === 'tx' ? 'eye-padtx' : 'eye-padrx']: `${num(pad, 1e12)} pF`,
+    };
+    if (m.form === 'rl') return { ...out, [`eye-pkg${x}-l`]: `${num(m.l, 1e9)} nH` };
+    return { ...out, [`eye-pkg${x}-z0`]: num(m.z0), [`eye-pkg${x}-delay`]: `${num(m.delay, 1e12)} ps`,
+        [`eye-pkg${x}-lossc`]: num(m.lossC), [`eye-pkg${x}-lossd`]: num(m.lossD) };
+}
+
+function fillPackage(x) {
+    const sel = $(`eye-pkg${x}-fill`), name = sel.value;
+    sel.value = '';
+    if (!PACKAGES[name]) return;
+    for (const [id, v] of Object.entries(packageInputs(x, name))) $(id).value = v;
+    updateVisibility();
 }
 
 // ---------------------------------------------------------------- state
@@ -298,6 +354,8 @@ function readConfig() {
         vcm: current ? parseQuantity('eye-vcm', 'volt', 'Common-mode voltage') : 0,
         padTx: parseQuantity('eye-padtx', 'cap', 'TX pad capacitance'),
         padRx: parseQuantity('eye-padrx', 'cap', 'RX pad capacitance'),
+        pkgTx: readPackage('tx', 'TX'),
+        pkgRx: readPackage('rx', 'RX'),
         tx: { ac: $('eye-tx-ac').checked },
         rx: { ac: $('eye-rx-ac').checked },
         term,
@@ -408,12 +466,21 @@ function updateVisibility() {
     show('eye-row-vtt', term === 'vtt');
     show('eye-row-ct', term === 'rc');
     show('eye-row-rdiff', term === 'diff');
+    for (const x of ['tx', 'rx']) {
+        const form = $(`eye-pkg${x}`).value;
+        for (const k of ['fill', 'cpin', 'z0', 'delay', 'lossc', 'lossd', 'r', 'l']) {
+            show(`eye-row-pkg${x}-${k}`, k === 'fill' || (form !== 'none' && PKG_ROWS[form].includes(k)));
+        }
+    }
     $('eye-ctx').disabled = !$('eye-tx-ac').checked;
     $('eye-crx').disabled = !$('eye-rx-ac').checked;
     const diffOpt = $('eye-term').querySelector('option[value="diff"]');
     if (diffOpt) diffOpt.disabled = !diff;
-    show('eye-show-legs-label', diff);
-    show('eye-show-cm-label', diff);
+    // The trace toggles do not apply to the package plot.
+    const pkgView = $('eye-view').value === 'package';
+    for (const id of ['eye-show-rx', 'eye-show-tx', 'eye-show-src']) $(id).parentElement.style.display = pkgView ? 'none' : '';
+    show('eye-show-legs-label', diff && !pkgView);
+    show('eye-show-cm-label', diff && !pkgView);
     $('eye-term-label').textContent = diff ? 'per pad' : '';
     // Level readout and clock data rate.
     let note = '';
@@ -438,6 +505,7 @@ function updateVisibility() {
     const wg = app.isSelfReferenced();
     $('btn-eye-run').disabled = wg || busy;
     setNotice(wg ? ['Time-domain simulation needs a TEM or quasi-TEM line: not available for a waveguide.'] : null, 'eye-notice');
+    schedulePackagePlot();
 }
 
 function fmtVolt(v) { return Math.abs(v) >= 1 ? `${+v.toPrecision(4)} V` : `${+(v * 1e3).toPrecision(4)} mV`; }
@@ -777,6 +845,74 @@ function drawSpectrum(res) {
     Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
 }
 
+// Frequency span of the package plot: the bit rate of a pattern (twice its Nyquist
+// frequency), else 1 / t_r; 1 to 200 GHz.
+function packagePlotSpan() {
+    let f = 20e9, nyq = null;
+    try {
+        if ($('eye-stim').value === 'pattern') {
+            const rate = parseQuantity('eye-bitrate', 'rate', 'Bit rate');
+            if (rate > 0) { f = rate; nyq = rate / 2; }
+        } else {
+            const tr = parseQuantity('eye-tr', 'time', 'Rise time');
+            if (tr > 0) f = 1 / tr;
+        }
+    } catch { /* keep the default span */ }
+    return { fMax: Math.min(200e9, Math.max(1e9, f)), nyq };
+}
+
+// S-parameters of the TX and RX packages from the current inputs, port 1 at the pin and
+// port 2 at the die pad, 50 ohm per leg (SDD at 100 ohm for a pair, the legs uncoupled).
+// Drawn without a simulation and redrawn as the inputs change.
+function drawPackage() {
+    const Plotly = getPlotly();
+    if (!Plotly) return;
+    const diff = app.isDifferential();
+    const { fMax, nyq } = packagePlotSpan();
+    const n = 400, f = Array.from({ length: n }, (_, i) => fMax * (i + 1) / n);
+    const x = f.map(v => v / 1e9);
+    const db = (z) => 20 * Math.log10(Math.max(Math.hypot(z[0], z[1]), 1e-15));
+    const traces = [], problems = [];
+    const sides = [['tx', 'TX', 'eye-padtx', COLORS[0]], ['rx', 'RX', 'eye-padrx', COLORS[1]]];
+    for (const [k, side, padId, color] of sides) {
+        let m, pad;
+        try {
+            const p = readPackage(k, side);
+            if (!p) continue;
+            m = packageModel(p, side);
+            pad = parseQuantity(padId, 'cap', `${side} pad capacitance`);
+            if (!(pad >= 0)) throw new Error(`${side} pad capacitance must be zero or positive.`);
+        } catch (e) {
+            problems.push(e.message);
+            continue;
+        }
+        const S = f.map(fi => packageSParams(m, pad, fi));
+        const nm = (ij) => `${side} ${diff ? 'SDD' : 'S'}${ij}`;
+        traces.push({ x, y: S.map(s => db(s.s21)), name: nm('21'), type: 'scatter', mode: 'lines', line: { color, width: 2 } });
+        traces.push({ x, y: S.map(s => db(s.s11)), name: nm('11') + ' (pin)', type: 'scatter', mode: 'lines', line: { color, width: 1.5, dash: 'dash' } });
+        traces.push({ x, y: S.map(s => db(s.s22)), name: nm('22') + ' (die)', type: 'scatter', mode: 'lines', line: { color, width: 1.5, dash: 'dot' }, visible: 'legendonly' });
+    }
+    const layout = layoutBase('Frequency (GHz)', 'Magnitude (dB)');
+    layout.xaxis.range = [0, fMax / 1e9];
+    layout.shapes = [];
+    layout.annotations = [];
+    if (nyq) {
+        layout.shapes.push({ type: 'line', x0: nyq / 1e9, x1: nyq / 1e9, yref: 'paper', y0: 0, y1: 1, line: { color: '#888', width: 1, dash: 'dash' } });
+        layout.annotations.push({ x: nyq / 1e9, y: 1, yref: 'paper', text: 'Nyquist', showarrow: false, xanchor: 'left', yanchor: 'top', font: { color: '#888', size: 10 } });
+    }
+    const msg = problems.length ? problems.join('<br>') : !traces.length ? 'No package selected (Packages: TX or RX).' : '';
+    if (msg) layout.annotations.push({ text: msg, showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: problems.length ? '#f87171' : '#888' } });
+    // react: in-place update while typing.
+    Plotly.react('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
+}
+
+// Redraw the package plot at most once per frame while its inputs are edited.
+let packageFrame = 0;
+function schedulePackagePlot() {
+    if ($('eye-view').value !== 'package' || packageFrame) return;
+    packageFrame = requestAnimationFrame(() => { packageFrame = 0; drawPackage(); });
+}
+
 function fmtT(s) {
     const a = Math.abs(s);
     if (a >= 1e-6) return `${+(s * 1e6).toPrecision(4)} μs`;
@@ -833,8 +969,10 @@ function drawPulse(res) {
 
 function draw() {
     const Plotly = getPlotly();
-    if (!Plotly || !lastResult) return;
+    if (!Plotly) return;
     const view = $('eye-view').value;
+    if (view === 'package') { drawPackage(); drawMetrics(lastResult); return; }
+    if (!lastResult) return;
     if (view === 'eye' && (lastResult.eye || lastResult.eyeHist)) drawEyeDiagram(lastResult);
     else if (view === 'pulse') drawPulse(lastResult);
     else if (view === 'spectrum') drawSpectrum(lastResult);
@@ -870,7 +1008,7 @@ function toggleFreeze() {
 
 // Typical starting values per interface (input id -> value; true/false for checkboxes).
 const PRESET_BASE = {
-    'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-tx-ac': false, 'eye-rx-ac': false,
+    'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-pkgtx': 'none', 'eye-pkgrx': 'none', 'eye-tx-ac': false, 'eye-rx-ac': false,
     'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-ctleorder': '1', 'eye-dfe': '0', 'eye-dfelim': '', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
 };
 // VTX-DIFF-PP is 800-1000 mV (full swing, no equalization, long runs into the load): the
@@ -882,7 +1020,8 @@ const pcie = (rate, tr, extra) => ({
 const pcieEq = (adcMin, adcMax, fp1, fp2, dfe, dfelim) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',
     'eye-adcmin': adcMin, 'eye-adcmax': adcMax, 'eye-fp1': fp1, 'eye-fp2': fp2, 'eye-dfe': dfe, 'eye-dfelim': dfelim });
 const lvcmos = (v, rs, tr) => ({ 'eye-vlow': '0 V', 'eye-vhigh': v, 'eye-rs': rs, 'eye-stim': 'clock', 'eye-clock-freq': '100 MHz',
-    'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': tr, 'eye-tf': tr, 'eye-term': 'open', 'eye-padrx': '3 pF' });
+    'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': tr, 'eye-tf': tr, 'eye-term': 'open',
+    ...packageInputs('tx', 'fpga18'), ...packageInputs('rx', 'fpga18') });
 const PRESETS = {
     lvds: { differential: true, 'eye-driver': 'current', 'eye-iout': '3.5 mA', 'eye-rout': '10k', 'eye-vcm': '1.2 V',
         'eye-stim': 'pattern', 'eye-bitrate': '1 Gb/s', 'eye-pattern': 'prbs7', 'eye-tr': '300 ps', 'eye-tf': '300 ps',
@@ -896,7 +1035,9 @@ const PRESETS = {
     // 3-tap DFE with |d1| <= 0.8 h0.
     // Edges (20-80 %): the spec gives rise times only for the stressed-eye generator, 14-19 ps at
     // 16 GT/s and 7.5-15 ps at 32 GT/s; Gen1-3 use 0.2 UI.
-    pcie4: { differential: true, ...pcie('16 Gb/s', '16.5 ps', pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')) },
+    // Gen4: the behavioral packages of the spec, root port transmitting.
+    pcie4: { differential: true, ...pcie('16 Gb/s', '16.5 ps', pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')),
+        ...packageInputs('tx', 'pcie16Root'), ...packageInputs('rx', 'pcie16NonRoot') },
     pcie5: { differential: true, ...pcie('32 Gb/s', '10 ps', { ...pcieEq('-15', '-5', '2 GHz', '9.5 GHz', '3', '0.8 h0, 20 mV, 20 mV'),
         'eye-ctleorder': '2', 'eye-fz1': '450 MHz', 'eye-fp3': '28 GHz' }) },
     lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
@@ -936,11 +1077,12 @@ function initEyeTab(ctx) {
     $('btn-eye-stop').addEventListener('click', stopEye);
     $('eye-export-btn').addEventListener('click', exportCsv);
     $('eye-freeze-btn').addEventListener('click', toggleFreeze);
-    $('eye-view').addEventListener('change', draw);
+    $('eye-view').addEventListener('change', () => { updateVisibility(); draw(); });
     for (const id of ['eye-show-rx', 'eye-show-tx', 'eye-show-src', 'eye-show-legs', 'eye-show-cm']) {
         $(id).addEventListener('change', draw);
     }
     $('eye-preset').addEventListener('change', (e) => applyPreset(e.target.value));
+    for (const x of ['tx', 'rx']) $(`eye-pkg${x}-fill`).addEventListener('change', () => fillPackage(x));
     const panel = $('eye-settings');
     panel.addEventListener('change', updateVisibility);
     panel.addEventListener('input', updateVisibility);
@@ -950,7 +1092,7 @@ function initEyeTab(ctx) {
 function onEyeTabShown() {
     updateVisibility();
     const Plotly = getPlotly(), c = $('eye-plot');
-    if (lastResult) draw();
+    if (lastResult || $('eye-view').value === 'package') draw();
     else if (Plotly && c && !c.data) {
         Plotly.newPlot('eye-plot', [], { ...layoutBase('Time', 'Voltage (V)'),
             annotations: [{ text: 'No results.', showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: '#888' } }] },
