@@ -3266,6 +3266,7 @@ export class TriBackend {
                 if (anyPlatingM || ownRqM || ownSigmaM || faceDZ) o.surfaceZs = buildFaceZs(s, crM, f);
                 else o.Rq = rq;
                 if (faceDZ) o.surfaceDZ = faceDZ;
+                if (meshedPlating) o.solveSparseMulti = this.ctx.helpers.solveSparseMulti;
                 return o;
             };
             // Frequency-invariant assembly caches (validated against the mesh object inside

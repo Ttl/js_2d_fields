@@ -7,7 +7,11 @@
 // loss, most of which sits under the plating and moves as delta passes the layer, and
 // the Eye tab warned of a precursor (L - X_KK/w drifted 3 % over 0.1-20 GHz). The bare
 // bottom strips of the layer under the side plating took no roughness either when the
-// bulk roughness was the solver-wide one (0.46 % with plating of the bulk sigma).
+// bulk roughness was the solver-wide one (0.46 % with plating of the bulk sigma). The
+// rough faces of a meshed layer are weighted by the perfect-conductor |K|^2: the
+// finite-sigma surface integral rises ~15 % over the band, and with a rough layer's
+// reactance several times its resistance that drift showed in L(f) alone (1.2 %
+// with plating on every face, rq 3 um under 2 um).
 //
 // Run: node tests/test_plating_kk.js
 import { buildSolverFromParams } from '../src/solver_factory.js';
@@ -63,7 +67,9 @@ const FREQS = [1e8, 3e8, 1e9, 3e9, 1e10, 2e10];
 const spread = (d) => (Math.max(...d) - Math.min(...d)) / d[d.length - 1];
 for (const [label, o, tol] of [
     ['meshed plating, rough bare bottom', {}, 0.002],
-    ['meshed plating of the bulk sigma, rough bare bottom', { plating_sigma: 5.8e7 }, 0.003],
+    ['meshed plating of the bulk sigma, rough bare bottom', { plating_sigma: 5.8e7 }, 0.002],
+    ['meshed plating on every face, rough plating and bulk',
+        { rq: 3e-6, plating_rq: 2e-6, plating_bottom: true }, 0.002],
     ['unplated rough reference', { use_plating: false }, 0.003],
 ]) {
     const ev = await quiet(() => channel({ ...BASE, ...o }));

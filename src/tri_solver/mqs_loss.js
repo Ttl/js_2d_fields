@@ -394,7 +394,8 @@ export function refineSkinBand(mesh, condRect, delta, passes, band = 3, targetH 
 //     loss is scaled by the |K|^2-weighted Re(Zs)/Rs over the faces. Overrides Rq.
 //   opts.surfaceDZ(x, y, orient) - impedance {re, im} or null added on top of
 //     surfaceZs over a face, R += Re(dZ)*|K|^2 and X += Im(dZ)*|K|^2 (meshed plating:
-//     the roughness of the plating/bulk interface the mesh holds smooth).
+//     the roughness of the plating/bulk interface the mesh holds smooth). With
+//     opts.solveSparseMulti the weight is the perfect-conductor |K|^2.
 //   opts.rectSigmaRel - sigma_rect / sigma per rect for conductors of different
 //     metals. The mass matrix, drive, net current and dissipation carry the ratio per
 //     triangle, and the surface scaling is taken per rect against its own Rs.
@@ -619,9 +620,27 @@ function cachedPrecompute(mesh, condRect, opts) {
 // currents the way the MQS Zmode is. Real solve, frequency-independent, cached
 // per skin mesh by the caller. Same I_mesh normalization as mqsConductorLoss.
 export function mqsPecInductance(mesh, condRect, solveSparseMulti, opts = {}) {
-    const { tris, triEdges, nNodes, nTris } = mesh;
     const sym = condRect.symmetry > 1 ? 2 : 1;
+    const { Phi } = pecPotentials(mesh, condRect, solveSparseMulti, opts);
+    const nG = Phi.length;
+    // Same current normalization as the MQS solve.
+    const I_mesh = (sym === 2 && !opts.diffPair) ? 0.5 : 1;
+    const I = (opts.modeCurrents && sym === 1 && nG > 1 && opts.modeCurrents.length === nG) ? opts.modeCurrents : null;
+    if (!I) return I_mesh * MU0 / Phi[0][0];
+    // L = mu0 * Phi^-1 contracted with the mode currents: (I^T L I) / (I^T I).
+    const a = solveDenseReal(Phi, I);
+    let num = 0, den = 0;
+    for (let k = 0; k < nG; k++) { num += a[k] * I[k]; den += I[k] * I[k]; }
+    return MU0 * num / den;
+}
+
+// Potentials of the perfect-conductor problem: phi_g is 1 on signal group g, 0 on the
+// other metal and the walls, harmonic outside; Phi_jk = phi_j^T S phi_k. Frequency
+// and drive independent, cached with the precompute.
+function pecPotentials(mesh, condRect, solveSparseMulti, opts) {
+    const { tris, triEdges, nNodes, nTris } = mesh;
     const pre = cachedPrecompute(mesh, condRect, opts);
+    if (pre.pec) return pre.pec;
     const { isCondTri, dofOf, nF, triGroup, rowPtr, colIdx, valS } = pre;
     const nG = pre.groups.length;
     // Metal DOF classes: 1 + group for signal metal, -1 for passive ground metal,
@@ -671,26 +690,41 @@ export function mqsPecInductance(mesh, condRect, solveSparseMulti, opts = {}) {
         }
         for (let k = 0; k < nG; k++) { let a = 0; for (let i = 0; i < nF; i++) a += Sp[i] * phi[k][i]; Phi[j].push(a); }
     }
-    // Same current normalization as the MQS solve.
+    pre.pec = { phi, Phi };
+    return pre.pec;
+}
+
+// Surface current potential of the perfect-conductor problem for the MQS drive: K is
+// its normal derivative on the metal faces. A group at potential a_g carries the net
+// current Phi a / mu0, so the target currents take a = mu0 Phi^-1 I and the field
+// returned is A / mu0 = sum_g (Phi^-1 I)_g phi_g.
+function pecSurfacePotential(mesh, condRect, solveSparseMulti, opts) {
+    const sym = condRect.symmetry > 1 ? 2 : 1;
+    const { phi, Phi } = pecPotentials(mesh, condRect, solveSparseMulti, opts);
+    const nG = Phi.length, nF = phi[0].length;
     const I_mesh = (sym === 2 && !opts.diffPair) ? 0.5 : 1;
     const I = (opts.modeCurrents && sym === 1 && nG > 1 && opts.modeCurrents.length === nG) ? opts.modeCurrents : null;
-    if (!I) return I_mesh * MU0 / Phi[0][0];
-    // L = mu0 * Phi^-1 contracted with the mode currents: (I^T L I) / (I^T I).
-    const M = Phi.map(row => row.slice());
-    const B = I.slice();
-    for (let c = 0; c < nG; c++) {   // Gaussian elimination with partial pivoting
-        let p = c; for (let r = c + 1; r < nG; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    const c = I ? solveDenseReal(Phi, I) : [I_mesh / Phi[0][0]];
+    const out = new Float64Array(nF);
+    for (let g = 0; g < c.length; g++) for (let i = 0; i < nF; i++) out[i] += c[g] * phi[g][i];
+    return out;
+}
+
+// Small dense real solve (Gaussian elimination with partial pivoting).
+function solveDenseReal(A, b) {
+    const n = b.length;
+    const M = A.map(row => row.slice()), B = b.slice();
+    for (let c = 0; c < n; c++) {
+        let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
         [M[c], M[p]] = [M[p], M[c]]; [B[c], B[p]] = [B[p], B[c]];
-        for (let r = 0; r < nG; r++) {
+        for (let r = 0; r < n; r++) {
             if (r === c) continue;
             const f = M[r][c] / M[c][c]; if (f === 0) continue;
-            for (let k = c; k < nG; k++) M[r][k] -= f * M[c][k];
+            for (let k = c; k < n; k++) M[r][k] -= f * M[c][k];
             B[r] -= f * B[c];
         }
     }
-    let num = 0, den = 0;
-    for (let k = 0; k < nG; k++) { num += (B[k] / M[k][k]) * I[k]; den += I[k] * I[k]; }
-    return MU0 * num / den;
+    return B.map((v, k) => v / M[k][k]);
 }
 
 // Dense complex NxN solve (Gauss-Jordan, partial pivot) for the drive-to-current
@@ -924,7 +958,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     // of triangle t beside it, with n the edge normal (exactly an axis on the faces of
     // a rect, slanted on a polygon side).
     const lge = new Int32Array(6), g2 = new Float64Array(3);
-    const edgeGrad2 = (t, x0, y0, x1, y1) => {
+    const edgeGrad2 = (t, x0, y0, x1, y1, field = sol, complex = true) => {
         const len = Math.hypot(x1 - x0, y1 - y0);
         const nx = (y0 - y1) / len, ny = (x1 - x0) / len;
         const v0 = tris[3*t], v1 = tris[3*t+1], v2 = tris[3*t+2];
@@ -938,7 +972,7 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
                 const g = lge[k]; if (g < 0) continue;
                 const gr = k < 3 ? lvGrad(coeff, k, xq, yq) : leGrad(coeff, edgeVerts[k-3][0], edgeVerts[k-3][1], xq, yq);
                 const gn = gr[0] * nx + gr[1] * ny;
-                gR += gn * sol[g]; gI += gn * sol[nF + g];
+                gR += gn * field[g]; if (complex) gI += gn * field[nF + g];
             }
             g2[q] = gR*gR + gI*gI;
         }
@@ -1072,7 +1106,17 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
     const rS = new Float64Array(rects.length), rZreS = new Float64Array(rects.length),
         rZimS = new Float64Array(rects.length);
     // Additive surface terms (opts.surfaceDZ), 0.5 * dZ * |K|^2 summed like the walls.
+    // |K|^2 is that of the perfect-conductor current when opts.solveSparseMulti is
+    // given: a weight that moves with frequency turns the reactance of a rough layer,
+    // several times its resistance, into an L(f) without its R(f) pair (non-causal),
+    // and the high-frequency distribution is what the volume loss of a bare conductor
+    // scales to at every frequency.
+    // The same weight per rect (rP*), for the roughness of a plating core's bare faces.
     let dRtr = 0, dXtr = 0, dRgr = 0, dXgr = 0;
+    const pecK = opts.surfaceZs && opts.solveSparseMulti
+        ? pecSurfacePotential(mesh, condRect, opts.solveSparseMulti, opts) : null;
+    const rPS = new Float64Array(rects.length), rPRe = new Float64Array(rects.length),
+        rPIm = new Float64Array(rects.length);
     if (opts.surfaceZs) {
         for (let e = 0; e < nEdges; e++) {
             const ta = eA[2*e], tb = eA[2*e+1];
@@ -1118,9 +1162,15 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             else { grS += Sseg; grZreS += Zs.re * Sseg; grZimS += Zs.im * Sseg; }
             const ri = pre.triRect[cnd];
             rS[ri] += Sseg; rZreS[ri] += Zs.re * Sseg; rZimS[ri] += Zs.im * Sseg;
+            let K2 = 0.5 * Cmag2 * Sseg / (MU0 * MU0);
+            if (pecK) {
+                const P2 = edgeGrad2(ext, x0, y0, x1, y1, pecK, false);
+                K2 = 0;
+                for (let q = 0; q < 3; q++) K2 += 0.5 * P2[q] * GL3w[q] * L;
+                rPS[ri] += K2; rPRe[ri] += Zs.re * K2; rPIm[ri] += Zs.im * K2;
+            }
             const dZ = opts.surfaceDZ ? opts.surfaceDZ(qx, qy, horiz ? 'h' : 'v') : null;
             if (dZ) {
-                const K2 = 0.5 * Cmag2 * Sseg / (MU0 * MU0);
                 if (isCondTri[cnd] === 1) { dRtr += dZ.re * K2; dXtr += dZ.im * K2; }
                 else { dRgr += dZ.re * K2; dXgr += dZ.im * K2; }
             }
@@ -1217,8 +1267,12 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             // The core under a meshed plating layer has dielectric faces only where the
             // plating leaves it bare, and most of its volume loss sits under the layer.
             // Its roughness acts on those faces alone: (Zs - Rs) * |K|^2 over them, the
-            // same weight for R and X so the pair stays causal.
-            if (r.coreOf != null && opts.surfaceZs && rS[i] > 0) {
+            // same weight for R and X (the perfect-conductor one when there is one, as
+            // the additive terms) so the pair stays causal.
+            if (r.coreOf != null && pecK && rPS[i] > 0) {
+                RiPsi = Ri + 2 * sym * (rPRe[i] - RsI * rPS[i]);
+                Xi = Ri + 2 * sym * (rPIm[i] - RsI * rPS[i]);
+            } else if (r.coreOf != null && opts.surfaceZs && rS[i] > 0) {
                 const w = sym * Cmag2 / (MU0 * MU0);
                 RiPsi = Ri + w * (rZreS[i] - RsI * rS[i]);
                 Xi = Ri + w * (rZimS[i] - RsI * rS[i]);
@@ -1234,6 +1288,21 @@ export function mqsConductorLoss(mesh, condRect, freq, sigma, solveComplexSymmet
             const Zs = calculate_Zrough(freq, sigmaW, Rq);
             X_gw = X_gw_smooth + (Zs.im - RsW) * 2 * sym * wallS2;
             R_gw *= Zs.re / RsW;
+        }
+    } else if (opts.surfaceZs && pecK) {
+        // Meshed plating: the face increments over the perfect-conductor |K|^2, as the
+        // additive terms they sit beside.
+        let pRt = 0, pXt = 0, pRg = 0, pXg = 0;
+        rects.forEach((r, i) => {
+            const dR = 2 * sym * (rPRe[i] - Rs * rPS[i]), dX = 2 * sym * (rPIm[i] - Rs * rPS[i]);
+            if (!rolesX || rolesX[i].is_signal) { pRt += dR; pXt += dX; } else { pRg += dR; pXg += dX; }
+        });
+        if (R_trace > 0) PsiR = 1 + pRt / R_trace;
+        X_trace = R_trace + pXt; R_trace += pRt;
+        X_gr = R_gr + pXg; R_gr += pRg;
+        if (gndS > 0) {
+            X_gw = X_gw_smooth + gndDXS / gndS * 2 * sym * wallS2;
+            R_gw *= gndZreS / (RsW * gndS);
         }
     } else if (opts.surfaceZs) {
         if (trS > 0) {
