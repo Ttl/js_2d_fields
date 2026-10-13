@@ -452,10 +452,9 @@ const PLOT_ROWS = 256;
  * Statistical eye over one UI of sampling phases and its BER-target opening.
  * p: makeStatEye parameters; opts: { ber (target), phases (per UI, even), nV (odd),
  * bisect (steps refining each eye width edge, default 7) }.
- * Returns { ber, height (peak within +-0.1 UI of the eye's centre), heightPhase,
- * heightSample (at n0), width, widthLeft, widthRight (phases in UI from n0), berSample
- * (at n0 and the threshold), thr, plot: { x (UI, the sample point at 1), y, density
- * (log10 probability per row), logBer } }.
+ * Returns { ber, height (at the sample point n0), sampleTop, sampleBottom, width, widthLeft,
+ * widthRight, centre (phases in UI from n0), berSample (at n0 and the threshold), thr, bin,
+ * plot: { x (UI, the eye centre at 1), y, density (log10 probability per row), logBer } }.
  */
 function statEye(p, opts) {
     const se = makeStatEye(p);
@@ -530,14 +529,7 @@ function statEye(p, opts) {
         wr = dfeWindow && ws.r === nPh - 1 ? centre + 0.5 : edge(cols[ws.r].u, cols[ws.r].u + step);
         width = Math.min(1, wr - wl);
     }
-    // Peak height within +-0.1 UI of the centre of the open phases.
-    const mid = ws ? 0.5 * (wl + wr) : centre;
-    let height = 0, hPhase = NaN;
-    for (const c of cols) {
-        if (Math.abs(c.u - mid) > 0.1 + 1e-9) continue;
-        if (c.open.height > height) { height = c.open.height; hPhase = c.u; }
-    }
-    // At the sample point n0.
+    // Height at the sample point n0.
     const s0 = at(0), o0 = verticalOpening(s0.ber, grid, target);
 
     // Maps over 2 UI, the eye centre at 1 UI, rows over the populated voltages. The
@@ -563,55 +555,69 @@ function statEye(p, opts) {
         density.push(dr); logBer.push(br);
     }
     return {
-        ber: target, thr, bin, centre, height, heightPhase: hPhase, heightSample: o0.height,
-        sampleTop: o0.top, sampleBottom: o0.bottom,
+        ber: target, thr, bin, centre, height: o0.height, sampleTop: o0.top, sampleBottom: o0.bottom,
         width, widthLeft: wl, widthRight: wr, berSample: s0.atThr, symmetric: se.symmetric,
         open: cols.map(c => ({ u: c.u, top: c.open.top, bottom: c.open.bottom })),
         plot: { x, y, density, logBer },
     };
 }
 
+// Voltage grid of nV bins holding every phase within +-1 UI of n0.
+function gridFor(se, p, nV) {
+    let bound = 0;
+    for (let k = -4; k <= 4; k++) bound = Math.max(bound, se.layout(p.n0 + k / 4 * p.spb, 0).bound);
+    bound = 1.05 * bound + 8 * (p.sigmaSlow || 0);
+    if (!(bound > 0)) bound = 1e-3;
+    const bin = 2 * bound / (nV - 1);
+    return { v0: p.vmid - (nV - 1) / 2 * bin, bin, nV };
+}
+
 /**
- * Eye height times width at the target BER with few evaluations, for ranking equalization
- * settings: the eye centre (n0 with a DFE, else a coarse scan), the width edges by bisection
- * from it, the height at the middle of the width and 0.05 UI either side.
+ * Eye height at the sample point n0 times the eye width at the target BER with few
+ * evaluations, for ranking equalization settings and sample points. The width edges come by
+ * bisection from n0: with a DFE within the window n0 +- UI/2 where its feedback holds.
  * opts: { ber, nV, steps (bisection steps per edge) }. Returns { height, width }.
  */
 function statEyeRank(p, opts) {
     const se = makeStatEye(p, 4);
     const { spb } = p, target = opts.ber;
-    const coarse = Array.from({ length: 9 }, (_, k) => (k - 4) / 4);
-    let bound = 0;
-    for (const u of coarse) bound = Math.max(bound, se.layout(p.n0 + u * spb, 0).bound);
-    bound = 1.05 * bound + 8 * (p.sigmaSlow || 0);
-    if (!(bound > 0)) bound = 1e-3;
-    const nV = opts.nV, bin = 2 * bound / (nV - 1);
-    const grid = { v0: p.vmid - (nV - 1) / 2 * bin, bin, nV };
+    const grid = gridFor(se, p, opts.nV);
     const ber = (u) => { const { p1, p0 } = se.evaluate(u * spb, grid); return berCurve(p1, p0); };
     const open = (u) => berAt(ber(u), grid, p.vmid) < target;
-    const dfeWindow = (p.dfe || []).length > 0;
-    let centre = 0;
-    if (!dfeWindow) {
-        const cs = coarse.map(u => ({ u, b: berAt(ber(u), grid, p.vmid) }));
-        let k = 0;
-        for (let i = 1; i < cs.length; i++) if (cs[i].b < cs[k].b) k = i;
-        let l = k, r = k;
-        while (l > 0 && cs[l - 1].b < target) l--;
-        while (r < cs.length - 1 && cs[r + 1].b < target) r++;
-        centre = 0.5 * (cs[l].u + cs[r].u);
-    }
-    if (!open(centre)) return { height: 0, width: 0 };
-    const reach = dfeWindow ? 0.5 : 0.75;
+    const b0 = ber(0);
+    const height = verticalOpening(b0, grid, target).height;
+    if (!(height > 0) || !(berAt(b0, grid, p.vmid) < target)) return { height, width: 0 };
+    const dfeWindow = (p.dfe || []).length > 0, reach = dfeWindow ? 0.5 : 1;
     const edge = (dir) => {
-        if (dfeWindow && open(centre + dir * (0.5 - 1e-6))) return centre + dir * 0.5;
+        if (dfeWindow && open(dir * (0.5 - 1e-6))) return dir * 0.5;
         let a = 0, b = reach;
-        for (let it = 0; it < opts.steps; it++) { const m = 0.5 * (a + b); if (open(centre + dir * m)) a = m; else b = m; }
-        return centre + dir * 0.5 * (a + b);
+        for (let it = 0; it < opts.steps; it++) { const m = 0.5 * (a + b); if (open(dir * m)) a = m; else b = m; }
+        return dir * 0.5 * (a + b);
     };
-    const wl = edge(-1), wr = edge(1), mid = 0.5 * (wl + wr);
-    let height = 0;
-    for (const u of [mid - 0.05, mid, mid + 0.05]) height = Math.max(height, verticalOpening(ber(u), grid, target).height);
-    return { height, width: Math.min(1, wr - wl) };
+    return { height, width: Math.min(1, edge(1) - edge(-1)) };
 }
 
-export { makeStatEye, statEye, statEyeRank, jitterNodes, berCurve, berAt, verticalOpening, smallTerms, gaussConv };
+/**
+ * Mean UI centre, in UI from n0: the middle of the zero-line crossings on either side of
+ * n0, each where half of the transitions have crossed (the threshold BER is then 1/4: half
+ * the bits follow a transition, half of those are still on the old side). That is the
+ * median crossing, the mean for a symmetric crossing distribution. p without DFE taps (the
+ * crossings of the equalized signal before the DFE). opts: { nV, steps }.
+ */
+function meanUiCentre(p, opts) {
+    const se = makeStatEye(p, 4);
+    const grid = gridFor(se, p, opts.nV);
+    const b = (u) => { const { p1, p0 } = se.evaluate(u * p.spb, grid); return berAt(berCurve(p1, p0), grid, p.vmid); };
+    // Start from the least threshold BER near n0.
+    let u0 = 0, b0 = b(0);
+    if (!(b0 < 0.25)) for (const u of [-0.5, -0.375, -0.25, -0.125, 0.125, 0.25, 0.375, 0.5]) { const x = b(u); if (x < b0) { b0 = x; u0 = u; } }
+    if (!(b0 < 0.25)) return u0;
+    const cross = (dir) => {
+        let a = 0, c = 0.75;
+        for (let it = 0; it < opts.steps; it++) { const m = 0.5 * (a + c); if (b(u0 + dir * m) < 0.25) a = m; else c = m; }
+        return u0 + dir * 0.5 * (a + c);
+    };
+    return 0.5 * (cross(-1) + cross(1));
+}
+
+export { makeStatEye, statEye, statEyeRank, meanUiCentre, jitterNodes, berCurve, berAt, verticalOpening, smallTerms, gaussConv };

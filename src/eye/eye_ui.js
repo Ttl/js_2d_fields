@@ -92,6 +92,9 @@ const EYE_FIELDS = [
     ['eye_dfelim', 'eye-dfelim', 'text'],
     ['eye_stat', 'eye-stat', 'chk'],
     ['eye_ber', 'eye-ber', 'eye', 'num'],
+    ['eye_soff_from', 'eye-soff-from', 'eye', 'num'],
+    ['eye_soff_to', 'eye-soff-to', 'eye', 'num'],
+    ['eye_soff_step', 'eye-soff-step', 'eye', 'num'],
     ['eye_spe', 'eye-spe', 'eye', 'num'],
     ['eye_span', 'eye-span', 'eye', 'time'],
 ];
@@ -112,7 +115,7 @@ const EYE_DEFAULTS = {
     ...Object.fromEntries(['tx', 'rx'].flatMap(x => [[`eye_pkg${x}`, 'none'], [`eye_pkg${x}_cpin`, 0.25e-12], [`eye_pkg${x}_z0`, 40],
         [`eye_pkg${x}_delay`, 150e-12], [`eye_pkg${x}_lossc`, 0.5], [`eye_pkg${x}_lossd`, 0], [`eye_pkg${x}_r`, 1], [`eye_pkg${x}_l`, 1e-9]])),
     eye_ctle: 'off', eye_adc: -6, eye_adcmin: -12, eye_adcmax: -6, eye_fp1: 2e9, eye_fp2: 8e9, eye_ctleorder: '1', eye_fz1: 4.5e8, eye_fp3: 28e9, eye_dfe: 0, eye_dfelim: '',
-    eye_stat: 1, eye_ber: 1e-12,
+    eye_stat: 1, eye_ber: 1e-12, eye_soff_from: -0.1, eye_soff_to: 0.1, eye_soff_step: 0.05,
 };
 
 // Whether a setting applies to the selected options; links leave out the others.
@@ -140,7 +143,8 @@ function eyeKeyActive(settings, key) {
         case 'eye_fz1': case 'eye_fp3': return v('eye_stim') === 'pattern' && v('eye_ctle') !== 'off' && v('eye_ctleorder') === '2';
         case 'eye_dfelim': return v('eye_stim') === 'pattern' && v('eye_dfe') > 0;
         case 'eye_stat': return v('eye_stim') === 'pattern';
-        case 'eye_ber': return v('eye_stim') === 'pattern' && !!v('eye_stat');
+        case 'eye_ber': case 'eye_soff_from': case 'eye_soff_to': case 'eye_soff_step':
+            return v('eye_stim') === 'pattern' && !!v('eye_stat');
         case 'eye_ctx': return !!v('eye_tx_ac');
         case 'eye_crx': return !!v('eye_rx_ac');
         case 'eye_rt': return ['vtt', 'r', 'rc'].includes(v('eye_term'));
@@ -437,7 +441,13 @@ function readConfig() {
     if (type === 'pattern' && $('eye-stat').checked) {
         const ber = parseQuantity('eye-ber', 'num', 'Target BER');
         if (!(ber >= 1e-30 && ber <= 1e-2)) throw new Error('Target BER: between 1e-30 and 1e-2.');
-        statEye = { ber };
+        const from = parseQuantity('eye-soff-from', 'num', 'Sample offsets from'), to = parseQuantity('eye-soff-to', 'num', 'Sample offsets to');
+        const step = parseQuantity('eye-soff-step', 'num', 'Sample offset step');
+        if (!(Math.abs(from) <= 0.5 && Math.abs(to) <= 0.5 && to >= from)) throw new Error('Sample offsets: from <= to, both within +-0.5 UI.');
+        const n = to > from ? Math.round((to - from) / step) + 1 : 1;
+        if (to > from && !(step > 0 && n <= 41)) throw new Error('Sample offset step: positive, at most 41 offsets.');
+        const offsets = Array.from({ length: n }, (_, i) => +Math.min(to, from + i * step).toFixed(9));
+        statEye = { ber, offsets };
     }
     if (network.tx.ac) network.tx.c = parseQuantity('eye-ctx', 'cap', 'TX coupling capacitor');
     if (network.rx.ac) network.rx.c = parseQuantity('eye-crx', 'cap', 'RX coupling capacitor');
@@ -478,7 +488,7 @@ function updateVisibility() {
     show('eye-jitter-set', type === 'pattern' || (type === 'clock' && $('eye-clock-mode').value === 'steady'));
     show('eye-rxeq-set', type === 'pattern');
     show('eye-stat-set', type === 'pattern');
-    show('eye-row-ber', $('eye-stat').checked);
+    for (const id of ['eye-row-ber', 'eye-row-soff-from', 'eye-row-soff-to', 'eye-row-soff-step']) show(id, $('eye-stat').checked);
     const txeq = $('eye-txeq').value, ctle = $('eye-ctle').value;
     for (const id of ['eye-row-deemph', 'eye-row-preshoot']) show(id, txeq === 'db');
     show('eye-row-adc', ctle === 'fixed');
@@ -825,8 +835,12 @@ function drawEyeHeatmap(res) {
         if (inf.widthRight > inf.widthLeft) {
             layout.shapes.push({ type: 'line', x0: inf.widthLeft, x1: inf.widthRight, y0: inf.thr, y1: inf.thr, line: mark });
         }
-        layout.annotations.push({ x: 1, y: inf.heightTop, text: open ? 'eye height' : 'closed', showarrow: false,
+        const off = res.eqChoice ? offsetLabel(res.eqChoice.sampleOffset) : '';
+        layout.annotations.push({ x: 1, y: inf.heightTop, text: open ? `EH${off}` : 'closed', showarrow: false,
             yanchor: 'bottom', font: { color: mark.color, size: 10 } });
+        if (inf.widthRight > inf.widthLeft) {
+            layout.annotations.push({ x: inf.widthRight, y: inf.thr, text: 'EW', showarrow: false, xanchor: 'left', font: { color: mark.color, size: 10 } });
+        }
     }
     Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
 }
@@ -978,6 +992,11 @@ function drawMetrics(res) {
     el.innerHTML = `<div class="eye-metric-grid">${rows}</div><div class="eye-info">${info}</div>`;
 }
 
+// Sample point offset from the mean UI centre for a label, '' without one.
+function offsetLabel(o) {
+    return o ? ` (${o > 0 ? '+' : ''}${+o.toFixed(3)} UI)` : '';
+}
+
 // Statistical eye: log10 probability density over 2 UI (the eye centre at 1 UI), BER
 // contours by decade down to the target, the eye height and width at the target marked.
 function drawStatEye(res) {
@@ -1014,12 +1033,11 @@ function drawStatEye(res) {
     layout.shapes = [];
     layout.annotations = [];
     const mark = (open) => ({ color: open ? '#4ade80' : '#f87171', width: 2 });
+    // EH at the sample point, labelled with its offset from the mean UI centre.
     const cAt = 1 - s.centre;
-    if (s.height > 0 && isFinite(s.heightPhase)) {
-        const o = s.open.reduce((a, b) => Math.abs(b.u - s.heightPhase) < Math.abs(a.u - s.heightPhase) ? b : a);
-        const xh = cAt + s.heightPhase;
-        layout.shapes.push({ type: 'line', x0: xh, x1: xh, y0: o.bottom, y1: o.top, line: mark(true) });
-        layout.annotations.push({ x: xh, y: o.top, text: 'EH', showarrow: false, yanchor: 'bottom', font: { color: '#4ade80', size: 10 } });
+    if (s.height > 0) {
+        layout.shapes.push({ type: 'line', x0: cAt, x1: cAt, y0: s.sampleBottom, y1: s.sampleTop, line: mark(true) });
+        layout.annotations.push({ x: cAt, y: s.sampleTop, text: `EH${offsetLabel(s.offset)}`, showarrow: false, yanchor: 'bottom', font: { color: '#4ade80', size: 10 } });
     }
     if (s.width > 0) {
         layout.shapes.push({ type: 'line', x0: cAt + s.widthLeft, x1: cAt + s.widthRight, y0: s.thr, y1: s.thr, line: mark(true) });
@@ -1114,7 +1132,7 @@ const pcie = (rate, tr, [rj, djdd, pwrj, pwdj], extra) => ({
     'eye-vlow': '0 V', 'eye-vhigh': '0.804 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
     'eye-edge-def': '10-90', 'eye-edge-shape': 'gauss',
     'eye-rj': `${rj} ps`, 'eye-djdd': `${djdd} ps`, 'eye-pwrj': `${pwrj} ps`, 'eye-pwdj': `${pwdj} ps`,
-    'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', 'eye-stat': true, 'eye-ber': '1e-12',
+    'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', 'eye-stat': true, 'eye-ber': '1e-12', 'eye-soff-from': '-0.1', 'eye-soff-to': '0.1', 'eye-soff-step': '0.05',
     ...packageInputs('tx', 'pcie8Tx'), ...packageInputs('rx', 'pcie8Rx'), ...extra,
 });
 const pcieEq = (adcMin, adcMax, fp1, fp2, dfe, dfelim) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',
@@ -1139,6 +1157,8 @@ const PRESETS = {
         ...packageInputs('tx', 'pcie16Root'), ...packageInputs('rx', 'pcie16NonRoot') },
     pcie5: { differential: true, ...pcie('32 Gb/s', '10.94 ps', [0.276, 1.875, 0.27, 2.5], { ...pcieEq('-15', '-5', '2 GHz', '9.5 GHz', '3', '0.8 h0, 20 mV, 20 mV'),
         'eye-ctleorder': '2', 'eye-fz1': '450 MHz', 'eye-fp3': '28 GHz',
+        // 32 GT/s: the sample point up to 0.30 UI left of the mean UI centre in 0.05 UI steps.
+        'eye-soff-from': '-0.3', 'eye-soff-to': '0', 'eye-soff-step': '0.05',
         // The 32 GT/s non-root model is not fitted: the 16 GT/s non-root package receives.
         ...packageInputs('tx', 'pcie32Root'), ...packageInputs('rx', 'pcie16NonRoot') }) },
     lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',

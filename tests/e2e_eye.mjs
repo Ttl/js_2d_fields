@@ -152,8 +152,10 @@ console.log('PCIe Gen3 packages (8 GT/s):', gen3PkgOk, gen3Pkg);
 // PCIe Gen5: 32 GT/s root port package at TX.
 const gen5 = await presetRun('pcie5');
 const gen5Pkg = await page.evaluate(() => ['eye-pkgtx-z0', 'eye-padtx', 'eye-pkgrx-z0'].map(id => document.getElementById(id).value));
-const gen5Ok = /Done/.test(gen5.st) && JSON.stringify(gen5Pkg) === JSON.stringify(['38.3', '0.44 pF', '41.3']);
-console.log('PCIe Gen5 preset with packages:', gen5Ok, gen5.st, gen5.m['Eye height (centre)'], gen5Pkg);
+const jGen5 = await linkJson(page);
+const gen5Ok = /Done/.test(gen5.st) && JSON.stringify(gen5Pkg) === JSON.stringify(['38.3', '0.44 pF', '41.3'])
+    && jGen5.eye_soff_from === -0.3 && jGen5.eye_soff_to === 0 && !('eye_soff_step' in jGen5) && /UI from the mean UI centre/.test(gen5.m['Sample point'] || '');
+console.log('PCIe Gen5 preset with packages:', gen5Ok, gen5.st, gen5.m['Eye height (centre)'], gen5.m['Sample point'], gen5Pkg, jGen5.eye_soff_from, jGen5.eye_soff_to);
 
 // PCIe Gen4: the behavioral packages are filled in, simulated and kept in a link.
 const gen4 = await presetRun('pcie4');
@@ -162,11 +164,22 @@ await page.selectOption('#eye-view', 'stat');
 await page.waitForTimeout(500);
 const statTraces = await page.$eval('#eye-plot', el => (el.data || []).map(t => `${t.type}:${t.name}`));
 await page.screenshot({ path: '/tmp/eye_stat_view.png' });
+const labels = () => page.$eval('#eye-plot', el => (el.layout.annotations || []).map(a => a.text));
+const statLabels = await labels();
+await page.selectOption('#eye-view', 'eye');
+await page.waitForTimeout(500);
+await page.screenshot({ path: '/tmp/eye_td_view.png' });
+const tdLabels = await labels();
+const off = (gen4.m['Sample point'] || '').match(/^([+-][\d.]+) UI/);
+const ehLabel = off ? `EH (${off[1].replace(/^\+?/, m => m === '+' ? '+' : '')} UI)` : 'EH';
+const labelOk = [statLabels, tdLabels].every(l => l.includes(ehLabel) && l.includes('EW'));
+console.log('EH / EW labels with the sample offset:', labelOk, ehLabel, statLabels, tdLabels);
 const jPkg = await linkJson(page);
 const statOk = statTraces.includes('heatmap:Density') && statTraces.includes('contour:BER 1e-12') && statTraces.includes('contour:BER 1e-6')
-    && /mV at [+-]/.test(gen4.m['Statistical eye height (BER 1e-12)'] || '') && /UI\)$/.test(gen4.m['Statistical eye width (BER 1e-12)'] || '')
-    && !('eye_stat' in jPkg) && !('eye_ber' in jPkg);
-console.log('PCIe Gen4 statistical eye:', statOk, gen4.m['Statistical eye height (BER 1e-12)'], gen4.m['Statistical eye width (BER 1e-12)'], statTraces);
+    && / mV$/.test(gen4.m['Statistical eye height (BER 1e-12)'] || '') && /UI\)$/.test(gen4.m['Statistical eye width (BER 1e-12)'] || '')
+    && /^[+-]0(\.\d+)? UI from the mean UI centre$/.test(gen4.m['Sample point'] || '') && /^EH x EW = /.test(gen4.m['Equalization objective'] || '')
+    && !('eye_stat' in jPkg) && !('eye_ber' in jPkg) && !Object.keys(jPkg).some(k => k.startsWith('eye_soff'));
+console.log('PCIe Gen4 statistical eye:', statOk, gen4.m['Statistical eye height (BER 1e-12)'], gen4.m['Statistical eye width (BER 1e-12)'], gen4.m['Sample point'], statTraces);
 const pkgPage = await browser.newPage();
 await pkgPage.goto(URL + '?params=' + btoa(encodeURIComponent(JSON.stringify(jPkg))), { waitUntil: 'networkidle' });
 const pkgBack = await pkgPage.evaluate(() => ['eye-pkgtx', 'eye-pkgtx-z0', 'eye-pkgrx-delay', 'eye-padrx'].map(id => document.getElementById(id).value));
@@ -238,6 +251,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = statOk && clockJitOk && gen4JitOk && peclOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = labelOk && statOk && clockJitOk && gen4JitOk && peclOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

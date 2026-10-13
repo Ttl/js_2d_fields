@@ -15,10 +15,10 @@
 // previous transmitted bits. TX preset and CTLE gain can be chosen automatically by the
 // peak-distortion eye of the pulse response (eq.js).
 import { legMean, edgeSpectrum, edgeValue, buildStimulus } from './stimulus.js';
-import { ctleOf, pdaEye, dfeTap, PCIE_PRESETS, firFromPresetDb, presetDbFromFir, boostDb } from './eq.js';
+import { ctleOf, pdaEye, pdaAt, pulseAt, dfeTap, PCIE_PRESETS, firFromPresetDb, presetDbFromFir, boostDb } from './eq.js';
 import { makeTransfer, dcSolve } from './network.js';
 import { jitterPerEdge, jitterActive } from './jitter.js';
-import { statEye, statEyeRank } from './stat_eye.js';
+import { statEye, statEyeRank, meanUiCentre } from './stat_eye.js';
 import { smoothSize } from './fft.js';
 import { fmtHz } from './channel_grid.js';
 import { lineEstimates, reflectionTrips, taper, deriveTraces, firstOrder, slowSplit, packOutput,
@@ -329,10 +329,11 @@ function patternSim(ctx, dt0) {
             const steps = mainSteps(ctx, resp.main, C);
             for (const fc of firCands) {
                 const q = pulseResponse(stim, steps, spb, fc.fir);
-                cands.push({ adc, C, steps, fir: fc.fir, firName: fc.name, q, pda: pdaEye(q, spb, dfeTaps, dfeLimits) });
+                const pda = pdaEye(q, spb, dfeTaps, dfeLimits);
+                cands.push({ adc, C, steps, fir: fc.fir, firName: fc.name, q, pda, sample: pda.n0 });
             }
         }
-        if (ctx.cfg.statEye && cands.length > 1) {
+        if (ctx.cfg.statEye) {
             search = statEyeSearch(ctx, cands, { stim, spb, dt, split, dfeTaps, dfeLimits });
             choice = search.best;
         } else {
@@ -448,12 +449,12 @@ function patternSim(ctx, dt0) {
     let slicer = eqTrace || main, centre = null;
     if (choice) {
         // The main cursor of bit m sits at m UI + tau_s; the DFE corrects the bit's UI.
-        const tauS = (choice.pda.n0 - nLead) * dt;
+        const tauS = (choice.sample - nLead) * dt;
         centre = tauS;
         if (dfeTaps > 0) {
             slicer = Float64Array.from(slicer);
             const d = (m) => 2 * stim.bits[((m % nb) + nb) % nb] - 1;
-            const { h, limited } = dfeTapsOf(choice.q, choice.pda.n0, spb, dfeTaps, dfeLimits);
+            const { h, limited } = dfeTapsOf(choice.q, choice.sample, spb, dfeTaps, dfeLimits);
             choice.dfeLimited = limited;
             for (let m = 0; m < nb; m++) {
                 let fb = 0;
@@ -465,7 +466,7 @@ function patternSim(ctx, dt0) {
         }
         if (eqTrace || dfeTaps > 0) full.rxEq = slicer;
     }
-    const stat = ctx.cfg.statEye ? statEyeOf(ctx, { resp, choice, stim, spb, dt, split, fir: choice ? choice.fir : (st.fir || [0, 1, 0]) }) : null;
+    const stat = ctx.cfg.statEye ? statEyeOf(ctx, { resp, choice, search, stim, spb, dt, split, dfeTaps, dfeLimits, fir: choice ? choice.fir : (st.fir || [0, 1, 0]) }) : null;
     const eye = choice
         ? eyeAnalysis(slicer, dt, ui, spb, nb, { centre, bits: stim.bits, crossings: dfeTaps === 0 })
         : eyeAnalysis(main, dt, ui, spb, nb);
@@ -503,8 +504,9 @@ function patternSim(ctx, dt0) {
             note: eq.ctle.order === 2 ? '2nd-order CTLE' : '1st-order CTLE' });
         if (choice.dfe) eqMetrics.push({ label: 'DFE taps', value: choice.dfe.map((x, k) => fmtV(x) + (choice.dfeLimited[k] ? ' (at its limit)' : '')).join(', '),
             note: 'ideal decisions; each tap the post-cursor at the sampling point, within its limit' });
-        eqMetrics.push({ label: 'Pulse-response eye estimate', value: fmtV(choice.pda.height), note: 'peak distortion: main cursor minus the residual ISI, worst case' });
-        if (search) {
+        choice.pdaSample = pdaAt(choice.q, choice.sample, spb, choice.dfe || []);
+        eqMetrics.push({ label: 'Pulse-response eye estimate', value: fmtV(choice.pdaSample.height), note: 'peak distortion at the sample point: main cursor minus the residual ISI, worst case' });
+        if (search && search.count > 1) {
             const name = (c) => [c.firName, c.adc !== null ? `${c.adc} dB` : null].filter(Boolean).join(' / ');
             const r = choice.stat, same = search.pdaBest === choice;
             eqMetrics.push({ label: 'Equalization objective', value: r.height * r.width > 0 ? `EH x EW = ${fmtV(r.height)} x ${r.width.toFixed(3)} UI` : 'all eyes closed: peak distortion',
@@ -533,10 +535,11 @@ function patternSim(ctx, dt0) {
         res.statEye = stat.out;
         metrics.list.push(...stat.metrics);
     }
-    if (search) res.eqSearch = { quick: search.quick, full: search.full };
+    if (search) res.eqSearch = { quick: search.quick, sweep: search.sweep, full: search.full };
     if (choice) {
         res.pulse = pulseOutput(choice, dt, spb, dfeTaps, nLead);
-        res.eqChoice = { firName: choice.firName, fir: choice.fir, adc: choice.adc, pdaHeight: choice.pda.height, dfe: choice.dfe || [] };
+        res.eqChoice = { firName: choice.firName, fir: choice.fir, adc: choice.adc, pdaHeight: choice.pdaSample.height, dfe: choice.dfe || [],
+            sampleOffset: choice.offset ?? null };
     }
     packOutput(res);
     // The whole period of the eye's signal, for callers that analyse it further (removed
@@ -545,10 +548,11 @@ function patternSim(ctx, dt0) {
     return res;
 }
 
-// DFE taps at sample index n0 of the pulse response q: each post-cursor within its limit.
+// DFE taps at (fractional) sample index n0 of the pulse response q: each post-cursor within
+// its limit.
 function dfeTapsOf(q, n0, spb, taps, limits) {
-    const at = (k) => { const i = n0 + k * spb; return i < q.length ? q[i] : 0; };
-    const h = Array.from({ length: taps }, (_, k) => dfeTap(at(k + 1), k + 1, limits, q[n0]));
+    const at = (k) => pulseAt(q, n0 + k * spb);
+    const h = Array.from({ length: taps }, (_, k) => dfeTap(at(k + 1), k + 1, limits, at(0)));
     return { h, limited: h.map((x, k) => Math.abs(at(k + 1) - x) > 1e-15) };
 }
 
@@ -585,75 +589,92 @@ function statEyeParams(ctx, { steps, adcLin, fir, n0, dfe, stim, split, spb, dt 
 }
 
 // Grids of the statistical eye: the reported one, and the coarse one that ranks the
-// equalization candidates.
+// equalization candidates and sample points.
 const STAT_QUICK = { nV: 513, steps: 6 };
 const statGrid = (cfg) => ({ phases: cfg.phases || 64, nV: cfg.nV || 2049 });
-// Candidates the full grid re-evaluates after the coarse ranking: those within 20 % of the
-// coarse best (its error near ties is ~10 %), at least 2, at most 6.
-const STAT_REFINE = { within: 0.8, min: 2, max: 6 };
+// Sample point offsets from the mean UI centre (UI): PCIe 8 and 16 GT/s +-0.1 UI.
+const SAMPLE_OFFSETS = [-0.1, -0.05, 0, 0.05, 0.1];
+// Coarse ranks: the candidates within 30 % of the best go on to the sample point sweep (2 to
+// 8), the (candidate, sample point) pairs within 20 % of the best to the full grid (2 to 4).
+// The coarse error near ties is ~10 %.
+const SWEEP_SET = { within: 0.7, min: 2, max: 8 }, FULL_SET = { within: 0.8, min: 2, max: 4 };
 
-// Choice of TX preset and CTLE gain by the statistical eye height times width at the target
-// BER, each candidate with its own DFE taps at its peak-distortion sample point. All are
-// ranked on a coarse grid, the best few again on the full one; closed eyes rank by the
-// peak-distortion height. Returns { best (candidate, best.stat its full statistical eye),
-// pdaBest (the peak-distortion choice), quick, full (rows of the rankings) }.
+/**
+ * Choice of TX preset, CTLE gain and sample point by the statistical eye height (at the
+ * sample point) times width at the target BER (PCIe 8.5.1.3.2-3). Sample points are offsets
+ * from each candidate's mean UI centre, the DFE taps recomputed at each. Three stages: every
+ * candidate at its peak-distortion sample point on a coarse grid, the sweep of all offsets
+ * for the best of them, the best pairs on the full grid. Closed eyes rank by the
+ * peak-distortion height at the sample point.
+ * Returns { best (candidate with sample, offset, stat), pdaBest, count, quick, sweep, full }.
+ */
 function statEyeSearch(ctx, cands, { stim, spb, dt, split, dfeTaps, dfeLimits }) {
-    const ber = ctx.cfg.statEye.ber || 1e-12;
-    const params = (c) => statEyeParams(ctx, { steps: c.steps, adcLin: c.C ? c.C(0)[0] : 1, fir: c.fir, n0: c.pda.n0,
-        dfe: dfeTapsOf(c.q, c.pda.n0, spb, dfeTaps, dfeLimits).h, stim, split, spb, dt });
-    const full = statGrid(ctx.cfg.statEye);
-    const better = (a, b) => (a.product !== b.product ? a.product > b.product : a.c.pda.height > b.c.pda.height);
-    const quick = cands.map(c => {
-        const r = statEyeRank(params(c), { ber, ...STAT_QUICK });
-        return { c, r, product: r.height * r.width };
-    });
-    quick.sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
+    const cfg = ctx.cfg.statEye, ber = cfg.ber || 1e-12;
+    const offsets = cfg.offsets && cfg.offsets.length ? cfg.offsets : SAMPLE_OFFSETS;
+    const params = (c, s, dfe) => statEyeParams(ctx, { steps: c.steps, adcLin: c.C ? c.C(0)[0] : 1, fir: c.fir, n0: s,
+        dfe, stim, split, spb, dt });
+    // offset null: the candidate's peak-distortion sample point.
+    const at = (c, offset) => {
+        const s = offset === null ? c.pda.n0 : c.centre + offset * spb, h = dfeTapsOf(c.q, s, spb, dfeTaps, dfeLimits).h;
+        const r = statEyeRank(params(c, s, h), { ber, ...STAT_QUICK });
+        return { c, offset, s, r, product: r.height * r.width, pda: pdaAt(c.q, s, spb, h).height };
+    };
+    const better = (a, b) => (a.product !== b.product ? a.product > b.product : a.pda > b.pda);
+    const sort = (list) => list.sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
+    const take = (list, set, n) => list.slice(0, n || Math.min(set.max, Math.max(set.min,
+        list.filter(e => e.product > 0 && e.product >= set.within * list[0].product).length)));
+    const quick = sort(cands.map(c => at(c, null)));
+    const sweep = [];
+    for (const q of take(quick, SWEEP_SET, cfg.sweep)) {
+        q.c.centre = q.c.pda.n0 + spb * meanUiCentre(params(q.c, q.c.pda.n0, []), { nV: STAT_QUICK.nV, steps: 8 });
+        for (const o of offsets) sweep.push(at(q.c, o));
+    }
+    sort(sweep);
     let best = null;
     const ranked = [];
-    const nRefine = ctx.cfg.statEye.refine || Math.min(STAT_REFINE.max, Math.max(STAT_REFINE.min,
-        quick.filter(q => q.product >= STAT_REFINE.within * quick[0].product && q.product > 0).length));
-    for (const q of quick.slice(0, nRefine)) {
-        const p = params(q.c), r = statEye(p, { ber, ...full });
+    for (const e of take(sweep, FULL_SET, cfg.refine)) {
+        const p = params(e.c, e.s, dfeTapsOf(e.c.q, e.s, spb, dfeTaps, dfeLimits).h), r = statEye(p, { ber, ...statGrid(cfg) });
         r.sigmaSlow = p.sigmaSlow;
-        const e = { c: q.c, r, product: r.height * r.width };
-        ranked.push(e);
-        if (!best || better(e, best)) best = e;
+        const f = { ...e, r, product: r.height * r.width };
+        ranked.push(f);
+        if (!best || better(f, best)) best = f;
     }
-    best.c.stat = best.r;
-    const row = (e) => ({ firName: e.c.firName, adc: e.c.adc, height: e.r.height, width: e.r.width, pda: e.c.pda.height });
+    Object.assign(best.c, { sample: best.s, offset: best.offset, stat: best.r });
+    const row = (e) => ({ firName: e.c.firName, adc: e.c.adc, offset: e.offset, height: e.r.height, width: e.r.width, pda: e.pda });
     let pdaBest = cands[0];
     for (const c of cands) if (c.pda.height > pdaBest.pda.height) pdaBest = c;
-    return { best: best.c, pdaBest, count: cands.length, quick: quick.map(row), full: ranked.map(row) };
+    return { best: best.c, pdaBest, count: cands.length, offsets, quick: quick.map(row), sweep: sweep.map(row), full: ranked.map(row) };
 }
 
 // Statistical eye at the slicer (or the receiver without equalization) of the chosen
-// equalization (stat_eye.js), and its metrics.
-function statEyeOf(ctx, { resp, choice, stim, spb, dt, split, fir }) {
+// equalization and sample point (stat_eye.js), and its metrics. Without equalization the
+// sample point sweep runs on the receiver signal alone.
+function statEyeOf(ctx, { resp, choice, search, stim, spb, dt, split, dfeTaps, dfeLimits, fir }) {
     const cfg = ctx.cfg.statEye;
     const ber = cfg.ber || 1e-12;
-    let r = choice && choice.stat;
-    let sigmaSlow;
-    if (!r) {
-        const steps = choice ? choice.steps : mainSteps(ctx, resp.main, null);
-        const n0 = choice ? choice.pda.n0 : pdaEye(pulseResponse(stim, steps, spb, fir), spb).n0;
-        const p = statEyeParams(ctx, { steps, adcLin: choice && choice.C ? choice.C(0)[0] : 1, fir, n0,
-            dfe: choice ? choice.dfe || [] : [], stim, split, spb, dt });
-        sigmaSlow = p.sigmaSlow;
-        r = statEye(p, { ber, ...statGrid(cfg) });
-    } else sigmaSlow = r.sigmaSlow;
+    let c = choice, srch = search;
+    if (!c || !c.stat) {
+        if (!c) {
+            const steps = mainSteps(ctx, resp.main, null), q = pulseResponse(stim, steps, spb, fir), pda = pdaEye(q, spb);
+            c = { adc: null, C: null, steps, fir, firName: null, q, pda, sample: pda.n0 };
+        }
+        srch = statEyeSearch(ctx, [c], { stim, spb, dt, split, dfeTaps: choice ? dfeTaps : 0, dfeLimits });
+    }
+    const r = c.stat, sigmaSlow = r.sigmaSlow;
     const berTxt = berLabel(ber);
     const metrics = [];
-    const off = r.width > 0 ? r.heightPhase - 0.5 * (r.widthLeft + r.widthRight) : r.heightPhase - r.centre;
-    metrics.push({ label: `Statistical eye height (BER ${berTxt})`, value: r.height > 0 ? `${fmtV(r.height)} at ${off >= 0 ? '+' : ''}${off.toFixed(3)} UI` : 'closed',
-        note: 'peak height within +-0.1 UI of the centre of the eye width, with the DFE taps of the sample point' });
+    metrics.push({ label: `Statistical eye height (BER ${berTxt})`, value: r.height > 0 ? fmtV(r.height) : 'closed',
+        note: 'at the sample point, with the DFE taps of the sample point; independent random bits and the TX jitter tails' });
     metrics.push({ label: `Statistical eye width (BER ${berTxt})`, value: r.width > 0 ? `${fmtTime(r.width * stim.ui)} (${r.width.toFixed(3)} UI)` : 'closed',
         note: 'at the zero-crossing line (the mid level)' });
-    metrics.push({ label: 'Statistical eye height at the sample point', value: r.heightSample > 0 ? fmtV(r.heightSample) : 'closed',
-        note: 'the DFE sampling point; independent random bits and the TX jitter tails' });
+    const o = srch.offsets, step = o.length > 1 ? o[1] - o[0] : 0;
+    metrics.push({ label: 'Sample point', value: `${c.offset >= 0 ? '+' : ''}${(+c.offset.toFixed(4))} UI from the mean UI centre`,
+        note: `the best eye height x width of the offsets ${o[0]} to ${o[o.length - 1]} UI${step ? ` in steps of ${+step.toFixed(4)} UI` : ''}, the DFE taps recomputed at each;`
+            + ' mean UI centre: middle of the median zero-line crossings' });
     metrics.push({ label: 'BER at the sample point', value: r.berSample < 1e-30 ? '< 1e-30' : r.berSample.toExponential(1),
         note: 'decision at the mid level' });
     if (sigmaSlow > 0) metrics.push({ label: 'Baseline wander (AC coupling)', value: `${fmtV(sigmaSlow)} rms`, note: 'independent random bits, in the statistical eye as a Gaussian' });
-    return { out: { ...r, ui: stim.ui }, metrics };
+    return { out: { ...r, ui: stim.ui, offset: c.offset }, metrics };
 }
 
 function berLabel(b) {
@@ -794,14 +815,14 @@ function eyeAtCentre(v, dt, ui, nb, { centre, bits, crossings }) {
     return { metrics, hist: histogram(v, dt, ui, start), info };
 }
 
-// Pulse response for the plot: q around the main cursor, in UI from it, and its cursors.
+// Pulse response for the plot: q around the sample point, in UI from it, and its cursors.
 function pulseOutput(choice, dt, spb, dfeTaps, nLead) {
-    const q = choice.q, n0 = choice.pda.n0;
-    const i0 = Math.max(0, n0 - 5 * spb), i1 = Math.min(q.length, n0 + 40 * spb);
+    const q = choice.q, n0 = choice.sample;
+    const i0 = Math.max(0, Math.ceil(n0 - 5 * spb)), i1 = Math.min(q.length, Math.floor(n0 + 40 * spb));
     const stride = Math.max(1, Math.floor((i1 - i0) / 4000));
     const x = [], y = [];
     for (let i = i0; i < i1; i += stride) { x.push((i - n0) / spb); y.push(q[i]); }
-    return { x: Float64Array.from(x), y: Float64Array.from(y), cursors: choice.pda.cursors, dfeTaps, dfe: choice.dfe || [],
+    return { x: Float64Array.from(x), y: Float64Array.from(y), cursors: choice.pdaSample.cursors, dfeTaps, dfe: choice.dfe || [],
         delay: (n0 - nLead) * dt };
 }
 

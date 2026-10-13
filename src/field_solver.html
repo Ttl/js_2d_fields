@@ -1017,6 +1017,9 @@
                     <legend>Statistical eye <span class="help-icon" onclick="showHelpModal('eye_stat', event)">?</span></legend>
                     <div class="eye-row"><label class="checkbox-label"><input type="checkbox" id="eye-stat" checked> Compute</label></div>
                     <div class="eye-row" id="eye-row-ber"><label for="eye-ber">Target BER</label><input type="text" id="eye-ber" value="1e-12"></div>
+                    <div class="eye-row" id="eye-row-soff-from"><label for="eye-soff-from">Sample offsets from (UI)</label><input type="text" id="eye-soff-from" value="-0.1"></div>
+                    <div class="eye-row" id="eye-row-soff-to"><label for="eye-soff-to">to (UI)</label><input type="text" id="eye-soff-to" value="0.1"></div>
+                    <div class="eye-row" id="eye-row-soff-step"><label for="eye-soff-step">in steps of (UI)</label><input type="text" id="eye-soff-step" value="0.05"></div>
                 </fieldset>
                 <fieldset>
                     <legend>Simulation <span class="help-icon" onclick="showHelpModal('eye_simulation', event)">?</span></legend>
@@ -1797,11 +1800,18 @@
                     <li>AC coupling adds its baseline wander as a Gaussian.</li>
                     <li>The automatic TX preset and CTLE gain are chosen by this eye's height times width (see RX equalization); the time-domain eye uses the same settings.</li>
                 </ul>
+                <h4>Sample point</h4>
+                <ul>
+                    <li>The sample point is swept over the offsets from the mean UI centre, the DFE taps recomputed at each; the one with the largest eye height times width wins (jointly with the TX preset and CTLE gain).</li>
+                    <li>PCIe: &plusmn;0.1 UI at 8 and 16 GT/s (the EH aperture), 0 to &minus;0.30 UI in 0.05 UI steps at 32 GT/s.</li>
+                    <li>Mean UI centre: the middle of the zero-line crossings, each where half of the transitions have crossed (from the statistical eye without the DFE).</li>
+                    <li>Without equalization the sweep picks the sample point of the receiver eye.</li>
+                </ul>
                 <h4>Results</h4>
                 <ul>
                     <li><b>BER</b> at a decision level and phase: half the probability that a one falls below it plus half that a zero lies above it.</li>
                     <li><b>Eye width</b>: the span of sampling phases whose BER at the mid level (the zero-crossing line) is below the target.</li>
-                    <li><b>Eye height</b>: the vertical opening at the target BER, its peak within &plusmn;0.1 UI of the centre of the eye width (PCIe 8 and 16 GT/s sample point range); also listed at the DFE sample point.</li>
+                    <li><b>Eye height</b>: the vertical opening at the target BER at the sample point.</li>
                     <li>The view shows the probability density of the slicer signal with BER contours from 1e-3 down to the target.</li>
                 </ul>
                 <p>Not included: RX noise and crosstalk.</p>`

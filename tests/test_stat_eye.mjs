@@ -5,13 +5,13 @@
 //      conditional distributions at two sampling phases.
 //   2. Lossless matched line with Rj, DjDD and PW DDj: the eye width at the threshold
 //      against the analytic BER(t) = P(delta > t) / 2 + P(delta < t - UI) / 2, and the
-//      eye height (the full amplitude) and the eye centre.
+//      eye height (the full amplitude), the mean UI centre in the middle of the width.
 //   3. Short-memory lossy line without jitter (few cursors, so the worst sequence is more
-//      likely than 1e-12): eye height at the sample point = the peak-distortion worst case
-//      = the PRBS15 time-domain eye, with and without DFE.
-//   5. Equalization search: the TX preset / CTLE gain chosen is the argmax of the full-grid
-//      eye height times width (default refinement and every candidate refined); without the
-//      statistical eye the peak-distortion argmax, a different choice on this channel.
+//      likely than 1e-12): eye height at the chosen sample point = the peak-distortion worst
+//      case = the PRBS15 time-domain eye there, with and without DFE.
+//   5. Equalization search: the TX preset / CTLE gain / sample point chosen is the argmax of
+//      the full-grid eye height times width (the default search and every pair on the full
+//      grid); without the statistical eye the peak-distortion argmax, a different choice here.
 //   4. Baseline wander of a slow AC-coupling mode: the passband level times the rms of a
 //      first-order low-pass of random +-1 bits, sqrt((1 - a) / (1 + a)), a = exp(-UI / lambda).
 import { check, done } from './helpers.js';
@@ -123,10 +123,12 @@ const volts = (s) => parseFloat(s) * (/ mV/.test(s) ? 1e-3 : / µV| uV/.test(s) 
     const s = r.statEye;
     check('lossless line: statistical eye width = analytic BER 1e-12 width (Rj, PW Rj, DjDD, PW DDj)', Math.abs(s.width - want) < 1.5e-3,
         `${s.width.toFixed(4)} vs ${want.toFixed(4)} UI`);
-    // The pulse top is flat, its first sample (the DFE sample point n0) is near an edge.
-    check('lossless line: statistical eye height = amplitude (0.5 V) within 2 bins, centred half a UI from the crossings',
-        Math.abs(s.height - 0.5) < 2 * s.bin && s.heightSample <= s.height && Math.abs(0.5 * (s.widthLeft + s.widthRight) - s.centre) < 0.02,
-        `${s.height.toFixed(4)} V peak, ${s.heightSample.toFixed(4)} V at the sample point, bin ${(s.bin * 1e3).toFixed(2)} mV`);
+    // Symmetric jitter: the middle of the eye width is the mean UI centre, the sample point
+    // sits `offset` from it, the height is the amplitude.
+    const mid = 0.5 * (s.widthLeft + s.widthRight);
+    check('lossless line: eye height = amplitude (0.5 V) within 2 bins, the eye width centred on the mean UI centre',
+        Math.abs(s.height - 0.5) < 2 * s.bin && Math.abs(mid + s.offset) < 0.01 && Math.abs(s.offset) <= 0.1 + 1e-9,
+        `${s.height.toFixed(4)} V, bin ${(s.bin * 1e3).toFixed(2)} mV; sample point ${s.offset} UI from the mean centre, width middle ${mid.toFixed(4)} UI from the sample point`);
     check('lossless line: symmetric eye (one chain run)', s.symmetric === true);
 }
 
@@ -143,8 +145,8 @@ const volts = (s) => parseFloat(s) * (/ mV/.test(s) ? 1e-3 : / µV| uV/.test(s) 
         const s = r.statEye, pda = r.eqChoice.pdaHeight, td = volts(metric(r, 'Eye height (centre)'));
         const bin = s.bin;
         check(`short memory, ${taps} DFE taps: statistical eye height = peak-distortion worst case = PRBS15 eye`,
-            Math.abs(s.heightSample - pda) < Math.max(1e-4, 2 * bin) && Math.abs(s.heightSample - td) < Math.max(1e-4, 2 * bin),
-            `stat ${(s.heightSample * 1e3).toFixed(3)} mV, peak distortion ${(pda * 1e3).toFixed(3)} mV, time domain ${(td * 1e3).toFixed(3)} mV, bin ${(bin * 1e3).toFixed(3)} mV`);
+            Math.abs(s.height - pda) < Math.max(1e-4, 2 * bin) && Math.abs(s.height - td) < Math.max(1e-4, 2 * bin),
+            `stat ${(s.height * 1e3).toFixed(3)} mV at ${s.offset} UI, peak distortion ${(pda * 1e3).toFixed(3)} mV, time domain ${(td * 1e3).toFixed(3)} mV, bin ${(bin * 1e3).toFixed(3)} mV`);
     }
 }
 
@@ -184,20 +186,21 @@ const volts = (s) => parseFloat(s) * (/ mV/.test(s) ? 1e-3 : / µV| uV/.test(s) 
         txEq: { auto: true, presets: ['P4', 'P5'] }, rxEq: { ctle: { auto: true, adcMin: -10, adcMax: -8, fp1: 2e9, fp2: 16e9 }, dfeTaps: 2, dfeLimits: [0.03, 0.02] },
         statEye });
     const name = (c) => `${c.firName}/${c.adc}`;
-    const all = simulateLink(pair, cfg({ ber: 1e-12, refine: 6 }), fft);
-    const def = simulateLink(pair, cfg({ ber: 1e-12 }), fft);
+    const offsets = [-0.05, 0, 0.05];
+    const all = simulateLink(pair, cfg({ ber: 1e-12, offsets, sweep: 6, refine: 18 }), fft);
+    const def = simulateLink(pair, cfg({ ber: 1e-12, offsets }), fft);
     const pda = simulateLink(pair, cfg(null), fft);
     const prod = (e) => e.height * e.width;
     const best = all.eqSearch.full.reduce((a, b) => prod(b) > prod(a) ? b : a);
-    const pdaBest = all.eqSearch.quick.reduce((a, b) => b.pda > a.pda ? b : a);
-    check('equalization search: EH x EW argmax over every candidate, the default refinement agrees, the reported eye is the winner\'s',
-        all.eqSearch.full.length === 6 && name(all.eqChoice) === name(best) && name(def.eqChoice) === name(best)
+    const pairName = (e) => `${name(e)}@${e.offset ?? e.sampleOffset}`;
+    check('equalization search: EH x EW argmax over every candidate and sample point, the default search agrees, the reported eye is the winner\'s',
+        all.eqSearch.full.length === 18 && pairName(all.eqChoice) === pairName(best) && pairName(def.eqChoice) === pairName(best)
         && Math.abs(def.statEye.height - best.height) < 1e-12 && Math.abs(def.statEye.width - best.width) < 1e-12,
-        `${name(best)}: ${(best.height * 1e3).toFixed(1)} mV x ${best.width.toFixed(3)} UI; refined ${def.eqSearch.full.length} of 6; `
-        + all.eqSearch.full.map(e => `${name(e)} ${(prod(e) * 1e3).toFixed(2)}`).join(', '));
+        `${pairName(best)}: ${(best.height * 1e3).toFixed(1)} mV x ${best.width.toFixed(3)} UI; full grid ${def.eqSearch.full.length} of 18; `
+        + all.eqSearch.full.slice().sort((a, b) => prod(b) - prod(a)).slice(0, 6).map(e => `${pairName(e)} ${(prod(e) * 1e3).toFixed(2)}`).join(', '));
     check('without the statistical eye: the peak-distortion choice (different here)',
-        name(pda.eqChoice) === name(pdaBest) && name(pda.eqChoice) !== name(best) && !pda.eqSearch,
-        `${name(pda.eqChoice)} (${(pdaBest.pda * 1e3).toFixed(1)} mV) vs EH x EW ${name(best)}`);
+        name(pda.eqChoice) !== name(best) && !pda.eqSearch && pda.eqChoice.sampleOffset === null && !pda.statEye,
+        `${name(pda.eqChoice)} (${(pda.eqChoice.pdaHeight * 1e3).toFixed(1)} mV) vs EH x EW ${name(best)}`);
 }
 
 done();

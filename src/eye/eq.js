@@ -107,7 +107,8 @@ function dfeTap(h, k, limits, h0) {
  * The best index is searched within half a UI of the pulse peak. Returns { height, n0,
  * cursors }.
  */
-function pdaEye(q, spb, dfeTaps = 0, dfeLimits = null, span = 64) {
+function pdaEye(q, spb, dfeTaps = 0, dfeLimits = null) {
+    const span = Math.ceil(q.length / spb);
     const N = q.length;
     let peak = 0;
     for (let n = 1; n < N; n++) if (q[n] > q[peak]) peak = n;
@@ -132,4 +133,29 @@ function pdaEye(q, spb, dfeTaps = 0, dfeLimits = null, span = 64) {
     return { height: best, n0: bestN, cursors };
 }
 
-export { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctleTransfer, ctle2Transfer, ctleOf, pdaEye, dfeTap };
+// Pulse response at a fractional sample index (linear, zero outside).
+function pulseAt(q, x) {
+    if (x < 0 || x > q.length - 1) return 0;
+    const i = Math.floor(x), f = x - i;
+    return i + 1 < q.length ? q[i] + (q[i + 1] - q[i]) * f : q[i];
+}
+
+/**
+ * Peak-distortion eye height at a fractional sample index s with DFE taps h (the post-
+ * cursors 1..h.length less their taps, every other cursor as ISI), and the cursors there.
+ */
+function pdaAt(q, s, spb, h) {
+    const span = Math.ceil(q.length / spb);
+    const h0 = pulseAt(q, s);
+    let isi = 0;
+    for (let k = -span; k <= span; k++) {
+        if (k === 0) continue;
+        const v = pulseAt(q, s + k * spb);
+        isi += Math.abs(k >= 1 && k <= h.length ? v - h[k - 1] : v);
+    }
+    const cursors = [];
+    for (let k = -3; k <= Math.max(8, h.length); k++) cursors.push({ k, value: pulseAt(q, s + k * spb) });
+    return { height: 2 * (h0 - isi), cursors };
+}
+
+export { pulseAt, pdaAt, PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctleTransfer, ctle2Transfer, ctleOf, pdaEye, dfeTap };
