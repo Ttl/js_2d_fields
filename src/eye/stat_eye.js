@@ -29,15 +29,15 @@ const PRUNE = 1e-40;
 /**
  * Jitter displacement distribution of one bit boundary as nodes and probabilities: a
  * Gaussian (Rj with the PW Rj) around the four dual-Dirac positions (DjDD, PW DDj), the
- * split jitter.js uses. Returns { t: Float64Array, p: Float64Array, ext } (ext: largest
- * |t|).
+ * split jitter.js uses, perSigma nodes per sigma over +-span sigma. Returns { t, p, ext }
+ * (Float64Arrays, ext the largest |t|).
  */
-function jitterNodes(j) {
+function jitterNodes(j, perSigma = NODES_PER_SIGMA, span = SIGMA_SPAN) {
     const sig = j ? Math.sqrt((j.rj || 0) ** 2 + 0.5 * (j.pwRj || 0) ** 2) : 0;
     const a = j ? 0.5 * (j.djdd || 0) : 0, b = j ? 0.25 * (j.pwDj || 0) : 0;
     let gt = [0], gp = [1];
     if (sig > 0) {
-        const n = NODES_PER_SIGMA * SIGMA_SPAN, h = 1 / NODES_PER_SIGMA;
+        const n = perSigma * span, h = 1 / perSigma;
         gt = []; gp = [];
         for (let i = -n; i <= n; i++) {
             // Bin [i - 1/2, i + 1/2] h of the unit Gaussian, the end nodes take the tails.
@@ -73,10 +73,11 @@ function sampler(a) {
  *      per bit), dt, n0 (sample index of bit 0's cursor), dfe (taps), jitter ({ rj, djdd,
  *      pwRj, pwDj } or null), vmid (threshold level, the mean signal), sigmaSlow (baseline
  *      wander rms) }
+ * nodesPerSigma: Gaussian jitter nodes per sigma.
  * Returns { layout(s, eps, weak), evaluate(phase, grid), symmetric }: s a sample time,
  * phase in samples from n0.
  */
-function makeStatEye(p) {
+function makeStatEye(p, nodesPerSigma = NODES_PER_SIGMA) {
     const { fir, spb, dt, n0 } = p;
     const N = p.gUp.length;
     const gUp = sampler(p.gUp), gDn = sampler(p.gDn);
@@ -87,7 +88,7 @@ function makeStatEye(p) {
     for (let n = 0; n < N; n++) { gMax = Math.max(gMax, Math.abs(lin[n])); dirDiff = Math.max(dirDiff, Math.abs(p.gUp[n] - p.gDn[n])); }
     // Odd symmetry in the bits: the zero distribution mirrors the one distribution.
     const symmetric = dirDiff <= 1e-12 * gMax;
-    const jn = jitterNodes(p.jitter);
+    const jn = jitterNodes(p.jitter, nodesPerSigma);
     const jExt = jn.ext / dt;
     const jt = Float64Array.from(jn.t, t => t / dt);
     const pre = fir[0] !== 0 ? 1 : 0, post = fir[2] !== 0 ? 1 : 0;
@@ -127,24 +128,28 @@ function makeStatEye(p) {
         return { max: xMax * mx, jitter: xMax * spread };
     };
 
-    // Transition values over the bits it depends on (equiprobable): x and its probability.
-    const xDist = new Map();
+    // Moments of the transition value over the bits it depends on (equiprobable), per
+    // direction: sum of p x and p x^2 over x > 0 and over x < 0.
+    const xm = { up: [0, 0], dn: [0, 0] };
     for (let code = 0; code < 16; code++) {
         const d = (k) => ((code >> (k + 1)) & 1) ? 1 : -1;   // d(-1) = d_(b+1) .. d(2) = d_(b-2)
         const x = fir[0] * (d(-1) - d(0)) + fir[1] * (d(0) - d(1)) + fir[2] * (d(1) - d(2));
-        xDist.set(x, (xDist.get(x) || 0) + 1 / 16);
+        if (x === 0) continue;
+        const m = x > 0 ? xm.up : xm.dn;
+        m[0] += x / 16; m[1] += x * x / 16;
     }
+    // Coarser jitter nodes for the moments of residuals below half a bin.
+    const jm = jitterNodes(p.jitter, 2, 6);
+    const jmt = Float64Array.from(jm.t, t => t / dt);
     // Mean and variance of a boundary's residual over the bits and the jitter.
     const residualMoments = (s, b) => {
         const tau = s - b * spb, gl = gLin(tau);
         let m = 0, m2 = 0;
-        for (const [x, px] of xDist) {
-            if (x === 0) continue;
-            const g = x > 0 ? gUp : gDn;
-            for (let i = 0; i < jt.length; i++) {
-                const v = x * (g(tau - jt[i]) - gl), q = px * jn.p[i];
-                m += q * v; m2 += q * v * v;
-            }
+        for (const [g, [x1, x2]] of [[gUp, xm.up], [gDn, xm.dn]]) {
+            if (x2 === 0) continue;
+            let e1 = 0, e2 = 0;
+            for (let i = 0; i < jmt.length; i++) { const v = g(tau - jmt[i]) - gl; e1 += jm.p[i] * v; e2 += jm.p[i] * v * v; }
+            m += x1 * e1; m2 += x2 * e2;
         }
         return { mean: m, var: Math.max(0, m2 - m * m) };
     };
@@ -302,15 +307,22 @@ function makeStatEye(p) {
         // Residual of boundary b for transition x, with the new bit's linear term wd.
         const kernel = (s_, b, x, wd, r) => {
             const tau = s_ - b * spb;
-            const vals = new Map();
-            const add = (v, q) => { const k = Math.round(v / bin); vals.set(k, (vals.get(k) || 0) + q); };
-            if (!r || x === 0) add(wd, 1);
-            else {
-                const g = x > 0 ? gUp : gDn, gl = gLin(tau);
-                if (!r.jitter || r.jitter < 0.01 * bin) add(wd + x * (g(tau) - gl), 1);
-                else for (let i = 0; i < jt.length; i++) add(wd + x * (g(tau - jt[i]) - gl), jn.p[i]);
+            if (!r || x === 0) return { off: Int32Array.of(Math.round(wd / bin)), p: Float64Array.of(1) };
+            const g = x > 0 ? gUp : gDn, gl = gLin(tau);
+            if (!r.jitter || r.jitter < 0.01 * bin) return { off: Int32Array.of(Math.round((wd + x * (g(tau) - gl)) / bin)), p: Float64Array.of(1) };
+            // Bins of the jittered values, accumulated densely between the extremes.
+            const ks = new Int32Array(jt.length);
+            let kLo = Infinity, kHi = -Infinity;
+            for (let i = 0; i < jt.length; i++) {
+                const k = Math.round((wd + x * (g(tau - jt[i]) - gl)) / bin);
+                ks[i] = k; if (k < kLo) kLo = k; if (k > kHi) kHi = k;
             }
-            const off = Int32Array.from(vals.keys()), pr = Float64Array.from(vals.values());
+            const acc = new Float64Array(kHi - kLo + 1);
+            for (let i = 0; i < jt.length; i++) acc[ks[i] - kLo] += jn.p[i];
+            let n = 0;
+            for (const q of acc) if (q > 0) n++;
+            const off = new Int32Array(n), pr = new Float64Array(n);
+            for (let k = 0, j = 0; k < acc.length; k++) if (acc[k] > 0) { off[j] = k + kLo; pr[j++] = acc[k]; }
             return { off, p: pr };
         };
 
@@ -438,7 +450,8 @@ const PLOT_ROWS = 256;
 
 /**
  * Statistical eye over one UI of sampling phases and its BER-target opening.
- * p: makeStatEye parameters; opts: { ber (target), phases (per UI, even), nV (odd) }.
+ * p: makeStatEye parameters; opts: { ber (target), phases (per UI, even), nV (odd),
+ * bisect (steps refining each eye width edge, default 7) }.
  * Returns { ber, height (peak within +-0.1 UI of the eye's centre), heightPhase,
  * heightSample (at n0), width, widthLeft, widthRight (phases in UI from n0), berSample
  * (at n0 and the threshold), thr, plot: { x (UI, the sample point at 1), y, density
@@ -505,7 +518,7 @@ function statEye(p, opts) {
     if (ws) {
         const edge = (inside, outside) => {
             let a = inside, b = outside;
-            for (let it = 0; it < 7; it++) {
+            for (let it = 0; it < (opts.bisect ?? 7); it++) {
                 const m = 0.5 * (a + b);
                 if (at(m).atThr < target) a = m; else b = m;
             }
@@ -558,4 +571,47 @@ function statEye(p, opts) {
     };
 }
 
-export { makeStatEye, statEye, jitterNodes, berCurve, berAt, verticalOpening, smallTerms, gaussConv };
+/**
+ * Eye height times width at the target BER with few evaluations, for ranking equalization
+ * settings: the eye centre (n0 with a DFE, else a coarse scan), the width edges by bisection
+ * from it, the height at the middle of the width and 0.05 UI either side.
+ * opts: { ber, nV, steps (bisection steps per edge) }. Returns { height, width }.
+ */
+function statEyeRank(p, opts) {
+    const se = makeStatEye(p, 4);
+    const { spb } = p, target = opts.ber;
+    const coarse = Array.from({ length: 9 }, (_, k) => (k - 4) / 4);
+    let bound = 0;
+    for (const u of coarse) bound = Math.max(bound, se.layout(p.n0 + u * spb, 0).bound);
+    bound = 1.05 * bound + 8 * (p.sigmaSlow || 0);
+    if (!(bound > 0)) bound = 1e-3;
+    const nV = opts.nV, bin = 2 * bound / (nV - 1);
+    const grid = { v0: p.vmid - (nV - 1) / 2 * bin, bin, nV };
+    const ber = (u) => { const { p1, p0 } = se.evaluate(u * spb, grid); return berCurve(p1, p0); };
+    const open = (u) => berAt(ber(u), grid, p.vmid) < target;
+    const dfeWindow = (p.dfe || []).length > 0;
+    let centre = 0;
+    if (!dfeWindow) {
+        const cs = coarse.map(u => ({ u, b: berAt(ber(u), grid, p.vmid) }));
+        let k = 0;
+        for (let i = 1; i < cs.length; i++) if (cs[i].b < cs[k].b) k = i;
+        let l = k, r = k;
+        while (l > 0 && cs[l - 1].b < target) l--;
+        while (r < cs.length - 1 && cs[r + 1].b < target) r++;
+        centre = 0.5 * (cs[l].u + cs[r].u);
+    }
+    if (!open(centre)) return { height: 0, width: 0 };
+    const reach = dfeWindow ? 0.5 : 0.75;
+    const edge = (dir) => {
+        if (dfeWindow && open(centre + dir * (0.5 - 1e-6))) return centre + dir * 0.5;
+        let a = 0, b = reach;
+        for (let it = 0; it < opts.steps; it++) { const m = 0.5 * (a + b); if (open(centre + dir * m)) a = m; else b = m; }
+        return centre + dir * 0.5 * (a + b);
+    };
+    const wl = edge(-1), wr = edge(1), mid = 0.5 * (wl + wr);
+    let height = 0;
+    for (const u of [mid - 0.05, mid, mid + 0.05]) height = Math.max(height, verticalOpening(ber(u), grid, target).height);
+    return { height, width: Math.min(1, wr - wl) };
+}
+
+export { makeStatEye, statEye, statEyeRank, jitterNodes, berCurve, berAt, verticalOpening, smallTerms, gaussConv };

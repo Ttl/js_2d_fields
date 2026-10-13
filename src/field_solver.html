@@ -1738,7 +1738,7 @@
                 <ul>
                     <li><b>Full swing</b> tries all eleven presets.</li>
                     <li><b>Reduced swing</b> tries only P4, P1, P9, P5, P6 and P3, the presets reduced-swing signaling implements.</li>
-                    <li>The best preset maximizes the worst-case (peak-distortion) eye height of the pulse response at the slicer.</li>
+                    <li>The best preset maximizes the statistical eye height times width at the target BER (PCIe 8.5.1.3.2), together with the CTLE gain. With the statistical eye off, it maximizes the worst-case (peak-distortion) eye height of the pulse response at the slicer.</li>
                 </ul>`
         },
         eye_rx_equalization: {
@@ -1779,7 +1779,8 @@
                 <p>The limits apply to the reference receiver only. Implementations can use different limits.</p>
                 <h4>Results</h4>
                 <ul>
-                    <li>The best settings maximize the worst-case (peak-distortion) eye height of the pulse response at the slicer.</li>
+                    <li>The best TX preset and CTLE gain maximize the statistical eye height times width at the target BER (PCIe 8.5.1.3.2). Every combination is ranked on a coarse grid, the best few again on the full one. With the statistical eye off, they maximize the worst-case (peak-distortion) eye height of the pulse response at the slicer.</li>
+                    <li>The DFE taps of each combination cancel the post-cursors at its peak-distortion sample point.</li>
                     <li>The eye diagram and its metrics show the slicer signal (after the CTLE and DFE), with the eye height at the pins listed for comparison.</li>
                     <li>The pulse response view shows the equalized pulse with its cursors, the DFE taps marked.</li>
                 </ul>`
@@ -1794,7 +1795,7 @@
                     <li>Boundaries near an arriving edge (where the jitter or unequal rise and fall times matter) are evaluated exactly over the bits each transition depends on; the other bits add their pulse response cursors independently.</li>
                     <li>Jitter: per edge, Gaussian Rj with the PW Rj times 0.707, dual Dirac &plusmn;DjDD/2 and &plusmn;PW DDj/4 (the TX jitter split).</li>
                     <li>AC coupling adds its baseline wander as a Gaussian.</li>
-                    <li>The TX preset, CTLE gain and DFE taps are those of the pattern simulation (chosen by the peak-distortion eye).</li>
+                    <li>The automatic TX preset and CTLE gain are chosen by this eye's height times width (see RX equalization); the time-domain eye uses the same settings.</li>
                 </ul>
                 <h4>Results</h4>
                 <ul>

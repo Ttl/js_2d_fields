@@ -18,7 +18,7 @@ import { legMean, edgeSpectrum, edgeValue, buildStimulus } from './stimulus.js';
 import { ctleOf, pdaEye, dfeTap, PCIE_PRESETS, firFromPresetDb, presetDbFromFir, boostDb } from './eq.js';
 import { makeTransfer, dcSolve } from './network.js';
 import { jitterPerEdge, jitterActive } from './jitter.js';
-import { statEye } from './stat_eye.js';
+import { statEye, statEyeRank } from './stat_eye.js';
 import { smoothSize } from './fft.js';
 import { fmtHz } from './channel_grid.js';
 import { lineEstimates, reflectionTrips, taper, deriveTraces, firstOrder, slowSplit, packOutput,
@@ -305,7 +305,8 @@ function patternSim(ctx, dt0) {
     }
 
     // Receiver and transmitter equalization: choose the TX preset and the CTLE gain
-    // (automatic settings) by the peak-distortion eye of the pulse response.
+    // (automatic settings) by the statistical eye height times width (PCIe 8.5.1.3.2), or by
+    // the peak-distortion eye height of the pulse response without the statistical eye.
     const eq = ctx.cfg.rxEq || {}, txEq = ctx.cfg.txEq || {};
     const dfeTaps = Math.max(0, Math.round(eq.dfeTaps || 0));
     // Tap magnitude limits of the DFE taps in order, V or { rel } of the cursor; missing ones
@@ -319,17 +320,23 @@ function patternSim(ctx, dt0) {
         ? Object.entries(PCIE_PRESETS).filter(([name]) => !txEq.presets || txEq.presets.includes(name))
             .map(([name, [ps, de]]) => ({ name, fir: firFromPresetDb(ps, de) }))
         : [{ name: txEq.name || null, fir: stim.fir || [0, 1, 0] }];
-    let choice = null;
+    let choice = null, search = null;
     const eqActive = !!eq.ctle || dfeTaps > 0 || txEq.auto;
     if (eqActive) {
+        const cands = [];
         for (const adc of ctleCands) {
             const C = adc === null ? null : ctleOf(eq.ctle, adc);
             const steps = mainSteps(ctx, resp.main, C);
             for (const fc of firCands) {
                 const q = pulseResponse(stim, steps, spb, fc.fir);
-                const pda = pdaEye(q, spb, dfeTaps, dfeLimits);
-                if (!choice || pda.height > choice.pda.height) choice = { adc, C, steps, fir: fc.fir, firName: fc.name, q, pda };
+                cands.push({ adc, C, steps, fir: fc.fir, firName: fc.name, q, pda: pdaEye(q, spb, dfeTaps, dfeLimits) });
             }
+        }
+        if (ctx.cfg.statEye && cands.length > 1) {
+            search = statEyeSearch(ctx, cands, { stim, spb, dt, split, dfeTaps, dfeLimits });
+            choice = search.best;
+        } else {
+            for (const c of cands) if (!choice || c.pda.height > choice.pda.height) choice = c;
         }
     }
     let st = stim;
@@ -446,14 +453,8 @@ function patternSim(ctx, dt0) {
         if (dfeTaps > 0) {
             slicer = Float64Array.from(slicer);
             const d = (m) => 2 * stim.bits[((m % nb) + nb) % nb] - 1;
-            const h = Array.from({ length: dfeTaps }, (_, k) => {
-                const i = choice.pda.n0 + (k + 1) * spb;
-                return dfeTap(i < choice.q.length ? choice.q[i] : 0, k + 1, dfeLimits, choice.q[choice.pda.n0]);
-            });
-            choice.dfeLimited = h.map((x, k) => {
-                const i = choice.pda.n0 + (k + 1) * spb;
-                return i < choice.q.length && Math.abs(choice.q[i] - x) > 1e-15;
-            });
+            const { h, limited } = dfeTapsOf(choice.q, choice.pda.n0, spb, dfeTaps, dfeLimits);
+            choice.dfeLimited = limited;
             for (let m = 0; m < nb; m++) {
                 let fb = 0;
                 for (let k = 0; k < dfeTaps; k++) fb += h[k] * d(m - 1 - k);
@@ -464,7 +465,7 @@ function patternSim(ctx, dt0) {
         }
         if (eqTrace || dfeTaps > 0) full.rxEq = slicer;
     }
-    const stat = ctx.cfg.statEye ? statEyeOf(ctx, { resp, choice, st, spb, dt, split, adcLin, fir: choice ? choice.fir : (st.fir || [0, 1, 0]) }) : null;
+    const stat = ctx.cfg.statEye ? statEyeOf(ctx, { resp, choice, stim, spb, dt, split, fir: choice ? choice.fir : (st.fir || [0, 1, 0]) }) : null;
     const eye = choice
         ? eyeAnalysis(slicer, dt, ui, spb, nb, { centre, bits: stim.bits, crossings: dfeTaps === 0 })
         : eyeAnalysis(main, dt, ui, spb, nb);
@@ -503,6 +504,13 @@ function patternSim(ctx, dt0) {
         if (choice.dfe) eqMetrics.push({ label: 'DFE taps', value: choice.dfe.map((x, k) => fmtV(x) + (choice.dfeLimited[k] ? ' (at its limit)' : '')).join(', '),
             note: 'ideal decisions; each tap the post-cursor at the sampling point, within its limit' });
         eqMetrics.push({ label: 'Pulse-response eye estimate', value: fmtV(choice.pda.height), note: 'peak distortion: main cursor minus the residual ISI, worst case' });
+        if (search) {
+            const name = (c) => [c.firName, c.adc !== null ? `${c.adc} dB` : null].filter(Boolean).join(' / ');
+            const r = choice.stat, same = search.pdaBest === choice;
+            eqMetrics.push({ label: 'Equalization objective', value: r.height * r.width > 0 ? `EH x EW = ${fmtV(r.height)} x ${r.width.toFixed(3)} UI` : 'all eyes closed: peak distortion',
+                note: `statistical eye height times width at the target BER over ${search.count} TX preset / CTLE combinations`
+                    + (same ? '; the peak-distortion estimate picks the same' : `; the peak-distortion estimate would pick ${name(search.pdaBest)}`) });
+        }
     }
 
     // The shown waveform: the first bits of the period.
@@ -525,6 +533,7 @@ function patternSim(ctx, dt0) {
         res.statEye = stat.out;
         metrics.list.push(...stat.metrics);
     }
+    if (search) res.eqSearch = { quick: search.quick, full: search.full };
     if (choice) {
         res.pulse = pulseOutput(choice, dt, spb, dfeTaps, nLead);
         res.eqChoice = { firName: choice.firName, fir: choice.fir, adc: choice.adc, pdaHeight: choice.pda.height, dfe: choice.dfe || [] };
@@ -536,13 +545,19 @@ function patternSim(ctx, dt0) {
     return res;
 }
 
-// Statistical eye at the slicer (or the receiver without equalization): the transition
-// responses of the main signal through the chosen CTLE, the chosen FIR and DFE taps, the
-// transmitter jitter, the slow coupling modes as baseline wander (stat_eye.js).
-function statEyeOf(ctx, { resp, choice, st, spb, dt, split, adcLin, fir }) {
+// DFE taps at sample index n0 of the pulse response q: each post-cursor within its limit.
+function dfeTapsOf(q, n0, spb, taps, limits) {
+    const at = (k) => { const i = n0 + k * spb; return i < q.length ? q[i] : 0; };
+    const h = Array.from({ length: taps }, (_, k) => dfeTap(at(k + 1), k + 1, limits, q[n0]));
+    return { h, limited: h.map((x, k) => Math.abs(at(k + 1) - x) > 1e-15) };
+}
+
+// Statistical eye inputs of a slicer signal: the main signal's step responses through the
+// CTLE (steps, per (leg, edge)), CTLE DC gain adcLin, FIR taps, sample index n0 and DFE taps,
+// the transmitter jitter, the slow coupling modes as baseline wander.
+function statEyeParams(ctx, { steps, adcLin, fir, n0, dfe, stim, split, spb, dt }) {
     const { net, diff, out } = ctx;
-    const nl = net.nl, half = 0.5 * st.dV;
-    const steps = choice ? choice.steps : mainSteps(ctx, resp.main, null);
+    const nl = net.nl, half = 0.5 * stim.dV;
     const N = steps[0].length;
     const gUp = new Float64Array(N), gDn = new Float64Array(N);
     for (let n = 0; n < N; n++) {
@@ -550,10 +565,8 @@ function statEyeOf(ctx, { resp, choice, st, spb, dt, split, adcLin, fir }) {
         gUp[n] = half * (diff ? steps[0][n] - steps[3][n] : steps[0][n]);
         gDn[n] = half * (diff ? steps[1][n] - steps[2][n] : steps[1][n]);
     }
-    let n0, dfe = [];
-    if (choice) { n0 = choice.pda.n0; dfe = choice.dfe || []; } else n0 = pdaEye(pulseResponse(st, steps, spb, fir), spb).n0;
     // Threshold: the main signal at the legs' mid levels (zero-mean data).
-    const mid = st.legs.map(() => 0.5 * (ctx.cfg.stimulus.vLow + ctx.cfg.stimulus.vHigh));
+    const mid = stim.legs.map(() => 0.5 * (ctx.cfg.stimulus.vLow + ctx.cfg.stimulus.vHigh));
     const xdc = dcSolve(net, ctx.Gdc, mid);
     const vmid = adcLin * (diff ? xdc[out.nodes[0]] - xdc[out.nodes[1]] : xdc[out.nodes[0]]);
     // Baseline wander of independent bits through the slow modes: each is a low-pass of the
@@ -561,30 +574,86 @@ function statEyeOf(ctx, { resp, choice, st, spb, dt, split, adcLin, fir }) {
     const rs = split.slowRes.map(sm => {
         let r = 0;
         for (let l = 0; l < nl; l++) r += (l === 0 ? 1 : -1) * (diff ? sm.r[l] - sm.r[nl + l] : sm.r[l]);
-        return { r: adcLin * half * r, a: Math.exp(-st.ui / sm.lambda) };
+        return { r: adcLin * half * r, a: Math.exp(-stim.ui / sm.lambda) };
     });
     let varSlow = 0;
     for (const x of rs) for (const y of rs) varSlow += x.r * y.r * (1 - x.a) * (1 - y.a) / (1 - x.a * y.a);
-    const fsum = fir[0] + fir[1] + fir[2];
-    const sigmaSlow = Math.abs(fsum) * Math.sqrt(Math.max(0, varSlow));
+    const sigmaSlow = Math.abs(fir[0] + fir[1] + fir[2]) * Math.sqrt(Math.max(0, varSlow));
     const j = ctx.cfg.stimulus.jitter;
+    return { gUp, gDn, fir, spb, dt, n0, dfe,
+        jitter: jitterActive(j) && !j.times ? j : null, vmid, sigmaSlow };
+}
+
+// Grids of the statistical eye: the reported one, and the coarse one that ranks the
+// equalization candidates.
+const STAT_QUICK = { nV: 513, steps: 6 };
+const statGrid = (cfg) => ({ phases: cfg.phases || 64, nV: cfg.nV || 2049 });
+// Candidates the full grid re-evaluates after the coarse ranking: those within 20 % of the
+// coarse best (its error near ties is ~10 %), at least 2, at most 6.
+const STAT_REFINE = { within: 0.8, min: 2, max: 6 };
+
+// Choice of TX preset and CTLE gain by the statistical eye height times width at the target
+// BER, each candidate with its own DFE taps at its peak-distortion sample point. All are
+// ranked on a coarse grid, the best few again on the full one; closed eyes rank by the
+// peak-distortion height. Returns { best (candidate, best.stat its full statistical eye),
+// pdaBest (the peak-distortion choice), quick, full (rows of the rankings) }.
+function statEyeSearch(ctx, cands, { stim, spb, dt, split, dfeTaps, dfeLimits }) {
+    const ber = ctx.cfg.statEye.ber || 1e-12;
+    const params = (c) => statEyeParams(ctx, { steps: c.steps, adcLin: c.C ? c.C(0)[0] : 1, fir: c.fir, n0: c.pda.n0,
+        dfe: dfeTapsOf(c.q, c.pda.n0, spb, dfeTaps, dfeLimits).h, stim, split, spb, dt });
+    const full = statGrid(ctx.cfg.statEye);
+    const better = (a, b) => (a.product !== b.product ? a.product > b.product : a.c.pda.height > b.c.pda.height);
+    const quick = cands.map(c => {
+        const r = statEyeRank(params(c), { ber, ...STAT_QUICK });
+        return { c, r, product: r.height * r.width };
+    });
+    quick.sort((a, b) => (better(a, b) ? -1 : better(b, a) ? 1 : 0));
+    let best = null;
+    const ranked = [];
+    const nRefine = ctx.cfg.statEye.refine || Math.min(STAT_REFINE.max, Math.max(STAT_REFINE.min,
+        quick.filter(q => q.product >= STAT_REFINE.within * quick[0].product && q.product > 0).length));
+    for (const q of quick.slice(0, nRefine)) {
+        const p = params(q.c), r = statEye(p, { ber, ...full });
+        r.sigmaSlow = p.sigmaSlow;
+        const e = { c: q.c, r, product: r.height * r.width };
+        ranked.push(e);
+        if (!best || better(e, best)) best = e;
+    }
+    best.c.stat = best.r;
+    const row = (e) => ({ firName: e.c.firName, adc: e.c.adc, height: e.r.height, width: e.r.width, pda: e.c.pda.height });
+    let pdaBest = cands[0];
+    for (const c of cands) if (c.pda.height > pdaBest.pda.height) pdaBest = c;
+    return { best: best.c, pdaBest, count: cands.length, quick: quick.map(row), full: ranked.map(row) };
+}
+
+// Statistical eye at the slicer (or the receiver without equalization) of the chosen
+// equalization (stat_eye.js), and its metrics.
+function statEyeOf(ctx, { resp, choice, stim, spb, dt, split, fir }) {
     const cfg = ctx.cfg.statEye;
     const ber = cfg.ber || 1e-12;
-    const r = statEye({ gUp, gDn, fir, spb, dt, n0, dfe, jitter: jitterActive(j) && !j.times ? j : null, vmid, sigmaSlow },
-        { ber, phases: cfg.phases || 64, nV: cfg.nV || 2049 });
+    let r = choice && choice.stat;
+    let sigmaSlow;
+    if (!r) {
+        const steps = choice ? choice.steps : mainSteps(ctx, resp.main, null);
+        const n0 = choice ? choice.pda.n0 : pdaEye(pulseResponse(stim, steps, spb, fir), spb).n0;
+        const p = statEyeParams(ctx, { steps, adcLin: choice && choice.C ? choice.C(0)[0] : 1, fir, n0,
+            dfe: choice ? choice.dfe || [] : [], stim, split, spb, dt });
+        sigmaSlow = p.sigmaSlow;
+        r = statEye(p, { ber, ...statGrid(cfg) });
+    } else sigmaSlow = r.sigmaSlow;
     const berTxt = berLabel(ber);
     const metrics = [];
     const off = r.width > 0 ? r.heightPhase - 0.5 * (r.widthLeft + r.widthRight) : r.heightPhase - r.centre;
     metrics.push({ label: `Statistical eye height (BER ${berTxt})`, value: r.height > 0 ? `${fmtV(r.height)} at ${off >= 0 ? '+' : ''}${off.toFixed(3)} UI` : 'closed',
         note: 'peak height within +-0.1 UI of the centre of the eye width, with the DFE taps of the sample point' });
-    metrics.push({ label: `Statistical eye width (BER ${berTxt})`, value: r.width > 0 ? `${fmtTime(r.width * st.ui)} (${r.width.toFixed(3)} UI)` : 'closed',
+    metrics.push({ label: `Statistical eye width (BER ${berTxt})`, value: r.width > 0 ? `${fmtTime(r.width * stim.ui)} (${r.width.toFixed(3)} UI)` : 'closed',
         note: 'at the zero-crossing line (the mid level)' });
     metrics.push({ label: 'Statistical eye height at the sample point', value: r.heightSample > 0 ? fmtV(r.heightSample) : 'closed',
         note: 'the DFE sampling point; independent random bits and the TX jitter tails' });
     metrics.push({ label: 'BER at the sample point', value: r.berSample < 1e-30 ? '< 1e-30' : r.berSample.toExponential(1),
         note: 'decision at the mid level' });
     if (sigmaSlow > 0) metrics.push({ label: 'Baseline wander (AC coupling)', value: `${fmtV(sigmaSlow)} rms`, note: 'independent random bits, in the statistical eye as a Gaussian' });
-    return { out: { ...r, ui: st.ui }, metrics };
+    return { out: { ...r, ui: stim.ui }, metrics };
 }
 
 function berLabel(b) {
