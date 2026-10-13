@@ -631,7 +631,7 @@ function jitteredClock(ctx, dt0) {
     for (let k = 1; k < n; k += 2) times[k] += (duty - 0.5) * P;
     const pcfg = { ...c, type: 'pattern', bitRate: 2 * c.clockFreq, bits, fir: null, jitter: { times } };
     const stim = buildStimulus({ ...pcfg, differential: ctx.diff });
-    const run = patternSim({ ...ctx, stim, cfg: { ...ctx.cfg, stimulus: pcfg, rxEq: null, txEq: null } }, dt0);
+    const run = patternSim({ ...ctx, stim, cfg: { ...ctx.cfg, stimulus: pcfg, rxEq: null, txEq: null, statEye: null } }, dt0);
     let peak = 0;
     for (const x of rand) peak = Math.max(peak, Math.abs(x));
     // Rising crossings of the receiver at the eye threshold: time interval error against

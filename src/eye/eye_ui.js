@@ -90,6 +90,8 @@ const EYE_FIELDS = [
     ['eye_fp3', 'eye-fp3', 'eye', 'freq'],
     ['eye_dfe', 'eye-dfe', 'eye', 'num'],
     ['eye_dfelim', 'eye-dfelim', 'text'],
+    ['eye_stat', 'eye-stat', 'chk'],
+    ['eye_ber', 'eye-ber', 'eye', 'num'],
     ['eye_spe', 'eye-spe', 'eye', 'num'],
     ['eye_span', 'eye-span', 'eye', 'time'],
 ];
@@ -110,6 +112,7 @@ const EYE_DEFAULTS = {
     ...Object.fromEntries(['tx', 'rx'].flatMap(x => [[`eye_pkg${x}`, 'none'], [`eye_pkg${x}_cpin`, 0.25e-12], [`eye_pkg${x}_z0`, 40],
         [`eye_pkg${x}_delay`, 150e-12], [`eye_pkg${x}_lossc`, 0.5], [`eye_pkg${x}_lossd`, 0], [`eye_pkg${x}_r`, 1], [`eye_pkg${x}_l`, 1e-9]])),
     eye_ctle: 'off', eye_adc: -6, eye_adcmin: -12, eye_adcmax: -6, eye_fp1: 2e9, eye_fp2: 8e9, eye_ctleorder: '1', eye_fz1: 4.5e8, eye_fp3: 28e9, eye_dfe: 0, eye_dfelim: '',
+    eye_stat: 1, eye_ber: 1e-12,
 };
 
 // Whether a setting applies to the selected options; links leave out the others.
@@ -136,6 +139,8 @@ function eyeKeyActive(settings, key) {
         case 'eye_fp1': return v('eye_stim') === 'pattern' && v('eye_ctle') !== 'off' && v('eye_ctleorder') !== '2';
         case 'eye_fz1': case 'eye_fp3': return v('eye_stim') === 'pattern' && v('eye_ctle') !== 'off' && v('eye_ctleorder') === '2';
         case 'eye_dfelim': return v('eye_stim') === 'pattern' && v('eye_dfe') > 0;
+        case 'eye_stat': return v('eye_stim') === 'pattern';
+        case 'eye_ber': return v('eye_stim') === 'pattern' && !!v('eye_stat');
         case 'eye_ctx': return !!v('eye_tx_ac');
         case 'eye_crx': return !!v('eye_rx_ac');
         case 'eye_rt': return ['vtt', 'r', 'rc'].includes(v('eye_term'));
@@ -428,6 +433,12 @@ function readConfig() {
             if ((rxEq.ctle.adcDb ?? rxEq.ctle.adcMax) > 0) throw new Error('CTLE: the DC gain is at most 0 dB (the high-frequency gain is 0 dB).');
         }
     }
+    let statEye = null;
+    if (type === 'pattern' && $('eye-stat').checked) {
+        const ber = parseQuantity('eye-ber', 'num', 'Target BER');
+        if (!(ber >= 1e-30 && ber <= 1e-2)) throw new Error('Target BER: between 1e-30 and 1e-2.');
+        statEye = { ber };
+    }
     if (network.tx.ac) network.tx.c = parseQuantity('eye-ctx', 'cap', 'TX coupling capacitor');
     if (network.rx.ac) network.rx.c = parseQuantity('eye-crx', 'cap', 'RX coupling capacitor');
     const spe = parseQuantity('eye-spe', 'num', 'Samples per edge');
@@ -436,7 +447,7 @@ function readConfig() {
     const length = parseQuantity('eye-length', 'len', 'Line length');
     if (!(length > 0)) throw new Error('Line length must be positive.');
     return {
-        length, network, stimulus, samplesPerEdge: spe, span: span || 0, txEq, rxEq,
+        length, network, stimulus, samplesPerEdge: spe, span: span || 0, txEq, rxEq, statEye,
         causal: !!($('chk_causal_materials') && $('chk_causal_materials').checked),
     };
 }
@@ -466,6 +477,8 @@ function updateVisibility() {
     show('eye-txeq-set', type === 'pattern');
     show('eye-jitter-set', type === 'pattern' || (type === 'clock' && $('eye-clock-mode').value === 'steady'));
     show('eye-rxeq-set', type === 'pattern');
+    show('eye-stat-set', type === 'pattern');
+    show('eye-row-ber', $('eye-stat').checked);
     const txeq = $('eye-txeq').value, ctle = $('eye-ctle').value;
     for (const id of ['eye-row-deemph', 'eye-row-preshoot']) show(id, txeq === 'db');
     show('eye-row-adc', ctle === 'fixed');
@@ -517,8 +530,10 @@ function updateVisibility() {
     const hasEye = type === 'clock' || type === 'pattern';
     $('eye-view').querySelector('option[value="eye"]').disabled = !hasEye;
     if (!hasEye && $('eye-view').value === 'eye') $('eye-view').value = 'wave';
-    $('eye-view').querySelector('option[value="pulse"]').disabled = type !== 'pattern';
-    if (type !== 'pattern' && $('eye-view').value === 'pulse') $('eye-view').value = 'wave';
+    for (const v of ['pulse', 'stat']) {
+        $('eye-view').querySelector(`option[value="${v}"]`).disabled = type !== 'pattern';
+        if (type !== 'pattern' && $('eye-view').value === v) $('eye-view').value = 'wave';
+    }
     const wg = app.isSelfReferenced();
     $('btn-eye-run').disabled = wg || busy;
     setNotice(wg ? ['Time-domain simulation needs a TEM or quasi-TEM line: not available for a waveguide.'] : null, 'eye-notice');
@@ -963,6 +978,58 @@ function drawMetrics(res) {
     el.innerHTML = `<div class="eye-metric-grid">${rows}</div><div class="eye-info">${info}</div>`;
 }
 
+// Statistical eye: log10 probability density over 2 UI (the eye centre at 1 UI), BER
+// contours by decade down to the target, the eye height and width at the target marked.
+function drawStatEye(res) {
+    const Plotly = getPlotly();
+    const s = res.statEye;
+    if (!s) {
+        Plotly.newPlot('eye-plot', [], { ...layoutBase('UI', 'Voltage (V)'), annotations: [{ text: 'The statistical eye is computed for bit patterns with "Statistical eye: Compute" on.',
+            showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: '#888' } }] }, { responsive: true });
+        return;
+    }
+    const { x, y, density, logBer } = s.plot;
+    const lt = Math.log10(s.ber), levels = [];
+    for (let e = -3; e > lt + 1e-9; e -= 3) levels.push(e);
+    levels.push(lt);
+    let dMin = Infinity;
+    for (const row of density) for (const d of row) if (d !== null) dMin = Math.min(dMin, d);
+    const traces = [{
+        type: 'heatmap', x, y, z: density, showscale: false, hoverongaps: false, zsmooth: false, zmin: Math.max(dMin, lt - 4), zmax: 0,
+        colorscale: [[0, '#1d2f6f'], [0.35, '#2c7fb8'], [0.7, '#f2c14e'], [1, '#ffffff']],
+        hovertemplate: '%{x:.3f} UI<br>%{y:.4g} V<br>log10 p %{z:.1f}<extra></extra>', name: 'Density',
+    }];
+    // One contour trace per level: Plotly spaces contour levels evenly.
+    const contour = (r, e, color, width, dash, name) => ({
+        type: 'contour', x: r.plot.x, y: r.plot.y, z: r.plot.logBer, showscale: false, hoverinfo: 'skip', name,
+        contours: { coloring: 'none', start: e, end: e, size: 1, showlabels: !dash, labelfont: { color, size: 9 } },
+        line: { color, width, dash: dash ? 'dot' : 'solid', smoothing: 0.6 },
+    });
+    for (const e of levels) traces.push(contour(s, e, e === lt ? '#ffffff' : '#9fb7d9', e === lt ? 2 : 1, false, `BER 1e${Math.round(e)}`));
+    if (frozen && frozen.statEye) traces.push(contour(frozen, Math.log10(frozen.statEye.ber), '#ddd', 1.5, true, 'Frozen'));
+    const layout = layoutBase(`Time (UI = ${fmtT(s.ui)})`, 'Voltage (V)');
+    layout.xaxis.range = [0, 2];
+    layout.yaxis.range = [y[0], y[y.length - 1]];
+    layout.showlegend = false;
+    layout.shapes = [];
+    layout.annotations = [];
+    const mark = (open) => ({ color: open ? '#4ade80' : '#f87171', width: 2 });
+    const cAt = 1 - s.centre;
+    if (s.height > 0 && isFinite(s.heightPhase)) {
+        const o = s.open.reduce((a, b) => Math.abs(b.u - s.heightPhase) < Math.abs(a.u - s.heightPhase) ? b : a);
+        const xh = cAt + s.heightPhase;
+        layout.shapes.push({ type: 'line', x0: xh, x1: xh, y0: o.bottom, y1: o.top, line: mark(true) });
+        layout.annotations.push({ x: xh, y: o.top, text: 'EH', showarrow: false, yanchor: 'bottom', font: { color: '#4ade80', size: 10 } });
+    }
+    if (s.width > 0) {
+        layout.shapes.push({ type: 'line', x0: cAt + s.widthLeft, x1: cAt + s.widthRight, y0: s.thr, y1: s.thr, line: mark(true) });
+        layout.annotations.push({ x: cAt + s.widthRight, y: s.thr, text: 'EW', showarrow: false, xanchor: 'left', font: { color: '#4ade80', size: 10 } });
+    } else {
+        layout.annotations.push({ x: 1, y: s.thr, text: 'closed', showarrow: false, font: { color: '#f87171', size: 11 } });
+    }
+    Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
+}
+
 // Pulse response at the slicer: the equalized response to one bit, in UI from its main
 // cursor, the cursors marked (DFE taps filled).
 function drawPulse(res) {
@@ -1001,6 +1068,7 @@ function draw() {
     if (!lastResult) return;
     if (view === 'eye' && (lastResult.eye || lastResult.eyeHist)) drawEyeDiagram(lastResult);
     else if (view === 'pulse') drawPulse(lastResult);
+    else if (view === 'stat') drawStatEye(lastResult);
     else if (view === 'spectrum') drawSpectrum(lastResult);
     else drawWave(lastResult);
     drawMetrics(lastResult);
@@ -1046,7 +1114,7 @@ const pcie = (rate, tr, [rj, djdd, pwrj, pwdj], extra) => ({
     'eye-vlow': '0 V', 'eye-vhigh': '0.804 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
     'eye-edge-def': '10-90', 'eye-edge-shape': 'gauss',
     'eye-rj': `${rj} ps`, 'eye-djdd': `${djdd} ps`, 'eye-pwrj': `${pwrj} ps`, 'eye-pwdj': `${pwdj} ps`,
-    'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50',
+    'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', 'eye-stat': true, 'eye-ber': '1e-12',
     ...packageInputs('tx', 'pcie8Tx'), ...packageInputs('rx', 'pcie8Rx'), ...extra,
 });
 const pcieEq = (adcMin, adcMax, fp1, fp2, dfe, dfelim) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',

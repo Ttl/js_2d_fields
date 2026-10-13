@@ -775,6 +775,7 @@
             <select id="eye-view">
                 <option value="wave">Waveform</option>
                 <option value="eye">Eye diagram</option>
+                <option value="stat">Statistical eye</option>
                 <option value="pulse">Pulse response</option>
                 <option value="spectrum">Channel response</option>
                 <option value="package">Package S-parameters</option>
@@ -1011,6 +1012,11 @@
                     <div class="eye-row" id="eye-row-fp3"><label for="eye-fp3">Poles 3 and 4</label><input type="text" id="eye-fp3" value="28 GHz"></div>
                     <div class="eye-row"><label for="eye-dfe">DFE taps</label><input type="text" id="eye-dfe" value="0"></div>
                     <div class="eye-row" id="eye-row-dfelim"><label for="eye-dfelim">DFE tap limits</label><input type="text" id="eye-dfelim" value="" placeholder="none"></div>
+                </fieldset>
+                <fieldset id="eye-stat-set">
+                    <legend>Statistical eye <span class="help-icon" onclick="showHelpModal('eye_stat', event)">?</span></legend>
+                    <div class="eye-row"><label class="checkbox-label"><input type="checkbox" id="eye-stat" checked> Compute</label></div>
+                    <div class="eye-row" id="eye-row-ber"><label for="eye-ber">Target BER</label><input type="text" id="eye-ber" value="1e-12"></div>
                 </fieldset>
                 <fieldset>
                     <legend>Simulation <span class="help-icon" onclick="showHelpModal('eye_simulation', event)">?</span></legend>
@@ -1777,6 +1783,27 @@
                     <li>The eye diagram and its metrics show the slicer signal (after the CTLE and DFE), with the eye height at the pins listed for comparison.</li>
                     <li>The pulse response view shows the equalized pulse with its cursors, the DFE taps marked.</li>
                 </ul>`
+        },
+        eye_stat: {
+            title: 'Statistical eye (bit patterns)',
+            wide: true,
+            body: `<p>The eye at a target bit error ratio, computed from the step responses rather than a simulated pattern: every bit sequence (independent, equiprobable bits) and the TX jitter distribution of every bit boundary, including the tails a pattern run never reaches. This is the PCIe channel tolerancing eye (8.5.1.3).</p>
+                <h4>Method</h4>
+                <ul>
+                    <li>The slicer signal at a sampling phase is a sum over bit boundaries of the FIR transition times its step response (through the CTLE), each boundary moved by its own jitter, less the DFE taps times the previous bits.</li>
+                    <li>Boundaries near an arriving edge (where the jitter or unequal rise and fall times matter) are evaluated exactly over the bits each transition depends on; the other bits add their pulse response cursors independently.</li>
+                    <li>Jitter: per edge, Gaussian Rj with the PW Rj times 0.707, dual Dirac &plusmn;DjDD/2 and &plusmn;PW DDj/4 (the TX jitter split).</li>
+                    <li>AC coupling adds its baseline wander as a Gaussian.</li>
+                    <li>The TX preset, CTLE gain and DFE taps are those of the pattern simulation (chosen by the peak-distortion eye).</li>
+                </ul>
+                <h4>Results</h4>
+                <ul>
+                    <li><b>BER</b> at a decision level and phase: half the probability that a one falls below it plus half that a zero lies above it.</li>
+                    <li><b>Eye width</b>: the span of sampling phases whose BER at the mid level (the zero-crossing line) is below the target.</li>
+                    <li><b>Eye height</b>: the vertical opening at the target BER, its peak within &plusmn;0.1 UI of the centre of the eye width (PCIe 8 and 16 GT/s sample point range); also listed at the DFE sample point.</li>
+                    <li>The view shows the probability density of the slicer signal with BER contours from 1e-3 down to the target.</li>
+                </ul>
+                <p>Not included: RX noise and crosstalk.</p>`
         },
         eye_termination: {
             title: 'RX termination',

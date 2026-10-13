@@ -17,7 +17,8 @@
 import { legMean, edgeSpectrum, edgeValue, buildStimulus } from './stimulus.js';
 import { ctleOf, pdaEye, dfeTap, PCIE_PRESETS, firFromPresetDb, presetDbFromFir, boostDb } from './eq.js';
 import { makeTransfer, dcSolve } from './network.js';
-import { jitterPerEdge } from './jitter.js';
+import { jitterPerEdge, jitterActive } from './jitter.js';
+import { statEye } from './stat_eye.js';
 import { smoothSize } from './fft.js';
 import { fmtHz } from './channel_grid.js';
 import { lineEstimates, reflectionTrips, taper, deriveTraces, firstOrder, slowSplit, packOutput,
@@ -463,6 +464,7 @@ function patternSim(ctx, dt0) {
         }
         if (eqTrace || dfeTaps > 0) full.rxEq = slicer;
     }
+    const stat = ctx.cfg.statEye ? statEyeOf(ctx, { resp, choice, st, spb, dt, split, adcLin, fir: choice ? choice.fir : (st.fir || [0, 1, 0]) }) : null;
     const eye = choice
         ? eyeAnalysis(slicer, dt, ui, spb, nb, { centre, bits: stim.bits, crossings: dfeTaps === 0 })
         : eyeAnalysis(main, dt, ui, spb, nb);
@@ -519,6 +521,10 @@ function patternSim(ctx, dt0) {
         eyeHist: eye.hist, eyeInfo: eye.info,
         eyeAt: choice && (eqTrace || dfeTaps > 0) ? 'slicer' : 'pins',
     };
+    if (stat) {
+        res.statEye = stat.out;
+        metrics.list.push(...stat.metrics);
+    }
     if (choice) {
         res.pulse = pulseOutput(choice, dt, spb, dfeTaps, nLead);
         res.eqChoice = { firName: choice.firName, fir: choice.fir, adc: choice.adc, pdaHeight: choice.pda.height, dfe: choice.dfe || [] };
@@ -528,6 +534,62 @@ function patternSim(ctx, dt0) {
     // before the result is posted).
     res.eyeSignal = choice ? slicer : main;
     return res;
+}
+
+// Statistical eye at the slicer (or the receiver without equalization): the transition
+// responses of the main signal through the chosen CTLE, the chosen FIR and DFE taps, the
+// transmitter jitter, the slow coupling modes as baseline wander (stat_eye.js).
+function statEyeOf(ctx, { resp, choice, st, spb, dt, split, adcLin, fir }) {
+    const { net, diff, out } = ctx;
+    const nl = net.nl, half = 0.5 * st.dV;
+    const steps = choice ? choice.steps : mainSteps(ctx, resp.main, null);
+    const N = steps[0].length;
+    const gUp = new Float64Array(N), gDn = new Float64Array(N);
+    for (let n = 0; n < N; n++) {
+        // Up: P rises (rise shape) and N falls (fall shape); down the opposite.
+        gUp[n] = half * (diff ? steps[0][n] - steps[3][n] : steps[0][n]);
+        gDn[n] = half * (diff ? steps[1][n] - steps[2][n] : steps[1][n]);
+    }
+    let n0, dfe = [];
+    if (choice) { n0 = choice.pda.n0; dfe = choice.dfe || []; } else n0 = pdaEye(pulseResponse(st, steps, spb, fir), spb).n0;
+    // Threshold: the main signal at the legs' mid levels (zero-mean data).
+    const mid = st.legs.map(() => 0.5 * (ctx.cfg.stimulus.vLow + ctx.cfg.stimulus.vHigh));
+    const xdc = dcSolve(net, ctx.Gdc, mid);
+    const vmid = adcLin * (diff ? xdc[out.nodes[0]] - xdc[out.nodes[1]] : xdc[out.nodes[0]]);
+    // Baseline wander of independent bits through the slow modes: each is a low-pass of the
+    // FIR levels with a = exp(-UI / lambda), variance (sum c)^2 (1 - a_i)(1 - a_j) / (1 - a_i a_j).
+    const rs = split.slowRes.map(sm => {
+        let r = 0;
+        for (let l = 0; l < nl; l++) r += (l === 0 ? 1 : -1) * (diff ? sm.r[l] - sm.r[nl + l] : sm.r[l]);
+        return { r: adcLin * half * r, a: Math.exp(-st.ui / sm.lambda) };
+    });
+    let varSlow = 0;
+    for (const x of rs) for (const y of rs) varSlow += x.r * y.r * (1 - x.a) * (1 - y.a) / (1 - x.a * y.a);
+    const fsum = fir[0] + fir[1] + fir[2];
+    const sigmaSlow = Math.abs(fsum) * Math.sqrt(Math.max(0, varSlow));
+    const j = ctx.cfg.stimulus.jitter;
+    const cfg = ctx.cfg.statEye;
+    const ber = cfg.ber || 1e-12;
+    const r = statEye({ gUp, gDn, fir, spb, dt, n0, dfe, jitter: jitterActive(j) && !j.times ? j : null, vmid, sigmaSlow },
+        { ber, phases: cfg.phases || 64, nV: cfg.nV || 2049 });
+    const berTxt = berLabel(ber);
+    const metrics = [];
+    const off = r.width > 0 ? r.heightPhase - 0.5 * (r.widthLeft + r.widthRight) : r.heightPhase - r.centre;
+    metrics.push({ label: `Statistical eye height (BER ${berTxt})`, value: r.height > 0 ? `${fmtV(r.height)} at ${off >= 0 ? '+' : ''}${off.toFixed(3)} UI` : 'closed',
+        note: 'peak height within +-0.1 UI of the centre of the eye width, with the DFE taps of the sample point' });
+    metrics.push({ label: `Statistical eye width (BER ${berTxt})`, value: r.width > 0 ? `${fmtTime(r.width * st.ui)} (${r.width.toFixed(3)} UI)` : 'closed',
+        note: 'at the zero-crossing line (the mid level)' });
+    metrics.push({ label: 'Statistical eye height at the sample point', value: r.heightSample > 0 ? fmtV(r.heightSample) : 'closed',
+        note: 'the DFE sampling point; independent random bits and the TX jitter tails' });
+    metrics.push({ label: 'BER at the sample point', value: r.berSample < 1e-30 ? '< 1e-30' : r.berSample.toExponential(1),
+        note: 'decision at the mid level' });
+    if (sigmaSlow > 0) metrics.push({ label: 'Baseline wander (AC coupling)', value: `${fmtV(sigmaSlow)} rms`, note: 'independent random bits, in the statistical eye as a Gaussian' });
+    return { out: { ...r, ui: st.ui }, metrics };
+}
+
+function berLabel(b) {
+    const e = Math.log10(b);
+    return Math.abs(e - Math.round(e)) < 1e-9 ? `1e${Math.round(e)}` : b.toExponential(1);
 }
 
 // Eye of one period of the main receiver trace: crossings at the threshold half way

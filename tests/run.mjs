@@ -52,6 +52,7 @@ const TIERS = {
         { file: 'tests/test_custom_geometry_equivalence.js', cost: 25 },
         { file: 'tests/test_dc_inductance.js', cost: 1 },
         { file: 'tests/test_eye_transient.mjs', cost: 1 },
+        { file: 'tests/test_stat_eye.mjs', cost: 14 },
     ],
     slow: [
         { file: 'tests/test_fullwave_correctness.js', cost: 98 },
