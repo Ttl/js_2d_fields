@@ -11,16 +11,20 @@
 //   o(t_n) = O'(0) n/N + p_n - p_0,  p = IFFT[O'(f) / (j w)] (no DC bin).
 //
 // Clock steady state: the periodic response is exact on the harmonic grid, one inverse
-// FFT over one period, any time constant included.
+// FFT over one period, any time constant included. With jitter, the clock runs through
+// the pattern engine over many cycles (jitteredClock).
 import { buildStimulus, legDerivSpectrum, legNetChange, legMean, sampleLeg, legValue, edgeSpectrum, requiredBandwidth } from './stimulus.js';
 import { makeRLGCEvaluator, fmtHz } from './channel_grid.js';
 import { buildNetwork, makeTransfer, dcMatrix, dcSolve, lumpedModes } from './network.js';
 import { smoothSize } from './fft.js';
 import { patternSim } from './pattern_sim.js';
+import { jitterActive, jitterPerEdge, boundaryJitter, Q_BER12 } from './jitter.js';
 
 const N_MAX = 1 << 21;
 const PLOT_BUCKETS = 6000;
 const CSV_MAX_ROWS = 100000;
+// Cycles of a jittered steady clock.
+const CLOCK_JITTER_CYCLES = 4096;
 
 // Delay, impedance and attenuation of the line modes at f (estimates for sizing).
 function lineEstimates(ev, f, len, diff) {
@@ -134,13 +138,16 @@ function simulateLink(table, cfg, fft) {
             ? 'The receiver has no DC path: its common-mode level is set by the receiver bias network, not modelled here (a 1 GOhm leak holds it at 0 V).'
             : 'The receiver has no DC path: its DC level is set by the receiver bias network, not modelled here (a 1 GOhm leak holds it at 0 V).');
     }
-    const res = stim.type === 'pattern' ? patternSim(ctx, dt0) : stim.steady ? steadyState(ctx, dt0) : transient(ctx, dt0);
+    const res = stim.type === 'pattern' ? patternSim(ctx, dt0)
+        : stim.steady ? (jitterActive(cfg.stimulus.jitter) ? jitteredClock(ctx, dt0) : steadyState(ctx, dt0))
+        : transient(ctx, dt0);
     res.differential = diff;
     // A current-mode driver's transfer is a transimpedance (V/A).
     res.currentDrive = net.current;
     res.stimType = stim.type;
     res.period = stim.period;
-    res.warnings = warnings;
+    delete res.eyeSignal;
+    res.warnings = [...new Set(warnings)];
     res.tau = est.modes.map(m => m.tau);
     res.fTop = fTop;
     res.fNeed = requiredBandwidth(cfg.stimulus);
@@ -605,6 +612,58 @@ function transientMetrics(t, traces, diff, stim, step, acCoupled, nFine) {
     if (i1 > i0) m.push({ label: 'Swing in the last period', value: fmtV(vmax - vmin) });
     if (isFinite(fall.t50)) m.push({ label: 'First high time (50 %)', value: fmtTime(fall.t50 - rise.t50) });
     return out;
+}
+
+// Steady clock with transmitter jitter: the clock as a periodic pattern of alternating
+// bits (UI = P / 2) over CLOCK_JITTER_CYCLES cycles in the pattern engine, each edge with
+// its own jitter draw and the falling ones moved by the duty cycle. The waveform and eye
+// are of that run; the clock metrics are of the clock without jitter.
+function jitteredClock(ctx, dt0) {
+    const nominal = steadyState(ctx, dt0);
+    const c = ctx.cfg.stimulus, P = 1 / c.clockFreq, n = 2 * CLOCK_JITTER_CYCLES;
+    const pe = jitterPerEdge(c.jitter), duty = c.duty ?? 0.5;
+    if (pe.dj / 2 + Q_BER12 * pe.rj >= 0.5 * Math.min(duty, 1 - duty) * P) {
+        throw new Error('The transmitter jitter at BER 1e-12 exceeds half of the high or low time.');
+    }
+    const bits = new Uint8Array(n);
+    for (let k = 0; k < n; k += 2) bits[k] = 1;
+    const rand = boundaryJitter(n, c.jitter), times = Float64Array.from(rand);
+    for (let k = 1; k < n; k += 2) times[k] += (duty - 0.5) * P;
+    const pcfg = { ...c, type: 'pattern', bitRate: 2 * c.clockFreq, bits, fir: null, jitter: { times } };
+    const stim = buildStimulus({ ...pcfg, differential: ctx.diff });
+    const run = patternSim({ ...ctx, stim, cfg: { ...ctx.cfg, stimulus: pcfg, rxEq: null, txEq: null } }, dt0);
+    let peak = 0;
+    for (const x of rand) peak = Math.max(peak, Math.abs(x));
+    // Rising crossings of the receiver at the eye threshold: time interval error against
+    // the ideal clock and period jitter.
+    const v = run.eyeSignal, M = v.length, dt = run.info.dt, thr = run.eyeInfo.thr;
+    const rise = [];
+    for (let i = 0; i < M; i++) {
+        const a = v[i] - thr, b = v[(i + 1) % M] - thr;
+        if (a < 0 && b >= 0) rise.push((i + a / (a - b)) * dt);
+    }
+    const jitterRows = [];
+    if (rise.length > 2) {
+        const tie = rise.map((t, k) => t - k * P), mean = tie.reduce((x, y) => x + y, 0) / tie.length;
+        const per = rise.map((t, k) => (k + 1 < rise.length ? rise[k + 1] : rise[0] + M * dt) - t - P);
+        const ppRms = (a, m = 0) => [Math.max(...a) - Math.min(...a), Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length)];
+        const [tpp, trms] = ppRms(tie, mean), [ppp, prms] = ppRms(per);
+        jitterRows.push({ label: 'Rising-edge TIE pk-pk / rms', value: `${fmtTime(tpp)} / ${fmtTime(trms)}`,
+            note: 'time interval error of the receiver rising crossings against an ideal clock, this run' });
+        jitterRows.push({ label: 'Period jitter pk-pk / rms', value: `${fmtTime(ppp)} / ${fmtTime(prms)}`,
+            note: 'rising crossing to the next, against the period, this run' });
+    }
+    delete run.eyeSignal;
+    const pick = (label) => run.metrics.list.find(m => m.label === label);
+    const list = nominal.metrics.list.filter(m => m.label !== 'Eye height (centre)').map(m => ({ ...m,
+        note: (m.note ? m.note + '; ' : '') + 'without jitter' }));
+    list.push(...['Eye height (centre)', 'Eye width (at threshold)', 'Crossing jitter pk-pk / rms'].map(pick).filter(Boolean), ...jitterRows);
+    list.push({ label: 'TX jitter per edge', value: `${fmtTime(pe.rj)} rms + ${fmtTime(pe.dj)} pp`,
+        note: `random (Rj with the PW Rj) plus dual Dirac (DjDD with the PW DDj); ${fmtTime(pe.tj)} total at BER 1e-12` });
+    list.push({ label: 'TX jitter of this run', value: `${fmtTime(peak)} largest displacement`,
+        note: `one random draw per edge over ${CLOCK_JITTER_CYCLES} cycles; the eye shows this draw, not the BER 1e-12 tails` });
+    return { ...run, kind: 'steady', metrics: { list, crossTime: nominal.metrics.crossTime }, hplot: nominal.hplot,
+        info: { ...run.info, jitterCycles: CLOCK_JITTER_CYCLES } };
 }
 
 // Metrics of one steady-state clock period.

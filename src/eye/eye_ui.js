@@ -39,6 +39,10 @@ const EYE_FIELDS = [
     ['eye_edge_shape', 'eye-edge-shape', 'text'],
     ['eye_rs', 'eye-rs', 'eye', 'res'],
     ['eye_skew', 'eye-skew', 'eye', 'time'],
+    ['eye_rj', 'eye-rj', 'eye', 'time'],
+    ['eye_djdd', 'eye-djdd', 'eye', 'time'],
+    ['eye_pwrj', 'eye-pwrj', 'eye', 'time'],
+    ['eye_pwdj', 'eye-pwdj', 'eye', 'time'],
     ['eye_tx_ac', 'eye-tx-ac', 'chk'],
     ['eye_ctx', 'eye-ctx', 'eye', 'cap'],
     ['eye_rx_ac', 'eye-rx-ac', 'chk'],
@@ -97,7 +101,7 @@ const EYE_DEFAULTS = {
     eye_length: 0.1, eye_stim: 'pulse', eye_delay: 0, eye_width: 1e-9,
     eye_clock_freq: 1e9, eye_duty: 50, eye_clock_mode: 'steady', eye_cycles: 8,
     eye_vlow: 0, eye_vhigh: 1, eye_tr: 35e-12, eye_tf: 35e-12, eye_edge_def: '10-90',
-    eye_edge_shape: 'rcos', eye_rs: 50, eye_skew: 0, eye_tx_ac: 0, eye_ctx: 1e-7,
+    eye_edge_shape: 'rcos', eye_rs: 50, eye_skew: 0, eye_rj: 0, eye_djdd: 0, eye_pwrj: 0, eye_pwdj: 0, eye_tx_ac: 0, eye_ctx: 1e-7,
     eye_rx_ac: 0, eye_crx: 1e-7, eye_term: 'r', eye_termloc: 'die', eye_rt: 50, eye_vtt: 1.2, eye_ct: 1e-7,
     eye_rdiff: 100, eye_spe: 16, eye_span: NaN,
     eye_bitrate: 10e9, eye_pattern: 'prbs7', eye_bits: '0011010111', eye_nbits: 32767,
@@ -123,6 +127,8 @@ function eyeKeyActive(settings, key) {
         case 'eye_iout': case 'eye_rout': case 'eye_vcm': return v('eye_driver') === 'current';
         case 'eye_rup': case 'eye_rdn': case 'eye_vsup': return v('eye_term') === 'thev';
         case 'eye_txeq': case 'eye_ctle': case 'eye_dfe': return v('eye_stim') === 'pattern';
+        case 'eye_rj': case 'eye_djdd': case 'eye_pwrj': case 'eye_pwdj':
+            return v('eye_stim') === 'pattern' || (v('eye_stim') === 'clock' && v('eye_clock_mode') === 'steady');
         case 'eye_deemph': case 'eye_preshoot': return v('eye_stim') === 'pattern' && v('eye_txeq') === 'db';
         case 'eye_adc': return v('eye_stim') === 'pattern' && v('eye_ctle') === 'fixed';
         case 'eye_adcmin': case 'eye_adcmax': return v('eye_stim') === 'pattern' && v('eye_ctle') === 'auto';
@@ -336,6 +342,12 @@ function readConfig() {
             throw new Error('Cycles: between 1 and 2000.');
         }
     }
+    if (type === 'pattern' || (type === 'clock' && stimulus.steady)) {
+        const jitter = { rj: parseQuantity('eye-rj', 'time', 'Rj'), djdd: parseQuantity('eye-djdd', 'time', 'DjDD'),
+            pwRj: parseQuantity('eye-pwrj', 'time', 'Pulse-width Rj'), pwDj: parseQuantity('eye-pwdj', 'time', 'Pulse-width DDj') };
+        if (Object.values(jitter).some(x => !(x >= 0))) throw new Error('TX jitter: the values must be zero or positive.');
+        stimulus.jitter = jitter;
+    }
     const term = { type: $('eye-term').value, loc: $('eye-termloc').value };
     if (['vtt', 'r', 'rc'].includes(term.type)) term.rt = parseQuantity('eye-rt', 'res', 'Termination resistance');
     if (term.type === 'vtt') term.vtt = parseQuantity('eye-vtt', 'volt', 'V_TT');
@@ -452,6 +464,7 @@ function updateVisibility() {
     for (const id of ['eye-row-iout', 'eye-row-rout', 'eye-row-vcm']) show(id, current);
     for (const id of ['eye-row-rup', 'eye-row-rdn', 'eye-row-vsup']) show(id, term === 'thev');
     show('eye-txeq-set', type === 'pattern');
+    show('eye-jitter-set', type === 'pattern' || (type === 'clock' && $('eye-clock-mode').value === 'steady'));
     show('eye-rxeq-set', type === 'pattern');
     const txeq = $('eye-txeq').value, ctle = $('eye-ctle').value;
     for (const id of ['eye-row-deemph', 'eye-row-preshoot']) show(id, txeq === 'db');
@@ -941,7 +954,7 @@ function drawMetrics(res) {
     const i = res.info;
     const tau = res.tau.map(fmtT).join(' / ');
     const info = `Line delay ${tau}${res.differential ? ' (odd / even)' : ''} · ` +
-        (res.kind === 'steady' ? 'clock steady state'
+        (res.kind === 'steady' ? (i.jitterCycles ? `clock steady state over ${i.jitterCycles} cycles with jitter, ${i.samplesPerBit} samples per half period` : 'clock steady state')
             : res.kind === 'pattern' ? `pattern steady state, ${i.samplesPerBit} samples per bit, step responses over ${fmtT(i.window)}`
             : `window ${fmtT(i.window)}`) +
         ` · ${i.N} samples, step ${fmtT(i.dt)}` + (i.slowModes ? ` · ${i.slowModes} slow coupling modes` : '') +
@@ -1023,12 +1036,16 @@ function toggleFreeze() {
 const PRESET_BASE = {
     'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-pkgtx': 'none', 'eye-pkgrx': 'none', 'eye-termloc': 'die', 'eye-tx-ac': false, 'eye-rx-ac': false,
     'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-ctleorder': '1', 'eye-dfe': '0', 'eye-dfelim': '', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
+    'eye-rj': '0 ps', 'eye-djdd': '0 ps', 'eye-pwrj': '0 ps', 'eye-pwdj': '0 ps',
 };
-// VTX-DIFF-PP is 800-1000 mV (full swing, no equalization, long runs into the load): the
-// presets launch the 800 mV minimum, 0.8 V EMF steps per pad behind 50 ohm.
+// The behavioral transmitter of channel tolerancing at the die pad (Table 8-14): 804 mVpp
+// full swing into a matched load (0.804 V EMF steps per pad behind 50 ohm), Gaussian edges
+// of the table's 10-90 % time, and its jitter [Rj, DjDD, PW Rj, PW DDj] in ps.
 // Packages default to the 8 GT/s ones (Gen1-3); extra may replace them.
-const pcie = (rate, tr, extra) => ({
-    'eye-vlow': '0 V', 'eye-vhigh': '0.8 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
+const pcie = (rate, tr, [rj, djdd, pwrj, pwdj], extra) => ({
+    'eye-vlow': '0 V', 'eye-vhigh': '0.804 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
+    'eye-edge-def': '10-90', 'eye-edge-shape': 'gauss',
+    'eye-rj': `${rj} ps`, 'eye-djdd': `${djdd} ps`, 'eye-pwrj': `${pwrj} ps`, 'eye-pwdj': `${pwdj} ps`,
     'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50',
     ...packageInputs('tx', 'pcie8Tx'), ...packageInputs('rx', 'pcie8Rx'), ...extra,
 });
@@ -1042,19 +1059,17 @@ const PRESETS = {
     lvds: { differential: true, 'eye-driver': 'current', 'eye-iout': '3.5 mA', 'eye-rout': '10k', 'eye-vcm': '1.2 V',
         'eye-stim': 'pattern', 'eye-bitrate': '1 Gb/s', 'eye-pattern': 'prbs7', 'eye-tr': '300 ps', 'eye-tf': '300 ps',
         'eye-term': 'diff', 'eye-rdiff': '100', ...fpgaPins },
-    pcie1: { differential: true, ...pcie('2.5 Gb/s', '80 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-3.5', 'eye-preshoot': '0' }) },
-    pcie2: { differential: true, ...pcie('5 Gb/s', '40 ps', { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-6', 'eye-preshoot': '0' }) },
-    pcie3: { differential: true, ...pcie('8 Gb/s', '25 ps', pcieEq('-12', '-6', '2 GHz', '8 GHz', '1', '30 mV')) },
+    pcie1: { differential: true, ...pcie('2.5 Gb/s', '140 ps', [3.45, 20, 1.42, 80], { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-3.5', 'eye-preshoot': '0' }) },
+    pcie2: { differential: true, ...pcie('5 Gb/s', '70 ps', [3.45, 20, 1.42, 40], { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-6', 'eye-preshoot': '0' }) },
+    pcie3: { differential: true, ...pcie('8 Gb/s', '43.75 ps', [1.31, 7, 1, 10], pcieEq('-12', '-6', '2 GHz', '8 GHz', '1', '30 mV')) },
     // Behavioral receiver equalization of the base spec. Gen3 and Gen4: 1st-order CTLE (poles
     // 2 / 8 GHz and 2 / 16 GHz, DC gain -6 to -12 dB) and 1- / 2-tap DFE. Gen5: 2nd-order CTLE
     // (zero 450 MHz, poles 1.65 x 450 MHz, 9.5 GHz, 28 GHz twice, DC gain -5 to -15 dB) and
     // 3-tap DFE with |d1| <= 0.8 h0.
-    // Edges (20-80 %): the spec gives rise times only for the stressed-eye generator, 14-19 ps at
-    // 16 GT/s and 7.5-15 ps at 32 GT/s; Gen1-3 use 0.2 UI.
     // Gen4: the behavioral packages of the spec, root port transmitting.
-    pcie4: { differential: true, ...pcie('16 Gb/s', '16.5 ps', pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')),
+    pcie4: { differential: true, ...pcie('16 Gb/s', '21.875 ps', [0.71, 3.75, 0.54, 5], pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')),
         ...packageInputs('tx', 'pcie16Root'), ...packageInputs('rx', 'pcie16NonRoot') },
-    pcie5: { differential: true, ...pcie('32 Gb/s', '10 ps', { ...pcieEq('-15', '-5', '2 GHz', '9.5 GHz', '3', '0.8 h0, 20 mV, 20 mV'),
+    pcie5: { differential: true, ...pcie('32 Gb/s', '10.94 ps', [0.276, 1.875, 0.27, 2.5], { ...pcieEq('-15', '-5', '2 GHz', '9.5 GHz', '3', '0.8 h0, 20 mV, 20 mV'),
         'eye-ctleorder': '2', 'eye-fz1': '450 MHz', 'eye-fp3': '28 GHz',
         // The 32 GT/s non-root model is not fitted: the 16 GT/s non-root package receives.
         ...packageInputs('tx', 'pcie32Root'), ...packageInputs('rx', 'pcie16NonRoot') }) },

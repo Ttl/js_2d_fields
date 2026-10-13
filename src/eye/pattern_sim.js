@@ -17,6 +17,7 @@
 import { legMean, edgeSpectrum, edgeValue, buildStimulus } from './stimulus.js';
 import { ctleOf, pdaEye, dfeTap, PCIE_PRESETS, firFromPresetDb, presetDbFromFir, boostDb } from './eq.js';
 import { makeTransfer, dcSolve } from './network.js';
+import { jitterPerEdge } from './jitter.js';
 import { smoothSize } from './fft.js';
 import { fmtHz } from './channel_grid.js';
 import { lineEstimates, reflectionTrips, taper, deriveTraces, firstOrder, slowSplit, packOutput,
@@ -167,9 +168,13 @@ function sampleLegPeriodic(stim, leg, M, dt) {
     const P = M * dt, u = new Float64Array(M);
     // Level between the edges: start from v0 at t = 0 and step at every 50 % point.
     // v0 is the level before the first boundary; an edge moved before t = 0 by a negative
-    // skew has happened by t = 0 (and comes again, a period later, inside the period).
+    // skew or jitter has happened by t = 0 (and comes again, a period later, inside the
+    // period), one jittered past the period end has not.
     let level = leg.v0, j = 0;
-    for (const e of leg.edges) if (e.t < 0) level += e.dv;
+    for (const e of leg.edges) {
+        if (e.t < 0) level += e.dv;
+        else if (e.t >= P) level -= e.dv;
+    }
     const edges = leg.edges.map(e => ({ ...e, t: ((e.t % P) + P) % P })).sort((a, b) => a.t - b.t);
     for (let n = 0; n < M; n++) {
         while (j < edges.length && edges[j].t <= n * dt) level += edges[j++].dv;
@@ -349,7 +354,15 @@ function patternSim(ctx, dt0) {
             let any = false;
             for (const ed of leg.edges) {
                 if ((ed.dv > 0) !== (e === 0)) continue;
-                buf[(((boundary(ed) % nb) + nb) % nb) * spb] += ed.dv;
+                const n0 = ((boundary(ed) % nb) + nb) % nb * spb;
+                if (!ed.jit) buf[n0] += ed.dv;
+                else {
+                    // A jittered edge between samples: cubic Lagrange weights on the four
+                    // nearest, which interpolates its response.
+                    const x = ed.jit / dt, i = Math.floor(x), f = x - i;
+                    const w = [-f * (f - 1) * (f - 2) / 6, (f + 1) * (f - 1) * (f - 2) / 2, -(f + 1) * f * (f - 2) / 2, (f + 1) * f * (f - 1) / 6];
+                    for (let q = 0; q < 4; q++) buf[(((n0 + i + q - 1) % M) + M) % M] += ed.dv * w[q];
+                }
                 any = true;
             }
             if (!any) continue;
@@ -375,7 +388,7 @@ function patternSim(ctx, dt0) {
 
     // Driver legs over the period: bit boundaries at k * UI from t = 0.
     const src = st.legs.map((leg, l) => sampleLegPeriodic(st, {
-        v0: leg.v0, edges: leg.edges.map(e => ({ ...e, t: e.t - st.t0 })),
+        v0: leg.v0, edges: leg.edges.map(e => ({ ...e, t: e.t + (e.jit || 0) - st.t0 })),
     }, M, dt));
     const xdc = dcSolve(net, ctx.Gdc, st.legs.map(leg => legMean(st, leg)));
     const o = {};
@@ -455,6 +468,20 @@ function patternSim(ctx, dt0) {
         : eyeAnalysis(main, dt, ui, spb, nb);
     const delayMetric = eyeDelay(eye, full[srcName(diff)], dt, ui, tauMin);
     const eqMetrics = [];
+    if (st.jitter) {
+        let peak = 0;
+        for (const x of st.jitter) peak = Math.max(peak, Math.abs(x));
+        const crossing = eye.metrics.find(m => m.label === 'Crossing jitter pk-pk / rms');
+        if (crossing) crossing.note = 'ISI and the transmitter jitter of this run at the threshold';
+        const j = ctx.cfg.stimulus.jitter;
+        if (!j.times) {
+            const pe = jitterPerEdge(j);
+            eqMetrics.push({ label: 'TX jitter per edge', value: `${fmtTime(pe.rj)} rms + ${fmtTime(pe.dj)} pp`,
+                note: `random (Rj with the PW Rj) plus dual Dirac (DjDD with the PW DDj); ${fmtTime(pe.tj)} total at BER 1e-12` });
+        }
+        eqMetrics.push({ label: 'TX jitter of this run', value: `${fmtTime(peak)} largest displacement`,
+            note: `one random draw per bit over ${nb} bits; the eye shows this draw, not the BER 1e-12 tails` });
+    }
     if (choice) {
         const pins = eyeAnalysis(main, dt, ui, spb, nb);
         const ph = pins.metrics.find(m => m.label === 'Eye height (centre)');
@@ -497,6 +524,9 @@ function patternSim(ctx, dt0) {
         res.eqChoice = { firName: choice.firName, fir: choice.fir, adc: choice.adc, pdaHeight: choice.pda.height, dfe: choice.dfe || [] };
     }
     packOutput(res);
+    // The whole period of the eye's signal, for callers that analyse it further (removed
+    // before the result is posted).
+    res.eyeSignal = choice ? slicer : main;
     return res;
 }
 

@@ -4,6 +4,8 @@
 // An edge goes from 0 to 1 with its 50 % point at t = 0. The shapes are odd-symmetric
 // about that point, so the spectrum of the edge derivative (unit area) is real.
 
+import { jitterActive, jitterPerEdge, boundaryJitter, Q_BER12 } from './jitter.js';
+
 const RAMP = 'ramp', RCOS = 'rcos', GAUSS = 'gauss';
 
 // Gaussian quantiles: the 10-90 % width is 2 * 1.2816 sigma, the 20-80 % one 2 * 0.8416 sigma.
@@ -74,12 +76,14 @@ function edgeSpectrum(e, f) {
  * cfg: { type: 'step' | 'pulse' | 'clock' | 'pattern', differential, vLow, vHigh, tr, tf,
  *        edgeDef, shape, delay, width (pulse), clockFreq, duty, steady (clock steady
  *        state), cycles (clock burst), bitRate, bits (pattern, Uint8Array), fir (pattern
- *        transmitter taps [c-1, c0, c+1], |c| summing to 1), skew (N leg delay) }
+ *        transmitter taps [c-1, c0, c+1], |c| summing to 1), jitter (pattern, see
+ *        jitter.js: { rj, djdd, pwRj, pwDj } or { times }), skew (N leg delay) }
  *
  * Voltages are the open-circuit source levels. Each leg is v0 plus a list of signed
  * steps { t, dv, edge } (t the 50 % time). A clock lists the edges of its first period
  * and repeats them `count` times every `period` (steady: indefinitely). A bit pattern
- * is periodic like a steady clock: its transitions sit on the bit boundaries k / bitRate.
+ * is periodic like a steady clock: its transitions sit on the bit boundaries k / bitRate,
+ * each moved by its jitter displacement edge.jit when there is jitter.
  */
 function buildStimulus(cfg) {
     const dV = cfg.vHigh - cfg.vLow;
@@ -154,9 +158,16 @@ function patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax }) {
     const bits = cfg.bits;
     if (!bits || bits.length < 2) throw new Error('The pattern needs at least two bits.');
     const ui = 1 / cfg.bitRate, n = bits.length;
-    if (2 * halfMax > ui) throw new Error('The rise and fall times are too long for this bit rate: the edges overlap.');
+    // Overlapping edges superpose (the link is linear); an edge longer than a bit is an error.
+    if (Math.max(up.t1090, down.t1090) > ui) throw new Error('The rise and fall times (10-90 %) are longer than a bit.');
     if (Math.abs(skew) > 0.5 * ui) throw new Error('The P/N skew must stay below half a bit.');
     const fir = cfg.fir || [0, 1, 0];
+    // Transmitter jitter: one displacement per bit boundary (edge.jit), the same on both legs.
+    const jit = jitterActive(cfg.jitter) ? boundaryJitter(n, cfg.jitter) : null;
+    if (jit && !cfg.jitter.times) {
+        const pe = jitterPerEdge(cfg.jitter);
+        if (pe.dj / 2 + Q_BER12 * pe.rj >= 0.5 * ui) throw new Error('The transmitter jitter at BER 1e-12 exceeds half a bit.');
+    }
     const legEdges = (vLo, vHi, shift) => {
         const mid = 0.5 * (vLo + vHi), half = 0.5 * (vHi - vLo);
         const d = (k) => 2 * bits[((k % n) + n) % n] - 1;
@@ -166,7 +177,9 @@ function patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax }) {
         for (let k = 0; k < n; k++) {
             const dv = levels[k] - levels[(k + n - 1) % n];
             if (Math.abs(dv) <= 1e-12 * Math.abs(half)) continue;
-            edges.push({ t: k * ui + shift, dv, edge: edgeFor(dv) });
+            const e = { t: k * ui + shift, dv, edge: edgeFor(dv) };
+            if (jit) e.jit = jit[k];
+            edges.push(e);
         }
         return { v0: levels[n - 1], edges };
     };
@@ -176,7 +189,7 @@ function patternStimulus(cfg, { dV, up, down, edgeFor, skew, halfMax }) {
     if (cfg.differential) legs.push(legEdges(cfg.vHigh, cfg.vLow, t0 + skew));
     return {
         type: 'pattern', differential: !!cfg.differential, legs, period: n * ui, count: Infinity, steady: true,
-        t0, tEnd: n * ui, tStart: 0, dV, up, down, bits, ui, bitRate: cfg.bitRate, fir,
+        t0, tEnd: n * ui, tStart: 0, dV, up, down, bits, ui, bitRate: cfg.bitRate, fir, jitter: jit,
         edgeMin: Math.min(cfg.tr, cfg.tf), t1090Min: Math.min(up.t1090, down.t1090), halfMax,
     };
 }
@@ -274,10 +287,12 @@ function legNetChange(stim, leg) {
 function legMean(stim, leg) {
     const P = stim.period;
     // Level changes at the edge times inside the period [0, P): the leg sits at v0
-    // before the first and returns to it after the last. The edges are odd-symmetric
-    // about their 50 % points, so those points alone fix the mean.
+    // before the first and returns to it after the last. Jitter moves an edge from there,
+    // possibly out of the period: before 0 it has happened at 0, after P not yet (as in
+    // sampleLegPeriodic). The edges are odd-symmetric about their 50 % points, so those
+    // points alone fix the mean.
     let m = leg.v0;
-    const ts = leg.edges.map(e => ((e.t % P) + P) % P);
+    const ts = leg.edges.map(e => ((e.t % P) + P) % P + (e.jit || 0));
     for (let i = 0; i < leg.edges.length; i++) m += leg.edges[i].dv * (P - ts[i]) / P;
     return m;
 }
@@ -286,7 +301,7 @@ function legMean(stim, leg) {
 // knee frequency 0.35/t_r of the fastest edge, and five clock harmonics.
 function requiredBandwidth(cfg) {
     // Only the edges and the rate matter, a two-bit pattern stands in for the bits.
-    const c = cfg.type === 'pattern' ? { ...cfg, bits: Uint8Array.of(0, 1) } : cfg;
+    const c = cfg.type === 'pattern' ? { ...cfg, bits: Uint8Array.of(0, 1), jitter: null } : cfg;
     const stim = buildStimulus({ ...c, differential: false, skew: 0 });
     let f = 1 / stim.t1090Min;
     if (stim.type === 'pattern') f = Math.max(f, 2.5 * stim.bitRate);

@@ -27,6 +27,9 @@
 //  16. Packages: line-form loss calibration (sqrt(f) and f terms), the PCIe 16 GT/s
 //      presets against the Fig 8-60 points at 8 GHz, no precursor through a lossy
 //      package, DC divider through the package resistance.
+//  17. Transmitter jitter: the per-edge model's statistics, a constant displacement
+//      shifts the receiver waveform, Rj alone reaches the receiver crossings of a
+//      lossless line unchanged, overlapping edges superpose; a jittered steady clock.
 import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
@@ -35,6 +38,7 @@ import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
 import { buildNetwork, makeTransfer, packageModel, packageSParams, PACKAGES } from '../src/eye/network.js';
 import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
 import { prbsBits, prbsPeriod, patternBits, PRBS } from '../src/eye/pattern.js';
+import { boundaryJitter, jitterPerEdge, Q_BER12 } from '../src/eye/jitter.js';
 import { PCIE_PRESETS, REDUCED_SWING_PRESETS, boostDb, firFromPresetDb, presetDbFromFir, ctle2Transfer } from '../src/eye/eq.js';
 import { computeSParamsSingleEnded, computeSParamsDifferentialMTL } from '../src/sparameters.js';
 
@@ -718,6 +722,125 @@ const valueAt = (r, name, t) => {
     const r2 = simulateLink(lossless, base({ network: { pkgTx: pk, pkgRx: pk } }), fft);
     const fin = r2.traces.rx[r2.traces.rx.length - 1];
     check('R + L packages: settled level 50 / 120', Math.abs(fin - 50 / 120) < 1e-4, fin.toFixed(6));
+}
+
+// 17. Transmitter jitter.
+{
+    const n = 200000;
+    const stats = (j) => {
+        const d = boundaryJitter(n, j);
+        let m = 0, s2 = 0;
+        for (const x of d) { m += x / n; s2 += x * x / n; }
+        return { d, m, sd: Math.sqrt(s2 - m * m) };
+    };
+    const rj = stats({ rj: 1e-12 }), pw = stats({ pwRj: 1e-12 });
+    const dd = stats({ djdd: 4e-12 }), pd = stats({ pwDj: 4e-12 });
+    const ddOk = dd.d.every(x => Math.abs(Math.abs(x) - 2e-12) < 1e-24) && pd.d.every(x => Math.abs(Math.abs(x) - 1e-12) < 1e-24);
+    check('jitter model: Rj sigma, PW Rj sigma / sqrt 2, DjDD +-pp/2, PW DDj +-pp/4, zero mean',
+        Math.abs(rj.sd / 1e-12 - 1) < 0.01 && Math.abs(pw.sd / (1e-12 / Math.SQRT2) - 1) < 0.01 && ddOk
+        && Math.abs(dd.m) < 2e-14 && Math.abs(rj.m) < 1e-14,
+        `Rj ${rj.sd.toExponential(3)}, PW Rj ${pw.sd.toExponential(3)}, DD mean ${dd.m.toExponential(1)}`);
+    // Width of a bit (difference of neighbouring edges): PW Rj rms, PW DDj peak to peak.
+    let w2 = 0, wmax = -Infinity, wmin = Infinity;
+    for (let k = 1; k < n; k++) { w2 += (pw.d[k] - pw.d[k - 1]) ** 2 / (n - 1); const w = pd.d[k] - pd.d[k - 1]; wmax = Math.max(wmax, w); wmin = Math.min(wmin, w); }
+    check('jitter model: bit width has the PW Rj rms and the PW DDj peak to peak', Math.abs(Math.sqrt(w2) / 1e-12 - 1) < 0.01 && Math.abs(wmax - wmin - 4e-12) < 1e-24,
+        `${Math.sqrt(w2).toExponential(3)} rms, ${(wmax - wmin).toExponential(3)} pp`);
+    // Table 8-14 at 16 GT/s.
+    const pe = jitterPerEdge({ rj: 0.71e-12, djdd: 3.75e-12, pwRj: 0.54e-12, pwDj: 5e-12 });
+    const tjWant = 6.25e-12 + 2 * Q_BER12 * Math.sqrt(0.71 ** 2 + 0.54 ** 2 / 2) * 1e-12;
+    check('jitter model: 16 GT/s per-edge totals', Math.abs(pe.dj - 6.25e-12) < 1e-24 && Math.abs(pe.tj - tjWant) < 1e-24 && Math.abs(2 * Q_BER12 - 14.07) < 0.01,
+        `Rj ${pe.rj.toExponential(4)}, Dj ${pe.dj.toExponential(3)}, TJ ${pe.tj.toExponential(4)}`);
+
+    const pcfg = (stim) => ({ length: 0.1, samplesPerEdge: 16,
+        network: { rs: 50, tx: { ac: false }, rx: { ac: false }, term: { type: 'r', rt: 50 } },
+        stimulus: { type: 'pattern', bitRate: 10e9, bits: patternBits({ pattern: 'prbs7' }), vLow: 0, vHigh: 1, tr: 30e-12, tf: 30e-12,
+            edgeDef: '10-90', shape: 'gauss', delay: 0, ...stim } });
+    const lossyLine = seTable(() => ({ R: 20, L: L0, G: 0, C: C0 }));
+    const nom = simulateLink(lossyLine, pcfg({}), fft);
+    const zero = simulateLink(lossyLine, pcfg({ jitter: { rj: 0, djdd: 0, pwRj: 0, pwDj: 0 } }), fft);
+    check('zero jitter = no jitter (bit identical)', nom.traces.rx.every((x, i) => x === zero.traces.rx[i]) && !zero.metrics.list.some(m => /TX jitter/.test(m.label)));
+    // A constant displacement of every edge delays the periodic waveform by it.
+    const dt = nom.info.dt, M = nom.info.periodSamples;
+    for (const frac of [3, 0.37, -1.71]) {
+        const delta = frac * dt;
+        const sh = simulateLink(lossyLine, pcfg({ jitter: { times: new Float64Array(127).fill(delta) } }), fft);
+        // The nominal waveform at t - delta: cubic interpolation of the periodic samples.
+        const v = nom.traces.rx, nv = v.length;
+        let e = 0;
+        for (let i = 8; i < nv - 8; i++) {
+            const x = i - frac, k = Math.floor(x), f = x - k;
+            const at = (q) => v[q];
+            const y = -f * (f - 1) * (f - 2) / 6 * at(k - 1) + (f + 1) * (f - 1) * (f - 2) / 2 * at(k) - (f + 1) * f * (f - 2) / 2 * at(k + 1) + (f + 1) * f * (f - 1) / 6 * at(k + 2);
+            e = Math.max(e, Math.abs(sh.traces.rx[i] - y));
+        }
+        check(`constant edge displacement ${frac} samples delays the waveform`, e < 2e-4, `max diff ${e.toExponential(2)} V (dt ${(dt * 1e12).toFixed(3)} ps, period ${M} samples)`);
+    }
+    // Lossless matched line with large random jitter: the receiver is half the exactly
+    // shifted source edges, delayed by the line (sub-sample positions interpolated).
+    {
+        const cfgJ = pcfg({ jitter: { rj: 2e-12, djdd: 10e-12, pwDj: 20e-12 } });
+        const r = simulateLink(lossless, cfgJ, fft);
+        const st = buildStimulus({ ...cfgJ.stimulus, differential: false });
+        const P = st.period, tau = 0.1 * Math.sqrt(L0 * C0), leg = st.legs[0];
+        const exact = (t) => {
+            let v = leg.v0;
+            for (const e of leg.edges) {
+                const te = e.t - st.t0 + e.jit;
+                // Periodic: the copies a period either side; the level before the first is v0.
+                for (const c of [-P, 0, P]) v += e.dv * (edgeValue(e.edge, t - te - c) - (c < 0 ? 1 : 0));
+            }
+            return v;
+        };
+        let eRx = 0, eSrc = 0;
+        for (let i = 0; i < r.t.length; i += 3) {
+            eRx = Math.max(eRx, Math.abs(r.traces.rx[i] - 0.5 * exact(r.t[i] - tau)));
+            eSrc = Math.max(eSrc, Math.abs(r.traces.src[i] - exact(r.t[i])));
+        }
+        check('jittered edges (+-15 ps and Rj) on a lossless line: source and receiver exact', eRx < 2e-5 && eSrc < 1e-6,
+            `RX ${eRx.toExponential(2)} V, source ${eSrc.toExponential(2)} V, edge 30 ps / ${(r.info.dt * 1e12).toFixed(2)} ps samples`);
+    }
+    // Rj only, lossless matched line: the receiver crossings move exactly as the edges.
+    {
+        const bits = patternBits({ pattern: 'prbs11' });
+        const r = simulateLink(lossless, pcfg({ bits, jitter: { rj: 1e-12 } }), fft);
+        const d = boundaryJitter(bits.length, { rj: 1e-12 });
+        let s1 = 0, s2 = 0, c = 0;
+        for (let k = 0; k < bits.length; k++) if (bits[k] !== bits[(k + bits.length - 1) % bits.length]) { s1 += d[k]; s2 += d[k] * d[k]; c++; }
+        const want = Math.sqrt(s2 / c - (s1 / c) ** 2) * 1e12;
+        const got = parseFloat(r.metrics.list.find(m => m.label === 'Crossing jitter pk-pk / rms').value.split('/')[1]);
+        check('Rj on a lossless line: receiver crossing rms = rms of the drawn edge displacements', Math.abs(got / want - 1) < 2e-3, `${got} ps vs ${want.toFixed(4)} ps`);
+    }
+    // Steady clock with jitter (4096 cycles, the even boundaries rise): receiver TIE = the
+    // rising edges' draws, period jitter sqrt 2 times; the duty cycle stays; a burst has none.
+    {
+        const ccfg = (jitter, duty = 0.5, steady = true) => ({ length: 0.1, samplesPerEdge: 16,
+            network: { rs: 50, tx: { ac: false }, rx: { ac: false }, term: { type: 'r', rt: 50 } },
+            stimulus: { type: 'clock', clockFreq: 1e9, duty, steady, cycles: 4, vLow: 0, vHigh: 1, tr: 50e-12, tf: 50e-12, edgeDef: '10-90', shape: 'gauss', delay: 0, jitter } });
+        const r = simulateLink(lossless, ccfg({ rj: 2e-12 }), fft);
+        const m = Object.fromEntries(r.metrics.list.map(x => [x.label, x.value]));
+        const d = boundaryJitter(8192, { rj: 2e-12 });
+        let s1 = 0, s2 = 0;
+        for (let k = 0; k < 8192; k += 2) { s1 += d[k] / 4096; s2 += d[k] * d[k] / 4096; }
+        const want = Math.sqrt(s2 - s1 * s1) * 1e12;
+        const tie = parseFloat(m['Rising-edge TIE pk-pk / rms'].split('/')[1]), per = parseFloat(m['Period jitter pk-pk / rms'].split('/')[1]);
+        check('jittered clock: receiver TIE = the rising edge draws, period jitter sqrt 2 x, kind steady', r.kind === 'steady'
+            && Math.abs(tie / want - 1) < 2e-3 && Math.abs(per / (Math.SQRT2 * 2) - 1) < 0.03 && /ps rms/.test(m['TX jitter per edge'] || ''),
+            `TIE ${tie} ps vs ${want.toFixed(4)}, period ${per} ps`);
+        const r40 = simulateLink(lossless, ccfg({ rj: 1e-12, pwDj: 10e-12 }, 0.4), fft);
+        const m40 = Object.fromEntries(r40.metrics.list.map(x => [x.label, x.value]));
+        const burst = simulateLink(lossless, ccfg({ rj: 1e-12 }, 0.5, false), fft);
+        check('jittered clock keeps its duty cycle; a burst ignores jitter', m40['Duty cycle'] === '40 %' && /TIE/.test(Object.keys(m40).join())
+            && burst.kind === 'transient' && !burst.metrics.list.some(x => /jitter/i.test(x.label)), `${m40['Duty cycle']}, ${m40['Rising-edge TIE pk-pk / rms']}`);
+    }
+    // Too much jitter for the bit; edges that overlap (Gaussian, 0.9 UI 10-90 %) superpose.
+    let threw = false;
+    try { buildStimulus({ ...pcfg({ jitter: { djdd: 80e-12, rj: 2e-12 } }).stimulus, differential: false }); } catch { threw = true; }
+    const slow = simulateLink(lossless, pcfg({ tr: 90e-12, tf: 90e-12 }), fft);
+    const lv = Object.fromEntries(slow.metrics.list.map(m => [m.label, m.value]));
+    let threwLong = false;
+    try { buildStimulus({ ...pcfg({ tr: 110e-12, tf: 110e-12 }).stimulus, differential: false }); } catch { threwLong = true; }
+    check('jitter beyond half a bit and edges longer than a bit are errors; 0.9 UI edges run', threw && threwLong && /mV/.test(lv['Eye height (centre)']),
+        `${lv['Eye height (centre)']}`);
 }
 
 void makeRLGCEvaluator;

@@ -880,6 +880,13 @@
                     <div class="eye-row" id="eye-row-skew"><label for="eye-skew">P/N skew (N later)</label><input type="text" id="eye-skew" value="0 ps"></div>
                     <div class="eye-row"><label for="eye-padtx">TX pad capacitance</label><input type="text" id="eye-padtx" value="0 pF"></div>
                 </fieldset>
+                <fieldset id="eye-jitter-set">
+                    <legend>TX jitter <span class="help-icon" onclick="showHelpModal('eye_tx_jitter', event)">?</span></legend>
+                    <div class="eye-row"><label for="eye-rj">Rj (rms)</label><input type="text" id="eye-rj" value="0 ps"></div>
+                    <div class="eye-row"><label for="eye-djdd">DjDD (pk-pk)</label><input type="text" id="eye-djdd" value="0 ps"></div>
+                    <div class="eye-row"><label for="eye-pwrj">Pulse-width Rj (rms)</label><input type="text" id="eye-pwrj" value="0 ps"></div>
+                    <div class="eye-row"><label for="eye-pwdj">Pulse-width DDj (pk-pk)</label><input type="text" id="eye-pwdj" value="0 ps"></div>
+                </fieldset>
                 <fieldset id="eye-txeq-set">
                     <legend>TX equalization <span class="help-icon" onclick="showHelpModal('eye_tx_equalization', event)">?</span></legend>
                     <div class="eye-row"><label for="eye-txeq">FIR</label>
@@ -1664,24 +1671,39 @@
                 <p>Current-mode driver, 3.5 mA into 100 &Omega; differential (350 mV), 1.2 V common mode.</p>
                 <h4>PCIe</h4>
                 <ul>
-                    <li>50 &Omega; voltage-mode driver, 800 mV differential peak-to-peak into a matched load (the minimum full swing V<sub>TX-DIFF-PP</sub> of 800-1000 mV, set by the high level).</li>
+                    <li>The behavioral transmitter of channel tolerancing (base spec 8.5.1.4, Table 8-14) at the die pad: a 50 &Omega; voltage-mode driver of 804 mV differential peak-to-peak full swing into a matched load (0.804 V EMF steps per pad), Gaussian edges of the table's 10-90 % time (without the pad capacitance, which is part of the package), and the table's jitter (TX jitter help). For reduced swing, halve the high level.</li>
                     <li>TX AC coupling, 2 &times; 50 &Omega; receiver termination.</li>
                 </ul>
                 <table>
-                    <tr><th></th><th>TX FIR</th><th>CTLE</th><th>DFE</th><th>Edge (20-80 %)</th></tr>
-                    <tr><th>Gen1/2</th><td>Fixed de-emphasis</td><td>None defined</td><td>None</td><td>0.2 UI</td></tr>
-                    <tr><th>Gen3</th><td>Best preset</td><td>1st order</td><td>1 tap</td><td>0.2 UI</td></tr>
-                    <tr><th>Gen4</th><td>Best preset</td><td>1st order</td><td>2 taps</td><td>16.5 ps</td></tr>
-                    <tr><th>Gen5</th><td>Best preset</td><td>2nd order</td><td>3 taps</td><td>10 ps</td></tr>
+                    <tr><th></th><th>TX FIR</th><th>CTLE</th><th>DFE</th><th>Edge (10-90 %)</th><th>Rj</th><th>DjDD</th><th>PW Rj</th><th>PW DDj</th></tr>
+                    <tr><th>Gen1</th><td>&minus;3.5 dB de-emphasis</td><td>None defined</td><td>None</td><td>140 ps</td><td>3.45 ps</td><td>20 ps</td><td>1.42 ps</td><td>80 ps</td></tr>
+                    <tr><th>Gen2</th><td>&minus;6 dB de-emphasis</td><td>None defined</td><td>None</td><td>70 ps</td><td>3.45 ps</td><td>20 ps</td><td>1.42 ps</td><td>40 ps</td></tr>
+                    <tr><th>Gen3</th><td>Best preset</td><td>1st order</td><td>1 tap</td><td>43.75 ps</td><td>1.31 ps</td><td>7 ps</td><td>1.0 ps</td><td>10 ps</td></tr>
+                    <tr><th>Gen4</th><td>Best preset</td><td>1st order</td><td>2 taps</td><td>21.875 ps</td><td>0.71 ps</td><td>3.75 ps</td><td>0.54 ps</td><td>5 ps</td></tr>
+                    <tr><th>Gen5</th><td>Best preset</td><td>2nd order</td><td>3 taps</td><td>10.94 ps</td><td>0.276 ps</td><td>1.875 ps</td><td>0.27 ps</td><td>2.5 ps</td></tr>
                 </table>
-                <p>The CTLE and DFE are the behavioral ones of the base spec, with its tap limits. The spec gives no transmitter rise time, the Gen4 and Gen5 edges are from stressed-eye generator ranges of 14-19 ps at 16 GT/s and 7.5-15 ps at 32 GT/s.</p>
+                <p>The CTLE and DFE are the behavioral ones of the base spec, with its tap limits.</p>
                 <p>Packages (root port transmitting where the spec tells root and non-root apart): Gen1-3 the 8 GT/s TX and RX packages (approximate line), Gen4 the 16 GT/s root port and non-root packages, Gen5 the 32 GT/s root port package with the 16 GT/s non-root one at the receiver (the 32 GT/s non-root model is not fitted yet). See the Packages help.</p>
-                <p>Not modeled: jitter (Rj, Sj) and the behavioral CDR of compliance testing.</p>
+                <p>Not modeled yet: the statistical eye at BER 10<sup>&minus;12</sup> (the eye shows one jitter draw), crosstalk, and the behavioral CDR of compliance testing.</p>
                 <h4>LVPECL</h4>
                 <p>Emitter-follower driver (low output resistance, 1.6/2.4 V) into 50 &Omega; to V<sub>CC</sub> &minus; 2 V, terminated on the board at the receiver pin.</p>
                 <h4>LVCMOS</h4>
                 <p>CMOS driver of 25-35 &Omega; output resistance into an unterminated receiver.</p>
                 <p class="help-note">The drivers and receivers are linear. A real CMOS or emitter-follower output changes its resistance with the output voltage, and receiver clamp diodes limit overshoot on unterminated lines.</p>`
+        },
+        eye_tx_jitter: {
+            title: 'TX jitter (bit patterns and steady clocks)',
+            body: `<p>Edge jitter of the transmitter at the die pad, in the terms of the PCIe channel tolerancing parameters (base spec 8.5.1.4, Table 8-14). Every term acts on each bit boundary independently:</p>
+                <ul>
+                    <li><b>Rj</b>: Gaussian, this rms.</li>
+                    <li><b>DjDD</b>: dual Dirac, &plusmn;half of this peak-to-peak value.</li>
+                    <li><b>Pulse-width Rj</b>: Gaussian of rms / &radic;2 per edge, so the width of a bit (two edges) has this rms.</li>
+                    <li><b>Pulse-width DDj</b>: dual Dirac of &plusmn;a quarter of this value per edge, so the width of a bit spans this peak-to-peak.</li>
+                </ul>
+                <p>This is how the spec's own derivation splits them (the pulse-width Rj enters the edge Rj &times; 0.707, the pulse-width DDj the edge DjDD halved). Both legs of a pair and the FIR level steps at a bit boundary move together.</p>
+                <p>The simulation draws one displacement per bit of the pattern (the same draw every run) and shows that eye: a PRBS15 has 16384 transitions, so its Gaussian tails reach about 4 &sigma;, not the 7 &sigma; of BER 10<sup>&minus;12</sup>. The result lists the per-edge totals and the dual-Dirac total jitter at BER 10<sup>&minus;12</sup>, DJ + 14.07 RJ. The TX preset and CTLE choice uses the pulse response without jitter.</p>
+                <p>A steady clock with jitter is simulated over 4096 cycles, each edge with its own draw (the pulse-width terms then jitter the high and low times). The wave and eye views show that run; the duty cycle, edge times, levels and delay in the results are those of the clock without jitter, the eye height, eye width and crossing jitter those with it. A burst has no jitter.</p>
+                <p>The PCIe presets fill in the Table 8-14 values of their rate.</p>`
         },
         eye_tx_equalization: {
             title: 'TX equalization (bit patterns)',
