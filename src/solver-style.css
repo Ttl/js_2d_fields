@@ -350,7 +350,25 @@ button.stop-mode:hover {
 .modes-list tr.spurious td.status { color: #f66; }
 .modes-list tr.nullspace { opacity: 0.45; }
 .modes-list tr.nullspace td.status { color: #888; }
-.modes-body .plot-container { flex: 1; min-height: 400px; }
+.modes-body .plot-container { flex: 1; min-width: 0; min-height: 400px; }
+
+/* Eye and Modes tabs stack their side panel over the plot when the main column is narrow,
+   whatever the viewport and sidebar leave for it. */
+#tab-eye, #tab-modes { container-type: inline-size; }
+#tab-modes .results-controls { flex-wrap: wrap; gap: 8px 15px; }
+#tab-modes .results-controls > label { white-space: nowrap; }
+
+@container (max-width: 860px) {
+    .modes-body { flex-direction: column; }
+    .modes-list {
+        flex: 0 1 auto;
+        min-height: 120px;
+        max-height: 35vh;
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .modes-body .plot-container { min-height: 300px; }
+}
 
 /* Eye Tab */
 #tab-eye .results-controls {
@@ -372,7 +390,9 @@ button.stop-mode:hover {
     border-right: 1px solid var(--border-color);
     padding: 6px 10px;
 }
+.eye-settings.collapsed { display: none; }
 .eye-settings fieldset {
+    min-width: 0;
     border: 1px solid var(--border-color);
     border-radius: 4px;
     margin: 0 0 8px;
@@ -445,6 +465,21 @@ button.stop-mode:hover {
 .eye-info {
     color: var(--text-muted);
     margin-top: 6px;
+}
+@container (max-width: 720px) {
+    .eye-body { flex-direction: column; }
+    .eye-settings:not(.collapsed) {
+        flex: 0 1 35vh;
+        min-height: 200px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+        column-gap: 10px;
+        align-items: start;
+        max-height: 45vh;
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .eye-main .plot-container { min-height: 300px; }
 }
 .eye-notice {
     margin: 6px 10px 0;
@@ -1204,8 +1239,3 @@ dialog.custom-choice h3 { margin-top: 0; color: var(--text-color); }
 dialog.custom-choice p { line-height: 1.5; color: var(--text-muted); }
 .custom-choice-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .custom-choice-buttons button { width: auto; font-size: 13px; padding: 7px 14px; }
-
-@media (max-width: 768px) {
-    .eye-body { flex-direction: column; }
-    .eye-settings { flex: 0 0 auto; max-height: 45vh; border-right: none; border-bottom: 1px solid var(--border-color); }
-}

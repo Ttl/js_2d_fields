@@ -1227,6 +1227,18 @@ function applyPreset(name) {
 
 // ---------------------------------------------------------------- setup
 
+const SETTINGS_HIDDEN_KEY = 'eye_settings_hidden';
+
+// Hides the settings panel so the plot gets the whole tab; the choice persists.
+function setSettingsHidden(hidden) {
+    $('eye-settings').classList.toggle('collapsed', hidden);
+    const btn = $('eye-settings-btn');
+    btn.textContent = hidden ? 'Show settings' : 'Hide settings';
+    btn.setAttribute('aria-expanded', String(!hidden));
+    try { localStorage.setItem(SETTINGS_HIDDEN_KEY, hidden ? '1' : '0'); } catch { /* unavailable */ }
+    window.dispatchEvent(new Event('resize'));
+}
+
 /**
  * ctx: { getParams, getSweepState, solveJob(type, payload, handlers), stopSolveJob,
  *        log, isBusy, isDifferential, isSelfReferenced, interpTolerance }
@@ -1237,6 +1249,10 @@ function initEyeTab(ctx) {
     $('btn-eye-stop').addEventListener('click', stopEye);
     $('eye-export-btn').addEventListener('click', exportCsv);
     $('eye-freeze-btn').addEventListener('click', toggleFreeze);
+    $('eye-settings-btn').addEventListener('click', () => setSettingsHidden(!$('eye-settings').classList.contains('collapsed')));
+    let hidden = false;
+    try { hidden = localStorage.getItem(SETTINGS_HIDDEN_KEY) === '1'; } catch { /* unavailable */ }
+    setSettingsHidden(hidden);
     $('eye-view').addEventListener('change', () => { updateVisibility(); draw(); });
     for (const id of ['eye-show-rx', 'eye-show-tx', 'eye-show-src', 'eye-show-legs', 'eye-show-cm']) {
         $(id).addEventListener('change', draw);
