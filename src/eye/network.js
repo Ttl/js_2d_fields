@@ -207,16 +207,21 @@ function packageModel(p, side) {
 // PCIe 8 GT/s (also the Gen1/2 channel reference): the spec gives only Cpin 0.25 pF and Cpad
 // 1.0 pF (TX) / 0.8 pF (RX); the line is the 16 GT/s non-root one, an approximation.
 // PCIe 32 GT/s root port: the spec's model is S-parameters; line, Cpin and Cpad fitted to
-// its plots (Fig 8-61 SDD21, -8.4 dB at 16 GHz, 0.7 dB rms to 30 GHz; Fig 8-62 board-side
-// SDD11 averaged over its ripple, 1.8 dB rms).
+// its plots, weighted to 16 GHz: Fig 8-61 SDD21 (-8.46 dB at 16 GHz against -8.40, 0.3 dB rms
+// to 16 GHz, 1.1 dB to 28 GHz) and Fig 8-62 board-side SDD11 ripple envelope (0.5 dB rms to
+// 16 GHz; above, the plot's -2 dB plateau is not followed).
+// PCIe 32 GT/s non-root: line, Cpin and Cpad fitted to Fig 8-65 SDD21 (-4.1 dB at 16 GHz against
+// -4.25, 0.25 dB rms to 40 GHz) and Fig 8-66 board-side SDD11 (ripple maxima 0.5 dB rms, the
+// nulls within 0.1 GHz; the delay set by their 3.8 GHz spacing).
 // 1.8 V FPGA I/O: IBIS [Package] of an HP 1.8 V LVCMOS pin (Zynq 7000), C_comp as the pad.
 const PCIE16_NON_ROOT_LINE = { form: 'line', cpin: 0.25e-12, z0: 41.3, delay: 135e-12, lossC: 0.532, lossD: 0, r: 1.0 };
 const PACKAGES = {
     pcie8Tx: { pad: 1.0e-12, model: PCIE16_NON_ROOT_LINE },
     pcie8Rx: { pad: 0.8e-12, model: PCIE16_NON_ROOT_LINE },
-    pcie32Root: { pad: 0.44e-12, model: { form: 'line', cpin: 0.29e-12, z0: 38.3, delay: 238e-12, lossC: 0, lossD: 0.332, r: 0.1 } },
+    pcie32Root: { pad: 0.47e-12, model: { form: 'line', cpin: 0.165e-12, z0: 38.8, delay: 240e-12, lossC: 0, lossD: 0.35, r: 0.1 } },
     fpga18: { pad: 4.5e-12, model: { form: 'rl', cpin: 1e-12, r: 0.3, l: 5e-9 } },
     pcie16NonRoot: { pad: 0.5e-12, model: PCIE16_NON_ROOT_LINE },
+    pcie32NonRoot: { pad: 0.22e-12, model: { form: 'line', cpin: 0.05e-12, z0: 39.0, delay: 126e-12, lossC: 0.55, lossD: 0.026, r: 0.5 } },
     pcie16Root: { pad: 0.5e-12, model: { form: 'line', cpin: 0.25e-12, z0: 35.8, delay: 203e-12, lossC: 1.054, lossD: 0.088, r: 1.3 } },
 };
 

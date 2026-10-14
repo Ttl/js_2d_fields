@@ -694,6 +694,19 @@ const valueAt = (r, name, t) => {
     const a = s21Db(nr.model, nr.pad, 8e9), b = s21Db(rt.model, rt.pad, 8e9);
     const r32 = PACKAGES.pcie32Root, c = s21Db(r32.model, r32.pad, 16e9);
     check('PCIe 32 GT/s root package: SDD21 at 16 GHz as Fig 8-61 (-8.40 dB)', Math.abs(c + 8.40) < 0.1, `${c.toFixed(3)} dB`);
+    // Non-root: Fig 8-65 SDD21 -4.25 dB at 16 GHz (-4.9 at 20 GHz); Fig 8-66 SDD11 nulls 3.8 GHz apart.
+    const n32 = PACKAGES.pcie32NonRoot, d = s21Db(n32.model, n32.pad, 16e9), d20 = s21Db(n32.model, n32.pad, 20e9);
+    const s11Db = (f) => { const S = packageSParams(packageModel(n32.model, 'test'), n32.pad, f); return 20 * Math.log10(Math.hypot(...S.s11)); };
+    const nulls = [];
+    for (let f = 1e9, prev = s11Db(0.9e9), cur = s11Db(1e9); f < 30e9; f += 0.1e9) {
+        const next = s11Db(f + 0.1e9);
+        if (cur < prev && cur < next) nulls.push(f / 1e9);
+        prev = cur; cur = next;
+    }
+    const want = [3.0, 6.6, 10.4, 14.1, 17.8, 21.6, 25.5, 29.3];
+    const nullErr = want.length === nulls.length ? Math.max(...want.map((x, i) => Math.abs(x - nulls[i]))) : Infinity;
+    check('PCIe 32 GT/s non-root package: SDD21 as Fig 8-65, SDD11 nulls as Fig 8-66', Math.abs(d + 4.25) < 0.3 && Math.abs(d20 + 4.9) < 0.3 && nullErr < 0.3,
+        `${d.toFixed(2)} / ${d20.toFixed(2)} dB, nulls ${nulls.map(x => x.toFixed(1)).join(' ')}`);
     check('PCIe 16 GT/s packages: SDD21 at 8 GHz as Fig 8-60 (-3.08 / -5.02 dB)', Math.abs(a + 3.08) < 0.05 && Math.abs(b + 5.02) < 0.05,
         `${a.toFixed(3)} / ${b.toFixed(3)} dB`);
     // Lossy packages on both ends of a lossless line: causal, arrives after both delays.

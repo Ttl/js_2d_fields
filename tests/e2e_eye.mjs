@@ -153,7 +153,7 @@ console.log('PCIe Gen3 packages (8 GT/s):', gen3PkgOk, gen3Pkg);
 const gen5 = await presetRun('pcie5');
 const gen5Pkg = await page.evaluate(() => ['eye-pkgtx-z0', 'eye-padtx', 'eye-pkgrx-z0'].map(id => document.getElementById(id).value));
 const jGen5 = await linkJson(page);
-const gen5Ok = /Done/.test(gen5.st) && JSON.stringify(gen5Pkg) === JSON.stringify(['38.3', '0.44 pF', '41.3'])
+const gen5Ok = /Done/.test(gen5.st) && JSON.stringify(gen5Pkg) === JSON.stringify(['38.8', '0.47 pF', '39'])
     && jGen5.eye_soff_from === -0.3 && jGen5.eye_soff_to === 0 && !('eye_soff_step' in jGen5) && /UI from the mean UI centre/.test(gen5.m['Sample point'] || '');
 console.log('PCIe Gen5 preset with packages:', gen5Ok, gen5.st, gen5.m['Eye height (centre)'], gen5.m['Sample point'], gen5Pkg, jGen5.eye_soff_from, jGen5.eye_soff_to);
 
@@ -166,10 +166,13 @@ const statTraces = await page.$eval('#eye-plot', el => (el.data || []).map(t => 
 await page.screenshot({ path: '/tmp/eye_stat_view.png' });
 const labels = () => page.$eval('#eye-plot', el => (el.layout.annotations || []).map(a => a.text));
 const statLabels = await labels();
+const paths = () => page.$eval('#eye-plot', el => (el.layout.shapes || []).filter(sh => sh.type === 'path').length);
+const statPaths = await paths();
 await page.selectOption('#eye-view', 'eye');
 await page.waitForTimeout(500);
 await page.screenshot({ path: '/tmp/eye_td_view.png' });
 const tdLabels = await labels();
+const tdPaths = await paths();
 const off = (gen4.m['Sample point'] || '').match(/^([+-][\d.]+) UI/);
 const ehLabel = off ? `EH (${off[1].replace(/^\+?/, m => m === '+' ? '+' : '')} UI)` : 'EH';
 const labelOk = [statLabels, tdLabels].every(l => l.includes(ehLabel) && l.includes('EW'));
@@ -179,12 +182,21 @@ const statOk = statTraces.includes('heatmap:Density') && statTraces.includes('co
     && / mV$/.test(gen4.m['Statistical eye height (BER 1e-12)'] || '') && /UI\)$/.test(gen4.m['Statistical eye width (BER 1e-12)'] || '')
     && /^[+-]0(\.\d+)? UI from the mean UI centre$/.test(gen4.m['Sample point'] || '') && /^EH x EW = /.test(gen4.m['Equalization objective'] || '')
     && !('eye_stat' in jPkg) && !('eye_ber' in jPkg) && !Object.keys(jPkg).some(k => k.startsWith('eye_soff'));
+// Table 8-15 mask: 15 mV / 0.3 UI at 16 GT/s, the verdict consistent with EH and EW.
+const maskRow = gen4.m['Eye mask'] || '';
+const ehMv = parseFloat(gen4.m['Statistical eye height (BER 1e-12)']), ewUi = parseFloat((gen4.m['Statistical eye width (BER 1e-12)'] || '').match(/\(([\d.]+) UI\)/)?.[1]);
+const verdict = ehMv >= 15 && ewUi >= 0.3 ? 'pass' : 'fail';
+const maskOk = new RegExp(`^${verdict} \\(margin EH [+-][\\d.]+ mV, EW [+-][\\d.]+ UI\\)$`).test(maskRow)
+    && statLabels.includes(`Mask: ${verdict}`) && statPaths === 1 && tdPaths === 1
+    && jPkg.eye_mask_eh === 0.015 && jPkg.eye_mask_ew === 0.3;
+console.log('PCIe Gen4 eye mask:', maskOk, maskRow, ehMv, ewUi, statPaths, tdPaths, jPkg.eye_mask_eh, jPkg.eye_mask_ew);
 console.log('PCIe Gen4 statistical eye:', statOk, gen4.m['Statistical eye height (BER 1e-12)'], gen4.m['Statistical eye width (BER 1e-12)'], gen4.m['Sample point'], statTraces);
 const pkgPage = await browser.newPage();
 await pkgPage.goto(URL + '?params=' + btoa(encodeURIComponent(JSON.stringify(jPkg))), { waitUntil: 'networkidle' });
-const pkgBack = await pkgPage.evaluate(() => ['eye-pkgtx', 'eye-pkgtx-z0', 'eye-pkgrx-delay', 'eye-padrx'].map(id => document.getElementById(id).value));
+const pkgBack = await pkgPage.evaluate(() => ['eye-pkgtx', 'eye-pkgtx-z0', 'eye-pkgrx-delay', 'eye-padrx', 'eye-mask-eh', 'eye-mask-ew'].map(id => document.getElementById(id).value));
 const gen4Ok = /Done/.test(gen4.st) && /mV/.test(gen4.m['Eye height (centre)'] || '') && jPkg.eye_pkgtx === 'line' && jPkg.eye_pkgrx === 'line'
-    && !('eye_pkgtx_l' in jPkg) && pkgBack[0] === 'line' && pkgBack[1] === '35.8' && pkgBack[2] === '135 ps' && pkgBack[3] === '0.5 pF';
+    && !('eye_pkgtx_l' in jPkg) && pkgBack[0] === 'line' && pkgBack[1] === '35.8' && pkgBack[2] === '135 ps' && pkgBack[3] === '0.5 pF'
+    && pkgBack[4] === '15 mV' && pkgBack[5] === '0.3';
 // Package S-parameter view: drawn from the inputs, redrawn while one is edited.
 await page.selectOption('#eye-view', 'package');
 await page.waitForTimeout(300);
@@ -251,6 +263,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = labelOk && statOk && clockJitOk && gen4JitOk && peclOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = maskOk && labelOk && statOk && clockJitOk && gen4JitOk && peclOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);

@@ -95,6 +95,8 @@ const EYE_FIELDS = [
     ['eye_soff_from', 'eye-soff-from', 'eye', 'num'],
     ['eye_soff_to', 'eye-soff-to', 'eye', 'num'],
     ['eye_soff_step', 'eye-soff-step', 'eye', 'num'],
+    ['eye_mask_eh', 'eye-mask-eh', 'eye', 'mvolt'],
+    ['eye_mask_ew', 'eye-mask-ew', 'eye', 'num'],
     ['eye_spe', 'eye-spe', 'eye', 'num'],
     ['eye_span', 'eye-span', 'eye', 'time'],
 ];
@@ -116,6 +118,7 @@ const EYE_DEFAULTS = {
         [`eye_pkg${x}_delay`, 150e-12], [`eye_pkg${x}_lossc`, 0.5], [`eye_pkg${x}_lossd`, 0], [`eye_pkg${x}_r`, 1], [`eye_pkg${x}_l`, 1e-9]])),
     eye_ctle: 'off', eye_adc: -6, eye_adcmin: -12, eye_adcmax: -6, eye_fp1: 2e9, eye_fp2: 8e9, eye_ctleorder: '1', eye_fz1: 4.5e8, eye_fp3: 28e9, eye_dfe: 0, eye_dfelim: '',
     eye_stat: 1, eye_ber: 1e-12, eye_soff_from: -0.1, eye_soff_to: 0.1, eye_soff_step: 0.05,
+    eye_mask_eh: NaN, eye_mask_ew: NaN,
 };
 
 // Whether a setting applies to the selected options; links leave out the others.
@@ -143,7 +146,7 @@ function eyeKeyActive(settings, key) {
         case 'eye_fz1': case 'eye_fp3': return v('eye_stim') === 'pattern' && v('eye_ctle') !== 'off' && v('eye_ctleorder') === '2';
         case 'eye_dfelim': return v('eye_stim') === 'pattern' && v('eye_dfe') > 0;
         case 'eye_stat': return v('eye_stim') === 'pattern';
-        case 'eye_ber': case 'eye_soff_from': case 'eye_soff_to': case 'eye_soff_step':
+        case 'eye_ber': case 'eye_soff_from': case 'eye_soff_to': case 'eye_soff_step': case 'eye_mask_eh': case 'eye_mask_ew':
             return v('eye_stim') === 'pattern' && !!v('eye_stat');
         case 'eye_ctx': return !!v('eye_tx_ac');
         case 'eye_crx': return !!v('eye_rx_ac');
@@ -185,6 +188,7 @@ const SHOW = {
     cap: [[1e-6, 1e-6, 'µF'], [1e-9, 1e-9, 'nF'], [0, 1e-12, 'pF']],
     ind: [[1e-6, 1e-6, 'µH'], [0, 1e-9, 'nH']],
     volt: [[0, 1, 'V']],
+    mvolt: [[1, 1, 'V'], [0, 1e-3, 'mV']],
     cur: [[1, 1, 'A'], [1e-3, 1e-3, 'mA'], [0, 1e-6, 'µA']],
     rate: [[1e9, 1e9, 'Gb/s'], [1e6, 1e6, 'Mb/s'], [1e3, 1e3, 'kb/s'], [0, 1, 'b/s']],
     res: [[0, 1, '']],
@@ -213,12 +217,13 @@ const UNIT = {
     ind: { h: 1, mh: 1e-3, uh: 1e-6, 'μh': 1e-6, nh: 1e-9, ph: 1e-12 },
     res: { '': 1, ohm: 1, ohms: 1, 'ω': 1, k: 1e3, kohm: 1e3, 'kω': 1e3 },
     volt: { v: 1, mv: 1e-3 },
+    mvolt: { v: 1, mv: 1e-3 },
     cur: { a: 1, ma: 1e-3, ua: 1e-6, 'μa': 1e-6 },
     rate: { 'b/s': 1, bps: 1, 'kb/s': 1e3, kbps: 1e3, 'mb/s': 1e6, mbps: 1e6, 'gb/s': 1e9, gbps: 1e9, 'tb/s': 1e12, tbps: 1e12 },
     pct: { '%': 1 },
     num: {},
 };
-const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', ind: 'nh', res: 'ohm', volt: 'v', pct: '%', num: '', rate: 'gb/s', cur: 'ma' };
+const DEFAULT_UNIT = { time: 'ps', freq: 'ghz', cap: 'nf', ind: 'nh', res: 'ohm', volt: 'v', mvolt: 'mv', pct: '%', num: '', rate: 'gb/s', cur: 'ma' };
 
 // Value of a text input in SI units. Throws with the field label on a bad value.
 function parseQuantity(id, kind, label, { optional = false } = {}) {
@@ -448,6 +453,12 @@ function readConfig() {
         if (to > from && !(step > 0 && n <= 41)) throw new Error('Sample offset step: positive, at most 41 offsets.');
         const offsets = Array.from({ length: n }, (_, i) => +Math.min(to, from + i * step).toFixed(9));
         statEye = { ber, offsets };
+        // Pass / fail limits (PCIe Table 8-15), either may be empty.
+        const eh = parseQuantity('eye-mask-eh', 'mvolt', 'Mask eye height', { optional: true });
+        const ew = parseQuantity('eye-mask-ew', 'num', 'Mask eye width', { optional: true });
+        if (eh !== null && !(eh > 0)) throw new Error('Mask eye height: positive, or empty for no limit.');
+        if (ew !== null && !(ew > 0 && ew < 1)) throw new Error('Mask eye width: between 0 and 1 UI, or empty for no limit.');
+        if (eh !== null || ew !== null) statEye.mask = { eh, ew };
     }
     if (network.tx.ac) network.tx.c = parseQuantity('eye-ctx', 'cap', 'TX coupling capacitor');
     if (network.rx.ac) network.rx.c = parseQuantity('eye-crx', 'cap', 'RX coupling capacitor');
@@ -488,7 +499,7 @@ function updateVisibility() {
     show('eye-jitter-set', type === 'pattern' || (type === 'clock' && $('eye-clock-mode').value === 'steady'));
     show('eye-rxeq-set', type === 'pattern');
     show('eye-stat-set', type === 'pattern');
-    for (const id of ['eye-row-ber', 'eye-row-soff-from', 'eye-row-soff-to', 'eye-row-soff-step']) show(id, $('eye-stat').checked);
+    for (const id of ['eye-row-ber', 'eye-row-soff-from', 'eye-row-soff-to', 'eye-row-soff-step', 'eye-row-mask-eh', 'eye-row-mask-ew']) show(id, $('eye-stat').checked);
     const txeq = $('eye-txeq').value, ctle = $('eye-ctle').value;
     for (const id of ['eye-row-deemph', 'eye-row-preshoot']) show(id, txeq === 'db');
     show('eye-row-adc', ctle === 'fixed');
@@ -841,6 +852,12 @@ function drawEyeHeatmap(res) {
         if (inf.widthRight > inf.widthLeft) {
             layout.annotations.push({ x: inf.widthRight, y: inf.thr, text: 'EW', showarrow: false, xanchor: 'left', font: { color: mark.color, size: 10 } });
         }
+        // The statistical eye's mask for scale; the pass / fail is at the target BER, not of this run.
+        const mask = res.statEye && res.statEye.mask;
+        if (mask) layout.shapes.push(maskShape(mask, {
+            x: 1, vMid: open ? (inf.heightTop + inf.heightBottom) / 2 : inf.thr,
+            wMid: inf.widthRight > inf.widthLeft ? (inf.widthLeft + inf.widthRight) / 2 : 1, thr: inf.thr,
+        }, { color: '#e5e7eb', width: 1.5, dash: 'dash' }, 'rgba(229,231,235,0.12)'));
     }
     Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
 }
@@ -992,6 +1009,17 @@ function drawMetrics(res) {
     el.innerHTML = `<div class="eye-metric-grid">${rows}</div><div class="eye-info">${info}</div>`;
 }
 
+// Mask shape (Fig 8-79 limits) as a Plotly path: top and bottom at the sample point x,
+// eh apart around the opening's middle vMid; left and right on the zero-crossing line thr,
+// ew apart around the width's middle wMid. A missing limit leaves a single bar.
+function maskShape(mask, { x, vMid, wMid, thr }, line, fill) {
+    const top = vMid + (mask.eh ?? 0) / 2, bot = vMid - (mask.eh ?? 0) / 2;
+    const l = wMid - (mask.ew ?? 0) / 2, r = wMid + (mask.ew ?? 0) / 2;
+    const path = mask.eh !== null && mask.ew !== null ? `M ${l},${thr} L ${x},${top} L ${r},${thr} L ${x},${bot} Z`
+        : mask.eh !== null ? `M ${x},${bot} L ${x},${top}` : `M ${l},${thr} L ${r},${thr}`;
+    return { type: 'path', path, line, fillcolor: fill, layer: 'above' };
+}
+
 // Sample point offset from the mean UI centre for a label, '' without one.
 function offsetLabel(o) {
     return o ? ` (${o > 0 ? '+' : ''}${+o.toFixed(3)} UI)` : '';
@@ -1044,6 +1072,15 @@ function drawStatEye(res) {
         layout.annotations.push({ x: cAt + s.widthRight, y: s.thr, text: 'EW', showarrow: false, xanchor: 'left', font: { color: '#4ade80', size: 10 } });
     } else {
         layout.annotations.push({ x: 1, y: s.thr, text: 'closed', showarrow: false, font: { color: '#f87171', size: 11 } });
+    }
+    if (s.mask) {
+        const color = s.mask.pass ? '#4ade80' : '#f87171';
+        layout.shapes.push(maskShape(s.mask, {
+            x: cAt, vMid: s.height > 0 ? (s.sampleTop + s.sampleBottom) / 2 : s.thr,
+            wMid: s.width > 0 ? cAt + (s.widthLeft + s.widthRight) / 2 : cAt, thr: s.thr,
+        }, { color, width: 1.5, dash: 'dash' }, s.mask.pass ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.25)'));
+        layout.annotations.push({ x: 0.02, y: 0.98, xref: 'paper', yref: 'paper', xanchor: 'left', yanchor: 'top', showarrow: false,
+            text: s.mask.pass ? 'Mask: pass' : 'Mask: fail', font: { color, size: 12 } });
     }
     Plotly.newPlot('eye-plot', traces, layout, { responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
 }
@@ -1122,17 +1159,19 @@ function toggleFreeze() {
 const PRESET_BASE = {
     'eye-driver': 'voltage', 'eye-padtx': '0 pF', 'eye-padrx': '0 pF', 'eye-pkgtx': 'none', 'eye-pkgrx': 'none', 'eye-termloc': 'die', 'eye-tx-ac': false, 'eye-rx-ac': false,
     'eye-txeq': 'none', 'eye-ctle': 'off', 'eye-ctleorder': '1', 'eye-dfe': '0', 'eye-dfelim': '', 'eye-skew': '0 ps', 'eye-edge-def': '20-80', 'eye-edge-shape': 'rcos',
-    'eye-rj': '0 ps', 'eye-djdd': '0 ps', 'eye-pwrj': '0 ps', 'eye-pwdj': '0 ps',
+    'eye-rj': '0 ps', 'eye-djdd': '0 ps', 'eye-pwrj': '0 ps', 'eye-pwdj': '0 ps', 'eye-mask-eh': '', 'eye-mask-ew': '',
 };
 // The behavioral transmitter of channel tolerancing at the die pad (Table 8-14): 804 mVpp
 // full swing into a matched load (0.804 V EMF steps per pad behind 50 ohm), Gaussian edges
 // of the table's 10-90 % time, and its jitter [Rj, DjDD, PW Rj, PW DDj] in ps.
 // Packages default to the 8 GT/s ones (Gen1-3); extra may replace them.
-const pcie = (rate, tr, [rj, djdd, pwrj, pwdj], extra) => ({
+// Mask: the Table 8-15 eye height (mV) and width (UI) at BER 1e-12.
+const pcie = (rate, tr, [rj, djdd, pwrj, pwdj], [eh, ew], extra) => ({
     'eye-vlow': '0 V', 'eye-vhigh': '0.804 V', 'eye-rs': '50', 'eye-stim': 'pattern', 'eye-bitrate': rate, 'eye-tr': tr, 'eye-tf': tr,
     'eye-edge-def': '10-90', 'eye-edge-shape': 'gauss',
     'eye-rj': `${rj} ps`, 'eye-djdd': `${djdd} ps`, 'eye-pwrj': `${pwrj} ps`, 'eye-pwdj': `${pwdj} ps`,
     'eye-tx-ac': true, 'eye-ctx': '100 nF', 'eye-term': 'r', 'eye-rt': '50', 'eye-stat': true, 'eye-ber': '1e-12', 'eye-soff-from': '-0.1', 'eye-soff-to': '0.1', 'eye-soff-step': '0.05',
+    'eye-mask-eh': `${eh} mV`, 'eye-mask-ew': `${ew}`,
     ...packageInputs('tx', 'pcie8Tx'), ...packageInputs('rx', 'pcie8Rx'), ...extra,
 });
 const pcieEq = (adcMin, adcMax, fp1, fp2, dfe, dfelim) => ({ 'eye-pattern': 'prbs15', 'eye-ctx': '220 nF', 'eye-txeq': 'auto', 'eye-ctle': 'auto',
@@ -1145,22 +1184,21 @@ const PRESETS = {
     lvds: { differential: true, 'eye-driver': 'current', 'eye-iout': '3.5 mA', 'eye-rout': '10k', 'eye-vcm': '1.2 V',
         'eye-stim': 'pattern', 'eye-bitrate': '1 Gb/s', 'eye-pattern': 'prbs7', 'eye-tr': '300 ps', 'eye-tf': '300 ps',
         'eye-term': 'diff', 'eye-rdiff': '100', ...fpgaPins },
-    pcie1: { differential: true, ...pcie('2.5 Gb/s', '140 ps', [3.45, 20, 1.42, 80], { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-3.5', 'eye-preshoot': '0' }) },
-    pcie2: { differential: true, ...pcie('5 Gb/s', '70 ps', [3.45, 20, 1.42, 40], { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-6', 'eye-preshoot': '0' }) },
-    pcie3: { differential: true, ...pcie('8 Gb/s', '43.75 ps', [1.31, 7, 1, 10], pcieEq('-12', '-6', '2 GHz', '8 GHz', '1', '30 mV')) },
+    pcie1: { differential: true, ...pcie('2.5 Gb/s', '140 ps', [3.45, 20, 1.42, 80], [130, 0.35], { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-3.5', 'eye-preshoot': '0' }) },
+    pcie2: { differential: true, ...pcie('5 Gb/s', '70 ps', [3.45, 20, 1.42, 40], [85, 0.30], { 'eye-pattern': 'prbs7', 'eye-txeq': 'db', 'eye-deemph': '-6', 'eye-preshoot': '0' }) },
+    pcie3: { differential: true, ...pcie('8 Gb/s', '43.75 ps', [1.31, 7, 1, 10], [25, 0.3], pcieEq('-12', '-6', '2 GHz', '8 GHz', '1', '30 mV')) },
     // Behavioral receiver equalization of the base spec. Gen3 and Gen4: 1st-order CTLE (poles
     // 2 / 8 GHz and 2 / 16 GHz, DC gain -6 to -12 dB) and 1- / 2-tap DFE. Gen5: 2nd-order CTLE
     // (zero 450 MHz, poles 1.65 x 450 MHz, 9.5 GHz, 28 GHz twice, DC gain -5 to -15 dB) and
     // 3-tap DFE with |d1| <= 0.8 h0.
     // Gen4: the behavioral packages of the spec, root port transmitting.
-    pcie4: { differential: true, ...pcie('16 Gb/s', '21.875 ps', [0.71, 3.75, 0.54, 5], pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')),
+    pcie4: { differential: true, ...pcie('16 Gb/s', '21.875 ps', [0.71, 3.75, 0.54, 5], [15, 0.3], pcieEq('-12', '-6', '2 GHz', '16 GHz', '2', '30 mV, 20 mV')),
         ...packageInputs('tx', 'pcie16Root'), ...packageInputs('rx', 'pcie16NonRoot') },
-    pcie5: { differential: true, ...pcie('32 Gb/s', '10.94 ps', [0.276, 1.875, 0.27, 2.5], { ...pcieEq('-15', '-5', '2 GHz', '9.5 GHz', '3', '0.8 h0, 20 mV, 20 mV'),
+    pcie5: { differential: true, ...pcie('32 Gb/s', '10.94 ps', [0.276, 1.875, 0.27, 2.5], [15, 0.3], { ...pcieEq('-15', '-5', '2 GHz', '9.5 GHz', '3', '0.8 h0, 20 mV, 20 mV'),
         'eye-ctleorder': '2', 'eye-fz1': '450 MHz', 'eye-fp3': '28 GHz',
         // 32 GT/s: the sample point up to 0.30 UI left of the mean UI centre in 0.05 UI steps.
         'eye-soff-from': '-0.3', 'eye-soff-to': '0', 'eye-soff-step': '0.05',
-        // The 32 GT/s non-root model is not fitted: the 16 GT/s non-root package receives.
-        ...packageInputs('tx', 'pcie32Root'), ...packageInputs('rx', 'pcie16NonRoot') }) },
+        ...packageInputs('tx', 'pcie32Root'), ...packageInputs('rx', 'pcie32NonRoot') }) },
     lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
         'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V', ...fpgaPins,
         'eye-termloc': 'board' },

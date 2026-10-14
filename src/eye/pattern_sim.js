@@ -674,7 +674,22 @@ function statEyeOf(ctx, { resp, choice, search, stim, spb, dt, split, dfeTaps, d
     metrics.push({ label: 'BER at the sample point', value: r.berSample < 1e-30 ? '< 1e-30' : r.berSample.toExponential(1),
         note: 'decision at the mid level' });
     if (sigmaSlow > 0) metrics.push({ label: 'Baseline wander (AC coupling)', value: `${fmtV(sigmaSlow)} rms`, note: 'independent random bits, in the statistical eye as a Gaussian' });
-    return { out: { ...r, ui: stim.ui, offset: c.offset }, metrics };
+    const mask = cfg.mask ? maskVerdict(r, cfg.mask) : null;
+    if (mask) {
+        const lim = [mask.eh !== null ? `EH ${fmtV(mask.eh)}` : null, mask.ew !== null ? `EW ${+mask.ew.toFixed(4)} UI` : null].filter(Boolean).join(', ');
+        const margin = [mask.eh !== null ? `EH ${mask.ehMargin >= 0 ? '+' : '-'}${fmtV(Math.abs(mask.ehMargin))}` : null,
+            mask.ew !== null ? `EW ${mask.ewMargin >= 0 ? '+' : '-'}${Math.abs(mask.ewMargin).toFixed(3)} UI` : null].filter(Boolean).join(', ');
+        metrics.push({ label: 'Eye mask', value: `${mask.pass ? 'pass' : 'fail'} (margin ${margin})`,
+            note: `minimum ${lim} at BER ${berTxt}` });
+    }
+    return { out: { ...r, ui: stim.ui, offset: c.offset, mask }, metrics };
+}
+
+// Pass / fail of a statistical eye against minimum EH (V) and EW (UI), either null.
+function maskVerdict(r, { eh, ew }) {
+    const h = Math.max(r.height, 0), w = Math.max(r.width, 0);
+    const ehMargin = eh !== null ? h - eh : null, ewMargin = ew !== null ? w - ew : null;
+    return { eh, ew, ehMargin, ewMargin, pass: !(ehMargin < 0) && !(ewMargin < 0) };
 }
 
 function berLabel(b) {

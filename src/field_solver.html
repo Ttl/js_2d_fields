@@ -927,6 +927,7 @@
                             <option value="pcie16Root">PCIe 16 GT/s root port</option>
                             <option value="pcie16NonRoot">PCIe 16 GT/s non-root</option>
                             <option value="pcie32Root">PCIe 32 GT/s root port</option>
+                            <option value="pcie32NonRoot">PCIe 32 GT/s non-root</option>
                             <option value="fpga18">Generic 1.8 V FPGA I/O</option>
                         </select></div>
                     <div class="eye-row" id="eye-row-pkgtx-cpin"><label for="eye-pkgtx-cpin">Pin capacitance</label><input type="text" id="eye-pkgtx-cpin" value="0.25 pF"></div>
@@ -950,6 +951,7 @@
                             <option value="pcie16Root">PCIe 16 GT/s root port</option>
                             <option value="pcie16NonRoot">PCIe 16 GT/s non-root</option>
                             <option value="pcie32Root">PCIe 32 GT/s root port</option>
+                            <option value="pcie32NonRoot">PCIe 32 GT/s non-root</option>
                             <option value="fpga18">Generic 1.8 V FPGA I/O</option>
                         </select></div>
                     <div class="eye-row" id="eye-row-pkgrx-cpin"><label for="eye-pkgrx-cpin">Pin capacitance</label><input type="text" id="eye-pkgrx-cpin" value="0.25 pF"></div>
@@ -1020,6 +1022,8 @@
                     <div class="eye-row" id="eye-row-soff-from"><label for="eye-soff-from">Sample offsets from (UI)</label><input type="text" id="eye-soff-from" value="-0.1"></div>
                     <div class="eye-row" id="eye-row-soff-to"><label for="eye-soff-to">to (UI)</label><input type="text" id="eye-soff-to" value="0.1"></div>
                     <div class="eye-row" id="eye-row-soff-step"><label for="eye-soff-step">in steps of (UI)</label><input type="text" id="eye-soff-step" value="0.05"></div>
+                    <div class="eye-row" id="eye-row-mask-eh"><label for="eye-mask-eh">Mask eye height</label><input type="text" id="eye-mask-eh" value="" placeholder="none"></div>
+                    <div class="eye-row" id="eye-row-mask-ew"><label for="eye-mask-ew">Mask eye width (UI)</label><input type="text" id="eye-mask-ew" value="" placeholder="none"></div>
                 </fieldset>
                 <fieldset>
                     <legend>Simulation <span class="help-icon" onclick="showHelpModal('eye_simulation', event)">?</span></legend>
@@ -1813,6 +1817,13 @@
                     <li><b>Eye width</b>: the span of sampling phases whose BER at the mid level (the zero-crossing line) is below the target.</li>
                     <li><b>Eye height</b>: the vertical opening at the target BER at the sample point.</li>
                     <li>The view shows the probability density of the slicer signal with BER contours from 1e-3 down to the target.</li>
+                </ul>
+                <h4>Pass / fail mask</h4>
+                <ul>
+                    <li>Mask eye height and width: the minimum EH and EW at the target BER (PCIe Table 8-15, Fig 8-79). The result lists pass or fail with the margins; an empty field sets no limit.</li>
+                    <li>The mask is drawn as a diamond: its top and bottom at the sample point, centred on the eye opening there, its left and right on the zero-crossing line, centred on the eye width. It fits inside the BER contour exactly when the eye passes.</li>
+                    <li>PCIe presets fill in the channel limits: 2.5 GT/s 130 mV / 0.35 UI, 5 GT/s 85 mV / 0.30 UI, 8 GT/s 25 mV / 0.3 UI, 16 and 32 GT/s 15 mV / 0.3 UI.</li>
+                    <li>A spec-style estimate for the solved line with behavioral packages, not a compliance result: no vias, connectors, crosstalk or RX noise.</li>
                 </ul>
                 <p>Not included: RX noise and crosstalk.</p>`
         },
