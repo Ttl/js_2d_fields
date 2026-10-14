@@ -91,9 +91,28 @@ function makeStatEye(p, nodesPerSigma = NODES_PER_SIGMA) {
     const jn = jitterNodes(p.jitter, nodesPerSigma);
     const jExt = jn.ext / dt;
     const jt = Float64Array.from(jn.t, t => t / dt);
+    // Kernel scratch: bin of each jitter node, and the dense bins between the extremes.
+    const ksBuf = new Int32Array(jt.length);
+    let accBuf = new Float64Array(64);
     const pre = fir[0] !== 0 ? 1 : 0, post = fir[2] !== 0 ? 1 : 0;
     const xMax = 2 * (Math.abs(fir[0]) + Math.abs(fir[1]) + Math.abs(fir[2]));
     const dfe = p.dfe || [];
+    // Transition value of each window W of the K + 1 bits a transition depends on (bit t of W
+    // is d_(b - 1 - post + t), the new bit on top), and per window the first one with the same
+    // value and new bit, whose kernel it shares.
+    const K = 1 + post + pre, nW = 1 << (K + 1);
+    const xOfW = new Float64Array(nW), canonW = new Int32Array(nW);
+    for (let W = 0; W < nW; W++) {
+        const bit = (t) => ((W >> t) & 1) ? 1 : -1;
+        let x = 0;
+        if (fir[0] !== 0) x += fir[0] * (bit(post + 2) - bit(post + 1));
+        x += fir[1] * (bit(post + 1) - bit(post));
+        if (fir[2] !== 0) x += fir[2] * (bit(post) - bit(post - 1));
+        xOfW[W] = x;
+        let c = W;
+        for (let V = 0; V < W; V++) if (xOfW[V] === x && (V >> K) === (W >> K)) { c = V; break; }
+        canonW[W] = c;
+    }
 
     // Linear weights w_m at sample time s: the pulse response cursors and the DFE.
     const weights = (s) => {
@@ -189,7 +208,6 @@ function makeStatEye(p, nodesPerSigma = NODES_PER_SIGMA) {
         const { w, res, bA, bB } = lay;
         // Bits of the chain lo .. hi; a transition depends on K + 1 of them.
         const lo = bA - 1 - post, hi = bB + pre;
-        const K = 1 + post + pre;
         // Bits outside the chain: independent +-w terms.
         let base = new Float64Array(nV);
         base[c0] = 1;
@@ -243,7 +261,7 @@ function makeStatEye(p, nodesPerSigma = NODES_PER_SIGMA) {
             for (let b = bA; b <= bB; b++) {
                 const m = b + pre, wm = w.get(m) || 0;
                 const r = res.get(b);
-                const kern = new Map();
+                const kern = new Array(nW);
                 for (let ns = 0; ns < S; ns++) { if (nxt[ns]) nxt[ns].fill(0); nlim[2 * ns] = nV; nlim[2 * ns + 1] = -1; }
                 for (let st = 0; st < S; st++) {
                     const src = cur[st];
@@ -253,16 +271,9 @@ function makeStatEye(p, nodesPerSigma = NODES_PER_SIGMA) {
                     for (let v = 0; v < 2; v++) {
                         const d = v ? 1 : -1;
                         if (m === 0 && d !== cond) continue;
-                        const W = st | (v << K);
-                        // Bits of the window: position t holds d_(lo(b) + t), lo(b) = b - 1 - post.
-                        const bit = (q) => ((W >> (q - (b - 1 - post))) & 1) ? 1 : -1;
-                        let x = 0;
-                        if (fir[0] !== 0) x += fir[0] * (bit(b + 1) - bit(b));
-                        x += fir[1] * (bit(b) - bit(b - 1));
-                        if (fir[2] !== 0) x += fir[2] * (bit(b - 1) - bit(b - 2));
-                        const key = `${x}|${d}`;
-                        let kr = kern.get(key);
-                        if (!kr) { kr = kernel(s, b, x, wm * d, r); kern.set(key, kr); }
+                        const W = st | (v << K), cw = canonW[W];
+                        let kr = kern[cw];
+                        if (!kr) { kr = kernel(s, b, xOfW[cw], wm * d, r); kern[cw] = kr; }
                         const ns = W >> 1;
                         if (!nxt[ns]) nxt[ns] = new Float64Array(nV);
                         const dst = nxt[ns];
@@ -304,6 +315,21 @@ function makeStatEye(p, nodesPerSigma = NODES_PER_SIGMA) {
             return sig > 0.05 * bin || Math.abs(lay.noiseMean) > 0.05 * bin ? gaussConv(out, sig / bin, lay.noiseMean / bin) : out;
         };
 
+        // Residual samples g(tau - jitter) - gLin(tau) of boundary b per edge direction, shared
+        // by every transition value and both conditionals.
+        const resid = new Map();
+        const residOf = (b, up) => {
+            const key = 2 * b + (up ? 1 : 0);
+            let a = resid.get(key);
+            if (!a) {
+                const tau = s - b * spb, g = up ? gUp : gDn, gl = gLin(tau);
+                a = new Float64Array(jt.length);
+                for (let i = 0; i < jt.length; i++) a[i] = g(tau - jt[i]) - gl;
+                resid.set(key, a);
+            }
+            return a;
+        };
+
         // Residual of boundary b for transition x, with the new bit's linear term wd.
         const kernel = (s_, b, x, wd, r) => {
             const tau = s_ - b * spb;
@@ -311,18 +337,22 @@ function makeStatEye(p, nodesPerSigma = NODES_PER_SIGMA) {
             const g = x > 0 ? gUp : gDn, gl = gLin(tau);
             if (!r.jitter || r.jitter < 0.01 * bin) return { off: Int32Array.of(Math.round((wd + x * (g(tau) - gl)) / bin)), p: Float64Array.of(1) };
             // Bins of the jittered values, accumulated densely between the extremes.
-            const ks = new Int32Array(jt.length);
+            const rv = residOf(b, x > 0);
+            const ks = ksBuf;
             let kLo = Infinity, kHi = -Infinity;
             for (let i = 0; i < jt.length; i++) {
-                const k = Math.round((wd + x * (g(tau - jt[i]) - gl)) / bin);
+                const k = Math.round((wd + x * rv[i]) / bin);
                 ks[i] = k; if (k < kLo) kLo = k; if (k > kHi) kHi = k;
             }
-            const acc = new Float64Array(kHi - kLo + 1);
+            const nAcc = kHi - kLo + 1;
+            if (accBuf.length < nAcc) accBuf = new Float64Array(2 * nAcc);
+            const acc = accBuf;
+            acc.fill(0, 0, nAcc);
             for (let i = 0; i < jt.length; i++) acc[ks[i] - kLo] += jn.p[i];
             let n = 0;
-            for (const q of acc) if (q > 0) n++;
+            for (let k = 0; k < nAcc; k++) if (acc[k] > 0) n++;
             const off = new Int32Array(n), pr = new Float64Array(n);
-            for (let k = 0, j = 0; k < acc.length; k++) if (acc[k] > 0) { off[j] = k + kLo; pr[j++] = acc[k]; }
+            for (let k = 0, j = 0; k < nAcc; k++) if (acc[k] > 0) { off[j] = k + kLo; pr[j++] = acc[k]; }
             return { off, p: pr };
         };
 
@@ -451,10 +481,13 @@ const PLOT_ROWS = 256;
 /**
  * Statistical eye over one UI of sampling phases and its BER-target opening.
  * p: makeStatEye parameters; opts: { ber (target), phases (per UI, even), nV (odd),
- * bisect (steps refining each eye width edge, default 7) }.
+ * bisect (steps refining each eye width edge, default 7), columns (false: height and width
+ * only, no plot), memo (Map of evaluated phases from an earlier call with the same p and
+ * opts) }.
  * Returns { ber, height (at the sample point n0), sampleTop, sampleBottom, width, widthLeft,
  * widthRight, centre (phases in UI from n0), berSample (at n0 and the threshold), thr, bin,
- * plot: { x (UI, the eye centre at 1), y, density (log10 probability per row), logBer } }.
+ * plot: { x (UI, the eye centre at 1), y, density (log10 probability per row), logBer } };
+ * with columns false no plot and open, but memo.
  */
 function statEye(p, opts) {
     const se = makeStatEye(p);
@@ -470,10 +503,16 @@ function statEye(p, opts) {
     const nV = opts.nV, bin = 2 * bound / (nV - 1);
     const grid = { v0: p.vmid - (nV - 1) / 2 * bin, bin, nV };
     const thr = p.vmid;
+    const memo = opts.memo || new Map();
     const at = (u) => {
-        const { p1, p0 } = se.evaluate(u * spb, grid);
-        const ber = berCurve(p1, p0);
-        return { p1, p0, ber, atThr: berAt(ber, grid, thr) };
+        let c = memo.get(u);
+        if (!c) {
+            const { p1, p0 } = se.evaluate(u * spb, grid);
+            const ber = berCurve(p1, p0);
+            c = { p1, p0, ber, atThr: berAt(ber, grid, thr) };
+            memo.set(u, c);
+        }
+        return c;
     };
     const span = (list, open) => {
         // Contiguous run of open entries around the least BER: [first, last] indices.
@@ -504,9 +543,44 @@ function statEye(p, opts) {
         centre = Math.round(centre * nPh) / nPh;
     }
 
+    const colU = (k) => centre + (k - nPh / 2) / nPh;
+    const edge = (inside, outside) => {
+        let a = inside, b = outside;
+        for (let it = 0; it < (opts.bisect ?? 7); it++) {
+            const m = 0.5 * (a + b);
+            if (at(m).atThr < target) a = m; else b = m;
+        }
+        return 0.5 * (a + b);
+    };
+    // Past the end of a DFE window the next decision's feedback applies: the window ends it.
+    const step = 1 / nPh;
+    const widthOf = (l, r) => {
+        const wl = dfeWindow && l === 0 ? colU(0) : edge(colU(l), colU(l) - step);
+        const wr = dfeWindow && r === nPh - 1 ? centre + 0.5 : edge(colU(r), colU(r) + step);
+        return { wl, wr, width: Math.min(1, wr - wl) };
+    };
+
+    // Height and width only: the open run of phase columns around the sample point by
+    // bisection over the columns, the same as the full scan when the open phases are one run.
+    const k0 = nPh / 2 - Math.round(centre * nPh);
+    if (opts.columns === false && k0 >= 0 && k0 < nPh) {
+        const open = (k) => at(colU(k)).atThr < target;
+        if (open(k0)) {
+            let a = -1, b = k0;
+            while (b - a > 1) { const m = (a + b) >> 1; if (open(m)) b = m; else a = m; }
+            const l = b;
+            a = k0; b = nPh;
+            while (b - a > 1) { const m = (a + b) >> 1; if (open(m)) a = m; else b = m; }
+            const { wl, wr, width } = widthOf(l, a);
+            const s0 = at(0), o0 = verticalOpening(s0.ber, grid, target);
+            return { ber: target, thr, bin, centre, height: o0.height, sampleTop: o0.top, sampleBottom: o0.bottom,
+                width, widthLeft: wl, widthRight: wr, berSample: s0.atThr, symmetric: se.symmetric, memo };
+        }
+    }
+
     const cols = [];
     for (let k = 0; k < nPh; k++) {
-        const u = centre + (k - nPh / 2) / nPh, c = at(u);
+        const u = colU(k), c = at(u);
         const dens = new Float64Array(nV);
         for (let i = 0; i < nV; i++) dens[i] = 0.5 * (c.p1[i] + c.p0[i]);
         cols.push({ u, ber: c.ber, dens, open: verticalOpening(c.ber, grid, target), atThr: c.atThr });
@@ -514,21 +588,7 @@ function statEye(p, opts) {
     // Width at the threshold: the open phases around the least BER, edges by bisection.
     let width = 0, wl = NaN, wr = NaN;
     const ws = span(cols, c => c.atThr < target);
-    if (ws) {
-        const edge = (inside, outside) => {
-            let a = inside, b = outside;
-            for (let it = 0; it < (opts.bisect ?? 7); it++) {
-                const m = 0.5 * (a + b);
-                if (at(m).atThr < target) a = m; else b = m;
-            }
-            return 0.5 * (a + b);
-        };
-        // Past the end of a DFE window the next decision's feedback applies: the window ends it.
-        const step = 1 / nPh;
-        wl = dfeWindow && ws.l === 0 ? cols[0].u : edge(cols[ws.l].u, cols[ws.l].u - step);
-        wr = dfeWindow && ws.r === nPh - 1 ? centre + 0.5 : edge(cols[ws.r].u, cols[ws.r].u + step);
-        width = Math.min(1, wr - wl);
-    }
+    if (ws) ({ wl, wr, width } = widthOf(ws.l, ws.r));
     // Height at the sample point n0.
     const s0 = at(0), o0 = verticalOpening(s0.ber, grid, target);
 

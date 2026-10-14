@@ -630,16 +630,18 @@ function statEyeSearch(ctx, cands, { stim, spb, dt, split, dfeTaps, dfeLimits })
         for (const o of offsets) sweep.push(at(q.c, o));
     }
     sort(sweep);
+    // The finalists by height and width on the full grid, the full eye of the winner only.
     let best = null;
     const ranked = [];
     for (const e of take(sweep, FULL_SET, cfg.refine)) {
-        const p = params(e.c, e.s, dfeTapsOf(e.c.q, e.s, spb, dfeTaps, dfeLimits).h), r = statEye(p, { ber, ...statGrid(cfg) });
-        r.sigmaSlow = p.sigmaSlow;
-        const f = { ...e, r, product: r.height * r.width };
+        const p = params(e.c, e.s, dfeTapsOf(e.c.q, e.s, spb, dfeTaps, dfeLimits).h), r = statEye(p, { ber, ...statGrid(cfg), columns: false });
+        const f = { ...e, p, r, product: r.height * r.width };
         ranked.push(f);
         if (!best || better(f, best)) best = f;
     }
-    Object.assign(best.c, { sample: best.s, offset: best.offset, stat: best.r });
+    const stat = best.r.plot ? best.r : statEye(best.p, { ber, ...statGrid(cfg), memo: best.r.memo });
+    stat.sigmaSlow = best.p.sigmaSlow;
+    Object.assign(best.c, { sample: best.s, offset: best.offset, stat });
     const row = (e) => ({ firName: e.c.firName, adc: e.c.adc, offset: e.offset, height: e.r.height, width: e.r.width, pda: e.pda });
     let pdaBest = cands[0];
     for (const c of cands) if (c.pda.height > pdaBest.pda.height) pdaBest = c;

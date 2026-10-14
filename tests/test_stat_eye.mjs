@@ -14,12 +14,15 @@
 //      grid); without the statistical eye the peak-distortion argmax, a different choice here.
 //   4. Baseline wander of a slow AC-coupling mode: the passband level times the rms of a
 //      first-order low-pass of random +-1 bits, sqrt((1 - a) / (1 + a)), a = exp(-UI / lambda).
+//   6. Height and width only (columns false, the equalization finalists): the same height,
+//      width and edges as the full phase scan, with and without DFE, and the full eye from
+//      its memo the same as a fresh one.
 import { check, done } from './helpers.js';
 import { loadFFT } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
 import { erfc } from '../src/eye/stimulus.js';
 import { patternBits } from '../src/eye/pattern.js';
-import { makeStatEye } from '../src/eye/stat_eye.js';
+import { makeStatEye, statEye } from '../src/eye/stat_eye.js';
 import { PACKAGES } from '../src/eye/network.js';
 
 const fft = await loadFFT();
@@ -201,6 +204,30 @@ const volts = (s) => parseFloat(s) * (/ mV/.test(s) ? 1e-3 : / µV| uV/.test(s) 
     check('without the statistical eye: the peak-distortion choice (different here)',
         name(pda.eqChoice) !== name(best) && !pda.eqSearch && pda.eqChoice.sampleOffset === null && !pda.statEye,
         `${name(pda.eqChoice)} (${(pda.eqChoice.pdaHeight * 1e3).toFixed(1)} mV) vs EH x EW ${name(best)}`);
+}
+
+// 6. Height and width only.
+{
+    const spb = 32, N = 320, dt = 1 / spb;
+    const edge = (t, s) => 0.5 * erfc(-t / (s * Math.SQRT2));
+    const mk = (s) => Float64Array.from({ length: N }, (_, n) => {
+        const t = (n - 40) * dt;
+        return 0.4 * edge(t, s) + 0.1 * edge(t - 0.8, 0.5) - 0.05 * edge(t - 3.1, s);
+    });
+    const jitter = { rj: 0.01, djdd: 0.06, pwRj: 0.01, pwDj: 0.04 };
+    const rows = [];
+    let ok = true;
+    for (const [name, dfe, fir] of [['DFE', [0.04, -0.01], [-0.08, 0.72, -0.2]], ['no DFE', [], [0, 1, 0]]]) {
+        const p = { gUp: mk(0.15), gDn: mk(0.22), fir, spb, dt, n0: 60, dfe, jitter, vmid: 0, sigmaSlow: 0.002 };
+        const opts = { ber: 1e-12, phases: 64, nV: 1025 };
+        const full = statEye(p, opts), quick = statEye(p, { ...opts, columns: false });
+        const again = statEye(p, { ...opts, memo: quick.memo });
+        const same = ['height', 'width', 'widthLeft', 'widthRight', 'berSample'].every(k => quick[k] === full[k])
+            && !quick.plot && JSON.stringify(again) === JSON.stringify(full);
+        ok = ok && same && full.height > 0 && full.width > 0;
+        rows.push(`${name} ${(full.height * 1e3).toFixed(2)} mV x ${full.width.toFixed(4)} UI ${same ? '=' : '!='} ${(quick.height * 1e3).toFixed(2)} mV x ${quick.width.toFixed(4)} UI`);
+    }
+    check('height and width only = full phase scan; full eye from the memo = fresh', ok, rows.join('; '));
 }
 
 done();
