@@ -48,11 +48,12 @@ async function loadFFT() {
     };
 }
 
-// Smallest even n >= m whose only prime factors are 2, 3 and 5.
-function smoothSize(m) {
-    let n = Math.max(2, Math.ceil(m));
-    if (n & 1) n++;
-    for (;; n += 2) {
+// Smallest even n >= m whose only prime factors are 2, 3 and 5, and a multiple of `step`
+// (even). A step of 16 keeps radix-2 stages in large transforms: 2 * 3^12 runs at twice the
+// time per point of its smooth neighbours.
+function smoothSize(m, step = 2) {
+    let n = Math.max(step, Math.ceil(m / step) * step);
+    for (;; n += step) {
         let k = n;
         for (const p of [2, 3, 5]) while (k % p === 0) k /= p;
         if (k === 1) return n;

@@ -59,7 +59,7 @@ eigen_solver.js: eigen_solver.cpp | eigen spectra
 # Eigen's unsupported FFT module, default kissfft backend (header-only).
 fft: fft.js
 fft.js: fft.cpp | eigen
-	$(EMCC) fft.cpp -I eigen -O3 \
+	$(EMCC) fft.cpp -I eigen -O3 -fcx-limited-range \
 	  -s WASM=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,worker,node \
 	  -s EXPORTED_FUNCTIONS='["_irfft_batch","_rfft","_malloc","_free"]' \
 	  -s EXPORTED_RUNTIME_METHODS='["HEAPF64"]' \

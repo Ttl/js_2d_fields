@@ -351,7 +351,9 @@ function patternSim(ctx, dt0) {
     const useEqOut = !!(choice && choice.C);
     const nOut = no + (useEqOut ? 1 : 0);
     const respOf = (o, l, e) => o < no ? resp.s[iRes(o, l, e)] : choice.steps[l * 2 + e];
-    const L = smoothSize(2 * M), K = L / 2;
+    // Linear convolution of the period's edge trains (M samples) with the responses folded
+    // into the period (min(N, M) samples), wrapped to the period below.
+    const L = smoothSize(M + Math.min(N, M) - 1, 16), K = L / 2;
     const acc = Array.from({ length: nOut }, () => new Float64Array(2 * (K + 1)));
     const buf = new Float64Array(L);
     for (let l = 0; l < nl; l++) {
