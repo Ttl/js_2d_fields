@@ -672,8 +672,10 @@ function meanUiCentre(p, opts) {
     let u0 = 0, b0 = b(0);
     if (!(b0 < 0.25)) for (const u of [-0.5, -0.375, -0.25, -0.125, 0.125, 0.25, 0.375, 0.5]) { const x = b(u); if (x < b0) { b0 = x; u0 = u; } }
     if (!(b0 < 0.25)) return u0;
+    // u0 may sit next to one crossing (n0 at the start of a flat top), so the other one is up
+    // to 1 UI away; a UI on, bit 0 is decided in the next eye and the BER is 1/2.
     const cross = (dir) => {
-        let a = 0, c = 0.75;
+        let a = 0, c = 1;
         for (let it = 0; it < opts.steps; it++) { const m = 0.5 * (a + c); if (b(u0 + dir * m) < 0.25) a = m; else c = m; }
         return u0 + dir * 0.5 * (a + c);
     };
