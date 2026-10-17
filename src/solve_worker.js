@@ -46,10 +46,11 @@ const stoppedJobs = new Set();
 let modesSolver = null;   // retained between 'modes' and its follow-up 'modeField' calls
 // The last simulate job's solver and converged solve, retained for 'plotFields', the id
 // of that job and its lowest frequency.
-let simSolver = null, simCached = null, simJob = null, simFMin = 0;
-// The interpolating sweep of that job and its DC row, when it had both.
+let simSolver = null, simCached = null, simJob = null, simFMin = 0, simFMax = 0;
+// The interpolating sweep of that job, its frequency range and its DC row (null when the
+// job had no DC point, the Eye channel then solves it on the kept mesh).
 let simSweep = null, simDCRow = null, simSweepRange = null;
-// The sweep below that one's lowest frequency, filled for the Eye channel: { sweep, fLow }.
+// The sweep below that job's lowest frequency, filled for the Eye channel: { sweep, fLow, fTop }.
 let simLowSweep = null;
 // The Eye tab's own channel sweep: its parameters, top frequency and sweep.
 let eyeChannel = null;
@@ -357,10 +358,11 @@ async function jobSimulate({ params, frequencies, opts }) {
     if (!stopped) {
         simFMin = Math.min(...frequencies);
         plotted = await plotFields(solver, cachedResults, plotFreq, simFMin);
-        simSolver = solver; simCached = cachedResults; simJob = currentId;
-        if (keptSweep && keptSweep.dc) {
-            simSweep = keptSweep.sweep; simDCRow = keptSweep.dc; simSweepRange = keptSweep.range; simLowSweep = null;
-        }
+        simSolver = solver; simCached = cachedResults; simJob = currentId; simFMax = maxFreq;
+        simSweep = keptSweep ? keptSweep.sweep : null;
+        simDCRow = (keptSweep && keptSweep.dc) || sweepResults.find(r => r.freq === 0) || null;
+        simSweepRange = keptSweep ? keptSweep.range : null;
+        simLowSweep = null;
     }
     return {
         stopped,
@@ -417,37 +419,54 @@ function logGrid(a, b, perDecade) {
 const EYE_TABLE_PER_DECADE = 40;
 
 // Line parameters for the Eye tab, as sweep rows from DC to (at least) fNeed.
-// mode 'reuse': evaluate the interpolating sweep of simulate job `job`.
+// mode 'reuse': the kept solve of simulate job `job`, extended downwards on its mesh
+// (never upwards: the top frequency sized the mesh). An interpolating sweep is evaluated
+// on a dense grid; for a discrete sweep (`discreteLow` = its lowest nonzero frequency)
+// only the rows below that point are returned, the caller appends its own.
 // mode 'solve': the Eye tab's own interpolating sweep, DC first then 10 MHz..fNeed,
 // on its own mesh solve. Kept, so a later request with the same parameters and a
 // lower fNeed needs no solve.
-async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance }) {
+async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance, discreteLow }) {
     const fLow = channelLowFreq(fNeed);
     if (mode === 'reuse') {
-        if (!simSweep || simJob !== job) throw new Error('The solve to reuse is no longer available.');
-        const [a, b] = simSweepRange;
-        const warnings = [...((simDCRow.result && simDCRow.result.warnings) || []), ...(simSweep.warnings || [])];
+        const discrete = discreteLow != null;
+        if (!simSolver || simJob !== job || (!discrete && !simSweep))
+            throw new Error('The solve to reuse is no longer available.');
+        if (simSolver.allow_dc === false)
+            throw new Error(simSolver.dc_block_reason || 'This line type does not propagate at DC.');
+        const [a, b] = discrete ? [discreteLow, simFMax] : simSweepRange;
+        const warnings = [];
+        let dcSolved = false;
+        if (!simDCRow) {
+            log('Channel sweep: DC point on the kept mesh...');
+            simDCRow = { freq: 0, result: await simSolver.computeAtFrequency(0, simCached) };
+            dcSolved = true;
+            if (stopRequested) return { stopped: true };
+        }
+        warnings.push(...((simDCRow.result && simDCRow.result.warnings) || []));
+        if (!discrete) warnings.push(...(simSweep.warnings || []));
         // A sweep starting well above fLow gets the band below it on the same mesh.
         let low = [];
         if (a > 2 * fLow) {
-            if (!simLowSweep || simLowSweep.fLow !== fLow) {
+            if (!simLowSweep || simLowSweep.fLow !== fLow || simLowSweep.fTop !== a) {
                 simLowSweep = null;
                 log(`Channel sweep: ${fmtFreq(fLow)} to ${fmtFreq(a)}, below the reused sweep...`);
                 const sweep = new InterpolatingSweep(simSolver, simCached, { tolerance: interpTolerance });
                 const n = await sweep.run(fLow, a, {
                     onProgress: (info) => progress(Math.min(0.95, info.totalSamples / EST_SWEEP_POINTS),
                         `Channel sweep: ${info.totalSamples} points`),
-                    shouldStop, sweepFmax: b,
+                    shouldStop, sweepFmax: simFMax,
                 });
                 if (stopRequested) return { stopped: true };
                 log(`Channel sweep: ${n} exact solves from ${fmtFreq(fLow)} to ${fmtFreq(a)} (interpolating, tolerance ${(100 * interpTolerance).toPrecision(3)} %).`);
-                simLowSweep = { sweep, fLow };
+                simLowSweep = { sweep, fLow, fTop: a };
             }
             low = simLowSweep.sweep.buildResults(logGrid(fLow, a, EYE_TABLE_PER_DECADE).slice(0, -1));
             warnings.push(...(simLowSweep.sweep.warnings || []));
         }
-        const rows = [simDCRow, ...low, ...simSweep.buildResults(logGrid(a, b, EYE_TABLE_PER_DECADE))];
-        return { rows: stripSweep(rows), fMax: b, warnings, lowFill: low.length ? [fLow, a] : null };
+        const upper = discrete ? [] : simSweep.buildResults(logGrid(a, b, EYE_TABLE_PER_DECADE));
+        const rows = [simDCRow, ...low, ...upper];
+        return { rows: stripSweep(rows), fMax: b, warnings, dcSolved, lowFill: low.length ? [fLow, a] : null };
     }
     const key = JSON.stringify(params);
     if (eyeChannel && eyeChannel.key === key && eyeChannel.fMax >= fNeed) {

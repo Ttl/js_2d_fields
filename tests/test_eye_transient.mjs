@@ -9,7 +9,7 @@
 //   7. Clock steady state vs the last period of a long burst from rest.
 //   8. Symmetric pair: differential response = twice the odd-mode single-ended one.
 //      Line + network transfer vs the MTL / single-ended S-parameters.
-//   9. Coverage rule of reused sweeps.
+//   9. Coverage rule of reused sweeps, low-end extension of a kept solve.
 //  10. FFT round trip, non-power-of-two sizes, sampling invariance.
 //  11. Non-causal dielectric model: precursor warning.
 //  12. Open end, strongly mismatched source, skin-effect line: the low-frequency
@@ -317,6 +317,16 @@ const valueAt = (r, name, t) => {
     check('coverage: dense linear sweep from 10 MHz accepted', checkCoverage(rows(lin(0, 2e10, 2001)), 1e10, false).ok);
     const logRows = [0, ...Array.from({ length: 41 }, (_, i) => 1e7 * Math.pow(2e3, i / 40))];
     check('coverage: log sweep from 10 MHz accepted', checkCoverage(rows(logRows), 1e10, false).ok);
+    // A kept solve is extended below its first point (DC included), never above its top.
+    const kNoDC = checkCoverage(rows([1e8, 1e9, 2e10]), 1e10, true, true);
+    check('coverage: kept interpolating sweep without DC is filled', kNoDC.ok && kNoDC.fill);
+    check('coverage: kept sweep stopping too low still rejected', !checkCoverage(rows([1e8, 1e9]), 5e9, true, true).ok);
+    const kLin = checkCoverage(rows(lin(0, 2e10, 201)), 1e10, false, true);
+    check('coverage: kept linear sweep from 100 MHz gets a low-band fill', kLin.ok && kLin.fill);
+    const kNoDCLin = checkCoverage(rows(lin(1e8, 2e10, 200)), 1e10, false, true);
+    check('coverage: kept linear sweep without DC gets a fill', kNoDCLin.ok && kNoDCLin.fill);
+    const kDense = checkCoverage(rows(lin(0, 2e10, 2001)), 1e10, false, true);
+    check('coverage: kept dense linear sweep from DC needs no fill', kDense.ok && !kDense.fill);
 }
 
 // 10. FFT and sampling.

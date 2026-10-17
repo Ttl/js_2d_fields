@@ -134,26 +134,31 @@ function channelLowFreq(fNeed) {
 /**
  * Whether sweep rows cover a time-domain simulation up to fNeed.
  * interp: the rows come from an interpolating sweep (evaluated on a dense grid).
- * Returns { ok, reason, warning }.
+ * canFill: the solve is kept, so a missing DC point and the band below the first point
+ * can be solved on its mesh (the top cannot be raised, it sized the mesh).
+ * Returns { ok, reason, warning, fill } (fill: the low end needs that extension).
  */
-function checkCoverage(rows, fNeed, interp) {
+function checkCoverage(rows, fNeed, interp, canFill = false) {
     if (!rows || !rows.length) return { ok: false, reason: 'no sweep results' };
     const fs = [...new Set(rows.map(r => r.freq))].sort((a, b) => a - b);
-    if (fs[0] !== 0) return { ok: false, reason: 'the sweep has no DC (0 Hz) point' };
+    const hasDC = fs[0] === 0;
+    if (!hasDC && !canFill) return { ok: false, reason: 'the sweep has no DC (0 Hz) point' };
     const top = fs[fs.length - 1];
     if (top < fNeed) {
         return { ok: false, reason: `the sweep stops at ${fmtHz(top)}, below the ${fmtHz(fNeed)} the stimulus needs` };
     }
-    if (interp) return { ok: true };
+    if (interp) return { ok: true, fill: !hasDC };
     const nz = fs.filter(f => f > 0);
     if (nz.length < 8) return { ok: false, reason: 'the sweep has too few points' };
-    if (nz[0] > 2 * channelLowFreq(fNeed)) {
+    const lowGap = nz[0] > 2 * channelLowFreq(fNeed);
+    if (lowGap && !canFill) {
         return { ok: false, reason: `the first sweep point above DC (${fmtHz(nz[0])}) is too high to resolve the internal inductance at low frequencies` };
     }
     // Large gaps in log f relative to the decade the line parameters change over.
     let worst = 1;
     for (let i = 1; i < nz.length; i++) worst = Math.max(worst, nz[i] / nz[i - 1]);
-    return { ok: true, warning: worst > 4 ? 'the sweep points are sparse, the line parameters are splined over large gaps' : null };
+    return { ok: true, fill: !hasDC || lowGap,
+        warning: worst > 4 ? 'the sweep points are sparse, the line parameters are splined over large gaps' : null };
 }
 
 function fmtHz(f) {

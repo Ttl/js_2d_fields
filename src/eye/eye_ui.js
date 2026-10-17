@@ -600,32 +600,43 @@ async function getChannel(fNeed) {
     if (sw.rows && sw.current && sw.params && channelKey(sw.params) !== key) {
         reason = 'the solver settings changed since the last solve';
     } else if (sw.rows && sw.current) {
-        const cov = checkCoverage(sw.rows, fNeed, sw.interp);
-        if (cov.ok) {
-            if (sw.interp && sw.keptJob != null) {
-                try {
-                    const out = await app.solveJob('eyeChannel', {
-                        mode: 'reuse', job: sw.keptJob, fNeed, interpTolerance: app.interpTolerance(),
-                    }, {
-                        progress: (m) => setStatus(m.text || 'Channel sweep...'),
-                    });
-                    if (out.stopped) return null;
-                    const source = `Last solve, interpolating sweep, DC to ${fmtHz(out.fMax)}`
-                        + (out.lowFill ? ` + new points ${fmtHz(out.lowFill[0])} to ${fmtHz(out.lowFill[1])}` : '');
-                    channelCache = { key, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
-                    return channelCache;
-                } catch (e) {
-                    reason = e.message;
+        const kept = sw.keptJob != null;
+        const cov = checkCoverage(sw.rows, fNeed, sw.interp, kept);
+        if (cov.ok && (sw.interp || cov.fill) && !kept) {
+            reason = 'the last solve is no longer kept';
+        } else if (cov.ok && (sw.interp || cov.fill)) {
+            // The kept solve, extended below its first point (DC included) on its mesh.
+            const nz = sw.rows.map(r => r.freq).filter(f => f > 0);
+            const discreteLow = sw.interp ? undefined : Math.min(...nz);
+            try {
+                const out = await app.solveJob('eyeChannel', {
+                    mode: 'reuse', job: sw.keptJob, fNeed, interpTolerance: app.interpTolerance(), discreteLow,
+                }, {
+                    progress: (m) => setStatus(m.text || 'Channel sweep...'),
+                });
+                if (out.stopped) return null;
+                const added = [out.dcSolved ? 'DC' : '', out.lowFill ? `${fmtHz(out.lowFill[0])} to ${fmtHz(out.lowFill[1])}` : '']
+                    .filter(Boolean).join(' and ');
+                const fMax = sw.interp ? out.fMax : Math.max(...nz);
+                const source = `Last solve, ${sw.interp ? 'interpolating sweep, ' : ''}DC to ${fmtHz(fMax)}`
+                    + (added ? ` + new points ${added}` : '');
+                let rows = out.rows, warnings = out.warnings || [];
+                if (!sw.interp) {
+                    if (cov.warning) app.log(`⚠ Time domain: ${cov.warning}.`);
+                    rows = [...out.rows, ...sw.rows.filter(r => r.freq > 0)];
+                    warnings = [...warnings, ...rowWarnings(sw.rows.filter(r => r.freq > 0))];
                 }
-            } else if (!sw.interp) {
-                const fMax = Math.max(...sw.rows.map(r => r.freq));
-                const source = `Last solve, DC to ${fmtHz(fMax)}`;
-                if (cov.warning) app.log(`⚠ Time domain: ${cov.warning}.`);
-                channelCache = { key, fMax, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
+                channelCache = { key, fMax, rows, source, warnings };
                 return channelCache;
-            } else {
-                reason = 'the last solve is no longer kept';
+            } catch (e) {
+                reason = e.message;
             }
+        } else if (cov.ok) {
+            const fMax = Math.max(...sw.rows.map(r => r.freq));
+            const source = `Last solve, DC to ${fmtHz(fMax)}`;
+            if (cov.warning) app.log(`⚠ Time domain: ${cov.warning}.`);
+            channelCache = { key, fMax, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
+            return channelCache;
         } else {
             reason = cov.reason;
         }
