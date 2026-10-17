@@ -1,7 +1,7 @@
 // Time domain tab: stimulus, coupling and termination settings, the channel sweep request and
 // the plots of the time-domain link simulation (eye_worker.js).
 import { darkAxis, darkBackground } from '../plot.js';
-import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
+import { channelTableFromRows, checkCoverage, channelLowFreq, fmtHz } from './channel_grid.js';
 import { requiredBandwidth } from './stimulus.js';
 import { patternBits, PRBS_TRUNCATED } from './pattern.js';
 import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX, SKIN_ERR } from './sensitivity.js';
@@ -289,7 +289,7 @@ let eyeWorker = null, eyeJobId = 0;
 const eyeJobs = new Map();
 let busy = false, stopRequested = false;
 let lastResult = null, frozen = null;
-let channelCache = null;   // { key, fMax, rows, source }
+let channelCache = null;   // { key, fMax, fLow, rows, source }
 
 function isBusy() { return busy; }
 
@@ -587,13 +587,15 @@ function channelKey(params) {
     return JSON.stringify(rest);
 }
 
-// Sweep rows from DC to at least fNeed: the cache, the last solve, or a channel sweep.
-async function getChannel(fNeed) {
+// Sweep rows from DC to at least fNeed for a line of length len: the cache, the last
+// solve, or a channel sweep.
+async function getChannel(fNeed, len) {
+    const fLow = channelLowFreq(fNeed, len);
     const params = app.getParams();
     const key = channelKey(params);
     // The cache also depends on the interpolation tolerance of the sweeps it ran.
     const cacheKey = JSON.stringify([key, app.interpTolerance()]);
-    if (channelCache && channelCache.key === cacheKey && channelCache.fMax >= fNeed) {
+    if (channelCache && channelCache.key === cacheKey && channelCache.fMax >= fNeed && channelCache.fLow <= fLow) {
         return { rows: channelCache.rows, source: channelCache.source, warnings: channelCache.warnings };
     }
     const sw = app.getSweepState();
@@ -603,7 +605,7 @@ async function getChannel(fNeed) {
         reason = 'the solver settings changed since the last solve';
     } else if (sw.rows && sw.current) {
         const kept = sw.keptJob != null;
-        const cov = checkCoverage(sw.rows, fNeed, sw.interp, kept);
+        const cov = checkCoverage(sw.rows, fNeed, sw.interp, kept, len);
         if (cov.ok && (sw.interp || cov.fill) && !kept) {
             reason = 'the last solve is no longer kept';
         } else if (cov.ok && (sw.interp || cov.fill)) {
@@ -612,7 +614,7 @@ async function getChannel(fNeed) {
             const discreteLow = sw.interp ? undefined : Math.min(...nz);
             try {
                 const out = await app.solveJob('eyeChannel', {
-                    mode: 'reuse', job: sw.keptJob, fNeed, interpTolerance: app.interpTolerance(), discreteLow,
+                    mode: 'reuse', job: sw.keptJob, fNeed, length: len, interpTolerance: app.interpTolerance(), discreteLow,
                 }, {
                     progress: (m) => setStatus(m.text || 'Channel sweep...'),
                 });
@@ -628,7 +630,7 @@ async function getChannel(fNeed) {
                     rows = [...out.rows, ...sw.rows.filter(r => r.freq > 0)];
                     warnings = [...warnings, ...rowWarnings(sw.rows.filter(r => r.freq > 0))];
                 }
-                channelCache = { key: cacheKey, fMax, rows, source, warnings };
+                channelCache = { key: cacheKey, fMax, fLow, rows, source, warnings };
                 return channelCache;
             } catch (e) {
                 reason = e.message;
@@ -637,7 +639,7 @@ async function getChannel(fNeed) {
             const fMax = Math.max(...sw.rows.map(r => r.freq));
             const source = `Last solve, DC to ${fmtHz(fMax)}`;
             if (cov.warning) app.log(`⚠ Time domain: ${cov.warning}.`);
-            channelCache = { key: cacheKey, fMax, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
+            channelCache = { key: cacheKey, fMax, fLow, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
             return channelCache;
         } else {
             reason = cov.reason;
@@ -648,7 +650,7 @@ async function getChannel(fNeed) {
     app.log(`Time domain: running a channel sweep from DC to ${fmtHz(fNeed)}: ${reason}.`);
     setStatus(`Channel sweep to ${fmtHz(fNeed)}...`);
     const out = await app.solveJob('eyeChannel', {
-        mode: 'solve', params, fNeed, interpTolerance: app.interpTolerance(),
+        mode: 'solve', params, fNeed, length: len, interpTolerance: app.interpTolerance(),
     }, {
         progress: (m) => setStatus(m.text || 'Channel sweep...'),
     });
@@ -656,7 +658,7 @@ async function getChannel(fNeed) {
     const logged = (out.warnings || []).filter(w => !QUANTIFIED.has(w && w.reason));
     for (const w of new Set(logged.map(w => w.message || String(w)))) app.log(`⚠ Time domain channel: ${w}`);
     const source = `New sweep, DC to ${fmtHz(out.fMax)}`;
-    channelCache = { key: cacheKey, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
+    channelCache = { key: cacheKey, fMax: out.fMax, fLow, rows: out.rows, source, warnings: out.warnings || [] };
     return channelCache;
 }
 
@@ -708,7 +710,7 @@ async function runEye() {
     setStatus('Preparing...');
     const t0 = Date.now();
     try {
-        const ch = await getChannel(fNeed);
+        const ch = await getChannel(fNeed, cfg.length);
         if (!ch || stopRequested) { setStatus('Stopped.'); return; }
         const table = channelTableFromRows(ch.rows);
         if (table.differential !== app.isDifferential()) throw new Error('The channel does not match the line type, solve again.');

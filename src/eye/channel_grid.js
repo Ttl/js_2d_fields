@@ -124,11 +124,15 @@ function makeRLGCEvaluator(table) {
     };
 }
 
-// Lowest sweep frequency above DC a channel needs. Below the first row the evaluator
-// blends from DC in sqrt(f), which misses the fall of the internal inductance through the
-// DC-skin transition: an L without the matching R, a receiver response before arrival.
-function channelLowFreq(fNeed) {
-    return Math.min(10e6, fNeed / 100);
+// Lowest sweep frequency above DC a channel of length len needs. Below the first row the
+// evaluator blends from DC in sqrt(f), which misses the fall of the internal inductance
+// through the DC-skin transition and the logarithmic rise of C to its DC value: R, L, C
+// and G that are not Kramers-Kronig pairs, a receiver response before arrival. A long
+// lossy line passes little but this band, so the first row scales down with the delay:
+// about 0.01 / tau at eps_eff = 4.
+const LOW_FREQ_DELAY = 0.005 * 299792458;
+function channelLowFreq(fNeed, len) {
+    return Math.min(10e6, fNeed / 100, len > 0 ? LOW_FREQ_DELAY / len : Infinity);
 }
 
 /**
@@ -136,9 +140,10 @@ function channelLowFreq(fNeed) {
  * interp: the rows come from an interpolating sweep (evaluated on a dense grid).
  * canFill: the solve is kept, so a missing DC point and the band below the first point
  * can be solved on its mesh (the top cannot be raised, it sized the mesh).
+ * len: line length, sets the lowest frequency needed (channelLowFreq).
  * Returns { ok, reason, warning, fill } (fill: the low end needs that extension).
  */
-function checkCoverage(rows, fNeed, interp, canFill = false) {
+function checkCoverage(rows, fNeed, interp, canFill = false, len = 0) {
     if (!rows || !rows.length) return { ok: false, reason: 'no sweep results' };
     const fs = [...new Set(rows.map(r => r.freq))].sort((a, b) => a - b);
     const hasDC = fs[0] === 0;
@@ -150,9 +155,9 @@ function checkCoverage(rows, fNeed, interp, canFill = false) {
     if (interp) return { ok: true, fill: !hasDC };
     const nz = fs.filter(f => f > 0);
     if (nz.length < 8) return { ok: false, reason: 'the sweep has too few points' };
-    const lowGap = nz[0] > 2 * channelLowFreq(fNeed);
+    const lowGap = nz[0] > 2 * channelLowFreq(fNeed, len);
     if (lowGap && !canFill) {
-        return { ok: false, reason: `the first sweep point above DC (${fmtHz(nz[0])}) is too high to resolve the internal inductance at low frequencies` };
+        return { ok: false, reason: `the first sweep point above DC (${fmtHz(nz[0])}) is too high to resolve the low-frequency line parameters` };
     }
     // Large gaps in log f relative to the decade the line parameters change over.
     let worst = 1;

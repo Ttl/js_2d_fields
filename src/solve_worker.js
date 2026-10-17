@@ -20,7 +20,7 @@
 //   { id, type: 'plotFields', freq }         (after a 'simulate' job, same worker)
 //   { id, type: 'plotRelease', job }          (drops the solve 'plotFields' reads, if
 //                                              it is still the one of simulate job `job`)
-//   { id, type: 'eyeChannel', mode, job, params, fNeed, interpTolerance }
+//   { id, type: 'eyeChannel', mode, job, params, fNeed, length, interpTolerance }
 //                                             (line parameters from DC to fNeed for the
 //                                              time-domain simulation, see jobEyeChannel)
 //   {     type: 'stop', job }                (cancels job `job`, running or queued)
@@ -423,11 +423,11 @@ const EYE_TABLE_PER_DECADE = 40;
 // (never upwards: the top frequency sized the mesh). An interpolating sweep is evaluated
 // on a dense grid; for a discrete sweep (`discreteLow` = its lowest nonzero frequency)
 // only the rows below that point are returned, the caller appends its own.
-// mode 'solve': the Eye tab's own interpolating sweep, DC first then 10 MHz..fNeed,
-// on its own mesh solve. Kept, so a later request with the same parameters and a
-// lower fNeed needs no solve.
-async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance, discreteLow }) {
-    const fLow = channelLowFreq(fNeed);
+// mode 'solve': the Eye tab's own interpolating sweep, DC first then fLow..fNeed
+// (fLow from fNeed and the line length), on its own mesh solve. Kept, so a later request
+// with the same parameters and a band inside it needs no solve.
+async function jobEyeChannel({ mode, job, params, fNeed, length, interpTolerance, discreteLow }) {
+    const fLow = channelLowFreq(fNeed, length);
     if (mode === 'reuse') {
         const discrete = discreteLow != null;
         if (!simSolver || simJob !== job || (!discrete && !simSweep))
@@ -469,7 +469,7 @@ async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance, discre
         return { rows: stripSweep(rows), fMax: b, warnings, dcSolved, lowFill: low.length ? [fLow, a] : null };
     }
     const key = JSON.stringify({ params, interpTolerance });
-    if (eyeChannel && eyeChannel.key === key && eyeChannel.fMax >= fNeed) {
+    if (eyeChannel && eyeChannel.key === key && eyeChannel.fMax >= fNeed && eyeChannel.fLow <= fLow) {
         return { rows: eyeChannel.rows, fMax: eyeChannel.fMax, warnings: eyeChannel.warnings };
     }
     eyeChannel = null;
@@ -498,7 +498,7 @@ async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance, discre
     if (sweep.warnings) warnings.push(...sweep.warnings);
     log(`Channel sweep: ${n + 1} exact solves from DC to ${fmtFreq(fNeed)} (interpolating, tolerance ${(100 * interpTolerance).toPrecision(3)} %).`);
     const rows = stripSweep([{ freq: 0, result: dc }, ...sweep.buildResults(logGrid(fLow, fNeed, EYE_TABLE_PER_DECADE))]);
-    eyeChannel = { key, fMax: fNeed, rows, warnings };
+    eyeChannel = { key, fMax: fNeed, fLow, rows, warnings };
     return { rows, fMax: fNeed, warnings };
 }
 

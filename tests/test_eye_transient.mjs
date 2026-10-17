@@ -37,7 +37,7 @@ import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
 import { buildStimulus, edgeValue, erfc } from '../src/eye/stimulus.js';
-import { makeRLGCEvaluator, checkCoverage } from '../src/eye/channel_grid.js';
+import { makeRLGCEvaluator, checkCoverage, channelLowFreq } from '../src/eye/channel_grid.js';
 import { buildNetwork, makeTransfer, packageModel, packageSParams, PACKAGES } from '../src/eye/network.js';
 import { lowFrequencyImpact, lowFrequencyNotes, perturbation } from '../src/eye/sensitivity.js';
 import { prbsBits, prbsPeriod, patternBits, PRBS } from '../src/eye/pattern.js';
@@ -328,6 +328,13 @@ const valueAt = (r, name, t) => {
     check('coverage: kept linear sweep without DC gets a fill', kNoDCLin.ok && kNoDCLin.fill);
     const kDense = checkCoverage(rows(lin(0, 2e10, 2001)), 1e10, false, true);
     check('coverage: kept dense linear sweep from DC needs no fill', kDense.ok && !kDense.fill);
+    // The first row above DC scales down with the length: a long lossy line passes
+    // little but the band below it.
+    check('low end: 10 MHz for a 0.1 m line, 30 kHz for 50 m', channelLowFreq(1e11, 0.1) === 10e6
+        && Math.abs(channelLowFreq(1e11, 50) / 30e3 - 1) < 0.01, `${channelLowFreq(1e11, 50)} Hz`);
+    check('coverage: log sweep from 10 MHz rejected for a 50 m line', !checkCoverage(rows(logRows), 1e10, false, false, 50).ok);
+    const kLong = checkCoverage(rows(logRows), 1e10, false, true, 50);
+    check('coverage: kept log sweep from 10 MHz gets a low-band fill for a 50 m line', kLong.ok && kLong.fill);
 }
 
 // 10. FFT and sampling.
