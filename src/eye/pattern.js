@@ -35,18 +35,22 @@ function parseBitString(str) {
     return Uint8Array.from(s, c => c === '1' ? 1 : 0);
 }
 
+// PRBS too long for a full period: the number of bits simulated is set by the user.
+const PRBS_TRUNCATED = new Set(['prbs23', 'prbs31']);
+
 /**
  * Bits of the pattern setting: { pattern: 'prbs7'..'prbs31' | 'custom', bits (custom
- * string), nbits (bits simulated of a PRBS longer than that) }.
+ * string), nbits (bits simulated of PRBS23 / PRBS31, the shorter ones run a full period) }.
  */
 function patternBits({ pattern, bits, nbits }) {
     let b;
     if (pattern === 'custom') b = parseBitString(bits);
-    else b = prbsBits(pattern, Math.min(prbsPeriod(pattern), Math.max(2, Math.round(nbits || prbsPeriod(pattern)))));
+    else if (!PRBS_TRUNCATED.has(pattern) || !nbits) b = prbsBits(pattern, prbsPeriod(pattern));
+    else b = prbsBits(pattern, Math.min(prbsPeriod(pattern), Math.max(2, Math.round(nbits))));
     let ones = 0;
     for (const x of b) ones += x;
     if (ones === 0 || ones === b.length) throw new Error('The pattern needs both 0 and 1 bits.');
     return b;
 }
 
-export { PRBS, prbsBits, prbsPeriod, parseBitString, patternBits };
+export { PRBS, PRBS_TRUNCATED, prbsBits, prbsPeriod, parseBitString, patternBits };

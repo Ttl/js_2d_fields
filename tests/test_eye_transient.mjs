@@ -30,6 +30,8 @@
 //  17. Transmitter jitter: the per-edge model's statistics, a constant displacement
 //      shifts the receiver waveform, Rj alone reaches the receiver crossings of a
 //      lossless line unchanged, overlapping edges superpose; a jittered steady clock.
+//  18. Floating AC-coupled receiver (bias-leak mode, lambda >> dt): the waveform equals the
+//      DC-coupled one minus its mean; patterns only use PRBS23 / PRBS31 bit counts.
 import { check, done } from './helpers.js';
 import { loadFFT, smoothSize } from '../src/eye/fft.js';
 import { simulateLink } from '../src/eye/transient.js';
@@ -857,6 +859,27 @@ const valueAt = (r, name, t) => {
     try { buildStimulus({ ...pcfg({ tr: 110e-12, tf: 110e-12 }).stimulus, differential: false }); } catch { threwLong = true; }
     check('jitter beyond half a bit and edges longer than a bit are errors; 0.9 UI edges run', threw && threwLong && /mV/.test(lv['Eye height (centre)']),
         `${lv['Eye height (centre)']}`);
+}
+
+console.log('\n18. Floating AC-coupled receiver; PRBS bit counts');
+{
+    const FREQS = [0, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12];
+    const tab = { differential: false, freqs: Float64Array.from(FREQS), keys: ['R', 'L', 'G', 'C'],
+        data: { R: new Float64Array(8), L: new Float64Array(8).fill(250e-9), G: new Float64Array(8), C: new Float64Array(8).fill(100e-12) },
+        lext: { L: 250e-9 } };
+    const cfg = (ac) => ({ length: 0.1,
+        network: { rs: 50, padRx: 0.5e-12, tx: { ac: false }, rx: ac ? { ac: true, c: 1e-6 } : { ac: false }, term: { type: 'open' } },
+        stimulus: { type: 'pattern', vLow: 0, vHigh: 1, tr: 8e-12, tf: 8e-12, edgeDef: '10-90', shape: 'gauss', delay: 0,
+            bitRate: 32e9, bits: prbsBits('prbs7', 127) },
+        samplesPerEdge: 16 });
+    const ra = simulateLink(tab, cfg(false), fft).traces.rx, rb = simulateLink(tab, cfg(true), fft).traces.rx;
+    let ma = 0, mb = 0;
+    for (let i = 0; i < ra.length; i++) { ma += ra[i] / ra.length; mb += rb[i] / rb.length; }
+    let e = 0;
+    for (let i = 0; i < ra.length; i++) e = Math.max(e, Math.abs((ra[i] - ma) - (rb[i] - mb)));
+    check('1 uF AC coupling into an open receiver = DC coupled minus the mean', e < 1e-5, `max diff ${(e * 1e3).toFixed(4)} mV`);
+    const n15 = patternBits({ pattern: 'prbs15', nbits: 10000 }).length, n23 = patternBits({ pattern: 'prbs23', nbits: 10000 }).length;
+    check('bits simulated applies to PRBS23 / PRBS31 only', n15 === prbsPeriod('prbs15') && n23 === 10000, `PRBS15 ${n15}, PRBS23 ${n23}`);
 }
 
 void makeRLGCEvaluator;

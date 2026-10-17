@@ -158,7 +158,8 @@ function simulateLink(table, cfg, fft) {
 // (input linear between samples), from rest.
 function firstOrder(lambda, s, dt) {
     const n = s.length, z = new Float64Array(n);
-    const a = Math.exp(-dt / lambda), k = (lambda / dt) * (1 - a);
+    // expm1 keeps k = (1 - a) lambda/dt accurate for lambda >> dt (bias-leak modes).
+    const x = dt / lambda, oma = -Math.expm1(-x), a = 1 - oma, k = oma / x;
     for (let i = 1; i < n; i++) {
         const u0 = s[i - 1], u1 = s[i];
         z[i] = a * z[i - 1] + u1 - a * u0 - (u1 - u0) * k;

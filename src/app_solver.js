@@ -30,6 +30,7 @@ let geometryChanged = false;  // Track if geometry has changed since last solve
 let lastSolvedGeometry = null;  // Hash of geometry params from last solve
 let lastSolvedFrequency = null;  // Frequency params from last solve
 let lastSolvedInterp = false;    // The last solve used the interpolating sweep
+let lastSolvedParams = null;     // getParams() of the last solve
 let isSweeping = false;
 let parameterSweepResults = null;
 let lastSweepGeometry = null;  // Geometry hash at sweep time (excluding swept param)
@@ -1696,6 +1697,7 @@ async function runSimulation() {
     const solvedGeometry = getGeometryHash();
     const solvedFrequency = getFrequencyHash();
     const solvedKey = solveInputKey();
+    const solvedParams = getParams();
     // The view model these fields belong to. A mid-solve edit runs
     // updateGeometry(), which replaces `solver` with one describing a different
     // cross-section. Identity is the exact test: updateGeometry() always
@@ -1926,6 +1928,7 @@ async function runSimulation() {
         lastSolvedGeometry = solvedGeometry;
         lastSolvedFrequency = solvedFrequency;
         lastSolvedInterp = !!JSON.parse(solvedKey || '{}').interp;
+        lastSolvedParams = solvedParams;
         updateResultNotices();
         outcome = 'done';
 
@@ -2857,7 +2860,8 @@ function init() {
             const current = !!frequencySweepResults && !isSimulating
                 && lastSolvedGeometry === getGeometryHash() && lastSolvedFrequency === getFrequencyHash();
             const kept = solver && solver === plotFieldsSolver && plotFieldsSolveKey === solveInputKey();
-            return { rows: frequencySweepResults, current, interp: lastSolvedInterp, keptJob: kept ? plotFieldsJob : null };
+            return { rows: frequencySweepResults, current, params: lastSolvedParams, interp: lastSolvedInterp,
+                keptJob: kept ? plotFieldsJob : null };
         },
         // A stoppable job on the solve worker.
         solveJob: async (type, payload, handlers) => {

@@ -3,7 +3,7 @@
 import { darkAxis, darkBackground } from '../plot.js';
 import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
 import { requiredBandwidth } from './stimulus.js';
-import { patternBits } from './pattern.js';
+import { patternBits, PRBS_TRUNCATED } from './pattern.js';
 import { lowFrequencyNotes, BOARD_WIDTH, GAP_ERR_MAX, SKIN_ERR } from './sensitivity.js';
 import { PCIE_PRESETS, REDUCED_SWING_PRESETS, firFromPresetDb } from './eq.js';
 import { PACKAGES, packageModel, packageSParams } from './network.js';
@@ -130,7 +130,7 @@ function eyeKeyActive(settings, key) {
         case 'eye_cycles': return v('eye_stim') === 'clock' && v('eye_clock_mode') === 'burst';
         case 'eye_bitrate': case 'eye_pattern': return v('eye_stim') === 'pattern';
         case 'eye_bits': return v('eye_stim') === 'pattern' && v('eye_pattern') === 'custom';
-        case 'eye_nbits': return v('eye_stim') === 'pattern' && ['prbs23', 'prbs31'].includes(v('eye_pattern'));
+        case 'eye_nbits': return v('eye_stim') === 'pattern' && PRBS_TRUNCATED.has(v('eye_pattern'));
         case 'eye_delay': case 'eye_span': return v('eye_stim') !== 'pattern';
         case 'eye_vlow': case 'eye_vhigh': case 'eye_rs': return v('eye_driver') !== 'current';
         case 'eye_iout': case 'eye_rout': case 'eye_vcm': return v('eye_driver') === 'current';
@@ -343,9 +343,13 @@ function readConfig() {
     if (type === 'pulse') stimulus.width = parseQuantity('eye-width', 'time', 'Pulse width');
     if (type === 'pattern') {
         stimulus.bitRate = parseQuantity('eye-bitrate', 'rate', 'Bit rate');
-        const nbits = Math.round(parseQuantity('eye-nbits', 'num', 'Bits simulated'));
-        if (!(nbits >= 2)) throw new Error('Bits simulated: at least 2.');
-        stimulus.bits = patternBits({ pattern: $('eye-pattern').value, bits: $('eye-bits').value, nbits });
+        const pattern = $('eye-pattern').value;
+        let nbits;
+        if (PRBS_TRUNCATED.has(pattern)) {
+            nbits = Math.round(parseQuantity('eye-nbits', 'num', 'Bits simulated'));
+            if (!(nbits >= 2)) throw new Error('Bits simulated: at least 2.');
+        }
+        stimulus.bits = patternBits({ pattern, bits: $('eye-bits').value, nbits });
     }
     if (type === 'clock') {
         stimulus.clockFreq = parseQuantity('eye-clock-freq', 'freq', 'Clock frequency');
@@ -484,7 +488,7 @@ function updateVisibility() {
     const pat = $('eye-pattern').value;
     for (const id of ['eye-row-bitrate', 'eye-row-pattern']) show(id, type === 'pattern');
     show('eye-row-bits', type === 'pattern' && pat === 'custom');
-    show('eye-row-nbits', type === 'pattern' && (pat === 'prbs23' || pat === 'prbs31'));
+    show('eye-row-nbits', type === 'pattern' && PRBS_TRUNCATED.has(pat));
     // A pattern simulates one period of its steady state: no start delay, no span.
     for (const id of ['eye-delay', 'eye-span']) {
         $(id).disabled = type === 'pattern';
@@ -592,7 +596,10 @@ async function getChannel(fNeed) {
     }
     const sw = app.getSweepState();
     let reason = 'there is no solve of the current geometry';
-    if (sw.rows && sw.current) {
+    // The geometry hash leaves out the backend and mesh settings, the solved parameters do not.
+    if (sw.rows && sw.current && sw.params && channelKey(sw.params) !== key) {
+        reason = 'the solver settings changed since the last solve';
+    } else if (sw.rows && sw.current) {
         const cov = checkCoverage(sw.rows, fNeed, sw.interp);
         if (cov.ok) {
             if (sw.interp && sw.keptJob != null) {

@@ -264,5 +264,5 @@ console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
 const pass = maskOk && labelOk && statOk && clockJitOk && gen4JitOk && peclOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
-    && eyeTraces > 0 && specTraces > 0 && /channel sweep/.test(info1) && /channel sweep/.test(info2) && errors.length === 0;
+    && eyeTraces > 0 && specTraces > 0 && /New sweep/.test(info1) && /New sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);
