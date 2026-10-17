@@ -591,7 +591,9 @@ function channelKey(params) {
 async function getChannel(fNeed) {
     const params = app.getParams();
     const key = channelKey(params);
-    if (channelCache && channelCache.key === key && channelCache.fMax >= fNeed) {
+    // The cache also depends on the interpolation tolerance of the sweeps it ran.
+    const cacheKey = JSON.stringify([key, app.interpTolerance()]);
+    if (channelCache && channelCache.key === cacheKey && channelCache.fMax >= fNeed) {
         return { rows: channelCache.rows, source: channelCache.source, warnings: channelCache.warnings };
     }
     const sw = app.getSweepState();
@@ -626,7 +628,7 @@ async function getChannel(fNeed) {
                     rows = [...out.rows, ...sw.rows.filter(r => r.freq > 0)];
                     warnings = [...warnings, ...rowWarnings(sw.rows.filter(r => r.freq > 0))];
                 }
-                channelCache = { key, fMax, rows, source, warnings };
+                channelCache = { key: cacheKey, fMax, rows, source, warnings };
                 return channelCache;
             } catch (e) {
                 reason = e.message;
@@ -635,7 +637,7 @@ async function getChannel(fNeed) {
             const fMax = Math.max(...sw.rows.map(r => r.freq));
             const source = `Last solve, DC to ${fmtHz(fMax)}`;
             if (cov.warning) app.log(`⚠ Time domain: ${cov.warning}.`);
-            channelCache = { key, fMax, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
+            channelCache = { key: cacheKey, fMax, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
             return channelCache;
         } else {
             reason = cov.reason;
@@ -654,7 +656,7 @@ async function getChannel(fNeed) {
     const logged = (out.warnings || []).filter(w => !QUANTIFIED.has(w && w.reason));
     for (const w of new Set(logged.map(w => w.message || String(w)))) app.log(`⚠ Time domain channel: ${w}`);
     const source = `New sweep, DC to ${fmtHz(out.fMax)}`;
-    channelCache = { key, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
+    channelCache = { key: cacheKey, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
     return channelCache;
 }
 

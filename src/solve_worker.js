@@ -52,7 +52,7 @@ let simSolver = null, simCached = null, simJob = null, simFMin = 0, simFMax = 0;
 let simSweep = null, simDCRow = null, simSweepRange = null;
 // The sweep below that job's lowest frequency, filled for the Eye channel: { sweep, fLow, fTop }.
 let simLowSweep = null;
-// The Eye tab's own channel sweep: its parameters, top frequency and sweep.
+// The Eye tab's own channel sweep: its parameters and tolerance, top frequency, rows and warnings.
 let eyeChannel = null;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
@@ -468,9 +468,9 @@ async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance, discre
         const rows = [simDCRow, ...low, ...upper];
         return { rows: stripSweep(rows), fMax: b, warnings, dcSolved, lowFill: low.length ? [fLow, a] : null };
     }
-    const key = JSON.stringify(params);
+    const key = JSON.stringify({ params, interpTolerance });
     if (eyeChannel && eyeChannel.key === key && eyeChannel.fMax >= fNeed) {
-        return { rows: eyeChannel.rows, fMax: eyeChannel.fMax };
+        return { rows: eyeChannel.rows, fMax: eyeChannel.fMax, warnings: eyeChannel.warnings };
     }
     eyeChannel = null;
     validateParams(params);
@@ -498,7 +498,7 @@ async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance, discre
     if (sweep.warnings) warnings.push(...sweep.warnings);
     log(`Channel sweep: ${n + 1} exact solves from DC to ${fmtFreq(fNeed)} (interpolating, tolerance ${(100 * interpTolerance).toPrecision(3)} %).`);
     const rows = stripSweep([{ freq: 0, result: dc }, ...sweep.buildResults(logGrid(fLow, fNeed, EYE_TABLE_PER_DECADE))]);
-    eyeChannel = { key, fMax: fNeed, rows };
+    eyeChannel = { key, fMax: fNeed, rows, warnings };
     return { rows, fMax: fNeed, warnings };
 }
 
