@@ -644,7 +644,13 @@ function jitteredClock(ctx, dt0) {
         if (a < 0 && b >= 0) rise.push((i + a / (a - b)) * dt);
     }
     const jitterRows = [];
-    if (rise.length > 2) {
+    // TIE pairs the k-th rising crossing with cycle k: only defined for one per cycle.
+    if (rise.length !== CLOCK_JITTER_CYCLES) {
+        const note = `${rise.length} rising crossings of the threshold in ${CLOCK_JITTER_CYCLES} cycles`
+            + ' (non-monotonic edges), the crossings do not map to clock cycles';
+        jitterRows.push({ label: 'Rising-edge TIE pk-pk / rms', value: 'not defined', note });
+        jitterRows.push({ label: 'Period jitter pk-pk / rms', value: 'not defined', note });
+    } else {
         const tie = rise.map((t, k) => t - k * P), mean = tie.reduce((x, y) => x + y, 0) / tie.length;
         const per = rise.map((t, k) => (k + 1 < rise.length ? rise[k + 1] : rise[0] + M * dt) - t - P);
         const ppRms = (a, m = 0) => [Math.max(...a) - Math.min(...a), Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length)];

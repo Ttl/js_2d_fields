@@ -29,7 +29,8 @@
 //      package, DC divider through the package resistance.
 //  17. Transmitter jitter: the per-edge model's statistics, a constant displacement
 //      shifts the receiver waveform, Rj alone reaches the receiver crossings of a
-//      lossless line unchanged, overlapping edges superpose; a jittered steady clock.
+//      lossless line unchanged, overlapping edges superpose; a jittered steady clock, its TIE
+//      not defined when the edges ring back through the threshold.
 //  18. Floating AC-coupled receiver (bias-leak mode, lambda >> dt): the waveform equals the
 //      DC-coupled one minus its mean; patterns only use PRBS23 / PRBS31 bit counts.
 import { check, done } from './helpers.js';
@@ -854,6 +855,17 @@ const valueAt = (r, name, t) => {
         check('jittered clock: receiver TIE = the rising edge draws, period jitter sqrt 2 x, kind steady', r.kind === 'steady'
             && Math.abs(tie / want - 1) < 2e-3 && Math.abs(per / (Math.SQRT2 * 2) - 1) < 0.03 && /ps rms/.test(m['TX jitter per edge'] || ''),
             `TIE ${tie} ps vs ${want.toFixed(4)}, period ${per} ps`);
+        // Ringback through the threshold (5 Ohm source, open end): several rising crossings per
+        // cycle, TIE and period jitter are not defined.
+        const ring = simulateLink(lossless, { length: 0.3, samplesPerEdge: 16,
+            network: { rs: 5, tx: { ac: false }, rx: { ac: false }, term: { type: 'open' } },
+            stimulus: { type: 'clock', clockFreq: 50e6, duty: 0.5, steady: true, vLow: 0, vHigh: 1, tr: 200e-12, tf: 200e-12,
+                edgeDef: '10-90', shape: 'gauss', delay: 0, jitter: { rj: 2e-12 } } }, fft);
+        const mr = Object.fromEntries(ring.metrics.list.map(x => [x.label, x.value]));
+        check('jittered clock with ringback through the threshold: TIE and period jitter not defined',
+            mr['Rising-edge TIE pk-pk / rms'] === 'not defined' && mr['Period jitter pk-pk / rms'] === 'not defined'
+            && /non-monotonic/.test(mr['Mid-level crossings per period'] || ''),
+            `${mr['Mid-level crossings per period']}, TIE ${mr['Rising-edge TIE pk-pk / rms']}`);
         const r40 = simulateLink(lossless, ccfg({ rj: 1e-12, pwDj: 10e-12 }, 0.4), fft);
         const m40 = Object.fromEntries(r40.metrics.list.map(x => [x.label, x.value]));
         const burst = simulateLink(lossless, ccfg({ rj: 1e-12 }, 0.5, false), fft);
