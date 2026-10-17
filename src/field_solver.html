@@ -513,7 +513,7 @@
         </div>
 
         <div class="control-group">
-            <label><input type="checkbox" id="chk_causal_materials"> Use Causal Material Parameters <span class="help-icon" onclick="showHelpModal('causal', event)">?</span></label>
+            <label><input type="checkbox" id="chk_causal_materials" checked> Use Causal Material Parameters <span class="help-icon" onclick="showHelpModal('causal', event)">?</span></label>
         </div>
         </div>
     </div>
@@ -606,7 +606,7 @@
         <button class="tab-button active" data-tab="geometry">Geometry</button>
         <button class="tab-button" data-tab="results">Results</button>
         <button class="tab-button" data-tab="sparams">S-Parameters</button>
-        <button class="tab-button" data-tab="eye">Eye</button>
+        <button class="tab-button" data-tab="eye">Time domain</button>
         <button class="tab-button" data-tab="sweep">Parameter Sweep</button>
         <button class="tab-button" data-tab="modes">Modes</button>
         <button class="tab-button" data-tab="about">About</button>
@@ -1578,7 +1578,7 @@
             body: '<p>Copies URL to clip board with all transmission line parameters encoded in it. Opening it will load the same parameters.</p>'
         },
         eye: {
-            title: 'Eye tab',
+            title: 'Time domain tab',
             wide: true,
             body: `<p>Time-domain response of the solved line, of the given length, between a driver and a receiver termination.</p>
                 <h4>Line parameters</h4>

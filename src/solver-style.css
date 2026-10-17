@@ -440,7 +440,7 @@ button.stop-mode:hover {
     flex-direction: column;
     min-width: 0;
 }
-.eye-main .plot-container { flex: 1; min-height: 360px; }
+.eye-main .plot-container { flex: 1; min-height: 360px; overflow: hidden; }
 .eye-metrics {
     padding: 6px 12px 10px;
     font-size: 0.8em;
@@ -466,6 +466,8 @@ button.stop-mode:hover {
     color: var(--text-muted);
     margin-top: 6px;
 }
+.eye-info > summary { cursor: pointer; user-select: none; }
+.eye-info[open] > summary { margin-bottom: 2px; }
 @container (max-width: 720px) {
     .eye-body { flex-direction: column; }
     .eye-settings:not(.collapsed) {

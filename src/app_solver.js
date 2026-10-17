@@ -225,7 +225,7 @@ const DEFAULT_SETTINGS = {
     plating_thick_corners: 1,
     sparam_length: 10, // mm
     sparam_z_ref: 50,
-    use_causal_materials: 0,
+    use_causal_materials: 1,
     interp_sweep: 1,
     interp_tolerance: 0.5,
     // Modes tab (eigenmode viewer)
@@ -2259,7 +2259,7 @@ async function runParameterSweep() {
 function resizeCanvas() {
     const Plotly = getPlotly();
     if (!Plotly) return;
-    for (const id of ['sim_canvas', 'modes-plot']) {
+    for (const id of ['sim_canvas', 'modes-plot', 'eye-plot']) {
         const container = document.getElementById(id);
         if (container && container.data) Plotly.Plots.resize(container);
     }
@@ -2910,7 +2910,7 @@ function init() {
             queued = true;
             requestAnimationFrame(() => { queued = false; resizeCanvas(); });
         });
-        for (const id of ['sim_canvas', 'modes-plot']) {
+        for (const id of ['sim_canvas', 'modes-plot', 'eye-plot']) {
             const container = document.getElementById(id);
             if (container) observer.observe(container);
         }

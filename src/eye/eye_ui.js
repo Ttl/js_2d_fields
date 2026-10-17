@@ -1,4 +1,4 @@
-// Eye tab: stimulus, coupling and termination settings, the channel sweep request and
+// Time domain tab: stimulus, coupling and termination settings, the channel sweep request and
 // the plots of the time-domain link simulation (eye_worker.js).
 import { darkAxis, darkBackground } from '../plot.js';
 import { channelTableFromRows, checkCoverage, fmtHz } from './channel_grid.js';
@@ -598,7 +598,7 @@ async function getChannel(fNeed) {
             if (sw.interp && sw.keptJob != null) {
                 try {
                     const out = await app.solveJob('eyeChannel', { mode: 'reuse', job: sw.keptJob, fNeed }, {});
-                    const source = `the last solve (interpolating sweep, DC to ${fmtHz(out.fMax)})`;
+                    const source = `Last solve, interpolating sweep, DC to ${fmtHz(out.fMax)}`;
                     channelCache = { key, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
                     return channelCache;
                 } catch (e) {
@@ -606,8 +606,8 @@ async function getChannel(fNeed) {
                 }
             } else if (!sw.interp) {
                 const fMax = Math.max(...sw.rows.map(r => r.freq));
-                const source = `the last solve (DC to ${fmtHz(fMax)})`;
-                if (cov.warning) app.log(`⚠ Eye: ${cov.warning}.`);
+                const source = `Last solve, DC to ${fmtHz(fMax)}`;
+                if (cov.warning) app.log(`⚠ Time domain: ${cov.warning}.`);
                 channelCache = { key, fMax, rows: sw.rows, source, warnings: rowWarnings(sw.rows) };
                 return channelCache;
             } else {
@@ -619,7 +619,7 @@ async function getChannel(fNeed) {
     } else if (sw.rows) {
         reason = 'the geometry or frequencies changed since the last solve';
     }
-    app.log(`Eye: running a channel sweep from DC to ${fmtHz(fNeed)}: ${reason}.`);
+    app.log(`Time domain: running a channel sweep from DC to ${fmtHz(fNeed)}: ${reason}.`);
     setStatus(`Channel sweep to ${fmtHz(fNeed)}...`);
     const out = await app.solveJob('eyeChannel', {
         mode: 'solve', params, fNeed, interpTolerance: app.interpTolerance(),
@@ -628,19 +628,24 @@ async function getChannel(fNeed) {
     });
     if (out.stopped) return null;
     const logged = (out.warnings || []).filter(w => !QUANTIFIED.has(w && w.reason));
-    for (const w of new Set(logged.map(w => w.message || String(w)))) app.log(`⚠ Eye channel: ${w}`);
-    const source = `the channel sweep (DC to ${fmtHz(out.fMax)})`;
+    for (const w of new Set(logged.map(w => w.message || String(w)))) app.log(`⚠ Time domain channel: ${w}`);
+    const source = `New sweep, DC to ${fmtHz(out.fMax)}`;
     channelCache = { key, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
     return channelCache;
 }
 
 // ---------------------------------------------------------------- low-frequency notes
 
-const NOTE_NAME = { 'narrow-gap': 'narrow-gap loss', 'skin-transition': 'DC-skin transition', 'ground-spreading': 'ground spreading' };
+const NOTE_NAME = { 'narrow-gap': 'Narrow-gap loss error', 'skin-transition': 'Skin-effect transition error', 'ground-spreading': 'Ground return spreading error' };
 
-// Warning text of a low-frequency note that changes the waveform noticeably.
+// Receiver change of a low-frequency note, in % of the swing.
+function lowFreqPct(lf) {
+    return `${lf.impact < 1e-5 ? '< 0.001' : +(100 * lf.impact).toPrecision(2)} %`;
+}
+
+// Warning text of a low-frequency note, also the tooltip of its details row.
 function lowFreqText(lf) {
-    const pct = `${+(100 * lf.impact).toPrecision(2)} %`;
+    const pct = lowFreqPct(lf);
     if (lf.reason === 'narrow-gap') {
         return `Below ${fmtHz(lf.band)} the quasi-static model overstates the skin-effect loss of closely facing conductors ` +
             `(up to ${100 * GAP_ERR_MAX} %): its estimated error changes this receiver waveform by ${pct} of the swing. ` +
@@ -654,13 +659,6 @@ function lowFreqText(lf) {
     return `Below ${fmtHz(lf.band)} the ground return spreads sideways, modelled as an ideal return: the resulting ` +
         `inductance increase (up to a ${BOARD_WIDTH * 1e3} mm wide board) changes this receiver waveform by ${pct} of the swing. ` +
         `Use custom geometry with finite grounds when this matters.`;
-}
-
-// One-line summary of the checked notes for the info line.
-function lowFreqSummary(list) {
-    if (!list || !list.length) return '';
-    return 'low-frequency model notes change the receiver by ' +
-        list.map(lf => `${lf.impact < 1e-5 ? '< 0.001' : +(100 * lf.impact).toPrecision(2)} % (${NOTE_NAME[lf.reason]} below ${fmtHz(lf.band)})`).join(', ');
 }
 
 // ---------------------------------------------------------------- run
@@ -697,7 +695,7 @@ async function runEye() {
         lastResult = res;
         $('eye-export-btn').disabled = false;
         setNotice(res.warnings);
-        for (const w of res.warnings) app.log(`⚠ Eye: ${w}`);
+        for (const w of res.warnings) app.log(`⚠ Time domain: ${w}`);
         draw();
         setStatus(`Done in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     } catch (e) {
@@ -992,21 +990,29 @@ function fmtT(s) {
     return `${+(s * 1e12).toPrecision(4)} ps`;
 }
 
+let detailsOpen = false;   // the Simulation details list stays as the user left it
+
 function drawMetrics(res) {
     const el = $('eye-metrics');
     if (!res) { el.innerHTML = ''; return; }
     const rows = res.metrics.list.map(m =>
         `<div${m.note ? ` title="${escapeHtml(m.note)}"` : ''}><span>${escapeHtml(m.label)}</span><span>${escapeHtml(m.value)}</span></div>`).join('');
     const i = res.info;
-    const tau = res.tau.map(fmtT).join(' / ');
-    const info = `Line delay ${tau}${res.differential ? ' (odd / even)' : ''} · ` +
-        (res.kind === 'steady' ? (i.jitterCycles ? `clock steady state over ${i.jitterCycles} cycles with jitter, ${i.samplesPerBit} samples per half period` : 'clock steady state')
-            : res.kind === 'pattern' ? `pattern steady state, ${i.samplesPerBit} samples per bit, step responses over ${fmtT(i.window)}`
-            : `window ${fmtT(i.window)}`) +
-        ` · ${i.N} samples, step ${fmtT(i.dt)}` + (i.slowModes ? ` · ${i.slowModes} slow coupling modes` : '') +
-        ` · line parameters from ${escapeHtml(res.source)}` +
-        (res.lowFreq && res.lowFreq.length ? ` · ${escapeHtml(lowFreqSummary(res.lowFreq))}` : '');
-    el.innerHTML = `<div class="eye-metric-grid">${rows}</div><div class="eye-info">${info}</div>`;
+    const row = (label, value, note) => `<div${note ? ` title="${escapeHtml(note)}"` : ''}><span>${label}</span><span>${escapeHtml(value)}</span></div>`;
+    const delay = row(res.differential ? 'Line delay (odd / even)' : 'Line delay', res.tau.map(fmtT).join(' / '));
+    const sim = res.kind === 'steady' ? (i.jitterCycles ? `Clock steady state, jitter over ${i.jitterCycles} cycles` : 'Clock steady state')
+        : res.kind === 'pattern' ? `Pattern steady state, step responses over ${fmtT(i.window)}`
+        : `Transient over ${fmtT(i.window)}`;
+    const per = res.kind === 'steady' ? 'half period' : 'bit';
+    const details = [
+        row('Simulation', sim),
+        row('Time step', `${fmtT(i.dt)}${i.samplesPerBit ? ` (${i.samplesPerBit} per ${per})` : ''}, ${i.N} samples`),
+        row('Line parameters', res.source),
+        ...(res.lowFreq || []).map(lf => row(`${NOTE_NAME[lf.reason]} below ${fmtHz(lf.band)}`, lowFreqPct(lf), lowFreqText(lf))),
+    ].join('');
+    el.innerHTML = `<div class="eye-metric-grid">${rows}${delay}</div>` +
+        `<details class="eye-info"${detailsOpen ? ' open' : ''}><summary>Simulation details</summary><div class="eye-metric-grid">${details}</div></details>`;
+    el.querySelector('details').addEventListener('toggle', e => { detailsOpen = e.target.open; });
 }
 
 // Mask shape (Fig 8-79 limits) as a Plotly path: top and bottom at the sample point x,
