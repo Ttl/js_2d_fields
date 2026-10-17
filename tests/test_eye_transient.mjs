@@ -362,6 +362,14 @@ const valueAt = (r, name, t) => {
     check('non-causal dielectric: precursor warning', r.warnings.some(w => w.includes('before the signal can arrive')), r.warnings.join(' | '));
     const r2 = simulateLink(lossless, base(), fft);
     check('lossless line: no precursor warning', !r2.warnings.some(w => w.includes('before the signal')));
+    // Microstrip-like dispersion, eps_eff 3.1 -> 4.0 above 30 GHz: a 1 ps edge mostly
+    // travels at the low-frequency delay, earlier than the delay at its edge frequency.
+    const disp = seTable(f => { const x = (f / 1e11) ** 2; return { R: 0, L: L0, G: 0, C: C0 * (1 + 0.29 * x / (1 + x)) }; }, DENSE);
+    const r3 = simulateLink(disp, base({ stimulus: { type: 'pulse', width: 10e-12, tr: 1e-12, tf: 1e-12 } }), fft);
+    check('dispersive line: no precursor warning', !r3.warnings.some(w => w.includes('before the signal')), r3.warnings.join(' | '));
+    const peak = Math.max(...r3.traces.rx), tMark = r3.markers[1].t;
+    check('dispersive line: the line delay marker is inside the received pulse', valueAt(r3, 'rx', tMark) > 0.3 * peak,
+        `${(valueAt(r3, 'rx', tMark) / peak).toFixed(2)} of the peak at ${(tMark * 1e12).toFixed(1)} ps`);
 }
 
 // 12. 0.5 m skin-effect line, 5 ps edge, 5 Ohm source, open end: heavily attenuated at

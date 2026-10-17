@@ -1303,7 +1303,7 @@ function onEyeTabShown() {
     if (lastResult || $('eye-view').value === 'package') draw();
     else if (Plotly && c && !c.data) {
         Plotly.newPlot('eye-plot', [], { ...layoutBase('Time', 'Voltage (V)'),
-            annotations: [{ text: 'No results.', showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: '#888' } }] },
+            annotations: [{ text: 'No results. Click Simulate.', showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: { color: '#888' } }] },
             { responsive: true });
     }
 }

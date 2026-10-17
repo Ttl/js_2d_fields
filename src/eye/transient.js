@@ -41,6 +41,18 @@ function lineEstimates(ev, f, len, diff) {
     return { modes: [odd, even] };
 }
 
+// Earliest arrival of each mode over the swept band: its smallest phase delay. A
+// dispersive line (microstrip eps_eff rising with frequency) carries most of an edge
+// faster than its delay at the edge frequency.
+function frontDelays(ev, freqs, len, diff, est) {
+    const tau = est.modes.map(m => m.tau);
+    for (const f of freqs) {
+        if (!(f > 0)) continue;
+        lineEstimates(ev, f, len, diff).modes.forEach((m, i) => { if (m.tau > 0) tau[i] = Math.min(tau[i], m.tau); });
+    }
+    return tau;
+}
+
 // Termination impedance a mode sees at high frequency (coupling caps shorted).
 function termImpedance(term, modeIdx) {
     switch (term.type) {
@@ -132,6 +144,7 @@ function simulateLink(table, cfg, fft) {
     const modes = lumpedModes(net, Gdc);
     const out = outputs(net);
     const est = lineEstimates(ev, 0.35 / stim.t1090Min, len, diff);
+    est.front = frontDelays(ev, table.freqs, len, diff, est);
     const ctx = { table, cfg, fft, len, diff, stim, ev, net, fTop, warnings, Gdc, modes, out, est, lead };
     if (net.rxFloating) {
         warnings.push(diff
@@ -148,7 +161,7 @@ function simulateLink(table, cfg, fft) {
     res.period = stim.period;
     delete res.eyeSignal;
     res.warnings = [...new Set(warnings)];
-    res.tau = est.modes.map(m => m.tau);
+    res.tau = est.front;
     res.fTop = fTop;
     res.fNeed = requiredBandwidth(cfg.stimulus);
     return res;
@@ -173,7 +186,7 @@ function transient(ctx, dt0) {
     const tauLine = Math.max(...est.modes.map(m => m.tau));
     const trips = reflectionTrips(lineEstimates(ev, 1 / (8 * tauLine), len, diff), net);
     // Delays of the path: the line modes plus the packages.
-    const tauMax = tauLine + net.pkgDelay, tauMin = Math.min(...est.modes.map(m => m.tau)) + net.pkgDelay;
+    const tauMax = tauLine + net.pkgDelay, tauMin = Math.min(...est.front) + net.pkgDelay;
     const edgeLong = Math.max(stim.up.t1090, stim.down.t1090);
     const tBase = stim.tEnd + tauMax * (1 + 2 * trips) + 20 * edgeLong + 2 * stim.halfMax;
 
@@ -705,7 +718,7 @@ function clockMetrics(t, v, s, P, ctx) {
     for (let i = 0; i < 2 * n; i++) s2[i] = s[i % n];
     const ts = crossing(t2, s2, 0.5 * (smin + smax), 1, 2 * n, 1);
     if (isFinite(ts)) {
-        const tau = Math.min(...ctx.est.modes.map(mm => mm.tau)) + ctx.net.pkgDelay;
+        const tau = Math.min(...ctx.est.front) + ctx.net.pkgDelay;
         let dly = ((tr - ts) % P + P) % P;
         dly += Math.max(0, Math.round((tau - dly) / P)) * P;
         m.push({ label: 'Delay (50 %)', value: fmtTime(dly), note: 'source to receiver, unwrapped with the line delay' });

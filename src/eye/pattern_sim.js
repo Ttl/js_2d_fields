@@ -227,7 +227,7 @@ function patternSim(ctx, dt0) {
     const tauLine = Math.max(...est.modes.map(m => m.tau));
     const trips = reflectionTrips(lineEstimates(ev, 1 / (8 * tauLine), len, diff), net);
     // Delays of the path: the line modes plus the packages.
-    const tauMax = tauLine + net.pkgDelay, tauMin = Math.min(...est.modes.map(m => m.tau)) + net.pkgDelay;
+    const tauMax = tauLine + net.pkgDelay, tauMin = Math.min(...est.front) + net.pkgDelay;
     const edgeLong = Math.max(stim.up.t1090, stim.down.t1090);
     const tBase = nLead * dt + Math.abs(skew) + tauMax * (1 + 2 * trips) + 20 * edgeLong + 2 * stim.halfMax;
     const split = slowSplit(ctx, tBase, dt);
