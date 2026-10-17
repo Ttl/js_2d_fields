@@ -597,8 +597,14 @@ async function getChannel(fNeed) {
         if (cov.ok) {
             if (sw.interp && sw.keptJob != null) {
                 try {
-                    const out = await app.solveJob('eyeChannel', { mode: 'reuse', job: sw.keptJob, fNeed }, {});
-                    const source = `Last solve, interpolating sweep, DC to ${fmtHz(out.fMax)}`;
+                    const out = await app.solveJob('eyeChannel', {
+                        mode: 'reuse', job: sw.keptJob, fNeed, interpTolerance: app.interpTolerance(),
+                    }, {
+                        progress: (m) => setStatus(m.text || 'Channel sweep...'),
+                    });
+                    if (out.stopped) return null;
+                    const source = `Last solve, interpolating sweep, DC to ${fmtHz(out.fMax)}`
+                        + (out.lowFill ? ` + new points ${fmtHz(out.lowFill[0])} to ${fmtHz(out.lowFill[1])}` : '');
                     channelCache = { key, fMax: out.fMax, rows: out.rows, source, warnings: out.warnings || [] };
                     return channelCache;
                 } catch (e) {

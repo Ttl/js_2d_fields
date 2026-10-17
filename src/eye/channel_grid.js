@@ -124,6 +124,13 @@ function makeRLGCEvaluator(table) {
     };
 }
 
+// Lowest sweep frequency above DC a channel needs. Below the first row the evaluator
+// blends from DC in sqrt(f), which misses the fall of the internal inductance through the
+// DC-skin transition: an L without the matching R, a receiver response before arrival.
+function channelLowFreq(fNeed) {
+    return Math.min(10e6, fNeed / 100);
+}
+
 /**
  * Whether sweep rows cover a time-domain simulation up to fNeed.
  * interp: the rows come from an interpolating sweep (evaluated on a dense grid).
@@ -140,8 +147,8 @@ function checkCoverage(rows, fNeed, interp) {
     if (interp) return { ok: true };
     const nz = fs.filter(f => f > 0);
     if (nz.length < 8) return { ok: false, reason: 'the sweep has too few points' };
-    if (nz[0] > fNeed / 10) {
-        return { ok: false, reason: `the first sweep point above DC (${fmtHz(nz[0])}) is too high` };
+    if (nz[0] > 2 * channelLowFreq(fNeed)) {
+        return { ok: false, reason: `the first sweep point above DC (${fmtHz(nz[0])}) is too high to resolve the internal inductance at low frequencies` };
     }
     // Large gaps in log f relative to the decade the line parameters change over.
     let worst = 1;
@@ -156,4 +163,4 @@ function fmtHz(f) {
     return `${+f.toPrecision(4)} Hz`;
 }
 
-export { channelTableFromRows, makeRLGCEvaluator, checkCoverage, fmtHz, PAIR_KEYS, SE_KEYS };
+export { channelTableFromRows, makeRLGCEvaluator, checkCoverage, channelLowFreq, fmtHz, PAIR_KEYS, SE_KEYS };

@@ -333,13 +333,15 @@ class InterpolatingSweep {
      *   maxError is Infinity during the initial phase; during refinement it is the
      *   running max until final:true, when it is the iteration's finalized error.
      * @param {function} [callbacks.shouldStop] - Returns true to abort
+     * @param {number} [callbacks.sweepFmax] - Skin-band sizing frequency when above fMax
+     *   (a sweep extending an earlier one keeps its skin mesh)
      * @returns {number} - Number of exact solves performed
      */
     async run(fMin, fMax, callbacks = {}) {
         const { onProgress, shouldStop } = callbacks;
         // Sweep-max hint for the triangular backend (see solve_sweep): sizes the
         // MQS skin band for the whole sweep so every sample reuses one skin mesh.
-        this.solver._sweepFmax = fMax;
+        this.solver._sweepFmax = Math.max(fMax, callbacks.sweepFmax || 0);
         const tMin = Math.log10(fMin);
         const tMax = Math.log10(fMax);
 

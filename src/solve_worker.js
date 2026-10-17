@@ -37,6 +37,7 @@
 
 import { buildSolverFromParams } from './solver_factory.js';
 import { InterpolatingSweep } from './interpolating_sweep.js';
+import { channelLowFreq } from './eye/channel_grid.js';
 import { hasConductiveDielectric } from './conductive_dielectric.js';
 
 let stopRequested = false;
@@ -48,6 +49,8 @@ let modesSolver = null;   // retained between 'modes' and its follow-up 'modeFie
 let simSolver = null, simCached = null, simJob = null, simFMin = 0;
 // The interpolating sweep of that job and its DC row, when it had both.
 let simSweep = null, simDCRow = null, simSweepRange = null;
+// The sweep below that one's lowest frequency, filled for the Eye channel: { sweep, fLow }.
+let simLowSweep = null;
 // The Eye tab's own channel sweep: its parameters, top frequency and sweep.
 let eyeChannel = null;
 
@@ -180,7 +183,7 @@ function adaptiveSolve(solver, p, onProgress) {
 async function jobSimulate({ params, frequencies, opts }) {
     if (stopRequested) return { stopped: true, sweepResults: [], fields: null };
     simSolver = null; simCached = null; simJob = null;
-    simSweep = null; simDCRow = null; simSweepRange = null;
+    simSweep = null; simDCRow = null; simSweepRange = null; simLowSweep = null;
     const solver = makeSolver(params);
     const p = params;
     validateParams(p);
@@ -356,7 +359,7 @@ async function jobSimulate({ params, frequencies, opts }) {
         plotted = await plotFields(solver, cachedResults, plotFreq, simFMin);
         simSolver = solver; simCached = cachedResults; simJob = currentId;
         if (keptSweep && keptSweep.dc) {
-            simSweep = keptSweep.sweep; simDCRow = keptSweep.dc; simSweepRange = keptSweep.range;
+            simSweep = keptSweep.sweep; simDCRow = keptSweep.dc; simSweepRange = keptSweep.range; simLowSweep = null;
         }
     }
     return {
@@ -398,7 +401,7 @@ async function jobPlotFields({ freq }) {
 function jobPlotRelease({ job }) {
     if (job === simJob) {
         simSolver = null; simCached = null; simJob = null;
-        simSweep = null; simDCRow = null; simSweepRange = null;
+        simSweep = null; simDCRow = null; simSweepRange = null; simLowSweep = null;
     }
     return {};
 }
@@ -419,12 +422,32 @@ const EYE_TABLE_PER_DECADE = 40;
 // on its own mesh solve. Kept, so a later request with the same parameters and a
 // lower fNeed needs no solve.
 async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance }) {
+    const fLow = channelLowFreq(fNeed);
     if (mode === 'reuse') {
         if (!simSweep || simJob !== job) throw new Error('The solve to reuse is no longer available.');
         const [a, b] = simSweepRange;
-        const rows = [simDCRow, ...simSweep.buildResults(logGrid(a, b, EYE_TABLE_PER_DECADE))];
         const warnings = [...((simDCRow.result && simDCRow.result.warnings) || []), ...(simSweep.warnings || [])];
-        return { rows: stripSweep(rows), fMax: b, warnings };
+        // A sweep starting well above fLow gets the band below it on the same mesh.
+        let low = [];
+        if (a > 2 * fLow) {
+            if (!simLowSweep || simLowSweep.fLow !== fLow) {
+                simLowSweep = null;
+                log(`Channel sweep: ${fmtFreq(fLow)} to ${fmtFreq(a)}, below the reused sweep...`);
+                const sweep = new InterpolatingSweep(simSolver, simCached, { tolerance: interpTolerance });
+                const n = await sweep.run(fLow, a, {
+                    onProgress: (info) => progress(Math.min(0.95, info.totalSamples / EST_SWEEP_POINTS),
+                        `Channel sweep: ${info.totalSamples} points`),
+                    shouldStop, sweepFmax: b,
+                });
+                if (stopRequested) return { stopped: true };
+                log(`Channel sweep: ${n} exact solves from ${fmtFreq(fLow)} to ${fmtFreq(a)} (interpolating, tolerance ${(100 * interpTolerance).toPrecision(3)} %).`);
+                simLowSweep = { sweep, fLow };
+            }
+            low = simLowSweep.sweep.buildResults(logGrid(fLow, a, EYE_TABLE_PER_DECADE).slice(0, -1));
+            warnings.push(...(simLowSweep.sweep.warnings || []));
+        }
+        const rows = [simDCRow, ...low, ...simSweep.buildResults(logGrid(a, b, EYE_TABLE_PER_DECADE))];
+        return { rows: stripSweep(rows), fMax: b, warnings, lowFill: low.length ? [fLow, a] : null };
     }
     const key = JSON.stringify(params);
     if (eyeChannel && eyeChannel.key === key && eyeChannel.fMax >= fNeed) {
@@ -434,7 +457,6 @@ async function jobEyeChannel({ mode, job, params, fNeed, interpTolerance }) {
     validateParams(params);
     const solver = makeSolver(params);
     if (solver.allow_dc === false) throw new Error(solver.dc_block_reason || 'This line type does not propagate at DC.');
-    const fLow = Math.min(10e6, fNeed / 100);
     solver.freq = fNeed;
     solver.plot_freq_target = fNeed;
     log(`Channel sweep: mesh solve at ${fmtFreq(fNeed)}...`);

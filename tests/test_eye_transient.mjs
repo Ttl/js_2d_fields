@@ -311,7 +311,10 @@ const valueAt = (r, name, t) => {
     check('coverage: stop too low', !checkCoverage(rows([0, 1e8, 1e9]), 5e9, true).ok);
     check('coverage: interpolating sweep from DC', checkCoverage(rows([0, 1e8, 2e10]), 1e10, true).ok);
     check('coverage: coarse linear sweep rejected', !checkCoverage(rows(lin(0, 2e10, 10)), 1e10, false).ok);
-    check('coverage: dense linear sweep accepted', checkCoverage(rows(lin(0, 2e10, 201)), 1e10, false).ok);
+    check('coverage: linear sweep starting at 100 MHz rejected (low-frequency L)', !checkCoverage(rows(lin(0, 2e10, 201)), 1e10, false).ok);
+    check('coverage: dense linear sweep from 10 MHz accepted', checkCoverage(rows(lin(0, 2e10, 2001)), 1e10, false).ok);
+    const logRows = [0, ...Array.from({ length: 41 }, (_, i) => 1e7 * Math.pow(2e3, i / 40))];
+    check('coverage: log sweep from 10 MHz accepted', checkCoverage(rows(logRows), 1e10, false).ok);
 }
 
 // 10. FFT and sampling.
