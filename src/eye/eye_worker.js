@@ -20,7 +20,8 @@ self.onmessage = async (e) => {
     const { id, type, table, cfg } = e.data;
     if (type !== 'run') { self.postMessage({ id, type: 'error', message: `unknown job "${type}"` }); return; }
     try {
-        if (!fftPromise) fftPromise = loadFFT();
+        // A failed load (network drop) is retried on the next run.
+        if (!fftPromise) fftPromise = loadFFT().catch((err) => { fftPromise = null; throw err; });
         const fft = await fftPromise;
         const t0 = Date.now();
         const result = simulateLink(table, cfg, fft);

@@ -7,7 +7,7 @@ import createFFTModule from '../wasm_solver/fft.js';
 let modulePromise = null;
 
 function getModule() {
-    if (!modulePromise) modulePromise = createFFTModule();
+    if (!modulePromise) modulePromise = createFFTModule().catch((err) => { modulePromise = null; throw err; });
     return modulePromise;
 }
 
