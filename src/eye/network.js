@@ -214,12 +214,15 @@ function packageModel(p, side) {
 // -4.25, 0.25 dB rms to 40 GHz) and Fig 8-66 board-side SDD11 (ripple maxima 0.5 dB rms, the
 // nulls within 0.1 GHz; the delay set by their 3.8 GHz spacing).
 // 1.8 V FPGA I/O: IBIS [Package] of an HP 1.8 V LVCMOS pin (Zynq 7000), C_comp as the pad.
+// QFN LVPECL clock buffer: IBIS [Package] typ of a QFN-16 LVPECL fanout buffer (ICS8S89874),
+// C_comp of its ECL output model as the pad.
 const PCIE16_NON_ROOT_LINE = { form: 'line', cpin: 0.25e-12, z0: 41.3, delay: 135e-12, lossC: 0.532, lossD: 0, r: 1.0 };
 const PACKAGES = {
     pcie8Tx: { pad: 1.0e-12, model: PCIE16_NON_ROOT_LINE },
     pcie8Rx: { pad: 0.8e-12, model: PCIE16_NON_ROOT_LINE },
     pcie32Root: { pad: 0.47e-12, model: { form: 'line', cpin: 0.165e-12, z0: 38.8, delay: 240e-12, lossC: 0, lossD: 0.35, r: 0.1 } },
     fpga18: { pad: 4.5e-12, model: { form: 'rl', cpin: 1e-12, r: 0.3, l: 5e-9 } },
+    qfnPecl: { pad: 2e-12, model: { form: 'rl', cpin: 0.07747e-12, r: 0.0724655, l: 1.47175e-9 } },
     pcie16NonRoot: { pad: 0.5e-12, model: PCIE16_NON_ROOT_LINE },
     pcie32NonRoot: { pad: 0.22e-12, model: { form: 'line', cpin: 0.05e-12, z0: 39.0, delay: 126e-12, lossC: 0.55, lossD: 0.026, r: 0.5 } },
     pcie16Root: { pad: 0.5e-12, model: { form: 'line', cpin: 0.25e-12, z0: 35.8, delay: 203e-12, lossC: 1.054, lossD: 0.088, r: 1.3 } },

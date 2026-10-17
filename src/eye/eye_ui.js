@@ -1212,6 +1212,7 @@ const pcieEq = (adcMin, adcMax, fp1, fp2, dfe, dfelim) => ({ 'eye-pattern': 'prb
     'eye-adcmin': adcMin, 'eye-adcmax': adcMax, 'eye-fp1': fp1, 'eye-fp2': fp2, 'eye-dfe': dfe, 'eye-dfelim': dfelim });
 // The generic FPGA I/O package at both ends.
 const fpgaPins = { ...packageInputs('tx', 'fpga18'), ...packageInputs('rx', 'fpga18') };
+const peclPins = { ...packageInputs('tx', 'qfnPecl'), ...packageInputs('rx', 'qfnPecl') };
 const lvcmos = (v, rs, tr) => ({ 'eye-vlow': '0 V', 'eye-vhigh': v, 'eye-rs': rs, 'eye-stim': 'clock', 'eye-clock-freq': '100 MHz',
     'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': tr, 'eye-tf': tr, 'eye-term': 'open', ...fpgaPins });
 const PRESETS = {
@@ -1233,8 +1234,8 @@ const PRESETS = {
         // 32 GT/s: the sample point up to 0.30 UI left of the mean UI centre in 0.05 UI steps.
         'eye-soff-from': '-0.3', 'eye-soff-to': '0', 'eye-soff-step': '0.05',
         ...packageInputs('tx', 'pcie32Root'), ...packageInputs('rx', 'pcie32NonRoot') }) },
-    lvpecl: { 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
-        'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V', ...fpgaPins,
+    lvpecl: { differential: true, 'eye-vlow': '1.6 V', 'eye-vhigh': '2.4 V', 'eye-rs': '7', 'eye-stim': 'clock', 'eye-clock-freq': '156.25 MHz',
+        'eye-duty': '50', 'eye-clock-mode': 'steady', 'eye-tr': '200 ps', 'eye-tf': '200 ps', 'eye-term': 'vtt', 'eye-rt': '50', 'eye-vtt': '1.3 V', ...peclPins,
         'eye-termloc': 'board' },
     lvcmos33: lvcmos('3.3 V', '25', '1 ns'),
     lvcmos25: lvcmos('2.5 V', '30', '800 ps'),

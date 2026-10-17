@@ -225,12 +225,14 @@ const gen4JitOk = /ps rms \+ .* ps pp/.test(gen4.m['TX jitter per edge'] || '') 
 console.log('PCIe Gen4 TX jitter and edges:', gen4JitOk, gen4.m['TX jitter per edge'], gen4.m['TX jitter of this run'], gen4.m['Crossing jitter pk-pk / rms']);
 console.log('PCIe Gen4 preset with packages:', gen4Ok, gen4.st, gen4.m['Eye height (centre)'], JSON.stringify(jPkg), pkgBack);
 
-// LVCMOS presets: the 1.8 V FPGA I/O package at both ends, on a single-ended line.
-await page.click('.tab-button[data-tab="geometry"]');
-await page.selectOption('#tl_type', 'microstrip');
-await page.click('.tab-button[data-tab="eye"]');
-// LVPECL: terminated on the board at the RX pin; the location row only with an RX package.
+// LVPECL (differential): the QFN clock buffer package, terminated on the board at the RX pin;
+// the location row only with an RX package.
 const pecl = await presetRun('lvpecl');
+const peclPkg = await page.evaluate(() => ['eye-pkgtx', 'eye-pkgrx-cpin', 'eye-pkgrx-r', 'eye-pkgrx-l', 'eye-padtx', 'eye-padrx']
+    .map(id => document.getElementById(id).value));
+const peclPkgOk = JSON.stringify(peclPkg) === JSON.stringify(['rl', '0.07747 pF', '0.0724655', '1.47175 nH', '2 pF', '2 pF'])
+    && 'RX diff' in Object.fromEntries((await page.$eval('#eye-plot', el => el.data.map(t => t.name))).map(n => [n, 1]));
+console.log('LVPECL QFN clock buffer package, differential:', peclPkgOk, peclPkg);
 const vis = () => page.$eval('#eye-row-termloc', el => el.style.display !== 'none');
 const peclLoc = await page.$eval('#eye-termloc', el => el.value), peclVis = await vis();
 const jPecl = await linkJson(page);
@@ -250,6 +252,10 @@ const jBurst = await linkJson(page);
 await page.selectOption('#eye-clock-mode', 'steady');
 const clockJitOk = /Done/.test(peclJ) && /ps \/ .*ps/.test(peclJm['Rising-edge TIE pk-pk / rms'] || '') && 'Period jitter pk-pk / rms' in peclJm && burstHidden && !('eye_rj' in jBurst);
 console.log('LVPECL clock with jitter:', clockJitOk, peclJ, peclJm['Rising-edge TIE pk-pk / rms'], peclJm['Period jitter pk-pk / rms'], burstHidden);
+// LVCMOS presets: the 1.8 V FPGA I/O package at both ends, on a single-ended line.
+await page.click('.tab-button[data-tab="geometry"]');
+await page.selectOption('#tl_type', 'microstrip');
+await page.click('.tab-button[data-tab="eye"]');
 const cmos = await presetRun('lvcmos33');
 const cmosPkg = await page.evaluate(() => ['eye-pkgtx', 'eye-pkgrx', 'eye-pkgtx-l', 'eye-padtx', 'eye-padrx'].map(id => document.getElementById(id).value));
 const cmosOk = /Done/.test(cmos.st) && JSON.stringify(cmosPkg) === JSON.stringify(['rl', 'rl', '5 nH', '4.5 pF', '4.5 pF']);
@@ -263,6 +269,6 @@ const wgOff = await page.evaluate(() => document.getElementById('btn-eye-run').d
 console.log('waveguide disables the Eye tab:', wgOff);
 
 printErrors(errors);
-const pass = maskOk && labelOk && statOk && clockJitOk && gen4JitOk && peclOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
+const pass = maskOk && labelOk && statOk && clockJitOk && gen4JitOk && peclOk && peclPkgOk && lvdsHOk && gen3PkgOk && gen5Ok && cmosOk && gen4Ok && pkgViewOk && fpgaOk && linkOk && contentOk && legacyOk && wgOff && patternOk && patLinkOk && lvdsOk && pcieOk && active && /Done/.test(s1) && /Done/.test(s2) && traces1 > 0 && metrics1.length > 4
     && eyeTraces > 0 && specTraces > 0 && /New sweep/.test(info1) && /New sweep/.test(info2) && errors.length === 0;
 await finish(browser, pass);
